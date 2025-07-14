@@ -5,18 +5,20 @@ edition = "2024"
 
 [dependencies]
 num-traits = "0.2.19"
-kube = { version = "1.0.0", features = ["runtime", "derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
-tokio = { version = "1.45.0", features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1.45.0", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
 thiserror = "2.0.12"
 futures = "0.3.31"
 tracing = "0.1.41"
-k8s-openapi = { version = "0.25.0", features = ["v1_30", "schemars"] }
-tracing-subscriber = "0.3.19"
+tracing-subscriber = { version = "0.3.19" }
 byte-unit = "5.1.6"
 bytes = "1.10.1"
 dotenvy = "0.15.7"
 serde_json = "1.0.140"
 serde_yaml = "0.9.33"
-schemars = "0.8.22"
 strum = { version = "0.27.1", features = ["derive"] }
+anyhow = "1.0.98"
+k8s-openapi = { git = "https://github.com/Arnavion/k8s-openapi.git", rev = "e9a9eaf", features = ["v1_30", "schemars"] }
+kube = { git = "https://github.com/kube-rs/kube.git", rev = "06e843bf026d0838dca159433e8af8268b6cc0bf", features = ["runtime", "derive", "client"] }
+schemars = "1"
+clap = { version = "4.5.41", features = ["derive"] }

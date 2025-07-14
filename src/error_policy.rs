@@ -12,16 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use k8s_openapi::api::core::v1 as corev1;
-use kube::KubeSchema;
-use serde::{Deserialize, Serialize};
+use crate::context::Context;
+use crate::error::Error;
+use crate::types::v1alpha1::tenant::Tenant;
+use kube::runtime::controller::Action;
+use std::sync::Arc;
+use std::time::Duration;
 
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Pool {
-    pub name: String,
-    pub servers: u64,
-    pub volumes_ser_server: u64,
-    pub volume_chain_template: corev1::PersistentVolumeClaim,
-    pub path: String,
+pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
+    if error.is_not_found() {
+        Action::await_change()
+    } else {
+        Action::requeue(Duration::from_secs(5))
+    }
 }
