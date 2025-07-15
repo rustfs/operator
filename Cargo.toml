@@ -2,6 +2,10 @@
 name = "operator"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/rustfs/operator"
+license = "Apache-2.0"
+homepage = "https://rustfs.com"
+
 
 [dependencies]
 num-traits = "0.2.19"
@@ -22,3 +26,8 @@ k8s-openapi = { git = "https://github.com/Arnavion/k8s-openapi.git", rev = "e9a9
 kube = { git = "https://github.com/kube-rs/kube.git", rev = "06e843bf026d0838dca159433e8af8268b6cc0bf", features = ["runtime", "derive", "client"] }
 schemars = "1"
 clap = { version = "4.5.41", features = ["derive"] }
+backon = "1.5.1"
+rand = "0.8"
+
+[lints.rust]
+unused_variables = "allow"

@@ -1,4 +1,4 @@
-// Copyright 2024 RustFS Team
+// Copyright 2025 RustFS Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,12 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::borrow::Cow;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
     KubeError(#[from] kube::Error),
+
+    #[error("no namespace")]
+    NoNamespace,
+
+    #[error(transparent)]
+    SerdeJsonError(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    StrError(Cow<'static, str>),
+
+    #[error("multiple initialized tenants")]
+    MultiError,
 }
 
 impl Error {
@@ -26,5 +39,12 @@ impl Error {
             return false;
         };
         err.reason == "NotFound" || err.code == 404
+    }
+
+    pub fn is_conflict(&self) -> bool {
+        let Error::KubeError(kube::Error::Api(err)) = self else {
+            return false;
+        };
+        err.reason == "Conflict" || err.code == 409
     }
 }
