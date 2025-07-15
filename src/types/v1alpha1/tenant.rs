@@ -1,5 +1,20 @@
+// Copyright 2024 RustFS Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::types::v1alpha1::pool::Pool;
 use crate::types::v1alpha1::status::Status;
+use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::schemars;
 use kube::runtime::reflector::Lookup;
 use kube::{CustomResource, KubeSchema};
@@ -35,9 +50,9 @@ pub struct TenantSpec {
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub pod_management_policy: Option<String>,
     //
-    // #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    // pub env: Vec<corev1::EnvVar>,
-    //
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<corev1::EnvVar>,
+
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub mount_path: Option<String>,
     //
@@ -87,8 +102,8 @@ pub struct TenantSpec {
     //
     // // #[serde(default, skip_serializing_if = "Option::is_none")]
     // // pub side_cars: Option<SideCars>,
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub configuration: Option<corev1::TypedLocalObjectReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<corev1::LocalObjectReference>,
 }
 
 impl Tenant {

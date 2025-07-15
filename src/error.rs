@@ -12,16 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use k8s_openapi::api::core::v1 as corev1;
-use kube::KubeSchema;
-use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Pool {
-    pub name: String,
-    pub servers: u64,
-    pub volumes_ser_server: u64,
-    pub volume_chain_template: corev1::PersistentVolumeClaim,
-    pub path: String,
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    KubeError(#[from] kube::Error),
+}
+
+impl Error {
+    pub fn is_not_found(&self) -> bool {
+        let Error::KubeError(kube::Error::Api(err)) = self else {
+            return false;
+        };
+        err.reason == "NotFound" || err.code == 404
+    }
 }
