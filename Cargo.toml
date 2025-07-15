@@ -18,5 +18,5 @@ bytes = "1.10.1"
 dotenvy = "0.15.7"
 serde_json = "1.0.140"
 serde_yaml = "0.9.33"
-schemars = "0.8.22"
+schemars = "1.0.4"
 strum = { version = "0.27.1", features = ["derive"] }
