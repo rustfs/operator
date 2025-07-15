@@ -1,7 +1,5 @@
 use crate::types::v1alpha1::pool::Pool;
 use crate::types::v1alpha1::status::Status;
-
-use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::schemars;
 use kube::runtime::reflector::Lookup;
 use kube::{CustomResource, KubeSchema};
@@ -31,7 +29,6 @@ pub struct TenantSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub image_pull_secret: Option<corev1::LocalObjectReference>,
     //
