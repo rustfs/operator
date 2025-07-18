@@ -1,4 +1,4 @@
-// Copyright 2024 RustFS Team
+// Copyright 2025 RustFS Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,30 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
-use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use strum::Display;
 
-#[derive(Deserialize, Serialize, Clone, Debug, Display)]
+#[derive(Display)]
 pub enum State {
     #[strum(serialize = "Initialized")]
     Initialized,
 
     #[strum(serialize = "Statefulset not controlled by operator")]
     NotOwned,
-}
 
-impl JsonSchema for State {
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("State")
-    }
-    fn schema_id() -> Cow<'static, str> {
-        Cow::Borrowed(concat!(module_path!(), "::", "State"))
-    }
-    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
-        json_schema! {
-            {"type": "string"}
-        }
-    }
+    #[strum(serialize = "Pool Decommissioning Not Allowed")]
+    DecommissioningNotAllowed,
+
+    #[strum(serialize = "Provisioning IO Service")]
+    ProvisioningIOService,
+
+    #[strum(serialize = "Provisioning Console Service")]
+    ProvisioningConsoleService,
+
+    #[strum(serialize = "Provisioning Headless Service")]
+    ProvisioningHeadlessService,
+
+    #[strum(serialize = "Multiple tenants exist in the namespace")]
+    MultipleTenantsExist,
 }

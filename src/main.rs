@@ -1,4 +1,4 @@
-// Copyright 2024 RustFS Team
+// Copyright 2025 RustFS Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,11 +13,7 @@
 // limitations under the License.
 
 use clap::{Parser, Subcommand};
-use kube::CustomResourceExt;
-use operator::run;
-use operator::types::v1alpha1::tenant::Tenant;
-use std::pin::Pin;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use operator::{crd, run};
 
 #[derive(Parser)]
 #[command(name = "rustfs-op")]
@@ -45,26 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Crd { file } => {
-            let mut writer: Pin<Box<dyn AsyncWrite + Send>> = if let Some(file) = file {
-                Box::pin(
-                    tokio::fs::OpenOptions::new()
-                        .create(true)
-                        .truncate(true)
-                        .write(true)
-                        .open(file)
-                        .await?,
-                )
-            } else {
-                Box::pin(tokio::io::stdout())
-            };
-
-            writer
-                .write_all(serde_yaml::to_string(&Tenant::crd())?.as_bytes())
-                .await?;
-        }
-        Commands::Server {} => run().await?,
+        Commands::Crd { file } => crd(file).await,
+        Commands::Server {} => run().await,
     }
-
-    Ok(())
 }

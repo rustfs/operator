@@ -1,4 +1,4 @@
-// Copyright 2024 RustFS Team
+// Copyright 2025 RustFS Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,9 +17,12 @@ use crate::error_policy::error_policy;
 use crate::reconcile::reconcile;
 use crate::types::v1alpha1::tenant::Tenant;
 use futures::StreamExt;
+use kube::CustomResourceExt;
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client};
+use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing::{info, warn};
 
 mod context;
@@ -39,11 +42,32 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .run(reconcile, error_policy, Arc::new(context))
         .for_each(|res| async move {
             match res {
-                Ok(o) => info!("reconciled {:?}", o),
+                Ok((tenant, _)) => info!("reconciled successful, object{:?}", tenant.name),
                 Err(e) => warn!("reconcile failed: {}", e),
             }
         })
         .await;
+
+    Ok(())
+}
+
+pub async fn crd(file: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer: Pin<Box<dyn AsyncWrite + Send>> = if let Some(file) = file {
+        Box::pin(
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(file)
+                .await?,
+        )
+    } else {
+        Box::pin(tokio::io::stdout())
+    };
+
+    writer
+        .write_all(serde_yaml::to_string(&Tenant::crd())?.as_bytes())
+        .await?;
 
     Ok(())
 }

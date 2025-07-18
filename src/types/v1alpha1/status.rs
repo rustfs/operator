@@ -1,4 +1,4 @@
-// Copyright 2024 RustFS Team
+// Copyright 2025 RustFS Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,18 +11,20 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+pub mod certificate;
 pub mod pool;
 pub mod state;
 
-use kube::KubeSchema;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
-    pub current_state: state::State,
+    pub current_state: String,
 
     pub available_replicas: i32,
 
     pub pools: Vec<pool::Pool>,
+    // pub certificates: certificate::Status,
 }
