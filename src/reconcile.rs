@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod certificate;
 pub(crate) mod pool;
 pub(crate) mod service;
 pub(crate) mod service_account;
