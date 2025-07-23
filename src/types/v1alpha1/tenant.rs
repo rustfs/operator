@@ -14,6 +14,7 @@
 
 use crate::error::Error;
 use crate::types::v1alpha1::pool::Pool;
+use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
@@ -282,6 +283,12 @@ impl Tenant {
         }
     }
 
+    pub fn new_statefulset(&self, pool: &Pool) -> v1::StatefulSet {
+        v1::StatefulSet {
+            ..Default::default()
+        }
+    }
+
     pub fn console_service_name(&self) -> String {
         format!("{}-console", self.name())
     }
@@ -300,5 +307,13 @@ impl Tenant {
 
     pub fn service_account_name(&self) -> String {
         format!("{}-sa", self.name())
+    }
+
+    pub fn statefulset_name(&self, pool: &Pool) -> String {
+        format!("{}-{}", self.name(), pool.name)
+    }
+
+    pub fn secret_name(&self) -> String {
+        format!("{}-tls", self.name())
     }
 }

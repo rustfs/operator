@@ -30,6 +30,7 @@ pub mod error;
 pub mod error_policy;
 pub mod reconcile;
 pub mod types;
+pub mod utils;
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_level(true).init();
