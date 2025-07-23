@@ -65,7 +65,7 @@ fn check_key_match(
             // RSA (PKCS#1 private key)
             let private_key = rsa::RsaPrivateKey::from_pkcs1_der(der.secret_pkcs1_der())
                 .map_err(|e| KeyError::PrivateKeyParse(e.to_string()))?;
-            let public_key_from_private = rsa::RsaPublicKey::from(&private_key);
+            let public_key_from_private = private_key.to_public_key();
 
             // 修正: 使用 cert_pki.raw 来解析 SubjectPublicKeyInfo
             let public_key_from_cert = rsa::RsaPublicKey::from_public_key_der(cert_pki.raw)
@@ -96,7 +96,7 @@ fn check_key_match(
                     let cert_pubkey = p256::ecdsa::VerifyingKey::from_sec1_bytes(
                         cert_pki.subject_public_key.data.as_ref(),
                     )
-                    .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
+                        .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
 
                     private_key.verifying_key() == &cert_pubkey
                 }
@@ -110,9 +110,9 @@ fn check_key_match(
                     let cert_pubkey = ed25519_dalek::VerifyingKey::try_from(
                         cert_pki.subject_public_key.data.as_ref(),
                     )
-                    .map_err(|_| {
-                        KeyError::PublicKeyParse("Invalid Ed25519 public key".to_string())
-                    })?;
+                        .map_err(|_| {
+                            KeyError::PublicKeyParse("Invalid Ed25519 public key".to_string())
+                        })?;
 
                     private_key.verifying_key() == cert_pubkey
                 }
@@ -128,7 +128,7 @@ fn check_key_match(
             let cert_pubkey = p256::ecdsa::VerifyingKey::from_sec1_bytes(
                 cert_pki.subject_public_key.data.as_ref(),
             )
-            .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
+                .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
 
             private_key.verifying_key() == &cert_pubkey
         }
@@ -147,7 +147,7 @@ mod tests {
     use crate::utils::tls::x509_key_pair;
 
     #[test]
-    #[ignore]
+    // #[ignore]
     fn test_ecdsa_x59_key_pair() {
         let pub_key = "-----BEGIN CERTIFICATE-----
 MIIB/jCCAWICCQDscdUxw16XFDAJBgcqhkjOPQQBMEUxCzAJBgNVBAYTAkFVMRMw
@@ -161,8 +161,7 @@ XxYP0xMEUksLPq6Ca+CRSqTtrd/23uTnapkwCQYHKoZIzj0EAQOBigAwgYYCQXJo
 A7Sl2nLVf+4Iu/tAX/IF4MavARKC4PPHK3zfuGfPR3oCCcsAoz3kAzOeijvd0iXb
 H5jBImIxPL4WxQNiBTexAkF8D1EtpYuWdlVQ80/h/f4pBcGiXPqX5h2PQSQY7hP1
 +jwM1FGS4fREIOvlBYr/SzzQRtwrvrzGYxDEDbsC0ZGRnA==
------END CERTIFICATE-----
-";
+-----END CERTIFICATE-----";
         let pri_key = "-----BEGIN EC PARAMETERS-----
 BgUrgQQAIw==
 -----END EC PARAMETERS-----
@@ -191,8 +190,7 @@ rtNuC+BdZ1tMuVCPFZcCAwEAAaNQME4wHQYDVR0OBBYEFJvKs8RfJaXTH08W+SGv
 zQyKn0H8MB8GA1UdIwQYMBaAFJvKs8RfJaXTH08W+SGvzQyKn0H8MAwGA1UdEwQF
 MAMBAf8wDQYJKoZIhvcNAQEFBQADQQBJlffJHybjDGxRMqaRmDhX0+6v02TUKZsW
 r5QuVbpQhH6u+0UgcW0jp9QwpxoPTLTWGXEWBBBurxFwiCBhkQ+V
------END CERTIFICATE-----
-";
+-----END CERTIFICATE-----";
         let pri_key = "-----BEGIN RSA PRIVATE KEY-----
 MIIBOwIBAAJBANLJhPHhITqQbPklG3ibCVxwGMRfp/v4XqhfdQHdcVfHap6NQ5Wo
 k/4xIA+ui35/MmNartNuC+BdZ1tMuVCPFZcCAwEAAQJAEJ2N+zsR0Xn8/Q6twa4G
@@ -201,8 +199,7 @@ MQIhAPW+eyZo7ay3lMz1V01WVjNKK9QSn1MJlb06h/LuYv9FAiEA25WPedKgVyCW
 SmUwbPw8fnTcpqDWE3yTO3vKcebqMSsCIBF3UmVue8YU3jybC3NxuXq3wNm34R8T
 xVLHwDXh/6NJAiEAl2oHGGLz64BuAfjKrqwz7qMYr9HCLIe/YsoWq/olzScCIQDi
 D2lWusoe2/nEqfDVVWGWlyJ7yOmqaVm/iNUN9B2N2g==
------END RSA PRIVATE KEY-----
-";
+-----END RSA PRIVATE KEY-----";
 
         x509_key_pair(pub_key, pri_key);
     }
@@ -228,14 +225,12 @@ ZXIubG9jYWwwDQYJKoZIhvcNAQELBQADggEBAA0yDaSneHN08dbAnbyYjicwP1RW
 sbl6Zv0rCH+L+n5PbQkN814NV+CtIpx4FnpPDItuQv1OhG2QKzk9MWruZ8yq9XEQ
 BJGC65+IZUMZek1PXA5Qc/bqJZauovheY+wHyejBUGsqjHRQY9dXogCYt8kFkaSW
 +l+XQboZHac+B8n1kUJW9sy2KY738V8GfUaRaQ0KQjT6VRbyFffOT4uksH4=
------END CERTIFICATE-----
-";
+-----END CERTIFICATE-----";
         let pri_key = "-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgymB8eN7IXNKINXHi
 URJC256QF+NHZ4MhaniIsCSFbeihRANCAATiQ71ecL+llVAutxZqnrRM1mRSYEsl
 crCYE8xHGa2Kchw0a6h5Rc99/RRnAMQwzkZDKfm1lCyNqkCJLR4NI+66
------END PRIVATE KEY-----
-";
+-----END PRIVATE KEY-----";
 
         x509_key_pair(pub_key, pri_key);
     }
