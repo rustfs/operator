@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(clippy::single_match)]
+
 use crate::context::Context;
-use crate::error_policy::error_policy;
-use crate::reconcile::reconcile;
+use crate::reconcile::{error_policy, reconcile};
 use crate::types::v1alpha1::tenant::Tenant;
 use futures::StreamExt;
 use kube::CustomResourceExt;
@@ -26,11 +27,14 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing::{info, warn};
 
 mod context;
-pub mod error;
-pub mod error_policy;
 pub mod reconcile;
 pub mod types;
 pub mod utils;
+
+pub mod built_info {
+    // The file has been placed there by the build script.
+    include!(concat!(env!("OUT_DIR"), "/built.rs"));
+}
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_level(true).init();
