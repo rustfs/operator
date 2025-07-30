@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::Error;
+use crate::types;
 use crate::types::v1alpha1::tenant::Tenant;
 use k8s_openapi::NamespaceResourceScope;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams, PostParams};
@@ -20,8 +20,22 @@ use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::{Resource, ResourceExt, api::Api};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use snafu::Snafu;
+use snafu::futures::TryFutureExt;
 use std::fmt::Debug;
 use tracing::info;
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("Kubernetes API error: {}", source))]
+    Kube { source: kube::Error },
+
+    #[snafu(display("record event error: {}", source))]
+    Record { source: kube::Error },
+
+    #[snafu(transparent)]
+    Types { source: types::error::Error },
+}
 
 pub struct Context {
     pub(crate) client: kube::Client,
@@ -59,9 +73,8 @@ impl Context {
                 },
                 &resource.object_ref(&()),
             )
-            .await?;
-
-        Ok(())
+            .context(RecordSnafu)
+            .await
     }
 
     pub async fn update_status<S>(
@@ -80,22 +93,21 @@ impl Context {
             let mut status = tenant.status.clone().unwrap_or_default();
             status.available_replicas = replica;
             status.current_state = current_status.to_string();
-            let status_body = serde_json::to_vec(&status)?;
+            let status_body = serde_json::to_vec(&status).unwrap();
 
             api.replace_status(name, &PostParams::default(), status_body)
+                .context(KubeSnafu)
                 .await
-                .map_err(Error::from)
         };
 
         match update_func(resource).await {
             Ok(t) => return Ok(t),
-            Err(e) if !e.is_conflict() => return Err(e),
             _ => {}
         }
 
         info!("status update failed due to conflict, retrieve the latest resource and retry.");
 
-        let new_one = api.get(name).await.map_err(Error::from)?;
+        let new_one = api.get(name).context(KubeSnafu).await?;
         update_func(&new_one).await
     }
 
@@ -105,7 +117,9 @@ impl Context {
         <T as kube::Resource>::DynamicType: Default,
     {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
-        api.delete(name, &DeleteParams::default()).await?;
+        api.delete(name, &DeleteParams::default())
+            .context(KubeSnafu)
+            .await?;
         Ok(())
     }
 
@@ -115,7 +129,7 @@ impl Context {
         <T as kube::Resource>::DynamicType: Default,
     {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
-        Ok(api.get(name).await?)
+        api.get(name).context(KubeSnafu).await
     }
 
     pub async fn create<T>(&self, resource: &T, namespace: &str) -> Result<T, Error>
@@ -124,7 +138,9 @@ impl Context {
         <T as kube::Resource>::DynamicType: Default,
     {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
-        Ok(api.create(&PostParams::default(), resource).await?)
+        api.create(&PostParams::default(), resource)
+            .context(KubeSnafu)
+            .await
     }
 
     pub async fn list<T>(&self, namespace: &str) -> Result<ObjectList<T>, Error>
@@ -133,7 +149,7 @@ impl Context {
         <T as kube::Resource>::DynamicType: Default,
     {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
-        Ok(api.list(&ListParams::default()).await?)
+        api.list(&ListParams::default()).context(KubeSnafu).await
     }
 
     pub async fn apply<T>(&self, resource: T, namespace: &str) -> Result<T, Error>
@@ -142,12 +158,12 @@ impl Context {
         <T as kube::Resource>::DynamicType: Default,
     {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
-        Ok(api
-            .patch(
-                &resource.name_any(),
-                &PatchParams::apply("rustfs-operator"),
-                &Patch::Apply(resource),
-            )
-            .await?)
+        api.patch(
+            &resource.name_any(),
+            &PatchParams::apply("rustfs-operator"),
+            &Patch::Apply(resource),
+        )
+        .context(KubeSnafu)
+        .await
     }
 }

@@ -10,7 +10,6 @@ homepage = "https://rustfs.com"
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.47.0", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
-thiserror = "2.0.12"
 futures = "0.3.31"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19" }
@@ -30,8 +29,12 @@ p256 = { version = "0.13.2", features = ["ecdsa"] }
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 pkcs8 = "0.10.2"
 sec1 = "0.7.3"
+snafu = { version = "0.8.6", features = ["futures"] }
 
 [dev-dependencies]
+
+[build-dependencies]
+built = { version = "0.8", features = ["chrono", "git2"] }
 
 [lints.rust]
 unused_variables = "allow"

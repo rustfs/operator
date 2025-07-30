@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::Error;
+use crate::types;
+use crate::types::error::NoNamespaceSnafu;
 use crate::types::v1alpha1::pool::Pool;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
@@ -22,6 +23,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr;
 use k8s_openapi::{Resource as _, schemars};
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
 use serde::{Deserialize, Serialize};
+use snafu::OptionExt;
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[kube(
@@ -110,8 +112,8 @@ pub struct TenantSpec {
 }
 
 impl Tenant {
-    pub fn namespace(&self) -> Result<String, Error> {
-        ResourceExt::namespace(self).ok_or(Error::NoNamespace)
+    pub fn namespace(&self) -> Result<String, types::error::Error> {
+        ResourceExt::namespace(self).context(NoNamespaceSnafu)
     }
 
     pub fn name(&self) -> String {

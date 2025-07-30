@@ -13,3 +13,4 @@
 // limitations under the License.
 
 pub mod v1alpha1;
+pub mod error;
