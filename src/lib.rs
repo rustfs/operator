@@ -18,6 +18,8 @@ use crate::context::Context;
 use crate::reconcile::{error_policy, reconcile};
 use crate::types::v1alpha1::tenant::Tenant;
 use futures::StreamExt;
+use k8s_openapi::api::apps::v1 as appsv1;
+use k8s_openapi::api::core::v1 as corev1;
 use kube::CustomResourceExt;
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client};
@@ -42,8 +44,28 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::try_default().await?;
     let tenant_client = Api::<Tenant>::all(client.clone());
 
-    let context = Context::new(client);
+    let context = Context::new(client.clone());
     Controller::new(tenant_client, watcher::Config::default())
+        .owns(
+            Api::<corev1::ConfigMap>::all(client.clone()),
+            watcher::Config::default(),
+        )
+        .owns(
+            Api::<corev1::Secret>::all(client.clone()),
+            watcher::Config::default(),
+        )
+        .owns(
+            Api::<corev1::ServiceAccount>::all(client.clone()),
+            watcher::Config::default(),
+        )
+        .owns(
+            Api::<corev1::Pod>::all(client.clone()),
+            watcher::Config::default(),
+        )
+        .owns(
+            Api::<appsv1::StatefulSet>::all(client.clone()),
+            watcher::Config::default(),
+        )
         .run(reconcile, error_policy, Arc::new(context))
         .for_each(|res| async move {
             match res {
