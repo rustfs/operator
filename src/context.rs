@@ -152,7 +152,7 @@ impl Context {
         api.list(&ListParams::default()).context(KubeSnafu).await
     }
 
-    pub async fn apply<T>(&self, resource: T, namespace: &str) -> Result<T, Error>
+    pub async fn apply<T>(&self, resource: &T, namespace: &str) -> Result<T, Error>
     where
         T: Clone + Serialize + DeserializeOwned + Debug + Resource<Scope = NamespaceResourceScope>,
         <T as kube::Resource>::DynamicType: Default,

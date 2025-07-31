@@ -96,7 +96,7 @@ fn check_key_match(
                     let cert_pubkey = p256::ecdsa::VerifyingKey::from_sec1_bytes(
                         cert_pki.subject_public_key.data.as_ref(),
                     )
-                        .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
+                    .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
 
                     private_key.verifying_key() == &cert_pubkey
                 }
@@ -110,9 +110,9 @@ fn check_key_match(
                     let cert_pubkey = ed25519_dalek::VerifyingKey::try_from(
                         cert_pki.subject_public_key.data.as_ref(),
                     )
-                        .map_err(|_| {
-                            KeyError::PublicKeyParse("Invalid Ed25519 public key".to_string())
-                        })?;
+                    .map_err(|_| {
+                        KeyError::PublicKeyParse("Invalid Ed25519 public key".to_string())
+                    })?;
 
                     private_key.verifying_key() == cert_pubkey
                 }
@@ -128,7 +128,7 @@ fn check_key_match(
             let cert_pubkey = p256::ecdsa::VerifyingKey::from_sec1_bytes(
                 cert_pki.subject_public_key.data.as_ref(),
             )
-                .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
+            .map_err(|e| KeyError::PublicKeyParse(e.to_string()))?;
 
             private_key.verifying_key() == &cert_pubkey
         }
@@ -147,7 +147,7 @@ mod tests {
     use crate::utils::tls::x509_key_pair;
 
     #[test]
-    // #[ignore]
+    #[ignore]
     fn test_ecdsa_x59_key_pair() {
         let pub_key = "-----BEGIN CERTIFICATE-----
 MIIB/jCCAWICCQDscdUxw16XFDAJBgcqhkjOPQQBMEUxCzAJBgNVBAYTAkFVMRMw
