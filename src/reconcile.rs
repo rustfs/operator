@@ -19,6 +19,7 @@ use kube::runtime::controller::Action;
 use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::error;
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -34,19 +35,29 @@ pub enum Error {
 // 2. 创建configmap
 // 3. 创建service
 // 4. 创建statfulset
-pub async fn reconcile(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<Action, Error> {
-    let latest_tenant = ctx
-        .get::<Tenant>(&tenant.name(), &tenant.namespace()?)
-        .await?;
+pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<Action, Error> {
+    let ns = tenant.namespace()?;
+    let latest_tenant = ctx.get::<Tenant>(&tenant.name(), &ns).await?;
 
     if latest_tenant.metadata.deletion_timestamp.is_some() {
         return Ok(Action::await_change());
     }
 
-    
+    let (role, service_account) = (
+        ctx.apply(&latest_tenant.new_role(), &ns).await?,
+        ctx.apply(&latest_tenant.new_service_account(), &ns).await?,
+    );
+
+    let service_account = ctx
+        .apply(
+            &latest_tenant.new_role_binding(&service_account, &role),
+            &ns,
+        )
+        .await?;
     Ok(Action::await_change())
 }
 
 pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
+    error!("{:?}", error);
     Action::requeue(Duration::from_secs(5))
 }

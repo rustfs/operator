@@ -17,18 +17,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(
-    validation = Rule::new("self.servers * self.volumesPerServer < 4")
-    .message("pool #%d with 2 servers must have at least 4 volumes in total")
-)]
+#[x_kube(validation = Rule::new("self.servers * self.volumesPerServer >= 4"))]
 pub struct Pool {
-    #[x_kube(validation = Rule::new("self == ''").message("pool name must be not empty"))]
+    #[x_kube(validation = Rule::new("self != ''").message("pool name must be not empty"))]
     pub name: String,
 
-    #[x_kube(validation = Rule::new("self <= 0").message("servers must be gather than 0"))]
+    #[x_kube(validation = Rule::new("self > 0").message("servers must be gather than 0"))]
     pub servers: i32,
 
-    #[x_kube(validation = Rule::new("self <= 0").message("volumesPerServer must be gather than 0"))]
+    #[x_kube(validation = Rule::new("self > 0").message("volumesPerServer must be gather than 0"))]
     pub volumes_per_server: i32,
     // pub volume_chain_template: corev1::PersistentVolumeClaim,
     // pub path: String,

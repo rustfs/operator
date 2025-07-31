@@ -45,7 +45,7 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<String>,
 
-    #[x_kube(validation = Rule::new("self.size() == 0").message("pools must be configured"))]
+    #[x_kube(validation = Rule::new("self.size() > 0").message("pools must be configured"))]
     pub pools: Vec<Pool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
