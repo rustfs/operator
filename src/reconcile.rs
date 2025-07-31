@@ -23,10 +23,10 @@ use std::time::Duration;
 #[derive(Snafu, Debug)]
 pub enum Error {
     #[snafu(transparent)]
-    CtxError { source: context::Error },
+    Context { source: context::Error },
 
     #[snafu(transparent)]
-    TypesError { source: types::error::Error },
+    Types { source: types::error::Error },
 }
 
 // todo
@@ -43,6 +43,7 @@ pub async fn reconcile(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<Action,
         return Ok(Action::await_change());
     }
 
+    
     Ok(Action::await_change())
 }
 
