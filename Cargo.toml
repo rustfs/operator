@@ -9,7 +9,7 @@ homepage = "https://rustfs.com"
 
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
-tokio = { version = "1.47.0", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
+tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
 futures = "0.3.31"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19" }
