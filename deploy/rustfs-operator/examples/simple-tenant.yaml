@@ -1,0 +1,23 @@
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: example-tenant
+  namespace: default
+spec:
+  # Container image for RustFS (optional, defaults to a specific version)
+  image: rustfs/rustfs:latest
+
+  # Pool configuration - at least one pool is required
+  # Each pool must have: servers * volumesPerServer >= 4
+  pools:
+    - name: pool-0
+      servers: 2
+      volumesPerServer: 2
+
+  # Optional environment variables for RustFS containers
+  env:
+    - name: RUST_LOG
+      value: info
+
+  # Optional scheduler name for pod placement
+  # scheduler: custom-scheduler

@@ -1,0 +1,77 @@
+# Default values for rustfs-operator.
+
+# Operator deployment configuration
+operator:
+  # Number of operator replicas
+  replicas: 1
+
+  image:
+    repository: rustfs/operator
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # Image pull secrets for private registries
+  imagePullSecrets: []
+
+  # Resource limits and requests
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Environment variables
+  env:
+    - name: RUST_LOG
+      value: info
+
+  # Security context for the operator pod
+  podSecurityContext:
+    fsGroup: 65534
+
+  # Security context for the operator container
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    runAsUser: 65534
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Node selector for operator pod placement
+  nodeSelector: {}
+
+  # Tolerations for operator pod scheduling
+  tolerations: []
+
+  # Affinity rules for operator pod scheduling
+  affinity: {}
+
+# ServiceAccount configuration
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# RBAC configuration
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+# Namespace where the operator will be deployed
+# If not specified, uses the release namespace
+namespace: ""
+
+# Additional labels to add to all resources
+commonLabels: {}
+
+# Additional annotations to add to all resources
+commonAnnotations: {}

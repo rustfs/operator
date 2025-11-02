@@ -1,0 +1,16 @@
+apiVersion: v2
+name: rustfs-operator
+description: Kubernetes operator for managing RustFS storage clusters
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://rustfs.com
+sources:
+  - https://github.com/rustfs/operator
+maintainers:
+  - name: RustFS Team
+keywords:
+  - storage
+  - object-storage
+  - distributed-storage
+  - operator

@@ -1,0 +1,36 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+rules:
+  # Tenant resources
+  - apiGroups: ["rustfs.com"]
+    resources: ["tenants"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["rustfs.com"]
+    resources: ["tenants/status"]
+    verbs: ["update", "patch"]
+
+  # Core resources managed by the operator
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "pods", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # RBAC resources created for tenants
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # StatefulSets for tenant pools
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Events for reconciliation notifications
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+{{- end }}

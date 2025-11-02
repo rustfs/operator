@@ -1,0 +1,35 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+The RustFS operator has been deployed to namespace: {{ include "rustfs-operator.namespace" . }}
+
+To verify the operator is running:
+
+  kubectl get pods -n {{ include "rustfs-operator.namespace" . }} -l {{ include "rustfs-operator.selectorLabels" . | replace ": " "=" | replace "\n" "," }}
+
+To view the operator logs:
+
+  kubectl logs -n {{ include "rustfs-operator.namespace" . }} -l {{ include "rustfs-operator.selectorLabels" . | replace ": " "=" | replace "\n" "," }} -f
+
+To create a Tenant resource:
+
+  kubectl apply -f - <<EOF
+  apiVersion: rustfs.com/v1alpha1
+  kind: Tenant
+  metadata:
+    name: example-tenant
+    namespace: default
+  spec:
+    image: rustfs/rustfs:latest
+    pools:
+      - name: pool-0
+        servers: 2
+        volumesPerServer: 2
+  EOF
+
+To view Tenant resources:
+
+  kubectl get tenants --all-namespaces
+
+For more information, visit: {{ .Chart.Home }}
