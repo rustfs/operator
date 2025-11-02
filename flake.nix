@@ -26,6 +26,7 @@
           zlib
           nil
           docker
+          docker-buildx
           kubernetes-helm
           kubectl
 
