@@ -53,12 +53,12 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     // 2. Create Services
     ctx.apply(&latest_tenant.new_io_service(), &ns).await?;
     ctx.apply(&latest_tenant.new_console_service(), &ns).await?;
-    ctx.apply(&latest_tenant.new_headless_service(), &ns).await?;
+    ctx.apply(&latest_tenant.new_headless_service(), &ns)
+        .await?;
 
     // 3. Create StatefulSets for each pool
     for pool in &latest_tenant.spec.pools {
-        ctx.apply(&latest_tenant.new_statefulset(pool), &ns)
-            .await?;
+        ctx.apply(&latest_tenant.new_statefulset(pool), &ns).await?;
     }
 
     Ok(Action::await_change())
