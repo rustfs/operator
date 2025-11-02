@@ -14,7 +14,7 @@ RUN apk add --no-cache \
     zlib-dev \
     zlib-static
 
-COPY src Cargo.toml Cargo.lock .
+COPY . .
 
 # Use vendored libgit2 to avoid linking issues with Alpine's libgit2
 ENV LIBGIT2_NO_VENDOR=0

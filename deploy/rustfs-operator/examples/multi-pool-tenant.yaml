@@ -2,7 +2,7 @@ apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:
   name: multi-pool-tenant
-  namespace: default
+  namespace: rustfs-system
 spec:
   image: rustfs/rustfs:latest
 

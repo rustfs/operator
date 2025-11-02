@@ -2,7 +2,7 @@ apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:
   name: example-tenant
-  namespace: default
+  namespace: rustfs-system
 spec:
   # Container image for RustFS (optional, defaults to a specific version)
   image: rustfs/rustfs:latest
