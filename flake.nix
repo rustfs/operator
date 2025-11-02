@@ -25,8 +25,7 @@
           openssl
           zlib
           nil
-          podman
-          podman-compose
+          docker
           kubernetes-helm
           kubectl
 
