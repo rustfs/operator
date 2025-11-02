@@ -30,11 +30,6 @@ pub enum Error {
     Types { source: types::error::Error },
 }
 
-// todo
-// 1. 创建role/rolegroup/serviceaccount
-// 2. 创建configmap
-// 3. 创建service
-// 4. 创建statfulset
 pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<Action, Error> {
     let ns = tenant.namespace()?;
     let latest_tenant = ctx.get::<Tenant>(&tenant.name(), &ns).await?;
@@ -43,17 +38,29 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         return Ok(Action::await_change());
     }
 
+    // 1. Create RBAC resources
     let (role, service_account) = (
         ctx.apply(&latest_tenant.new_role(), &ns).await?,
         ctx.apply(&latest_tenant.new_service_account(), &ns).await?,
     );
 
-    let service_account = ctx
-        .apply(
-            &latest_tenant.new_role_binding(&service_account, &role),
-            &ns,
-        )
-        .await?;
+    ctx.apply(
+        &latest_tenant.new_role_binding(&service_account, &role),
+        &ns,
+    )
+    .await?;
+
+    // 2. Create Services
+    ctx.apply(&latest_tenant.new_io_service(), &ns).await?;
+    ctx.apply(&latest_tenant.new_console_service(), &ns).await?;
+    ctx.apply(&latest_tenant.new_headless_service(), &ns).await?;
+
+    // 3. Create StatefulSets for each pool
+    for pool in &latest_tenant.spec.pools {
+        ctx.apply(&latest_tenant.new_statefulset(pool), &ns)
+            .await?;
+    }
+
     Ok(Action::await_change())
 }
 
