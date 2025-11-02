@@ -29,6 +29,9 @@
           podman-compose
           kubernetes-helm
           kubectl
+
+          # For testing
+          minio-client
         ];
 
       in
