@@ -287,7 +287,67 @@ impl Tenant {
     }
 
     pub fn new_statefulset(&self, pool: &Pool) -> v1::StatefulSet {
+        let labels: std::collections::BTreeMap<String, String> = [
+            ("rustfs.tenant".to_owned(), self.name()),
+            ("rustfs.pool".to_owned(), pool.name.clone()),
+        ]
+        .into_iter()
+        .collect();
+
+        let container = corev1::Container {
+            name: "rustfs".to_owned(),
+            image: self.spec.image.clone(),
+            env: if self.spec.env.is_empty() {
+                None
+            } else {
+                Some(self.spec.env.clone())
+            },
+            ports: Some(vec![
+                corev1::ContainerPort {
+                    container_port: 9000,
+                    name: Some("http".to_owned()),
+                    protocol: Some("TCP".to_owned()),
+                    ..Default::default()
+                },
+                corev1::ContainerPort {
+                    container_port: 9090,
+                    name: Some("console".to_owned()),
+                    protocol: Some("TCP".to_owned()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+
         v1::StatefulSet {
+            metadata: metav1::ObjectMeta {
+                name: Some(self.statefulset_name(pool)),
+                namespace: self.namespace().ok(),
+                owner_references: Some(vec![self.new_owner_ref()]),
+                labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            spec: Some(v1::StatefulSetSpec {
+                replicas: Some(pool.servers),
+                service_name: Some(self.headless_service_name()),
+                selector: metav1::LabelSelector {
+                    match_labels: Some(labels.clone()),
+                    ..Default::default()
+                },
+                template: corev1::PodTemplateSpec {
+                    metadata: Some(metav1::ObjectMeta {
+                        labels: Some(labels),
+                        ..Default::default()
+                    }),
+                    spec: Some(corev1::PodSpec {
+                        service_account_name: Some(self.service_account_name()),
+                        containers: vec![container],
+                        scheduler_name: self.spec.scheduler.clone(),
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }

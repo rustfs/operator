@@ -1,3 +1,9 @@
 /target
 .idea
 .DS_Store
+.direnv
+
+# Helm
+*.tgz
+deploy/rustfs-operator/charts/
+deploy/rustfs-operator/Chart.lock

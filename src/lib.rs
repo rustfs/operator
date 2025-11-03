@@ -98,7 +98,7 @@ pub async fn crd(file: Option<String>) -> Result<(), Box<dyn std::error::Error>>
     };
 
     writer
-        .write_all(serde_yaml::to_string(&Tenant::crd())?.as_bytes())
+        .write_all(serde_yaml_ng::to_string(&Tenant::crd())?.as_bytes())
         .await?;
 
     Ok(())

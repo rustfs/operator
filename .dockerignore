@@ -7,3 +7,4 @@ Justfile
 LICENSE
 README.md
 rustfmt.toml
+rust-toolchain.toml
