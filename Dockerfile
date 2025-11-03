@@ -1,33 +1,32 @@
-# 使用官方 Rust 镜像
-FROM rust:1.91-alpine AS builder
+# Stage 1: Generate recipe file for dependencies
+FROM rust AS planner
+
 WORKDIR /app
-
-# Install build dependencies for OpenSSL, git2, and other native libraries
-RUN apk add --no-cache \
-    musl-dev \
-    openssl-dev \
-    openssl-libs-static \
-    pkgconfig \
-    perl \
-    make \
-    git \
-    zlib-dev \
-    zlib-static
-
+RUN cargo install cargo-chef
 COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Use vendored libgit2 to avoid linking issues with Alpine's libgit2
-ENV LIBGIT2_NO_VENDOR=0
+# Stage 2: Build dependencies
+FROM rust AS cacher
+
+WORKDIR /app
+RUN cargo install cargo-chef
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Stage 3: Build
+FROM rust AS builder
+
+WORKDIR /app
+COPY . .
+COPY --from=cacher /app/target target
+COPY --from=cacher /usr/local/cargo /usr/local/cargo
+
 RUN cargo build --release
 
-FROM alpine:latest
+# Stage 4: Final image
+FROM gcr.io/distroless/cc-debian13:latest
+
 WORKDIR /app
-
-# Install runtime dependencies
-RUN apk add --no-cache \
-    libgcc \
-    openssl \
-    ca-certificates
-
 COPY --from=builder /app/target/release/operator .
 CMD ["./operator", "-h"]
