@@ -58,7 +58,7 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
 
     // 3. Create StatefulSets for each pool
     for pool in &latest_tenant.spec.pools {
-        ctx.apply(&latest_tenant.new_statefulset(pool), &ns).await?;
+        ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns).await?;
     }
 
     Ok(Action::await_change())

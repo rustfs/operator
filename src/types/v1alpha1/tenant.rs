@@ -121,6 +121,39 @@ impl Tenant {
         ResourceExt::name_any(self)
     }
 
+    /// Constructs the RUSTFS_VOLUMES environment variable value
+    /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/{0...volumes-1}
+    /// All pools are combined into a space-separated string for a unified cluster
+    pub fn rustfs_volumes_env_value(&self) -> Result<String, types::error::Error> {
+        let namespace = self.namespace()?;
+        let tenant_name = self.name();
+        let headless_service = self.headless_service_name();
+
+        let volume_specs: Vec<String> = self
+            .spec
+            .pools
+            .iter()
+            .map(|pool| {
+                let base_path = pool.path.as_deref().unwrap_or("/data");
+                let pool_name = &pool.name;
+
+                // Construct volume specification with range notation
+                format!(
+                    "http://{}-{}-{{0...{}}}.{}.{}.svc.cluster.local:9000{}/{{0...{}}}",
+                    tenant_name,
+                    pool_name,
+                    pool.servers - 1,
+                    headless_service,
+                    namespace,
+                    base_path.trim_end_matches('/'),
+                    pool.volumes_per_server - 1
+                )
+            })
+            .collect();
+
+        Ok(volume_specs.join(" "))
+    }
+
     /// a new owner reference for tenant
     pub fn new_owner_ref(&self) -> metav1::OwnerReference {
         metav1::OwnerReference {
@@ -286,7 +319,7 @@ impl Tenant {
         }
     }
 
-    pub fn new_statefulset(&self, pool: &Pool) -> v1::StatefulSet {
+    pub fn new_statefulset(&self, pool: &Pool) -> Result<v1::StatefulSet, types::error::Error> {
         let labels: std::collections::BTreeMap<String, String> = [
             ("rustfs.tenant".to_owned(), self.name()),
             ("rustfs.pool".to_owned(), pool.name.clone()),
@@ -294,13 +327,73 @@ impl Tenant {
         .into_iter()
         .collect();
 
+        // Generate PVC name prefix: {tenantName}-{poolName}
+        let pvc_name_prefix = format!("{}-{}", self.name(), pool.name);
+
+        // Use provided volume claim template or create default (ReadWriteOnce, 10Gi)
+        let pvc_spec = pool.volume_claim_template.clone().unwrap_or_else(|| {
+            let mut resources = std::collections::BTreeMap::new();
+            resources.insert("storage".to_string(), k8s_openapi::apimachinery::pkg::api::resource::Quantity("10Gi".to_string()));
+
+            corev1::PersistentVolumeClaimSpec {
+                access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                resources: Some(corev1::VolumeResourceRequirements {
+                    requests: Some(resources),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        });
+
+        // Generate volume claim templates for each volume
+        let volume_claim_templates: Vec<corev1::PersistentVolumeClaim> = (0..pool.volumes_per_server)
+            .map(|i| corev1::PersistentVolumeClaim {
+                metadata: metav1::ObjectMeta {
+                    name: Some(format!("{}-{}", pvc_name_prefix, i)),
+                    ..Default::default()
+                },
+                spec: Some(pvc_spec.clone()),
+                ..Default::default()
+            })
+            .collect();
+
+        // Generate volume mounts for each volume
+        // Default path is /data if not specified
+        let base_path = pool.path.as_deref().unwrap_or("/data");
+        let volume_mounts: Vec<corev1::VolumeMount> = (0..pool.volumes_per_server)
+            .map(|i| corev1::VolumeMount {
+                name: format!("{}-{}", pvc_name_prefix, i),
+                mount_path: format!("{}/{}", base_path.trim_end_matches('/'), i),
+                ..Default::default()
+            })
+            .collect();
+
+        // Generate environment variables: operator-managed + user-provided
+        let mut env_vars = Vec::new();
+
+        // Add RUSTFS_VOLUMES environment variable for multi-node communication
+        let rustfs_volumes = self.rustfs_volumes_env_value()?;
+        env_vars.push(corev1::EnvVar {
+            name: "RUSTFS_VOLUMES".to_owned(),
+            value: Some(rustfs_volumes),
+            ..Default::default()
+        });
+
+        // Merge with user-provided environment variables
+        // User-provided vars can override operator-managed ones
+        for user_env in &self.spec.env {
+            // Remove any existing var with the same name to allow override
+            env_vars.retain(|e| e.name != user_env.name);
+            env_vars.push(user_env.clone());
+        }
+
         let container = corev1::Container {
             name: "rustfs".to_owned(),
             image: self.spec.image.clone(),
-            env: if self.spec.env.is_empty() {
+            env: if env_vars.is_empty() {
                 None
             } else {
-                Some(self.spec.env.clone())
+                Some(env_vars)
             },
             ports: Some(vec![
                 corev1::ContainerPort {
@@ -316,10 +409,11 @@ impl Tenant {
                     ..Default::default()
                 },
             ]),
+            volume_mounts: Some(volume_mounts),
             ..Default::default()
         };
 
-        v1::StatefulSet {
+        Ok(v1::StatefulSet {
             metadata: metav1::ObjectMeta {
                 name: Some(self.statefulset_name(pool)),
                 namespace: self.namespace().ok(),
@@ -346,10 +440,11 @@ impl Tenant {
                         ..Default::default()
                     }),
                 },
+                volume_claim_templates: Some(volume_claim_templates),
                 ..Default::default()
             }),
             ..Default::default()
-        }
+        })
     }
 
     pub fn console_service_name(&self) -> String {
