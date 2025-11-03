@@ -20,10 +20,16 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use k8s_openapi::apimachinery::pkg::util::intstr;
-use k8s_openapi::{Resource as _, schemars};
+use k8s_openapi::{schemars, Resource as _};
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
+
+const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
+
+fn volume_claim_template_name(shard: i32) -> String {
+    format!("{}-{}", VOLUME_CLAIM_TEMPLATE_PREFIX, shard)
+}
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[kube(
@@ -134,7 +140,7 @@ impl Tenant {
             .pools
             .iter()
             .map(|pool| {
-                let base_path = pool.path.as_deref().unwrap_or("/data");
+                let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
                 let pool_name = &pool.name;
 
                 // Construct volume specification with range notation
@@ -146,7 +152,7 @@ impl Tenant {
                     headless_service,
                     namespace,
                     base_path.trim_end_matches('/'),
-                    pool.volumes_per_server - 1
+                    pool.persistence.volumes_per_server - 1
                 )
             })
             .collect();
@@ -234,6 +240,7 @@ impl Tenant {
             spec: Some(corev1::ServiceSpec {
                 type_: Some("ClusterIP".to_owned()),
                 cluster_ip: Some("None".to_owned()),
+                publish_not_ready_addresses: Some(true),
                 selector: Some(
                     [("rustfs.tenant".to_owned(), self.name())]
                         .into_iter()
@@ -319,6 +326,72 @@ impl Tenant {
         }
     }
 
+    /// Creates volume claim templates for a pool
+    /// Returns a vector of PersistentVolumeClaim templates for StatefulSet
+    fn volume_claim_templates(
+        &self,
+        pool: &Pool,
+    ) -> Result<Vec<corev1::PersistentVolumeClaim>, types::error::Error> {
+        // Get PVC spec or create default (ReadWriteOnce, 10Gi)
+        let spec = pool
+            .persistence
+            .volume_claim_template
+            .clone()
+            .unwrap_or_else(|| {
+                let mut resources = std::collections::BTreeMap::new();
+                resources.insert(
+                    "storage".to_string(),
+                    k8s_openapi::apimachinery::pkg::api::resource::Quantity("10Gi".to_string()),
+                );
+
+                corev1::PersistentVolumeClaimSpec {
+                    access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                    resources: Some(corev1::VolumeResourceRequirements {
+                        requests: Some(resources),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
+            });
+
+        let tenant = self.name();
+        let pool_name = pool.name.clone();
+
+        // Create operator-managed labels
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert(
+            "app.kubernetes.io/managed-by".to_owned(),
+            "rustfs-operator".to_owned(),
+        );
+        labels.insert("rustfs.tenant".to_owned(), tenant.clone());
+        labels.insert("rustfs.pool".to_owned(), pool_name.clone());
+        labels.insert("rustfs.tenant.namespace".to_owned(), self.namespace()?);
+
+        // Merge with user-provided labels (user labels can override)
+        if let Some(user_labels) = &pool.persistence.labels {
+            labels.extend(user_labels.clone());
+        }
+
+        // Get annotations from persistence config
+        let annotations = pool.persistence.annotations.clone();
+
+        // Generate volume claim templates for each volume
+        let templates: Vec<_> = (0..pool.persistence.volumes_per_server)
+            .map(|i| corev1::PersistentVolumeClaim {
+                metadata: metav1::ObjectMeta {
+                    name: Some(volume_claim_template_name(i)),
+                    labels: Some(labels.clone()),
+                    annotations: annotations.clone(),
+                    ..Default::default()
+                },
+                spec: Some(spec.clone()),
+                ..Default::default()
+            })
+            .collect();
+
+        Ok(templates)
+    }
+
     pub fn new_statefulset(&self, pool: &Pool) -> Result<v1::StatefulSet, types::error::Error> {
         let labels: std::collections::BTreeMap<String, String> = [
             ("rustfs.tenant".to_owned(), self.name()),
@@ -330,39 +403,16 @@ impl Tenant {
         // Generate PVC name prefix: {tenantName}-{poolName}
         let pvc_name_prefix = format!("{}-{}", self.name(), pool.name);
 
-        // Use provided volume claim template or create default (ReadWriteOnce, 10Gi)
-        let pvc_spec = pool.volume_claim_template.clone().unwrap_or_else(|| {
-            let mut resources = std::collections::BTreeMap::new();
-            resources.insert("storage".to_string(), k8s_openapi::apimachinery::pkg::api::resource::Quantity("10Gi".to_string()));
-
-            corev1::PersistentVolumeClaimSpec {
-                access_modes: Some(vec!["ReadWriteOnce".to_string()]),
-                resources: Some(corev1::VolumeResourceRequirements {
-                    requests: Some(resources),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }
-        });
-
-        // Generate volume claim templates for each volume
-        let volume_claim_templates: Vec<corev1::PersistentVolumeClaim> = (0..pool.volumes_per_server)
-            .map(|i| corev1::PersistentVolumeClaim {
-                metadata: metav1::ObjectMeta {
-                    name: Some(format!("{}-{}", pvc_name_prefix, i)),
-                    ..Default::default()
-                },
-                spec: Some(pvc_spec.clone()),
-                ..Default::default()
-            })
-            .collect();
+        // Generate volume claim templates using helper function
+        let volume_claim_templates = self.volume_claim_templates(pool)?;
 
         // Generate volume mounts for each volume
         // Default path is /data if not specified
-        let base_path = pool.path.as_deref().unwrap_or("/data");
-        let volume_mounts: Vec<corev1::VolumeMount> = (0..pool.volumes_per_server)
+        // Volume mount names must match the volume claim template names (vol-0, vol-1, etc.)
+        let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
+        let volume_mounts: Vec<corev1::VolumeMount> = (0..pool.persistence.volumes_per_server)
             .map(|i| corev1::VolumeMount {
-                name: format!("{}-{}", pvc_name_prefix, i),
+                name: volume_claim_template_name(i),
                 mount_path: format!("{}/{}", base_path.trim_end_matches('/'), i),
                 ..Default::default()
             })
@@ -424,6 +474,7 @@ impl Tenant {
             spec: Some(v1::StatefulSetSpec {
                 replicas: Some(pool.servers),
                 service_name: Some(self.headless_service_name()),
+                pod_management_policy: Some("Parallel".to_owned()),
                 selector: metav1::LabelSelector {
                     match_labels: Some(labels.clone()),
                     ..Default::default()

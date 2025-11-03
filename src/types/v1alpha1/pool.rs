@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use k8s_openapi::api::core::v1 as corev1;
 use kube::KubeSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::types::v1alpha1::persistence::PersistenceConfig;
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("self.servers * self.volumesPerServer >= 4"))]
+#[x_kube(validation = Rule::new("self.servers * self.persistence.volumesPerServer >= 4"))]
 pub struct Pool {
     #[x_kube(validation = Rule::new("self != ''").message("pool name must be not empty"))]
     pub name: String,
@@ -26,13 +27,5 @@ pub struct Pool {
     #[x_kube(validation = Rule::new("self > 0").message("servers must be gather than 0"))]
     pub servers: i32,
 
-    #[x_kube(validation = Rule::new("self > 0").message("volumesPerServer must be gather than 0"))]
-    pub volumes_per_server: i32,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub volume_claim_template: Option<corev1::PersistentVolumeClaimSpec>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[x_kube(validation = Rule::new("!has(self) || self != ''").message("path must be not empty when specified"))]
-    pub path: Option<String>,
+    pub persistence: PersistenceConfig,
 }
