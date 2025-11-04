@@ -139,20 +139,8 @@ impl Tenant {
         }
     }
 
-    pub fn console_service_name(&self) -> String {
-        format!("{}-console", self.name())
-    }
-
-    pub fn headless_service_name(&self) -> String {
+    pub(crate) fn headless_service_name(&self) -> String {
         format!("{}-hl", self.name())
-    }
-
-    pub fn role_binding_name(&self) -> String {
-        format!("{}-role-binding", self.name())
-    }
-
-    pub fn role_name(&self) -> String {
-        format!("{}-role", self.name())
     }
 
     pub fn service_account_name(&self) -> String {
@@ -162,17 +150,9 @@ impl Tenant {
             .unwrap_or_else(|| format!("{}-sa", self.name()))
     }
 
-    pub fn statefulset_name(&self, pool: &Pool) -> String {
-        format!("{}-{}", self.name(), pool.name)
-    }
-
-    pub fn secret_name(&self) -> String {
-        format!("{}-tls", self.name())
-    }
-
     /// Returns common labels that should be applied to all Tenant-owned resources.
     /// These labels follow Kubernetes recommended label conventions.
-    pub fn common_labels(&self) -> std::collections::BTreeMap<String, String> {
+    pub(crate) fn common_labels(&self) -> std::collections::BTreeMap<String, String> {
         [
             ("app.kubernetes.io/name".to_owned(), "rustfs".to_owned()),
             ("app.kubernetes.io/instance".to_owned(), self.name()),
@@ -188,7 +168,7 @@ impl Tenant {
 
     /// Returns labels for pool-specific resources (StatefulSets, PVCs).
     /// Includes common labels plus pool-specific labels.
-    pub fn pool_labels(&self, pool: &Pool) -> std::collections::BTreeMap<String, String> {
+    pub(crate) fn pool_labels(&self, pool: &Pool) -> std::collections::BTreeMap<String, String> {
         let mut labels = self.common_labels();
         labels.insert("rustfs.pool".to_owned(), pool.name.clone());
         labels.insert(
@@ -200,14 +180,17 @@ impl Tenant {
 
     /// Returns selector labels for Services and StatefulSets.
     /// These should be a stable subset of the full labels.
-    pub fn selector_labels(&self) -> std::collections::BTreeMap<String, String> {
+    pub(crate) fn selector_labels(&self) -> std::collections::BTreeMap<String, String> {
         [("rustfs.tenant".to_owned(), self.name())]
             .into_iter()
             .collect()
     }
 
     /// Returns selector labels for pool-specific resources.
-    pub fn pool_selector_labels(&self, pool: &Pool) -> std::collections::BTreeMap<String, String> {
+    pub(crate) fn pool_selector_labels(
+        &self,
+        pool: &Pool,
+    ) -> std::collections::BTreeMap<String, String> {
         let mut labels = self.selector_labels();
         labels.insert("rustfs.pool".to_owned(), pool.name.clone());
         labels

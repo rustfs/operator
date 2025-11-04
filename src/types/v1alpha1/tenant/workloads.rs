@@ -25,6 +25,10 @@ fn volume_claim_template_name(shard: i32) -> String {
     format!("{}-{}", VOLUME_CLAIM_TEMPLATE_PREFIX, shard)
 }
 
+fn statefulset_name(tenant: &Tenant, pool: &Pool) -> String {
+    format!("{}-{}", tenant.name(), pool.name)
+}
+
 impl Tenant {
     /// Constructs the RUSTFS_VOLUMES environment variable value
     /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/{0...volumes-1}
@@ -181,7 +185,7 @@ impl Tenant {
 
         Ok(v1::StatefulSet {
             metadata: metav1::ObjectMeta {
-                name: Some(self.statefulset_name(pool)),
+                name: Some(statefulset_name(self, pool)),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
                 labels: Some(labels.clone()),

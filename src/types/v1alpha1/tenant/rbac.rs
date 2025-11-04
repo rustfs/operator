@@ -19,11 +19,19 @@ use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::{Resource, ResourceExt};
 
+fn role_binding_name(tenant: &Tenant) -> String {
+    format!("{}-role-binding", tenant.name())
+}
+
+fn role_name(tenant: &Tenant) -> String {
+    format!("{}-role", tenant.name())
+}
+
 impl Tenant {
     pub fn new_role_binding(&self, sa_name: &str, role: &rbacv1::Role) -> rbacv1::RoleBinding {
         rbacv1::RoleBinding {
             metadata: metav1::ObjectMeta {
-                name: Some(self.role_binding_name()),
+                name: Some(role_binding_name(self)),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
                 labels: Some(self.common_labels()),
@@ -46,7 +54,7 @@ impl Tenant {
     pub fn new_role(&self) -> rbacv1::Role {
         rbacv1::Role {
             metadata: metav1::ObjectMeta {
-                name: Some(self.role_name()),
+                name: Some(role_name(self)),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
                 labels: Some(self.common_labels()),

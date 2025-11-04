@@ -17,6 +17,10 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use k8s_openapi::apimachinery::pkg::util::intstr;
 
+fn console_service_name(tenant: &Tenant) -> String {
+    format!("{}-console", tenant.name())
+}
+
 impl Tenant {
     /// a new io Service for tenant
     pub fn new_io_service(&self) -> corev1::Service {
@@ -47,7 +51,7 @@ impl Tenant {
     pub fn new_console_service(&self) -> corev1::Service {
         corev1::Service {
             metadata: metav1::ObjectMeta {
-                name: Some(self.console_service_name()),
+                name: Some(console_service_name(self)),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
                 labels: Some(self.common_labels()),
