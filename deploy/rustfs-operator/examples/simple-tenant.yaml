@@ -7,14 +7,65 @@ spec:
   # Container image for RustFS (optional, defaults to a specific version)
   image: rustfs/rustfs:latest
 
+  # Pod management policy for StatefulSet (defaults to Parallel)
+  # Parallel is recommended for multi-node RustFS deployments
+  podManagementPolicy: Parallel
+
   # Pool configuration - at least one pool is required
   # Each pool must have: servers * volumesPerServer >= 4
   pools:
-    - name: pool-0
+    - name: primary
       servers: 2
-      volumesPerServer: 2
+      # Persistence configuration for storage (REQUIRED)
+      # Note: servers * volumesPerServer must be >= 4 for RustFS distributed storage
+      persistence:
+        # Number of volumes per server (REQUIRED, must satisfy servers * volumesPerServer >= 4)
+        volumesPerServer: 2
+        # Optional: Path where volumes will be mounted in the container (defaults to /data)
+        # With volumesPerServer=2, volumes will be mounted at: /data/0, /data/1
+        # path: /data
+        # Optional: PersistentVolumeClaim template for storage (defaults to ReadWriteOnce, 10Gi)
+        # PVCs will be named: {tenantName}-{poolName}-{index}
+        # For this example: example-tenant-pool-0-0, example-tenant-pool-0-1
+        # volumeClaimTemplate:
+        #   accessModes:
+        #     - ReadWriteOnce
+        #   resources:
+        #     requests:
+        #       storage: 10Gi
+        #   # Optional: specify storage class
+        #   # storageClassName: standard
+        # Optional: Custom labels for PVCs
+        # The operator automatically adds the following labels:
+        #   - app.kubernetes.io/managed-by: rustfs-operator
+        #   - rustfs.tenant: <tenant-name>
+        #   - rustfs.pool: <pool-name>
+        # You can add additional labels or override the operator labels:
+        labels:
+          app: rustfs
+          environment: production
+          team: storage
+        # Optional: Custom annotations for PVCs
+        annotations:
+          backup.velero.io/backup-volumes: "true"
+          description: "RustFS distributed storage volumes"
+
+  # Multi-Node Communication (Automatic)
+  # The operator automatically generates the RUSTFS_VOLUMES environment variable
+  # for multi-node, multi-disk distributed storage communication.
+  #
+  # For this configuration, the generated RUSTFS_VOLUMES will be:
+  # http://example-tenant-pool-0-{0...1}.example-tenant-hl.rustfs-system.svc.cluster.local:9000/data/{0...1}
+  #
+  # This configures RustFS to:
+  # - Communicate with 2 nodes (servers: 2)
+  # - Each node has 2 storage volumes (volumesPerServer: 2)
+  # - Use Kubernetes DNS for node discovery via the headless service
+  #
+  # Multiple pools will be combined into a single distributed storage cluster.
 
   # Optional environment variables for RustFS containers
+  # Note: RUSTFS_VOLUMES is automatically set by the operator and should not be manually configured
   env:
     - name: RUST_LOG
       value: info

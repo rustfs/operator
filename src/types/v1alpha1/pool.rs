@@ -15,9 +15,11 @@
 use kube::KubeSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::types::v1alpha1::persistence::PersistenceConfig;
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("self.servers * self.volumesPerServer >= 4"))]
+#[x_kube(validation = Rule::new("self.servers * self.persistence.volumesPerServer >= 4"))]
 pub struct Pool {
     #[x_kube(validation = Rule::new("self != ''").message("pool name must be not empty"))]
     pub name: String,
@@ -25,8 +27,5 @@ pub struct Pool {
     #[x_kube(validation = Rule::new("self > 0").message("servers must be gather than 0"))]
     pub servers: i32,
 
-    #[x_kube(validation = Rule::new("self > 0").message("volumesPerServer must be gather than 0"))]
-    pub volumes_per_server: i32,
-    // pub volume_chain_template: corev1::PersistentVolumeClaim,
-    // pub path: String,
+    pub persistence: PersistenceConfig,
 }

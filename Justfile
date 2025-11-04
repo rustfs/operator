@@ -41,4 +41,4 @@ build:
 
 # Build Docker image
 build-image tag:
-    docker buildx build --platform linux/amd64,linux/arm64 -t operator:{{ tag }} .
+    docker buildx build --platform linux/amd64,linux/arm64 -t rustfs/operator:{{ tag }} .
