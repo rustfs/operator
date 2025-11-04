@@ -35,3 +35,15 @@ pub struct PersistenceConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<std::collections::BTreeMap<String, String>>,
 }
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            volumes_per_server: 4, // Default to 4 volumes to satisfy validation (must be > 0)
+            volume_claim_template: None,
+            path: None,
+            labels: None,
+            annotations: None,
+        }
+    }
+}
