@@ -106,8 +106,9 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_service_account_rbac: Option<bool>,
 
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub priority_class_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_class_name: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_pull_policy: Option<k8s::ImagePullPolicy>,
 

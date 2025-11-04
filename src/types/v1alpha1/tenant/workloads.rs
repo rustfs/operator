@@ -191,6 +191,7 @@ impl Tenant {
                         service_account_name: Some(self.service_account_name()),
                         containers: vec![container],
                         scheduler_name: self.spec.scheduler.clone(),
+                        priority_class_name: self.spec.priority_class_name.clone(),
                         ..Default::default()
                     }),
                 },
