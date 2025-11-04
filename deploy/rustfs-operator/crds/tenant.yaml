@@ -124,16 +124,18 @@ spec:
                 nullable: true
                 type: string
               imagePullPolicy:
-                anyOf:
-                - description: Image pull policy for containers
-                  enum:
-                  - Always
-                  - Never
-                  - IfNotPresent
-                  type: string
-                - enum:
-                  - null
-                  nullable: true
+                description: |-
+                  Image pull policy for containers.
+                  - Always: Always pull the image
+                  - Never: Never pull the image
+                  - IfNotPresent: Pull the image if not present locally (default)
+                enum:
+                - Always
+                - Never
+                - IfNotPresent
+                - null
+                nullable: true
+                type: string
               imagePullSecret:
                 description: LocalObjectReference contains enough information to let you locate the referenced object inside the same namespace.
                 nullable: true
@@ -315,6 +317,9 @@ spec:
                 x-kubernetes-validations:
                 - message: pools must be configured
                   rule: self.size() > 0
+              priorityClassName:
+                nullable: true
+                type: string
               scheduler:
                 nullable: true
                 type: string

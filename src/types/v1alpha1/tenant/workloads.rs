@@ -180,6 +180,7 @@ impl Tenant {
                 },
             ]),
             volume_mounts: Some(volume_mounts),
+            lifecycle: self.spec.lifecycle.clone(),
             ..Default::default()
         };
 
