@@ -26,6 +26,39 @@ fn volume_claim_template_name(shard: i32) -> String {
 }
 
 impl Tenant {
+    /// Constructs the RUSTFS_VOLUMES environment variable value
+    /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/{0...volumes-1}
+    /// All pools are combined into a space-separated string for a unified cluster
+    fn rustfs_volumes_env_value(&self) -> Result<String, types::error::Error> {
+        let namespace = self.namespace()?;
+        let tenant_name = self.name();
+        let headless_service = self.headless_service_name();
+
+        let volume_specs: Vec<String> = self
+            .spec
+            .pools
+            .iter()
+            .map(|pool| {
+                let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
+                let pool_name = &pool.name;
+
+                // Construct volume specification with range notation
+                format!(
+                    "http://{}-{}-{{0...{}}}.{}.{}.svc.cluster.local:9000{}/{{0...{}}}",
+                    tenant_name,
+                    pool_name,
+                    pool.servers - 1,
+                    headless_service,
+                    namespace,
+                    base_path.trim_end_matches('/'),
+                    pool.persistence.volumes_per_server - 1
+                )
+            })
+            .collect();
+
+        Ok(volume_specs.join(" "))
+    }
+
     /// Creates volume claim templates for a pool
     /// Returns a vector of PersistentVolumeClaim templates for StatefulSet
     fn volume_claim_templates(
