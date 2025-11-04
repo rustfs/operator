@@ -20,7 +20,7 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use k8s_openapi::apimachinery::pkg::util::intstr;
-use k8s_openapi::{schemars, Resource as _};
+use k8s_openapi::{schemars::JsonSchema, Resource as _};
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -29,6 +29,16 @@ const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 
 fn volume_claim_template_name(shard: i32) -> String {
     format!("{}-{}", VOLUME_CLAIM_TEMPLATE_PREFIX, shard)
+}
+
+#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "PascalCase")]
+#[schemars(rename_all = "PascalCase")]
+pub enum PodManagementPolicy {
+    OrderedReady,
+
+    #[default]
+    Parallel,
 }
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
@@ -59,9 +69,9 @@ pub struct TenantSpec {
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub image_pull_secret: Option<corev1::LocalObjectReference>,
     //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub pod_management_policy: Option<String>,
-    //
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_management_policy: Option<PodManagementPolicy>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
 
@@ -474,7 +484,13 @@ impl Tenant {
             spec: Some(v1::StatefulSetSpec {
                 replicas: Some(pool.servers),
                 service_name: Some(self.headless_service_name()),
-                pod_management_policy: Some("Parallel".to_owned()),
+                pod_management_policy: self
+                    .spec
+                    .pod_management_policy
+                    .as_ref()
+                    .and_then(|p| serde_json::to_string(p).ok())
+                    .map(|s| s.trim_matches('"').to_owned())
+                    .or(Some("Parallel".to_owned())),
                 selector: metav1::LabelSelector {
                     match_labels: Some(labels.clone()),
                     ..Default::default()

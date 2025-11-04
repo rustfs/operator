@@ -120,6 +120,13 @@ spec:
               image:
                 nullable: true
                 type: string
+              podManagementPolicy:
+                enum:
+                - OrderedReady
+                - Parallel
+                - null
+                nullable: true
+                type: string
               pools:
                 items:
                   properties:

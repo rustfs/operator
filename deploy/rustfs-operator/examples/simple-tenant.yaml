@@ -7,6 +7,10 @@ spec:
   # Container image for RustFS (optional, defaults to a specific version)
   image: rustfs/rustfs:latest
 
+  # Pod management policy for StatefulSet (defaults to Parallel)
+  # Parallel is recommended for multi-node RustFS deployments
+  podManagementPolicy: Parallel
+
   # Pool configuration - at least one pool is required
   # Each pool must have: servers * volumesPerServer >= 4
   pools:
