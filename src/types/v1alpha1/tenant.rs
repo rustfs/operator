@@ -20,7 +20,7 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use k8s_openapi::apimachinery::pkg::util::intstr;
-use k8s_openapi::{schemars::JsonSchema, Resource as _};
+use k8s_openapi::{Resource as _, schemars::JsonSchema};
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
