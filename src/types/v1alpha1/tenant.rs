@@ -14,13 +14,14 @@
 
 use crate::types;
 use crate::types::error::NoNamespaceSnafu;
+use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::pool::Pool;
+use k8s_openapi::Resource as _;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use k8s_openapi::apimachinery::pkg::util::intstr;
-use k8s_openapi::{Resource as _, schemars::JsonSchema};
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -29,16 +30,6 @@ const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 
 fn volume_claim_template_name(shard: i32) -> String {
     format!("{}-{}", VOLUME_CLAIM_TEMPLATE_PREFIX, shard)
-}
-
-#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema)]
-#[serde(rename_all = "PascalCase")]
-#[schemars(rename_all = "PascalCase")]
-pub enum PodManagementPolicy {
-    OrderedReady,
-
-    #[default]
-    Parallel,
 }
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
@@ -66,11 +57,12 @@ pub struct TenantSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub image_pull_secret: Option<corev1::LocalObjectReference>,
-    //
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pod_management_policy: Option<PodManagementPolicy>,
+    pub image_pull_secret: Option<corev1::LocalObjectReference>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_management_policy: Option<k8s::PodManagementPolicy>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
@@ -113,15 +105,17 @@ pub struct TenantSpec {
 
     // #[serde(default, skip_serializing_if = "Vec::is_empty")]
     // prometheus_operator_scrape_metrics_paths: Vec<String>,
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub service_account_name: Option<String>,
-    //
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account_name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_service_account_rbac: Option<bool>,
+
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub priority_class_name: Option<String>,
-    //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub image_pull_policy: Option<String>,
-    //
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pull_policy: Option<k8s::ImagePullPolicy>,
+
     // // #[serde(default, skip_serializing_if = "Option::is_none")]
     // // pub side_cars: Option<SideCars>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,11 +261,7 @@ impl Tenant {
         }
     }
 
-    pub fn new_role_binding(
-        &self,
-        sa: &corev1::ServiceAccount,
-        role: &rbacv1::Role,
-    ) -> rbacv1::RoleBinding {
+    pub fn new_role_binding(&self, sa_name: &str, role: &rbacv1::Role) -> rbacv1::RoleBinding {
         rbacv1::RoleBinding {
             metadata: metav1::ObjectMeta {
                 name: Some(self.role_binding_name()),
@@ -281,8 +271,8 @@ impl Tenant {
             },
             subjects: Some(vec![rbacv1::Subject {
                 kind: corev1::ServiceAccount::KIND.to_owned(),
-                namespace: ResourceExt::namespace(sa),
-                name: sa.name_any(),
+                namespace: self.namespace().ok(),
+                name: sa_name.to_owned(),
                 ..Default::default()
             }]),
             role_ref: rbacv1::RoleRef {
@@ -531,7 +521,10 @@ impl Tenant {
     }
 
     pub fn service_account_name(&self) -> String {
-        format!("{}-sa", self.name())
+        self.spec
+            .service_account_name
+            .clone()
+            .unwrap_or_else(|| format!("{}-sa", self.name()))
     }
 
     pub fn statefulset_name(&self, pool: &Pool) -> String {
