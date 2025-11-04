@@ -26,6 +26,7 @@ impl Tenant {
                 name: Some(self.role_binding_name()),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
+                labels: Some(self.common_labels()),
                 ..Default::default()
             },
             subjects: Some(vec![rbacv1::Subject {
@@ -48,6 +49,7 @@ impl Tenant {
                 name: Some(self.role_name()),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
+                labels: Some(self.common_labels()),
                 ..Default::default()
             },
             rules: Some(vec![
@@ -79,6 +81,7 @@ impl Tenant {
                 name: Some(self.service_account_name()),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
+                labels: Some(self.common_labels()),
                 ..Default::default()
             },
             ..Default::default()

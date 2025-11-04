@@ -25,15 +25,12 @@ impl Tenant {
                 name: Some("rustfs".to_owned()),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
+                labels: Some(self.common_labels()),
                 ..Default::default()
             },
             spec: Some(corev1::ServiceSpec {
                 type_: Some("ClusterIP".to_owned()),
-                selector: Some(
-                    [("rustfs.tenant".to_owned(), self.name())]
-                        .into_iter()
-                        .collect(),
-                ),
+                selector: Some(self.selector_labels()),
                 ports: Some(vec![corev1::ServicePort {
                     port: 90,
                     target_port: Some(intstr::IntOrString::Int(9000)),
@@ -53,15 +50,12 @@ impl Tenant {
                 name: Some(self.console_service_name()),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
+                labels: Some(self.common_labels()),
                 ..Default::default()
             },
             spec: Some(corev1::ServiceSpec {
                 type_: Some("ClusterIP".to_owned()),
-                selector: Some(
-                    [("rustfs.tenant".to_owned(), self.name())]
-                        .into_iter()
-                        .collect(),
-                ),
+                selector: Some(self.selector_labels()),
                 ports: Some(vec![corev1::ServicePort {
                     port: 9090,
                     target_port: Some(intstr::IntOrString::Int(9090)),
@@ -81,17 +75,14 @@ impl Tenant {
                 name: Some(self.headless_service_name()),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
+                labels: Some(self.common_labels()),
                 ..Default::default()
             },
             spec: Some(corev1::ServiceSpec {
                 type_: Some("ClusterIP".to_owned()),
                 cluster_ip: Some("None".to_owned()),
                 publish_not_ready_addresses: Some(true),
-                selector: Some(
-                    [("rustfs.tenant".to_owned(), self.name())]
-                        .into_iter()
-                        .collect(),
-                ),
+                selector: Some(self.selector_labels()),
                 ports: Some(vec![corev1::ServicePort {
                     port: 9000,
                     name: Some("http-rustfs".to_owned()),

@@ -202,6 +202,49 @@ impl Tenant {
     pub fn secret_name(&self) -> String {
         format!("{}-tls", self.name())
     }
+
+    /// Returns common labels that should be applied to all Tenant-owned resources.
+    /// These labels follow Kubernetes recommended label conventions.
+    pub fn common_labels(&self) -> std::collections::BTreeMap<String, String> {
+        [
+            ("app.kubernetes.io/name".to_owned(), "rustfs".to_owned()),
+            ("app.kubernetes.io/instance".to_owned(), self.name()),
+            (
+                "app.kubernetes.io/managed-by".to_owned(),
+                "rustfs-operator".to_owned(),
+            ),
+            ("rustfs.tenant".to_owned(), self.name()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// Returns labels for pool-specific resources (StatefulSets, PVCs).
+    /// Includes common labels plus pool-specific labels.
+    pub fn pool_labels(&self, pool: &Pool) -> std::collections::BTreeMap<String, String> {
+        let mut labels = self.common_labels();
+        labels.insert("rustfs.pool".to_owned(), pool.name.clone());
+        labels.insert(
+            "app.kubernetes.io/component".to_owned(),
+            "storage".to_owned(),
+        );
+        labels
+    }
+
+    /// Returns selector labels for Services and StatefulSets.
+    /// These should be a stable subset of the full labels.
+    pub fn selector_labels(&self) -> std::collections::BTreeMap<String, String> {
+        [("rustfs.tenant".to_owned(), self.name())]
+            .into_iter()
+            .collect()
+    }
+
+    /// Returns selector labels for pool-specific resources.
+    pub fn pool_selector_labels(&self, pool: &Pool) -> std::collections::BTreeMap<String, String> {
+        let mut labels = self.selector_labels();
+        labels.insert("rustfs.pool".to_owned(), pool.name.clone());
+        labels
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +318,103 @@ mod tests {
         assert_eq!(
             sa_name, "",
             "Empty string should be returned as-is, not converted to default"
+        );
+    }
+
+    // Test 4: Common labels include Kubernetes recommended labels
+    #[test]
+    fn test_common_labels() {
+        let tenant = create_test_tenant(None, None);
+
+        let labels = tenant.common_labels();
+
+        // Verify Kubernetes recommended labels
+        assert_eq!(
+            labels.get("app.kubernetes.io/name"),
+            Some(&"rustfs".to_string())
+        );
+        assert_eq!(
+            labels.get("app.kubernetes.io/instance"),
+            Some(&"test-tenant".to_string())
+        );
+        assert_eq!(
+            labels.get("app.kubernetes.io/managed-by"),
+            Some(&"rustfs-operator".to_string())
+        );
+        assert_eq!(
+            labels.get("rustfs.tenant"),
+            Some(&"test-tenant".to_string())
+        );
+        assert_eq!(labels.len(), 4, "Should have exactly 4 common labels");
+    }
+
+    // Test 5: Pool labels include common labels plus pool-specific labels
+    #[test]
+    fn test_pool_labels() {
+        let tenant = create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let labels = tenant.pool_labels(pool);
+
+        // Should include all common labels
+        assert_eq!(
+            labels.get("app.kubernetes.io/name"),
+            Some(&"rustfs".to_string())
+        );
+        assert_eq!(
+            labels.get("rustfs.tenant"),
+            Some(&"test-tenant".to_string())
+        );
+
+        // Plus pool-specific labels
+        assert_eq!(labels.get("rustfs.pool"), Some(&"pool-0".to_string()));
+        assert_eq!(
+            labels.get("app.kubernetes.io/component"),
+            Some(&"storage".to_string())
+        );
+
+        assert_eq!(
+            labels.len(),
+            6,
+            "Should have 4 common + 2 pool-specific labels"
+        );
+    }
+
+    // Test 6: Selector labels are stable subset
+    #[test]
+    fn test_selector_labels() {
+        let tenant = create_test_tenant(None, None);
+
+        let labels = tenant.selector_labels();
+
+        assert_eq!(
+            labels.get("rustfs.tenant"),
+            Some(&"test-tenant".to_string())
+        );
+        assert_eq!(
+            labels.len(),
+            1,
+            "Selector should only have tenant label for stability"
+        );
+    }
+
+    // Test 7: Pool selector labels include pool
+    #[test]
+    fn test_pool_selector_labels() {
+        let tenant = create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let labels = tenant.pool_selector_labels(pool);
+
+        assert_eq!(
+            labels.get("rustfs.tenant"),
+            Some(&"test-tenant".to_string())
+        );
+        assert_eq!(labels.get("rustfs.pool"), Some(&"pool-0".to_string()));
+        assert_eq!(
+            labels.len(),
+            2,
+            "Pool selector should have tenant + pool labels"
         );
     }
 }

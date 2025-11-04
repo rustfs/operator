@@ -54,18 +54,8 @@ impl Tenant {
                 }
             });
 
-        let tenant = self.name();
-        let pool_name = pool.name.clone();
-
-        // Create operator-managed labels
-        let mut labels = std::collections::BTreeMap::new();
-        labels.insert(
-            "app.kubernetes.io/managed-by".to_owned(),
-            "rustfs-operator".to_owned(),
-        );
-        labels.insert("rustfs.tenant".to_owned(), tenant.clone());
-        labels.insert("rustfs.pool".to_owned(), pool_name.clone());
-        labels.insert("rustfs.tenant.namespace".to_owned(), self.namespace()?);
+        // Start with operator-managed labels (follows Kubernetes recommended labels)
+        let mut labels = self.pool_labels(pool);
 
         // Merge with user-provided labels (user labels can override)
         if let Some(user_labels) = &pool.persistence.labels {
@@ -93,12 +83,8 @@ impl Tenant {
     }
 
     pub fn new_statefulset(&self, pool: &Pool) -> Result<v1::StatefulSet, types::error::Error> {
-        let labels: std::collections::BTreeMap<String, String> = [
-            ("rustfs.tenant".to_owned(), self.name()),
-            ("rustfs.pool".to_owned(), pool.name.clone()),
-        ]
-        .into_iter()
-        .collect();
+        let labels = self.pool_labels(pool);
+        let selector_labels = self.pool_selector_labels(pool);
 
         // Generate volume claim templates using helper function
         let volume_claim_templates = self.volume_claim_templates(pool)?;
@@ -179,7 +165,7 @@ impl Tenant {
                     .map(|s| s.trim_matches('"').to_owned())
                     .or(Some("Parallel".to_owned())),
                 selector: metav1::LabelSelector {
-                    match_labels: Some(labels.clone()),
+                    match_labels: Some(selector_labels),
                     ..Default::default()
                 },
                 template: corev1::PodTemplateSpec {
