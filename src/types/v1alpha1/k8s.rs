@@ -28,18 +28,16 @@ pub enum PodManagementPolicy {
     Parallel,
 }
 
-/// Image pull policy for containers
+/// Image pull policy for containers.
+/// - Always: Always pull the image
+/// - Never: Never pull the image
+/// - IfNotPresent: Pull the image if not present locally (default)
 #[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "PascalCase")]
 #[schemars(rename_all = "PascalCase")]
 pub enum ImagePullPolicy {
-    /// Always pull the image
     Always,
-
-    /// Never pull the image
     Never,
-
-    /// Pull the image if not present locally
     #[default]
     IfNotPresent,
 }
