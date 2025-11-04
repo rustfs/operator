@@ -63,12 +63,6 @@ pub struct TenantSpec {
     pub env: Vec<corev1::EnvVar>,
 
     // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub mount_path: Option<String>,
-    //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub sub_path: Option<String>,
-    //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub request_auto_cert: Option<bool>,
     //
     // #[serde(default, skip_serializing_if = "Option::is_none")]
