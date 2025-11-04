@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod k8s;
 pub mod persistence;
 pub mod pool;
 pub mod status;
