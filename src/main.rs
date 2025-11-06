@@ -13,11 +13,43 @@
 // limitations under the License.
 
 use clap::{Parser, Subcommand};
+use const_str::concat;
 use operator::{crd, run};
 
+shadow_rs::shadow!(build);
+
+#[allow(clippy::const_is_empty)]
+const SHORT_VERSION: &str = {
+    if !build::TAG.is_empty() {
+        build::TAG
+    } else if !build::SHORT_COMMIT.is_empty() {
+        concat!("@", build::SHORT_COMMIT)
+    } else {
+        build::PKG_VERSION
+    }
+};
+
+const LONG_VERSION: &str = concat!(
+    concat!(SHORT_VERSION, "\n"),
+    concat!("build time   : ", build::BUILD_TIME, "\n"),
+    concat!("build profile: ", build::BUILD_RUST_CHANNEL, "\n"),
+    concat!("build os     : ", build::BUILD_OS, "\n"),
+    concat!("rust version : ", build::RUST_VERSION, "\n"),
+    concat!("rust channel : ", build::RUST_CHANNEL, "\n"),
+    concat!("git branch   : ", build::BRANCH, "\n"),
+    concat!("git commit   : ", build::COMMIT_HASH,),
+    if !build::TAG.is_empty() {
+        concat!("\n", "git tag      : ", build::TAG)
+    } else {
+        ""
+    },
+);
+
 #[derive(Parser)]
-#[command(name = "rustfs-op")]
+#[command(name = "rustfs-operator")]
 #[command(about = "RustFS Kubernetes Operator CLI", long_about = None)]
+#[command(version=SHORT_VERSION)]
+#[command(long_version = LONG_VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

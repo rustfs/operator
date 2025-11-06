@@ -33,11 +33,6 @@ pub mod reconcile;
 pub mod types;
 pub mod utils;
 
-pub mod built_info {
-    // The file has been placed there by the build script.
-    include!(concat!(env!("OUT_DIR"), "/built.rs"));
-}
-
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_level(true)

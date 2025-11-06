@@ -36,8 +36,8 @@ test:
 pre-commit: fmt clippy check test
 
 # Build the operator binary
-build:
-    cargo build --release
+build MODE="release":
+    cargo build {{ if MODE == "release" { "--release" } else { "" } }}
 
 # Build Docker image
 build-image tag:

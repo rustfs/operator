@@ -30,11 +30,13 @@ ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 pkcs8 = "0.10.2"
 sec1 = "0.7.3"
 snafu = { version = "0.8.9", features = ["futures"] }
+shadow-rs = "1.4.0"
+const-str = "0.7.0"
 
 [dev-dependencies]
 
 [build-dependencies]
-built = { version = "0.8", features = ["chrono", "git2"] }
+shadow-rs = { version = "1.4.0", features = ["build"] }
 
 [lints.rust]
 unused_variables = "allow"
