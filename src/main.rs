@@ -38,6 +38,7 @@ const LONG_VERSION: &str = concat!(
     concat!("rust channel : ", build::RUST_CHANNEL, "\n"),
     concat!("git branch   : ", build::BRANCH, "\n"),
     concat!("git commit   : ", build::COMMIT_HASH,),
+    #[allow(clippy::const_is_empty)]
     if !build::TAG.is_empty() {
         concat!("\n", "git tag      : ", build::TAG)
     } else {
