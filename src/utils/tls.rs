@@ -61,10 +61,9 @@ fn load_private_key(private_key: &[u8]) -> Result<PrivateKeyDer<'static>, Error>
     // Item 可以是 Key, Certificate, CSR 等
     if let Some(item) = rustls_pemfile::read_one(&mut BufReader::new(private_key))
         .context(InvalidPrivateKeySnafu)?
+        && let rustls_pemfile::Item::Pkcs8Key(key) = item
     {
-        if let rustls_pemfile::Item::Pkcs8Key(key) = item {
-            return Ok(key.into());
-        }
+        return Ok(key.into());
     }
 
     NonPrivateKeySnafu.fail()
