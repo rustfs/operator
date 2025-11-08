@@ -18,7 +18,7 @@ serde_json = "1.0.145"
 serde_yaml_ng = "0.10.0"
 strum = { version = "0.27.2", features = ["derive"] }
 k8s-openapi = { version = "0.26.0", features = ["v1_30", "schemars"] }
-kube = { version = "2.0.1", features = ["runtime", "derive", "client"] }
+kube = { version = "2.0.1", features = ["runtime", "derive", "client", "rustls-tls"] }
 schemars = "1"
 clap = { version = "4.5.51", features = ["derive"] }
 rustls = {version="0.23", features = ["ring"]}
