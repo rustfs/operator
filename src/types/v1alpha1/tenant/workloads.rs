@@ -249,7 +249,10 @@ impl Tenant {
                         node_selector: pool.scheduling.node_selector.clone(),
                         affinity: pool.scheduling.affinity.clone(),
                         tolerations: pool.scheduling.tolerations.clone(),
-                        topology_spread_constraints: pool.scheduling.topology_spread_constraints.clone(),
+                        topology_spread_constraints: pool
+                            .scheduling
+                            .topology_spread_constraints
+                            .clone(),
                         ..Default::default()
                     }),
                 },
@@ -430,8 +433,14 @@ mod tests {
     fn test_pool_resources_applied_to_container() {
         let mut tenant = super::super::tests::create_test_tenant(None, None);
         let mut requests = std::collections::BTreeMap::new();
-        requests.insert("cpu".to_string(), k8s_openapi::apimachinery::pkg::api::resource::Quantity("4".to_string()));
-        requests.insert("memory".to_string(), k8s_openapi::apimachinery::pkg::api::resource::Quantity("16Gi".to_string()));
+        requests.insert(
+            "cpu".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity("4".to_string()),
+        );
+        requests.insert(
+            "memory".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity("16Gi".to_string()),
+        );
 
         tenant.spec.pools[0].scheduling.resources = Some(corev1::ResourceRequirements {
             requests: Some(requests.clone()),
