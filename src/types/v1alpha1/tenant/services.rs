@@ -36,7 +36,7 @@ impl Tenant {
                 type_: Some("ClusterIP".to_owned()),
                 selector: Some(self.selector_labels()),
                 ports: Some(vec![corev1::ServicePort {
-                    port: 90,
+                    port: 9000,
                     target_port: Some(intstr::IntOrString::Int(9000)),
                     name: Some("http-rustfs".to_owned()),
                     ..Default::default()
@@ -61,8 +61,8 @@ impl Tenant {
                 type_: Some("ClusterIP".to_owned()),
                 selector: Some(self.selector_labels()),
                 ports: Some(vec![corev1::ServicePort {
-                    port: 9090,
-                    target_port: Some(intstr::IntOrString::Int(9090)),
+                    port: 9001,
+                    target_port: Some(intstr::IntOrString::Int(9001)),
                     name: Some("http-console".to_owned()),
                     ..Default::default()
                 }]),

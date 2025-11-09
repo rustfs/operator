@@ -31,8 +31,9 @@ fn statefulset_name(tenant: &Tenant, pool: &Pool) -> String {
 
 impl Tenant {
     /// Constructs the RUSTFS_VOLUMES environment variable value
-    /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/{0...volumes-1}
+    /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/rustfs{0...volumes-1}
     /// All pools are combined into a space-separated string for a unified cluster
+    /// Follows RustFS convention: /data/rustfs0, /data/rustfs1, etc.
     fn rustfs_volumes_env_value(&self) -> Result<String, types::error::Error> {
         let namespace = self.namespace()?;
         let tenant_name = self.name();
@@ -47,8 +48,9 @@ impl Tenant {
                 let pool_name = &pool.name;
 
                 // Construct volume specification with range notation
+                // Follows RustFS convention: /data/rustfs{0...N}
                 format!(
-                    "http://{}-{}-{{0...{}}}.{}.{}.svc.cluster.local:9000{}/{{0...{}}}",
+                    "http://{}-{}-{{0...{}}}.{}.{}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
                     tenant_name,
                     pool_name,
                     pool.servers - 1,
@@ -129,11 +131,12 @@ impl Tenant {
         // Generate volume mounts for each volume
         // Default path is /data if not specified
         // Volume mount names must match the volume claim template names (vol-0, vol-1, etc.)
+        // Mount paths follow RustFS convention: /data/rustfs0, /data/rustfs1, etc.
         let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
         let volume_mounts: Vec<corev1::VolumeMount> = (0..pool.persistence.volumes_per_server)
             .map(|i| corev1::VolumeMount {
                 name: volume_claim_template_name(i),
-                mount_path: format!("{}/{}", base_path.trim_end_matches('/'), i),
+                mount_path: format!("{}/rustfs{}", base_path.trim_end_matches('/'), i),
                 ..Default::default()
             })
             .collect();
@@ -146,6 +149,25 @@ impl Tenant {
         env_vars.push(corev1::EnvVar {
             name: "RUSTFS_VOLUMES".to_owned(),
             value: Some(rustfs_volumes),
+            ..Default::default()
+        });
+
+        // Add required RustFS environment variables
+        env_vars.push(corev1::EnvVar {
+            name: "RUSTFS_ADDRESS".to_owned(),
+            value: Some("0.0.0.0:9000".to_owned()),
+            ..Default::default()
+        });
+
+        env_vars.push(corev1::EnvVar {
+            name: "RUSTFS_CONSOLE_ADDRESS".to_owned(),
+            value: Some("0.0.0.0:9001".to_owned()),
+            ..Default::default()
+        });
+
+        env_vars.push(corev1::EnvVar {
+            name: "RUSTFS_CONSOLE_ENABLE".to_owned(),
+            value: Some("true".to_owned()),
             ..Default::default()
         });
 
@@ -173,7 +195,7 @@ impl Tenant {
                     ..Default::default()
                 },
                 corev1::ContainerPort {
-                    container_port: 9090,
+                    container_port: 9001,
                     name: Some("console".to_owned()),
                     protocol: Some("TCP".to_owned()),
                     ..Default::default()
@@ -181,6 +203,8 @@ impl Tenant {
             ]),
             volume_mounts: Some(volume_mounts),
             lifecycle: self.spec.lifecycle.clone(),
+            // Apply pool-level resource requirements to container
+            resources: pool.scheduling.resources.clone(),
             ..Default::default()
         };
 
@@ -215,7 +239,20 @@ impl Tenant {
                         service_account_name: Some(self.service_account_name()),
                         containers: vec![container],
                         scheduler_name: self.spec.scheduler.clone(),
-                        priority_class_name: self.spec.priority_class_name.clone(),
+                        // Pool-level priority class overrides tenant-level
+                        priority_class_name: pool
+                            .scheduling
+                            .priority_class_name
+                            .clone()
+                            .or_else(|| self.spec.priority_class_name.clone()),
+                        // Pool-level scheduling controls
+                        node_selector: pool.scheduling.node_selector.clone(),
+                        affinity: pool.scheduling.affinity.clone(),
+                        tolerations: pool.scheduling.tolerations.clone(),
+                        topology_spread_constraints: pool
+                            .scheduling
+                            .topology_spread_constraints
+                            .clone(),
                         ..Default::default()
                     }),
                 },
@@ -229,6 +266,8 @@ impl Tenant {
 
 #[cfg(test)]
 mod tests {
+    use k8s_openapi::api::core::v1 as corev1;
+
     // Test: StatefulSet uses correct service account
     #[test]
     fn test_statefulset_uses_default_sa() {
@@ -275,6 +314,161 @@ mod tests {
             pod_spec.service_account_name,
             Some("my-custom-sa".to_string()),
             "Pod should use custom service account"
+        );
+    }
+
+    // Test: StatefulSet applies pool-level node selector
+    #[test]
+    fn test_statefulset_applies_node_selector() {
+        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let mut node_selector = std::collections::BTreeMap::new();
+        node_selector.insert("storage-type".to_string(), "nvme".to_string());
+        tenant.spec.pools[0].scheduling.node_selector = Some(node_selector.clone());
+
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        assert_eq!(
+            pod_spec.node_selector,
+            Some(node_selector),
+            "Pod should use pool-level node selector"
+        );
+    }
+
+    // Test: StatefulSet applies pool-level tolerations
+    #[test]
+    fn test_statefulset_applies_tolerations() {
+        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let tolerations = vec![corev1::Toleration {
+            key: Some("spot-instance".to_string()),
+            operator: Some("Equal".to_string()),
+            value: Some("true".to_string()),
+            effect: Some("NoSchedule".to_string()),
+            ..Default::default()
+        }];
+        tenant.spec.pools[0].scheduling.tolerations = Some(tolerations.clone());
+
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        assert_eq!(
+            pod_spec.tolerations,
+            Some(tolerations),
+            "Pod should use pool-level tolerations"
+        );
+    }
+
+    // Test: Pool-level priority class overrides tenant-level
+    #[test]
+    fn test_pool_priority_class_overrides_tenant() {
+        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        tenant.spec.priority_class_name = Some("tenant-priority".to_string());
+        tenant.spec.pools[0].scheduling.priority_class_name = Some("pool-priority".to_string());
+
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        assert_eq!(
+            pod_spec.priority_class_name,
+            Some("pool-priority".to_string()),
+            "Pool-level priority class should override tenant-level"
+        );
+    }
+
+    // Test: Tenant-level priority class used when pool-level not set
+    #[test]
+    fn test_tenant_priority_class_fallback() {
+        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        tenant.spec.priority_class_name = Some("tenant-priority".to_string());
+        // pool.priority_class_name remains None
+
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        assert_eq!(
+            pod_spec.priority_class_name,
+            Some("tenant-priority".to_string()),
+            "Should fall back to tenant-level priority class when pool-level not set"
+        );
+    }
+
+    // Test: Pool-level resources applied to container
+    #[test]
+    fn test_pool_resources_applied_to_container() {
+        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let mut requests = std::collections::BTreeMap::new();
+        requests.insert(
+            "cpu".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity("4".to_string()),
+        );
+        requests.insert(
+            "memory".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity("16Gi".to_string()),
+        );
+
+        tenant.spec.pools[0].scheduling.resources = Some(corev1::ResourceRequirements {
+            requests: Some(requests.clone()),
+            limits: None,
+            claims: None,
+        });
+
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let container = &statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec")
+            .containers[0];
+
+        assert!(
+            container.resources.is_some(),
+            "Container should have resources"
+        );
+        assert_eq!(
+            container.resources.as_ref().unwrap().requests,
+            Some(requests),
+            "Container should use pool-level resource requests"
         );
     }
 }

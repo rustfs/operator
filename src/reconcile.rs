@@ -113,6 +113,7 @@ mod tests {
                         volumes_per_server: 4,
                         ..Default::default()
                     },
+                    scheduling: Default::default(),
                 }],
                 service_account_name,
                 create_service_account_rbac,
