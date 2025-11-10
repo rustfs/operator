@@ -16,24 +16,24 @@ use strum::Display;
 
 #[derive(Display)]
 pub enum State {
-    #[strum(serialize = "Initialized")]
+    #[strum(to_string = "Initialized")]
     Initialized,
 
-    #[strum(serialize = "Statefulset not controlled by operator")]
+    #[strum(to_string = "Statefulset not controlled by operator")]
     NotOwned,
 
-    #[strum(serialize = "Pool Decommissioning Not Allowed")]
+    #[strum(to_string = "Pool Decommissioning Not Allowed")]
     DecommissioningNotAllowed,
 
-    #[strum(serialize = "Provisioning IO Service")]
+    #[strum(to_string = "Provisioning IO Service")]
     ProvisioningIOService,
 
-    #[strum(serialize = "Provisioning Console Service")]
+    #[strum(to_string = "Provisioning Console Service")]
     ProvisioningConsoleService,
 
-    #[strum(serialize = "Provisioning Headless Service")]
+    #[strum(to_string = "Provisioning Headless Service")]
     ProvisioningHeadlessService,
 
-    #[strum(serialize = "Multiple tenants exist in the namespace")]
+    #[strum(to_string = "Multiple tenants exist in the namespace")]
     MultipleTenantsExist,
 }

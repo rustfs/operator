@@ -14,7 +14,6 @@
 
 use super::Tenant;
 use crate::types;
-use crate::types::v1alpha1::k8s::PodManagementPolicy;
 use crate::types::v1alpha1::pool::Pool;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
@@ -206,6 +205,11 @@ impl Tenant {
             lifecycle: self.spec.lifecycle.clone(),
             // Apply pool-level resource requirements to container
             resources: pool.scheduling.resources.clone(),
+            image_pull_policy: self
+                .spec
+                .image_pull_policy
+                .as_ref()
+                .map(ToString::to_string),
             ..Default::default()
         };
 
@@ -220,10 +224,11 @@ impl Tenant {
             spec: Some(v1::StatefulSetSpec {
                 replicas: Some(pool.servers),
                 service_name: Some(self.headless_service_name()),
-                pod_management_policy: Some(match self.spec.pod_management_policy {
-                    Some(PodManagementPolicy::Parallel) | None => "Parallel".to_owned(),
-                    Some(PodManagementPolicy::OrderedReady) => "OrderedReady".to_owned(),
-                }),
+                pod_management_policy: self
+                    .spec
+                    .pod_management_policy
+                    .as_ref()
+                    .map(ToString::to_string),
                 selector: metav1::LabelSelector {
                     match_labels: Some(selector_labels),
                     ..Default::default()

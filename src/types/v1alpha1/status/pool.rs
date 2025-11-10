@@ -27,13 +27,13 @@ pub struct Pool {
 
 #[derive(Deserialize, Serialize, Clone, Debug, Display)]
 pub enum PoolState {
-    #[strum(serialize = "PoolCreated")]
+    #[strum(to_string = "PoolCreated")]
     Created,
 
-    #[strum(serialize = "PoolNotCreated")]
+    #[strum(to_string = "PoolNotCreated")]
     NotCreated,
 
-    #[strum(serialize = "PoolInitialized")]
+    #[strum(to_string = "PoolInitialized")]
     Initialized,
 }
 

@@ -16,14 +16,22 @@
 
 use k8s_openapi::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use strum::Display;
 
 /// Pod management policy for StatefulSets
-#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema)]
+/// - OrderedReady: Respect the ordering guarantees demonstrated
+/// - Parallel: launch or terminate all Pods in parallel, and not to wait for Pods to become Running
+///   and Ready or completely terminated prior to launching or terminating another Pod
+///
+///https://kubernetes.io/docs/tutorials/stateful-application/basic-stateful-set/#pod-management-policy
+#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema, Display)]
 #[serde(rename_all = "PascalCase")]
 #[schemars(rename_all = "PascalCase")]
 pub enum PodManagementPolicy {
+    #[strum(to_string = "OrderedReady")]
     OrderedReady,
 
+    #[strum(to_string = "Parallel")]
     #[default]
     Parallel,
 }
@@ -32,12 +40,19 @@ pub enum PodManagementPolicy {
 /// - Always: Always pull the image
 /// - Never: Never pull the image
 /// - IfNotPresent: Pull the image if not present locally (default)
-#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema)]
+///
+/// https://kubernetes.io/docs/concepts/containers/images/#image-pull-policy
+#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema, Display)]
 #[serde(rename_all = "PascalCase")]
 #[schemars(rename_all = "PascalCase")]
 pub enum ImagePullPolicy {
+    #[strum(to_string = "Always")]
     Always,
+
+    #[strum(to_string = "Never")]
     Never,
+
+    #[strum(to_string = "IfNotPresent")]
     #[default]
     IfNotPresent,
 }

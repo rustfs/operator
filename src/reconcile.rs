@@ -20,7 +20,7 @@ use kube::runtime::controller::Action;
 use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::error;
+use tracing::{debug, error};
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -36,6 +36,11 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     let latest_tenant = ctx.get::<Tenant>(&tenant.name(), &ns).await?;
 
     if latest_tenant.metadata.deletion_timestamp.is_some() {
+        debug!(
+            "tenant {} is deleted, deletion_timestamp is {:?}",
+            tenant.name(),
+            latest_tenant.metadata.deletion_timestamp
+        );
         return Ok(Action::await_change());
     }
 
