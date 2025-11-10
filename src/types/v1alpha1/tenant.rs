@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::types;
-use crate::types::error::NoNamespaceSnafu;
 use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::pool::Pool;
+use crate::types::{self, error::NoNamespaceSnafu};
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
