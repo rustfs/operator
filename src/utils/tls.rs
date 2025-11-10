@@ -60,12 +60,12 @@ fn load_certs(cert: &[u8]) -> Result<Vec<CertificateDer<'static>>, Error> {
 }
 
 fn load_private_key(private_key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
-    // rustls_pemfile::read_one() 返回一个 Option<Item>
-    // Item 可以是 Key, Certificate, CSR 等
+    // rustls_pemfile::read_one() returns Option<Item>
     let item = rustls_pemfile::read_one(&mut Cursor::new(private_key))
         .context(InvalidPrivateKeySnafu)?
         .ok_or(Error::NonPrivateKey)?;
 
+    // only pkcs8/pkcs1/sec1 supported
     Ok(match item {
         Item::Pkcs8Key(key) => key.into(),
         Item::Pkcs1Key(key) => key.into(),
