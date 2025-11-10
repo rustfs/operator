@@ -20,7 +20,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::sign::{CertifiedKey, SigningKey};
 use rustls_pemfile::Item;
 use snafu::{ResultExt, Snafu};
-use std::io::{self, BufReader};
+use std::io::{self, Cursor};
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -48,7 +48,7 @@ pub enum Error {
 
 // load certificates from PEM file
 fn load_certs(cert: &[u8]) -> Result<Vec<CertificateDer<'static>>, Error> {
-    let certs = rustls_pemfile::certs(&mut BufReader::new(cert))
+    let certs = rustls_pemfile::certs(&mut Cursor::new(cert))
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
         .context(InvalidCertificateSnafu)?;
 
@@ -62,7 +62,7 @@ fn load_certs(cert: &[u8]) -> Result<Vec<CertificateDer<'static>>, Error> {
 fn load_private_key(private_key: &[u8]) -> Result<PrivateKeyDer<'static>, Error> {
     // rustls_pemfile::read_one() 返回一个 Option<Item>
     // Item 可以是 Key, Certificate, CSR 等
-    let item = rustls_pemfile::read_one(&mut BufReader::new(private_key))
+    let item = rustls_pemfile::read_one(&mut Cursor::new(private_key))
         .context(InvalidPrivateKeySnafu)?
         .ok_or(Error::NonPrivateKey)?;
 
