@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 // Submodules for resource factory methods
+mod helper;
 mod rbac;
 mod services;
 mod workloads;
@@ -49,8 +50,17 @@ pub struct TenantSpec {
     #[x_kube(validation = Rule::new("self.size() > 0").message("pools must be configured"))]
     pub pools: Vec<Pool>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "helper::get_rustfs_image",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub image: Option<String>,
+
+    #[serde(
+        default = "helper::get_rustfs_mount_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mount_path: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_pull_secret: Option<corev1::LocalObjectReference>,
@@ -191,43 +201,11 @@ impl Tenant {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::types::v1alpha1::persistence::PersistenceConfig;
-
-    // Helper function to create a test tenant (available to submodule tests via super::tests)
-    pub(super) fn create_test_tenant(
-        service_account_name: Option<String>,
-        create_service_account_rbac: Option<bool>,
-    ) -> Tenant {
-        Tenant {
-            metadata: metav1::ObjectMeta {
-                name: Some("test-tenant".to_string()),
-                namespace: Some("default".to_string()),
-                uid: Some("test-uid-123".to_string()),
-                ..Default::default()
-            },
-            spec: TenantSpec {
-                pools: vec![Pool {
-                    name: "pool-0".to_string(),
-                    servers: 4,
-                    persistence: PersistenceConfig {
-                        volumes_per_server: 4,
-                        ..Default::default()
-                    },
-                    scheduling: Default::default(),
-                }],
-                service_account_name,
-                create_service_account_rbac,
-                ..Default::default()
-            },
-            status: None,
-        }
-    }
 
     // Test 1: Default behavior - no custom SA
     #[test]
     fn test_service_account_name_default() {
-        let tenant = create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
 
         let sa_name = tenant.service_account_name();
 
@@ -240,7 +218,7 @@ mod tests {
     // Test 2: Custom SA specified
     #[test]
     fn test_service_account_name_custom() {
-        let tenant = create_test_tenant(Some("my-custom-sa".to_string()), None);
+        let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), None);
 
         let sa_name = tenant.service_account_name();
 
@@ -253,7 +231,7 @@ mod tests {
     // Test 3: Edge case - empty string for custom SA (treated as-is)
     #[test]
     fn test_service_account_name_empty_string() {
-        let tenant = create_test_tenant(Some("".to_string()), None);
+        let tenant = crate::tests::create_test_tenant(Some("".to_string()), None);
 
         let sa_name = tenant.service_account_name();
 
@@ -267,7 +245,7 @@ mod tests {
     // Test 4: Common labels include Kubernetes recommended labels
     #[test]
     fn test_common_labels() {
-        let tenant = create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
 
         let labels = tenant.common_labels();
 
@@ -294,7 +272,7 @@ mod tests {
     // Test 5: Pool labels include common labels plus pool-specific labels
     #[test]
     fn test_pool_labels() {
-        let tenant = create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
         let pool = &tenant.spec.pools[0];
 
         let labels = tenant.pool_labels(pool);
@@ -326,7 +304,7 @@ mod tests {
     // Test 6: Selector labels are stable subset
     #[test]
     fn test_selector_labels() {
-        let tenant = create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
 
         let labels = tenant.selector_labels();
 
@@ -344,7 +322,7 @@ mod tests {
     // Test 7: Pool selector labels include pool
     #[test]
     fn test_pool_selector_labels() {
-        let tenant = create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
         let pool = &tenant.spec.pools[0];
 
         let labels = tenant.pool_selector_labels(pool);

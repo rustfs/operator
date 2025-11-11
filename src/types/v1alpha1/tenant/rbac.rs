@@ -102,7 +102,7 @@ mod tests {
     // Test: ServiceAccount resource creation
     #[test]
     fn test_new_service_account_structure() {
-        let tenant = super::super::tests::create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
 
         let sa = tenant.new_service_account();
 
@@ -122,7 +122,7 @@ mod tests {
     // Test: Role structure validation
     #[test]
     fn test_new_role_structure() {
-        let tenant = super::super::tests::create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
 
         let role = tenant.new_role();
 
@@ -157,7 +157,7 @@ mod tests {
     // Test: RoleBinding with default SA
     #[test]
     fn test_new_role_binding_default_sa() {
-        let tenant = super::super::tests::create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
         let role = tenant.new_role();
         let sa_name = tenant.service_account_name();
 
@@ -186,8 +186,7 @@ mod tests {
     // Test: RoleBinding with custom SA
     #[test]
     fn test_new_role_binding_custom_sa() {
-        let tenant =
-            super::super::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(true));
+        let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(true));
         let role = tenant.new_role();
         let sa_name = tenant.service_account_name();
 

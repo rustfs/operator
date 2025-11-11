@@ -191,8 +191,8 @@ impl Context {
         }
 
         // if no ak/sk or ak/sk is empty
-        if config.get("accesskey").map_or(true, |x| x.is_empty())
-            || config.get("secretkey").map_or(true, |x| x.is_empty())
+        if config.get("accesskey").is_none_or(|x| x.is_empty())
+            || config.get("secretkey").is_none_or(|x| x.is_empty())
         {
             return EmptyRootCredentialsSnafu.fail();
         }

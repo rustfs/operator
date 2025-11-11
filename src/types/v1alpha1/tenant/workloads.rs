@@ -22,10 +22,10 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 
 fn volume_claim_template_name(shard: i32) -> String {
-    format!("{}-{}", VOLUME_CLAIM_TEMPLATE_PREFIX, shard)
+    format!("{VOLUME_CLAIM_TEMPLATE_PREFIX}-{shard}")
 }
 
-fn statefulset_name(tenant: &Tenant, pool: &Pool) -> String {
+fn stateful_name(tenant: &Tenant, pool: &Pool) -> String {
     format!("{}-{}", tenant.name(), pool.name)
 }
 
@@ -50,12 +50,8 @@ impl Tenant {
                 // Construct volume specification with range notation
                 // Follows RustFS convention: /data/rustfs{0...N}
                 format!(
-                    "http://{}-{}-{{0...{}}}.{}.{}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
-                    tenant_name,
-                    pool_name,
+                    "http://{tenant_name}-{pool_name}-{{0...{}}}.{headless_service}.{namespace}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
                     pool.servers - 1,
-                    headless_service,
-                    namespace,
                     base_path.trim_end_matches('/'),
                     pool.persistence.volumes_per_server - 1
                 )
@@ -215,7 +211,7 @@ impl Tenant {
 
         Ok(v1::StatefulSet {
             metadata: metav1::ObjectMeta {
-                name: Some(statefulset_name(self, pool)),
+                name: Some(stateful_name(self, pool)),
                 namespace: self.namespace().ok(),
                 owner_references: Some(vec![self.new_owner_ref()]),
                 labels: Some(labels.clone()),
@@ -274,7 +270,7 @@ mod tests {
     // Test: StatefulSet uses correct service account
     #[test]
     fn test_statefulset_uses_default_sa() {
-        let tenant = super::super::tests::create_test_tenant(None, None);
+        let tenant = crate::tests::create_test_tenant(None, None);
         let pool = &tenant.spec.pools[0];
 
         let statefulset = tenant
@@ -298,8 +294,7 @@ mod tests {
     // Test: StatefulSet uses custom service account
     #[test]
     fn test_statefulset_uses_custom_sa() {
-        let tenant =
-            super::super::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(true));
+        let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(true));
         let pool = &tenant.spec.pools[0];
 
         let statefulset = tenant
@@ -323,7 +318,7 @@ mod tests {
     // Test: StatefulSet applies pool-level node selector
     #[test]
     fn test_statefulset_applies_node_selector() {
-        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let mut tenant = crate::tests::create_test_tenant(None, None);
         let mut node_selector = std::collections::BTreeMap::new();
         node_selector.insert("storage-type".to_string(), "nvme".to_string());
         tenant.spec.pools[0].scheduling.node_selector = Some(node_selector.clone());
@@ -350,7 +345,7 @@ mod tests {
     // Test: StatefulSet applies pool-level tolerations
     #[test]
     fn test_statefulset_applies_tolerations() {
-        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let mut tenant = crate::tests::create_test_tenant(None, None);
         let tolerations = vec![corev1::Toleration {
             key: Some("spot-instance".to_string()),
             operator: Some("Equal".to_string()),
@@ -382,7 +377,7 @@ mod tests {
     // Test: Pool-level priority class overrides tenant-level
     #[test]
     fn test_pool_priority_class_overrides_tenant() {
-        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let mut tenant = crate::tests::create_test_tenant(None, None);
         tenant.spec.priority_class_name = Some("tenant-priority".to_string());
         tenant.spec.pools[0].scheduling.priority_class_name = Some("pool-priority".to_string());
 
@@ -408,7 +403,7 @@ mod tests {
     // Test: Tenant-level priority class used when pool-level not set
     #[test]
     fn test_tenant_priority_class_fallback() {
-        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let mut tenant = crate::tests::create_test_tenant(None, None);
         tenant.spec.priority_class_name = Some("tenant-priority".to_string());
         // pool.priority_class_name remains None
 
@@ -434,7 +429,7 @@ mod tests {
     // Test: Pool-level resources applied to container
     #[test]
     fn test_pool_resources_applied_to_container() {
-        let mut tenant = super::super::tests::create_test_tenant(None, None);
+        let mut tenant = crate::tests::create_test_tenant(None, None);
         let mut requests = std::collections::BTreeMap::new();
         requests.insert(
             "cpu".to_string(),
