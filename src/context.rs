@@ -15,6 +15,7 @@
 use crate::types;
 use crate::types::v1alpha1::tenant::Tenant;
 use k8s_openapi::NamespaceResourceScope;
+use k8s_openapi::api::core::v1::Secret;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams, PostParams};
 use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::{Resource, ResourceExt, api::Api};
@@ -22,6 +23,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use snafu::Snafu;
 use snafu::futures::TryFutureExt;
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use tracing::info;
 
@@ -35,6 +37,9 @@ pub enum Error {
 
     #[snafu(transparent)]
     Types { source: types::error::Error },
+
+    #[snafu(display("empty tenant credentials"))]
+    EmptyRootCredentials,
 }
 
 pub struct Context {
@@ -165,5 +170,33 @@ impl Context {
         )
         .context(KubeSnafu)
         .await
+    }
+
+    pub async fn get_tenant_credentials(
+        &self,
+        tenant: &Tenant,
+    ) -> Result<BTreeMap<String, String>, Error> {
+        let config: std::collections::BTreeMap<_, _> = tenant
+            .spec
+            .env
+            .iter()
+            .filter_map(|item| item.value.as_ref().map(|v| (item.name.clone(), v.clone())))
+            .collect();
+
+        if let Some(ref cfg) = tenant.spec.configuration
+            && !cfg.name.is_empty()
+        {
+            // todo: add env from Secret
+            let _secret: Secret = self.get(&cfg.name, &tenant.namespace()?).await?;
+        }
+
+        // if no ak/sk or ak/sk is empty
+        if config.get("accesskey").map_or(true, |x| x.is_empty())
+            || config.get("secretkey").map_or(true, |x| x.is_empty())
+        {
+            return EmptyRootCredentialsSnafu.fail();
+        }
+
+        Ok(config)
     }
 }

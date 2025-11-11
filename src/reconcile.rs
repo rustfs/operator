@@ -86,8 +86,14 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     Ok(Action::await_change())
 }
 
-pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
-    error!("{:?}", error);
+pub fn error_policy(_object: Arc<Tenant>, error: &Error, ctx: Arc<Context>) -> Action {
+    error!("error_policy: {:?}", error);
+
+    // todo: update tenant status
+    match error {
+        Error::Context { source } => {}
+        _ => {}
+    }
     Action::requeue(Duration::from_secs(5))
 }
 
