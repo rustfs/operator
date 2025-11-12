@@ -51,7 +51,14 @@ pub struct SchedulingConfig {
 
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("self.servers * self.persistence.volumesPerServer >= 4"))]
+#[x_kube(validation = Rule::new("!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 2)").
+    message(Message::Expression(r#""pool " + self.name + " with 2 servers must have at least 4 volumes in total""#.into())).
+    reason(Reason::FieldValueInvalid))
+]
+#[x_kube(validation = Rule::new("!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 3)").
+    message(Message::Expression(r#""pool " + self.name + " with 3 servers must have at least 6 volumes in total""#.into())).
+    reason(Reason::FieldValueInvalid))
+]
 pub struct Pool {
     #[x_kube(validation = Rule::new("self != ''").message("pool name must be not empty"))]
     pub name: String,
