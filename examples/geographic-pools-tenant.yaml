@@ -1,0 +1,302 @@
+# Geographic Distribution Multi-Pool Tenant Example
+#
+# This example demonstrates geographic distribution of storage pools across
+# multiple regions/zones for:
+# - Data sovereignty and compliance (GDPR, data residency laws)
+# - High availability across geographic failure domains
+# - Regional disaster recovery
+#
+# IMPORTANT ARCHITECTURE NOTE:
+# All pools form ONE unified RustFS erasure-coded cluster. Data is striped
+# across ALL regions for redundancy, not stored locally per region. The
+# affinity rules ensure PODS run in specific regions, but DATA is distributed
+# globally via erasure coding.
+#
+# Primary use case: Compliance/DR (ensure processing happens in correct region)
+# NOT: Automatic data locality or intelligent geo-tiering
+#
+# Use Case: Global application with compliance requirements
+#
+# Prerequisites:
+# - Multi-region Kubernetes cluster or nodes labeled with regions/zones
+#   kubectl label node <node> topology.kubernetes.io/region=us-east-1
+#   kubectl label node <node> topology.kubernetes.io/zone=us-east-1a
+#
+# Resources created:
+# - 3 StatefulSets (us-region, eu-region, apac-region)
+# - 96 total PVCs (32 per region)
+# - 3 Services (shared, accessible from all regions)
+# - RBAC resources
+
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: global-storage
+  namespace: global
+  labels:
+    architecture: multi-region
+    compliance: gdpr-ready
+spec:
+  image: rustfs/rustfs:latest
+
+  pools:
+    # US REGION POOL
+    - name: us-region
+      servers: 8
+      persistence:
+        volumesPerServer: 4  # 8 × 4 = 32 volumes
+
+        volumeClaimTemplate:
+          storageClassName: regional-us-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Ti
+
+        labels:
+          region: us
+          compliance: ccpa
+          data-residency: united-states
+
+        annotations:
+          description: "US region storage pool"
+          backup-region: "us-west-2"
+
+      # TARGET: US region nodes only
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values:
+                      - us-east-1
+                      - us-west-2
+
+      # DISTRIBUTE: Across availability zones within region
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              rustfs.pool: us-region
+
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+    # EU REGION POOL (GDPR Compliance)
+    - name: eu-region
+      servers: 8
+      persistence:
+        volumesPerServer: 4  # 8 × 4 = 32 volumes
+
+        volumeClaimTemplate:
+          storageClassName: regional-eu-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Ti
+
+        labels:
+          region: eu
+          compliance: gdpr
+          data-residency: european-union
+
+        annotations:
+          description: "EU region storage pool - GDPR compliant"
+          backup-region: "eu-central-1"
+          gdpr-compliant: "true"
+
+      # TARGET: EU region nodes only (GDPR requirement)
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values:
+                      - eu-west-1
+                      - eu-central-1
+
+      # DISTRIBUTE: Across availability zones
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              rustfs.pool: eu-region
+
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+    # APAC REGION POOL
+    - name: apac-region
+      servers: 8
+      persistence:
+        volumesPerServer: 4  # 8 × 4 = 32 volumes
+
+        volumeClaimTemplate:
+          storageClassName: regional-apac-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Ti
+
+        labels:
+          region: apac
+          compliance: local
+          data-residency: asia-pacific
+
+        annotations:
+          description: "APAC region storage pool"
+          backup-region: "ap-southeast-2"
+
+      # TARGET: APAC region nodes only
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/region
+                    operator: In
+                    values:
+                      - ap-southeast-1
+                      - ap-northeast-1
+
+      # DISTRIBUTE: Across availability zones
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              rustfs.pool: apac-region
+
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+  env:
+    - name: RUST_LOG
+      value: "info"
+
+---
+# Deployment Guide
+
+# 1. Verify your cluster has multi-region support:
+#   kubectl get nodes -L topology.kubernetes.io/region,topology.kubernetes.io/zone
+
+# 2. Create namespace:
+#   kubectl create namespace global
+
+# 3. Create priority class:
+#   kubectl apply -f - <<EOF
+#   apiVersion: scheduling.k8s.io/v1
+#   kind: PriorityClass
+#   metadata:
+#     name: high-priority
+#   value: 1000
+#   globalDefault: false
+#   description: "High priority for critical storage pools"
+#   EOF
+
+# 4. Apply tenant:
+#   kubectl apply -f geographic-pools-tenant.yaml
+
+# 5. Verify regional distribution:
+#   # US pool should only be on US region nodes
+#   kubectl get pods -n global -l rustfs.pool=us-region -o wide
+#
+#   # EU pool should only be on EU region nodes
+#   kubectl get pods -n global -l rustfs.pool=eu-region -o wide
+#
+#   # APAC pool should only be on APAC region nodes
+#   kubectl get pods -n global -l rustfs.pool=apac-region -o wide
+
+# 6. Verify zone distribution (should be spread across zones):
+#   kubectl get pods -n global -l rustfs.pool=us-region \
+#     -o custom-columns=NAME:.metadata.name,ZONE:.spec.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values
+
+# 7. Check combined RUSTFS_VOLUMES (all regions):
+#   kubectl get statefulset -n global global-storage-us-region \
+#     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="RUSTFS_VOLUMES")].value}' | tr ' ' '\n'
+#
+# Should show all three regions combined into one distributed cluster
+
+# 8. Access the global cluster:
+#   kubectl port-forward -n global svc/rustfs 9000:9000
+#   mc alias set global http://localhost:9000 rustfsadmin rustfsadmin
+
+---
+# Architecture Clarification:
+
+# ⚠️ CRITICAL: Data Distribution Behavior
+# All pools form ONE unified RustFS cluster. When you write an object:
+# - Erasure coded into shards
+# - Shards distributed across ALL 96 volumes (US + EU + APAC)
+# - Data is NOT kept region-local automatically
+# - All regions participate in the same distributed hash ring
+#
+# This means:
+# - An object written by a US client may have shards in EU and APAC
+# - Reading requires fetching shards from multiple regions
+# - This is BY DESIGN for redundancy and disaster recovery
+
+# Use Case Scenarios:
+
+# Scenario 1: GDPR Compliance (VALID)
+# - Ensures EU data is PROCESSED on EU nodes (pod affinity)
+# - Data sovereignty via compute locality
+# - Labels/annotations for compliance auditing
+# - NOTE: Data shards may still be distributed globally for redundancy
+
+# Scenario 2: Regional Disaster Recovery (VALID)
+# - If entire US region fails, cluster survives
+# - Erasure coding tolerance across regions
+# - Each region is an independent failure domain
+# - RustFS can rebuild data from remaining regions
+
+# Scenario 3: Compute Locality (PARTIAL)
+# - Application pods in region can read from local RustFS pods (network locality)
+# - Lower latency if majority of shards are local (not guaranteed)
+# - Better than cross-region for every I/O
+
+# Scenario 4: Data Residency Enforcement (PROCESSING, NOT STORAGE)
+# - Kubernetes affinity ensures PROCESSING happens in correct region
+# - Data access requests handled by pods in that region
+# - Helps meet regulations requiring regional data handling
+# - NOTE: Underlying data is still distributed globally via erasure coding
+
+---
+# Advanced: Preferred vs Required Scheduling
+
+# Use preferredDuringScheduling for soft constraints:
+# affinity:
+#   nodeAffinity:
+#     preferredDuringSchedulingIgnoredDuringExecution:
+#       - weight: 100
+#         preference:
+#           matchExpressions:
+#             - key: topology.kubernetes.io/region
+#               operator: In
+#               values: ["us-east-1"]
+#
+# This allows fallback to other regions if preferred region unavailable

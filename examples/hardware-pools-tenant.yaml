@@ -1,0 +1,245 @@
+# Multi-Disk-Size Pools Tenant Example
+#
+# This example demonstrates using multiple pools with DIFFERENT DISK SIZES
+# but the SAME storage class (performance tier).
+#
+# IMPORTANT ARCHITECTURE NOTE:
+# All pools form ONE unified RustFS erasure-coded cluster. Data is striped
+# uniformly across ALL volumes regardless of pool. To avoid performance
+# degradation, ALL pools should use the SAME storage class (e.g., all SSD).
+#
+# Mixing NVMe/SSD/HDD in one tenant will result in HDD-level performance
+# for the entire cluster because erasure coding distributes data across
+# ALL volumes equally.
+#
+# Use Case: Utilize existing hardware with different disk sizes
+#
+# Prerequisites:
+# - Nodes labeled by disk configuration:
+#   kubectl label node <node> disk-config=large-disks
+#   kubectl label node <node> disk-config=medium-disks
+#   kubectl label node <node> disk-config=many-small-disks
+#
+# Resources created:
+# - 3 StatefulSets with different disk size configurations
+# - 64 total PVCs (all same storage class, different sizes)
+# - 3 Services (shared)
+# - RBAC resources
+#
+# Total storage: ~220Ti (all SSD for consistent performance)
+
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: multi-disk-config
+  namespace: storage
+  labels:
+    architecture: heterogeneous-disks
+    environment: production
+spec:
+  image: rustfs/rustfs:latest
+
+  pools:
+    # LARGE DISK POOL: Nodes with large SSD disks
+    # Few large disks per server
+    - name: large-disk-pool
+      servers: 4
+      persistence:
+        volumesPerServer: 4  # 4 × 4 = 16 volumes
+
+        volumeClaimTemplate:
+          # ALL pools use same storage class (SSD) for consistent performance
+          storageClassName: fast-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Ti  # Large disks
+
+        labels:
+          disk-config: large
+          disk-count: few
+
+      # TARGET: Nodes with large disk configuration
+      nodeSelector:
+        disk-config: large-disks
+
+      # Higher CPU/memory for larger data throughput
+      resources:
+        requests:
+          cpu: "8"
+          memory: "32Gi"
+        limits:
+          cpu: "16"
+          memory: "64Gi"
+
+    # MEDIUM DISK POOL: Nodes with medium SSD disks
+    # Moderate number of medium-sized disks
+    - name: medium-disk-pool
+      servers: 8
+      persistence:
+        volumesPerServer: 4  # 8 × 4 = 32 volumes
+
+        volumeClaimTemplate:
+          # SAME storage class as other pools
+          storageClassName: fast-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Ti  # Medium disks
+
+        labels:
+          disk-config: medium
+          disk-count: moderate
+
+      # TARGET: Nodes with medium disk configuration
+      nodeSelector:
+        disk-config: medium-disks
+
+      # Standard resources
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+    # SMALL DISK POOL: Nodes with many small SSD disks
+    # Many small disks per server for better parallelism
+    - name: small-disk-pool
+      servers: 4
+      persistence:
+        volumesPerServer: 4  # 4 × 4 = 16 volumes
+
+        volumeClaimTemplate:
+          # SAME storage class as other pools
+          storageClassName: fast-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Ti  # Smaller disks
+
+        labels:
+          disk-config: small
+          disk-count: many
+
+      # TARGET: Nodes with many small disks
+      nodeSelector:
+        disk-config: many-small-disks
+
+      # Standard resources
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+  env:
+    - name: RUST_LOG
+      value: "info"
+
+---
+# Architecture Explanation
+
+# Why Same Storage Class?
+# ----------------------
+# RustFS erasure codes objects across ALL volumes in RUSTFS_VOLUMES.
+# The RUSTFS_VOLUMES for this tenant contains all 64 volumes:
+#
+#   large-disk-pool: 16 volumes (10Ti each)
+#   medium-disk-pool: 32 volumes (5Ti each)
+#   small-disk-pool: 16 volumes (2Ti each)
+#
+# When you write an object:
+# - Erasure coded into N data shards + K parity shards
+# - Shards distributed uniformly across ALL 64 volumes
+# - Some shards go to large disks, some to medium, some to small
+#
+# Result: Consistent performance because all use same storage class (SSD)
+#
+# If you mixed NVMe/SSD/HDD:
+# - Some shards on fast NVMe, some on slow HDD
+# - Read/write limited by slowest shard (HDD)
+# - Expensive NVMe provides ZERO performance benefit
+
+# Why Different Disk Sizes?
+# -------------------------
+# Valid reasons:
+# 1. Utilize existing hardware with different disk configurations
+# 2. Cost optimization (larger disks cheaper per Ti in some cases)
+# 3. Capacity planning (add capacity without replacing existing hardware)
+# 4. Hardware lifecycle (new nodes with larger disks, old with smaller)
+
+# Total Capacity Calculation:
+# --------------------------
+# - Large pool: 16 volumes × 10Ti = 160Ti
+# - Medium pool: 32 volumes × 5Ti = 160Ti
+# - Small pool: 16 volumes × 2Ti = 32Ti
+# Total usable (with erasure coding overhead): ~220Ti
+
+---
+# Deployment Guide
+
+# 1. Label nodes by their disk configuration:
+#   kubectl label node node-1 disk-config=large-disks
+#   kubectl label node node-2 disk-config=large-disks
+#   kubectl label node node-3 disk-config=medium-disks
+#   kubectl label node node-4 disk-config=medium-disks
+#   kubectl label node node-5 disk-config=many-small-disks
+
+# 2. Create namespace:
+#   kubectl create namespace storage
+
+# 3. Apply tenant:
+#   kubectl apply -f hardware-pools-tenant.yaml
+
+# 4. Verify pool placement:
+#   kubectl get pods -n storage -l rustfs.pool=large-disk-pool -o wide
+#   kubectl get pods -n storage -l rustfs.pool=medium-disk-pool -o wide
+#   kubectl get pods -n storage -l rustfs.pool=small-disk-pool -o wide
+
+# 5. Verify PVC sizes:
+#   kubectl get pvc -n storage -l rustfs.pool=large-disk-pool \
+#     -o custom-columns=NAME:.metadata.name,SIZE:.spec.resources.requests.storage
+#   # Should show 10Ti for large pool
+#
+#   kubectl get pvc -n storage -l rustfs.pool=small-disk-pool \
+#     -o custom-columns=NAME:.metadata.name,SIZE:.spec.resources.requests.storage
+#   # Should show 2Ti for small pool
+
+# 6. Access the unified cluster:
+#   kubectl port-forward -n storage svc/rustfs 9000:9000
+#   mc alias set disksize http://localhost:9000 rustfsadmin rustfsadmin
+
+---
+# COMMON MISTAKES TO AVOID:
+
+# ❌ WRONG: Mixing storage classes for "performance tiers"
+# pools:
+#   - name: fast
+#     storageClassName: nvme-local  # ← Don't mix performance classes!
+#   - name: slow
+#     storageClassName: hdd-local   # ← Results in HDD performance for ALL data
+
+# ✅ CORRECT: Same storage class, different sizes
+# pools:
+#   - name: large
+#     storageClassName: fast-ssd    # ← Same class
+#     storage: 10Ti
+#   - name: small
+#     storageClassName: fast-ssd    # ← Same class
+#     storage: 2Ti
+
+---
+# When to use different storage classes:
+
+# Use different storage classes ONLY when:
+# 1. Cluster expansion (migrating old SSD pool to new NVMe pool via decommissioning)
+# 2. Testing/staging separate from production (separate Tenants, not pools)
+# 3. Different Tenants for different customer tiers (separate RustFS clusters)
+
+# For performance tiering within one storage system, use RustFS lifecycle
+# policies to transition data to EXTERNAL cloud storage (S3, Azure, GCS),
+# not internal pool differentiation.

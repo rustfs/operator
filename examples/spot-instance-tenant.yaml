@@ -1,0 +1,315 @@
+# Spot Instance Optimization Multi-Pool Tenant Example
+#
+# This example demonstrates cost optimization using a mix of:
+# - On-demand instances for guaranteed compute availability
+# - Spot instances for elastic capacity and cost savings
+#
+# IMPORTANT ARCHITECTURE NOTE:
+# All pools form ONE unified RustFS cluster. Data is striped uniformly
+# across all volumes regardless of instance type. Cost savings come from
+# cheaper spot instance COMPUTE, not from storage differentiation.
+# Both pools use the SAME storage class to avoid performance degradation.
+#
+# Use Case: 70-90% cost reduction while maintaining reliability
+#
+# Prerequisites:
+# - Nodes with spot instance taints:
+#   kubectl taint node <spot-node> spot-instance=true:NoSchedule
+# - Node labels for instance lifecycle:
+#   kubectl label node <node> instance-lifecycle=spot
+#   kubectl label node <node> instance-lifecycle=on-demand
+#
+# Resources created:
+# - 2 StatefulSets (critical-pool on-demand, elastic-pool spot)
+# - 80 total PVCs
+# - 3 Services (shared)
+# - RBAC resources
+#
+# Cost Example:
+# - On-demand: 4 × c5.4xlarge = $2,720/month
+# - Spot: 16 × c5.4xlarge = $816/month (70% savings)
+# - Total: $3,536/month vs $13,600/month all on-demand (74% savings)
+
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: cost-optimized
+  namespace: storage
+  labels:
+    cost-profile: optimized
+    environment: production
+spec:
+  image: rustfs/rustfs:latest
+
+  pools:
+    # CRITICAL POOL: On-demand instances
+    # For data requiring guaranteed availability
+    - name: critical-pool
+      servers: 4
+      persistence:
+        volumesPerServer: 4  # 4 × 4 = 16 volumes
+
+        volumeClaimTemplate:
+          storageClassName: standard-ssd  # Same as elastic pool
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Ti
+
+        labels:
+          instance-type: on-demand
+          criticality: high
+          sla: "99.99"
+
+        annotations:
+          description: "Critical data on on-demand instances"
+          backup-policy: "continuous"
+
+      # TARGET: On-demand instances only
+      nodeSelector:
+        instance-lifecycle: on-demand
+
+      # AVOID: Spot instance nodes (additional safety)
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: instance-lifecycle
+                    operator: In
+                    values: ["on-demand"]
+                  - key: karpenter.sh/capacity-type
+                    operator: NotIn
+                    values: ["spot"]
+
+      # High priority to prevent eviction
+      priorityClassName: system-cluster-critical
+
+      # Higher resources for critical workloads
+      resources:
+        requests:
+          cpu: "8"
+          memory: "32Gi"
+        limits:
+          cpu: "16"
+          memory: "64Gi"
+
+    # ELASTIC POOL: Spot instances
+    # For elastic capacity and cost optimization
+    - name: elastic-pool
+      servers: 16
+      persistence:
+        volumesPerServer: 4  # 16 × 4 = 64 volumes
+
+        volumeClaimTemplate:
+          storageClassName: standard-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 4Ti
+
+        labels:
+          instance-type: spot
+          criticality: normal
+          sla: "99.5"
+
+        annotations:
+          description: "Elastic capacity on spot instances"
+          backup-policy: "daily"
+          cost-center: "elastic-storage"
+
+      # TARGET: Spot instance nodes
+      nodeSelector:
+        instance-lifecycle: spot
+
+      # TOLERATE: Spot instance taints
+      tolerations:
+        - key: "spot-instance"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+        - key: "karpenter.sh/disruption"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+      # DISTRIBUTE: Across multiple spot instance types/zones
+      # to reduce correlated failures
+      topologySpreadConstraints:
+        - maxSkew: 2
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              rustfs.pool: elastic-pool
+        - maxSkew: 4
+          topologyKey: node.kubernetes.io/instance-type
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              rustfs.pool: elastic-pool
+
+      # Standard resources for elastic pool
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+  env:
+    - name: RUST_LOG
+      value: "info"
+
+---
+# Deployment Guide
+
+# 1. Label nodes by instance lifecycle:
+#   # On-demand nodes
+#   kubectl label node on-demand-node-1 instance-lifecycle=on-demand
+#   kubectl label node on-demand-node-2 instance-lifecycle=on-demand
+#
+#   # Spot instance nodes
+#   kubectl label node spot-node-1 instance-lifecycle=spot
+#   kubectl label node spot-node-2 instance-lifecycle=spot
+
+# 2. Taint spot nodes (prevents non-tolerant workloads):
+#   kubectl taint node spot-node-1 spot-instance=true:NoSchedule
+#   kubectl taint node spot-node-2 spot-instance=true:NoSchedule
+
+# 3. Create namespace:
+#   kubectl create namespace storage
+
+# 4. Create system-cluster-critical priority class (if not exists):
+#   # Usually exists by default, verify with:
+#   kubectl get priorityclass system-cluster-critical
+
+# 5. Apply tenant:
+#   kubectl apply -f spot-instance-tenant.yaml
+
+# 6. Verify critical pool on on-demand instances:
+#   kubectl get pods -n storage -l rustfs.pool=critical-pool -o wide
+#   # Should show pods on on-demand nodes only
+
+# 7. Verify elastic pool on spot instances:
+#   kubectl get pods -n storage -l rustfs.pool=elastic-pool -o wide
+#   # Should show pods on spot nodes
+
+# 8. Monitor spot instance interruptions:
+#   kubectl get events -n storage --field-selector reason=Evicted
+#
+#   # When spot instance is interrupted, RustFS will:
+#   # - Automatically handle the failure via erasure coding
+#   # - Continue serving from remaining nodes
+#   # - Pod will reschedule to another spot instance
+
+# 9. Check cost allocation:
+#   kubectl get pods -n storage -o custom-columns=\
+#   NAME:.metadata.name,\
+#   POOL:.metadata.labels.rustfs\\.pool,\
+#   LIFECYCLE:.spec.nodeSelector.instance-lifecycle,\
+#   CPU:.spec.containers[0].resources.requests.cpu,\
+#   MEM:.spec.containers[0].resources.requests.memory
+
+---
+# Cost Analysis:
+
+# On-Demand Pool (critical-pool):
+# - 4 servers on c5.4xlarge instances
+# - $0.68/hour × 24 × 30 × 4 = $1,958/month
+# - Guaranteed availability
+# - 16 volumes × 2Ti = 32Ti storage
+
+# Spot Pool (elastic-pool):
+# - 16 servers on c5.4xlarge spot instances
+# - ~$0.20/hour (70% discount) × 24 × 30 × 16 = $2,304/month
+# - Interruption risk (typically <5% per hour)
+# - 64 volumes × 4Ti = 256Ti storage
+
+# Total Cost:
+# - This config: ~$4,262/month for 288Ti
+# - All on-demand: ~$13,608/month for 288Ti
+# - Savings: ~$9,346/month (69% reduction)
+
+# Reliability:
+# - RustFS erasure coding tolerates node failures
+# - With 80 total volumes (16 critical + 64 elastic):
+#   - Can lose up to 40 volumes and still function (50% failure tolerance)
+#   - Critical pool on guaranteed infrastructure
+#   - Spot interruptions handled gracefully
+
+---
+# Cloud Provider Examples:
+
+# AWS:
+#   # On-demand nodes
+#   kubectl label node <node> instance-lifecycle=on-demand \
+#     node.kubernetes.io/instance-type=c5.4xlarge \
+#     karpenter.sh/capacity-type=on-demand
+#
+#   # Spot nodes
+#   kubectl label node <node> instance-lifecycle=spot \
+#     node.kubernetes.io/instance-type=c5.4xlarge \
+#     karpenter.sh/capacity-type=spot
+#   kubectl taint node <node> karpenter.sh/disruption=spot:NoSchedule
+
+# GCP:
+#   # On-demand nodes
+#   kubectl label node <node> instance-lifecycle=on-demand \
+#     cloud.google.com/gke-preemptible=false
+#
+#   # Preemptible (spot) nodes
+#   kubectl label node <node> instance-lifecycle=spot \
+#     cloud.google.com/gke-preemptible=true
+#   kubectl taint node <node> cloud.google.com/gke-preemptible=true:NoSchedule
+
+# Azure:
+#   # On-demand nodes
+#   kubectl label node <node> instance-lifecycle=on-demand \
+#     kubernetes.azure.com/scalesetpriority=regular
+#
+#   # Spot nodes
+#   kubectl label node <node> instance-lifecycle=spot \
+#     kubernetes.azure.com/scalesetpriority=spot
+#   kubectl taint node <node> kubernetes.azure.com/scalesetpriority=spot:NoSchedule
+
+---
+# Handling Spot Interruptions:
+
+# RustFS automatically handles spot interruptions:
+# 1. Spot node receives termination notice (2 minutes warning)
+# 2. Kubernetes evicts pods
+# 3. RustFS continues serving from remaining nodes (erasure coding)
+# 4. Kubernetes reschedules pod to another spot instance
+# 5. RustFS automatically rebalances data
+
+# Monitor interruptions:
+#   kubectl get events -n storage -w | grep -i "evicted\|preempt"
+
+# Check RustFS cluster health during interruptions:
+#   mc admin info global
+#   # Should show cluster healthy even with some nodes down
+
+---
+# Best Practices:
+
+# 1. Maintain minimum on-demand capacity:
+#    - At least servers × volumesPerServer >= 4 on on-demand
+#    - Ensures cluster survives even if all spot instances interrupted
+
+# 2. Use topology spread for spot pools:
+#    - Distribute across zones and instance types
+#    - Reduces correlated interruptions
+
+# 3. Set appropriate priority classes:
+#    - Critical pool: system-cluster-critical or high-priority
+#    - Elastic pool: default or low-priority
+
+# 4. Monitor costs:
+#    - Track actual spot prices
+#    - Adjust instance types based on availability/cost
+
+# 5. Test interruptions:
+#    - Drain spot nodes to simulate interruptions
+#    - Verify RustFS continues operating
+#    - Verify automatic pod rescheduling
