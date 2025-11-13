@@ -4,7 +4,6 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 **Last Updated**: 2025-11-13
 **Current Version**: 0.1.0 (pre-release)
-**Target 1.0 Release**: Q2 2026
 
 ---
 
