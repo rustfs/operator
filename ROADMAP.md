@@ -311,8 +311,8 @@ We welcome community input on this roadmap. You can:
 4. **Share use cases**: Help us understand your deployment scenarios
 5. **Contribute code**: Pick up items marked as `good-first-issue`
 
-**Discussion Forum**: [Link to GitHub Discussions]
-**Issue Tracker**: [Link to GitHub Issues]
+**Discussion Forum**: https://github.com/orgs/rustfs/discussions
+**Issue Tracker**: https://github.com/rustfs/operator/issues
 **Community Chat**: [Link to Slack/Discord]
 
 ---
