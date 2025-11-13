@@ -35,7 +35,7 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 ---
 
-## v0.2.0 - Core Stability (Q1 2026)
+## Core Stability
 
 **Focus**: Production readiness for basic deployments
 
@@ -95,7 +95,7 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 ---
 
-## v0.3.0 - Advanced Features (Q2 2026)
+## Advanced Features
 
 **Focus**: Advanced lifecycle management and operational features
 
@@ -141,7 +141,7 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 ---
 
-## v0.4.0 - Enterprise Features (Q3 2026)
+## Enterprise Features
 
 **Focus**: Multi-tenancy, security, and compliance
 
@@ -188,7 +188,7 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 ---
 
-## v1.0.0 - Production Ready (Q4 2026)
+## Production Ready
 
 **Focus**: Stability, documentation, and ecosystem integration
 
