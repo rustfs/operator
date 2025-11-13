@@ -313,7 +313,6 @@ We welcome community input on this roadmap. You can:
 
 **Discussion Forum**: https://github.com/orgs/rustfs/discussions
 **Issue Tracker**: https://github.com/rustfs/operator/issues
-**Community Chat**: [Link to Slack/Discord]
 
 ---
 
