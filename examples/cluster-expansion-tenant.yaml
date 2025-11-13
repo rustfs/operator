@@ -1,0 +1,254 @@
+# Cluster Expansion Multi-Pool Tenant Example
+#
+# This example demonstrates using multiple pools for cluster expansion,
+# which is one of the primary design purposes of RustFS pool architecture.
+#
+# Use Case: Expand storage capacity or migrate to new hardware
+#
+# ARCHITECTURE NOTE:
+# All pools form ONE unified RustFS cluster. New pools can be added for
+# capacity expansion, and old pools can be decommissioned to migrate data
+# to new hardware without downtime.
+#
+# Scenario: Originally deployed with pool-v1, now adding pool-v2 for expansion
+
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: expanding-storage
+  namespace: storage
+  labels:
+    phase: expansion
+spec:
+  image: rustfs/rustfs:latest
+
+  pools:
+    # ORIGINAL POOL (v1): Existing deployment
+    # Deployed 6 months ago with smaller disks
+    - name: pool-v1
+      servers: 8
+      persistence:
+        volumesPerServer: 4  # 8 × 4 = 32 volumes
+
+        volumeClaimTemplate:
+          storageClassName: standard-ssd
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Ti  # Original smaller disks
+
+        labels:
+          pool-version: v1
+          deployment-date: "2024-05"
+
+        annotations:
+          description: "Original pool - candidate for decommissioning"
+
+      # Original nodes (older hardware)
+      nodeSelector:
+        pool-generation: v1
+
+      # Standard resources for v1
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+    # EXPANSION POOL (v2): New capacity addition
+    # Being added now with larger disks and better hardware
+    - name: pool-v2
+      servers: 16
+      persistence:
+        volumesPerServer: 4  # 16 × 4 = 64 volumes
+
+        volumeClaimTemplate:
+          storageClassName: fast-ssd  # Newer, faster storage class
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Ti  # Larger disks
+
+        labels:
+          pool-version: v2
+          deployment-date: "2025-11"
+
+        annotations:
+          description: "Expansion pool - new hardware"
+
+      # New nodes (newer hardware)
+      nodeSelector:
+        pool-generation: v2
+
+      # Higher resources for v2 (better hardware)
+      resources:
+        requests:
+          cpu: "8"
+          memory: "32Gi"
+        limits:
+          cpu: "16"
+          memory: "64Gi"
+
+      # Higher priority for new pool
+      priorityClassName: high-priority
+
+  env:
+    - name: RUST_LOG
+      value: "info"
+
+---
+# Cluster Expansion Workflow
+
+# Phase 1: Initial Deployment (6 months ago)
+# ==========================================
+# Deployed with only pool-v1:
+#
+# pools:
+#   - name: pool-v1
+#     servers: 8
+#     persistence:
+#       volumesPerServer: 4
+#
+# This created: 32 volumes, ~64Ti capacity
+
+# Phase 2: Add Expansion Pool (now)
+# ==================================
+# Add pool-v2 to the tenant spec (as shown above)
+#
+# kubectl apply -f cluster-expansion-tenant.yaml
+#
+# This creates:
+# - pool-v1: 32 volumes (64Ti) - existing
+# - pool-v2: 64 volumes (320Ti) - new
+# - Total: 96 volumes, ~384Ti capacity
+#
+# RustFS automatically:
+# - Includes new volumes in RUSTFS_VOLUMES
+# - Starts using new capacity immediately
+# - Distributes new data across ALL volumes (v1 + v2)
+
+# Phase 3: Monitor Expansion
+# ==========================
+# Verify new pool is healthy:
+#   kubectl get pods -n storage -l rustfs.pool=pool-v2
+#   kubectl get pvc -n storage -l rustfs.pool=pool-v2
+#
+# Check combined RUSTFS_VOLUMES:
+#   kubectl get statefulset -n storage expanding-storage-pool-v1 \
+#     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="RUSTFS_VOLUMES")].value}'
+#
+# Should show both pools:
+#   http://expanding-storage-pool-v1-{0...7}.expanding-storage-hl.storage.svc.cluster.local:9000/data/rustfs{0...3}
+#   http://expanding-storage-pool-v2-{0...15}.expanding-storage-hl.storage.svc.cluster.local:9000/data/rustfs{0...3}
+
+# Phase 4: Pool Decommissioning (future)
+# =======================================
+# When ready to remove pool-v1 and migrate to all v2:
+#
+# 1. Use RustFS admin API to decommission pool-v1:
+#    mc admin decommission pool myprod http://expanding-storage-pool-v1-{0...7}...
+#
+# 2. RustFS will:
+#    - Move data from pool-v1 to pool-v2
+#    - Rebalance erasure coding
+#    - Update internal metadata
+#
+# 3. Once complete, remove pool-v1 from tenant spec:
+#    kubectl edit tenant expanding-storage
+#    # Remove pool-v1 from pools list
+#
+# 4. Operator will delete pool-v1 StatefulSet and PVCs
+
+---
+# Deployment Guide
+
+# 1. Label nodes by generation:
+#   # Existing nodes
+#   kubectl label node old-node-1 pool-generation=v1
+#   kubectl label node old-node-2 pool-generation=v1
+#
+#   # New nodes
+#   kubectl label node new-node-1 pool-generation=v2
+#   kubectl label node new-node-2 pool-generation=v2
+
+# 2. Create namespace:
+#   kubectl create namespace storage
+
+# 3. Create priority class for v2:
+#   kubectl apply -f - <<EOF
+#   apiVersion: scheduling.k8s.io/v1
+#   kind: PriorityClass
+#   metadata:
+#     name: high-priority
+#   value: 1000
+#   globalDefault: false
+#   description: "High priority for new storage pools"
+#   EOF
+
+# 4. Apply tenant (with both pools):
+#   kubectl apply -f cluster-expansion-tenant.yaml
+
+# 5. Verify both pools running:
+#   kubectl get statefulset -n storage
+#   kubectl get pods -n storage -o wide
+
+# 6. Check capacity:
+#   mc admin info myprod
+#   # Should show ~384Ti total capacity (64Ti + 320Ti)
+
+---
+# Use Cases for This Pattern:
+
+# 1. Capacity Expansion
+#    - Cluster running out of space
+#    - Add new pool with more/larger disks
+#    - Immediate capacity increase
+
+# 2. Hardware Upgrade
+#    - Replace old hardware with new
+#    - Add new pool with better hardware
+#    - Decommission old pool gradually
+
+# 3. Storage Class Migration
+#    - Move from standard-ssd to fast-ssd
+#    - Add new pool with new storage class
+#    - Migrate and remove old pool
+#    - NOTE: During migration, cluster runs at slower tier's speed
+
+# 4. Cloud Migration
+#    - Migrate from on-prem to cloud
+#    - Add cloud-based pool
+#    - Decommission on-prem pool
+
+# 5. Gradual Scaling
+#    - Add pools incrementally as needed
+#    - Better cost control than over-provisioning
+#    - Pay-as-you-grow model
+
+---
+# Best Practices:
+
+# 1. Keep old pool running during expansion
+#    - Ensures zero downtime
+#    - RustFS handles rebalancing automatically
+
+# 2. Monitor capacity during expansion
+#    - Ensure new pool is healthy before decommissioning old
+#    - Check erasure coding sets are balanced
+
+# 3. Plan decommissioning window
+#    - Pool decommissioning is I/O intensive
+#    - Schedule during low-traffic periods
+#    - Monitor progress with RustFS admin tools
+
+# 4. Label pools clearly
+#    - Use pool-version labels (v1, v2, v3)
+#    - Track deployment dates
+#    - Document migration plans in annotations
+
+# 5. Use nodeSelector for hardware generations
+#    - Prevents old/new pods from mixing on same nodes
+#    - Ensures new pool gets new hardware
+#    - Helps with capacity planning

@@ -1,0 +1,92 @@
+# Minimal Development Tenant Example
+#
+# This is the smallest valid RustFS tenant configuration.
+# Suitable for local development, testing, or learning.
+#
+# Resources created:
+# - 1 StatefulSet with 1 replica
+# - 4 PVCs (1 server × 4 volumes)
+# - 3 Services (IO at 9000, Console at 9001, Headless)
+# - RBAC resources (Role, ServiceAccount, RoleBinding)
+#
+# Total storage: 40Gi (4 volumes × 10Gi default)
+
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: dev-minimal
+  namespace: default
+  labels:
+    environment: development
+spec:
+  # Container image (optional - uses operator default if not specified)
+  image: rustfs/rustfs:latest
+
+  # Minimal pool configuration
+  # servers * volumesPerServer must be >= 4 (RustFS erasure coding requirement)
+  # This uses: 1 server × 4 volumes = 4 total volumes (minimum valid)
+  pools:
+    - name: dev-pool
+      servers: 1  # Single server for development
+      persistence:
+        volumesPerServer: 4  # Minimum 4 volumes required
+
+        # Optional: Reduce storage size for development
+        # volumeClaimTemplate:
+        #   accessModes: ["ReadWriteOnce"]
+        #   resources:
+        #     requests:
+        #       storage: 5Gi  # Smaller for dev environments
+
+  # Optional: Enable debug logging for development
+  # Note: Operator automatically sets RUSTFS_VOLUMES, RUSTFS_ADDRESS,
+  # RUSTFS_CONSOLE_ADDRESS, and RUSTFS_CONSOLE_ENABLE
+  env:
+    # Standard Rust logging (not RustFS-specific)
+    - name: RUST_LOG
+      value: "debug"
+
+---
+# Quick Start Guide
+
+# 1. Apply the tenant:
+#   kubectl apply -f minimal-dev-tenant.yaml
+
+# 2. Check status:
+#   kubectl get tenant dev-minimal
+#   kubectl get pods -l rustfs.tenant=dev-minimal
+#   kubectl get pvc -l rustfs.tenant=dev-minimal
+
+# 3. Wait for pod to be ready:
+#   kubectl wait --for=condition=ready pod -l rustfs.tenant=dev-minimal --timeout=300s
+
+# 4. Access S3 API (port 9000):
+#   kubectl port-forward svc/rustfs 9000:9000
+#   # Test: aws --endpoint-url http://localhost:9000 s3 ls
+
+# 5. Access Console UI (port 9001):
+#   kubectl port-forward svc/dev-minimal-console 9001:9001
+#   # Open http://localhost:9001 in browser
+#   # Default credentials: rustfsadmin / rustfsadmin
+
+# 6. View automatically configured RUSTFS_VOLUMES:
+#   kubectl get statefulset dev-minimal-dev-pool \
+#     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="RUSTFS_VOLUMES")].value}'
+#
+# Output will be:
+#   http://dev-minimal-dev-pool-0.dev-minimal-hl.default.svc.cluster.local:9000/data/rustfs{0...3}
+#
+# This tells RustFS to use 4 volumes at paths:
+#   /data/rustfs0, /data/rustfs1, /data/rustfs2, /data/rustfs3
+
+# 7. Test with MinIO client:
+#   mc alias set devlocal http://localhost:9000 rustfsadmin rustfsadmin
+#   mc mb devlocal/test-bucket
+#   mc ls devlocal
+
+# 8. View logs:
+#   kubectl logs -f -l rustfs.tenant=dev-minimal
+
+# 9. Delete tenant and cleanup:
+#   kubectl delete tenant dev-minimal
+#   # All resources (StatefulSets, PVCs, Services, RBAC) are automatically deleted

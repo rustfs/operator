@@ -16,17 +16,18 @@ spec:
   pools:
     - name: primary
       servers: 2
+
       # Persistence configuration for storage (REQUIRED)
       # Note: servers * volumesPerServer must be >= 4 for RustFS distributed storage
       persistence:
         # Number of volumes per server (REQUIRED, must satisfy servers * volumesPerServer >= 4)
         volumesPerServer: 2
+
         # Optional: Path where volumes will be mounted in the container (defaults to /data)
-        # With volumesPerServer=2, volumes will be mounted at: /data/0, /data/1
+        # Volumes will be mounted at: /data/rustfs0, /data/rustfs1, etc.
         # path: /data
+
         # Optional: PersistentVolumeClaim template for storage (defaults to ReadWriteOnce, 10Gi)
-        # PVCs will be named: {tenantName}-{poolName}-{index}
-        # For this example: example-tenant-pool-0-0, example-tenant-pool-0-1
         # volumeClaimTemplate:
         #   accessModes:
         #     - ReadWriteOnce
@@ -35,6 +36,7 @@ spec:
         #       storage: 10Gi
         #   # Optional: specify storage class
         #   # storageClassName: standard
+
         # Optional: Custom labels for PVCs
         # The operator automatically adds the following labels:
         #   - app.kubernetes.io/managed-by: rustfs-operator
@@ -45,27 +47,75 @@ spec:
           app: rustfs
           environment: production
           team: storage
+
         # Optional: Custom annotations for PVCs
         annotations:
           backup.velero.io/backup-volumes: "true"
           description: "RustFS distributed storage volumes"
+
+      # Optional: Kubernetes scheduling configuration for this pool
+      # All fields below are optional and control where/how pods are scheduled
+
+      # Optional: Node selector - target specific nodes by labels
+      # nodeSelector:
+      #   storage-type: ssd
+      #   disk-size: large
+
+      # Optional: Node/pod affinity - complex scheduling rules
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #         - matchExpressions:
+      #             - key: topology.kubernetes.io/zone
+      #               operator: In
+      #               values: ["us-east-1a", "us-east-1b"]
+
+      # Optional: Tolerations - schedule on tainted nodes
+      # tolerations:
+      #   - key: "dedicated"
+      #     operator: "Equal"
+      #     value: "storage"
+      #     effect: "NoSchedule"
+
+      # Optional: Topology spread - distribute pods across failure domains
+      # topologySpreadConstraints:
+      #   - maxSkew: 1
+      #     topologyKey: topology.kubernetes.io/zone
+      #     whenUnsatisfiable: DoNotSchedule
+      #     labelSelector:
+      #       matchLabels:
+      #         rustfs.pool: primary
+
+      # Optional: Resource requirements - CPU and memory for pool containers
+      # resources:
+      #   requests:
+      #     cpu: "4"
+      #     memory: "16Gi"
+      #   limits:
+      #     cpu: "8"
+      #     memory: "32Gi"
+
+      # Optional: Priority class - overrides tenant-level priority
+      # priorityClassName: high-priority
 
   # Multi-Node Communication (Automatic)
   # The operator automatically generates the RUSTFS_VOLUMES environment variable
   # for multi-node, multi-disk distributed storage communication.
   #
   # For this configuration, the generated RUSTFS_VOLUMES will be:
-  # http://example-tenant-pool-0-{0...1}.example-tenant-hl.rustfs-system.svc.cluster.local:9000/data/{0...1}
+  # http://example-tenant-pool-0-{0...1}.example-tenant-hl.rustfs-system.svc.cluster.local:9000/data/rustfs{0...1}
   #
   # This configures RustFS to:
   # - Communicate with 2 nodes (servers: 2)
-  # - Each node has 2 storage volumes (volumesPerServer: 2)
+  # - Each node has 2 storage volumes at /data/rustfs0 and /data/rustfs1
   # - Use Kubernetes DNS for node discovery via the headless service
   #
   # Multiple pools will be combined into a single distributed storage cluster.
 
   # Optional environment variables for RustFS containers
-  # Note: RUSTFS_VOLUMES is automatically set by the operator and should not be manually configured
+  # Note: RUSTFS_VOLUMES, RUSTFS_ADDRESS, RUSTFS_CONSOLE_ADDRESS, and
+  # RUSTFS_CONSOLE_ENABLE are automatically set by the operator
   env:
     - name: RUST_LOG
       value: info

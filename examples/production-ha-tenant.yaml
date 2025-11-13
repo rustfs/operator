@@ -1,0 +1,220 @@
+# Production High-Availability Tenant Example
+#
+# This configuration is suitable for production workloads requiring:
+# - High availability (multiple servers)
+# - Large storage capacity
+# - Custom storage classes
+# - Resource labels and annotations
+#
+# Resources created:
+# - 1 StatefulSet with 16 replicas
+# - 64 PVCs (16 servers × 4 volumes)
+# - 3 Services (IO at 9000, Console at 9001, Headless)
+# - RBAC resources
+#
+# Total storage: 6.4TB (64 volumes × 100Gi)
+
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: production-storage
+  namespace: production
+  labels:
+    environment: production
+    app: rustfs
+    tier: storage
+    criticality: high
+spec:
+  # Use specific version tag for production (check latest at https://github.com/rustfs/rustfs/releases)
+  image: rustfs/rustfs:latest
+
+  # Production pool configuration
+  pools:
+    - name: production-pool
+      servers: 16  # High availability with 16 servers
+      persistence:
+        volumesPerServer: 4  # 16 × 4 = 64 total volumes
+
+        # Production volume configuration
+        volumeClaimTemplate:
+          # ReadWriteOnce for StatefulSet (each pod gets its own volumes)
+          accessModes: ["ReadWriteOnce"]
+
+          # Use fast storage class for production
+          storageClassName: fast-ssd
+
+          # Request 100Gi per volume
+          resources:
+            requests:
+              storage: 100Gi
+
+        # Custom labels for PVCs (merged with operator labels)
+        labels:
+          environment: production
+          backup-policy: "daily"
+          retention: "30d"
+          cost-center: "storage-ops"
+
+        # Annotations for backup and monitoring tools
+        annotations:
+          # Velero backup annotation
+          backup.velero.io/backup-volumes: "true"
+
+          # Custom backup schedule
+          backup.example.com/schedule: "0 2 * * *"
+
+          # Volume description
+          description: "Production RustFS storage volumes"
+
+          # Monitoring annotations
+          prometheus.io/scrape: "true"
+
+      # High availability: Distribute pods across availability zones
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              rustfs.pool: production-pool
+
+      # Production resources: Guaranteed CPU and memory
+      resources:
+        requests:
+          cpu: "4"
+          memory: "16Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+
+  # Optional: Custom environment variables
+  # Note: Operator automatically sets RUSTFS_VOLUMES, RUSTFS_ADDRESS,
+  # RUSTFS_CONSOLE_ADDRESS, and RUSTFS_CONSOLE_ENABLE
+  env:
+    # Logging configuration (standard Rust logging)
+    - name: RUST_LOG
+      value: "info"
+
+    # Example: Load config from ConfigMap
+    - name: STORAGE_TIER
+      valueFrom:
+        configMapKeyRef:
+          name: storage-config
+          key: tier
+          optional: true
+
+    # Example: Load RustFS access key from Secret (if custom auth needed)
+    - name: RUSTFS_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: rustfs-credentials
+          key: access-key
+          optional: true
+
+    - name: RUSTFS_SECRET_KEY
+      valueFrom:
+        secretKeyRef:
+          name: rustfs-credentials
+          key: secret-key
+          optional: true
+
+  # Optional: Use custom scheduler for storage-aware placement
+  # scheduler: stork-scheduler
+
+  # Optional: High priority for production workloads
+  # priorityClassName: high-priority
+
+  # Optional: Container lifecycle hooks
+  lifecycle:
+    preStop:
+      exec:
+        command:
+          - /bin/sh
+          - -c
+          - |
+            # Graceful shutdown - allow time for connections to drain
+            echo "Initiating graceful shutdown..."
+            sleep 30
+
+---
+# Supporting Resources (Optional)
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storage-config
+  namespace: production
+data:
+  tier: "production"
+  region: "us-east-1"
+
+---
+# Example Secret for custom credentials
+# By default, RustFS uses rustfsadmin/rustfsadmin
+# Create this only if you need custom credentials
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: rustfs-credentials
+#   namespace: production
+# type: Opaque
+# stringData:
+#   access-key: "your-custom-access-key"
+#   secret-key: "your-custom-secret-key"
+
+---
+# Production Deployment Guide
+
+# 1. Create namespace:
+#   kubectl create namespace production
+
+# 2. (Optional) Create custom credentials Secret:
+#   kubectl create secret generic rustfs-credentials \
+#     --from-literal=access-key=your-access-key \
+#     --from-literal=secret-key=your-secret-key \
+#     -n production
+
+# 3. Apply tenant:
+#   kubectl apply -f production-ha-tenant.yaml
+
+# 4. Verify deployment:
+#   kubectl get tenant -n production
+#   kubectl get statefulset -n production
+#   kubectl get pods -n production -l rustfs.tenant=production-storage
+#   kubectl get pvc -n production -l rustfs.tenant=production-storage
+
+# 5. Monitor rollout:
+#   kubectl rollout status statefulset/production-storage-production-pool -n production
+
+# 6. Check RUSTFS_VOLUMES configuration:
+#   kubectl get statefulset production-storage-production-pool -n production \
+#     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="RUSTFS_VOLUMES")].value}'
+#
+# Output will be:
+#   http://production-storage-production-pool-{0...15}.production-storage-hl.production.svc.cluster.local:9000/data/rustfs{0...3}
+#
+# This configures 16 servers × 4 volumes = 64 total endpoints
+# Each server has volumes at: /data/rustfs0, /data/rustfs1, /data/rustfs2, /data/rustfs3
+
+# 7. Access services:
+#   # S3 API (port 9000)
+#   kubectl port-forward -n production svc/rustfs 9000:9000
+#
+#   # Console UI (port 9001)
+#   kubectl port-forward -n production svc/production-storage-console 9001:9001
+#   # Then open http://localhost:9001 in browser
+#   # Default credentials: rustfsadmin / rustfsadmin
+
+# 8. Test S3 API access:
+#   # Using AWS CLI
+#   aws --endpoint-url http://localhost:9000 s3 ls
+#
+#   # Using MinIO client
+#   mc alias set myprod http://localhost:9000 rustfsadmin rustfsadmin
+#   mc admin info myprod
+
+# 9. Scale if needed (modify servers count and reapply):
+#   # Edit tenant YAML: servers: 32
+#   kubectl apply -f production-ha-tenant.yaml
+#   # Operator will update StatefulSet replicas
