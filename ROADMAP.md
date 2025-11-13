@@ -301,19 +301,6 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 ---
 
-## Release Schedule
-
-| Version | Target Date | Focus Area |
-|---------|-------------|------------|
-| v0.2.0  | March 2026  | Core Stability |
-| v0.3.0  | June 2026   | Advanced Features |
-| v0.4.0  | September 2026 | Enterprise Features |
-| v1.0.0  | December 2026 | Production Ready |
-
-**Release Cadence**: Quarterly for pre-1.0, monthly for post-1.0 maintenance releases
-
----
-
 ## How to Contribute to This Roadmap
 
 We welcome community input on this roadmap. You can:
