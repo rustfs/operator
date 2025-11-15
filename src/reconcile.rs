@@ -17,6 +17,7 @@ use crate::types::v1alpha1::tenant::Tenant;
 use crate::{context, types};
 use kube::ResourceExt;
 use kube::runtime::controller::Action;
+use kube::runtime::events::EventType;
 use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +43,26 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
             latest_tenant.metadata.deletion_timestamp
         );
         return Ok(Action::await_change());
+    }
+
+    // Validate credential Secret if configured
+    // This only validates the Secret exists and has required keys.
+    // Actual credential injection happens via secretKeyRef in the StatefulSet.
+    if let Some(ref cfg) = latest_tenant.spec.creds_secret
+        && !cfg.name.is_empty()
+    {
+        ctx.validate_credential_secret(&latest_tenant)
+            .await
+            .map_err(|e| {
+                // Record event for credential validation failure
+                let _ = ctx.record(
+                    &latest_tenant,
+                    EventType::Warning,
+                    "CredentialValidationFailed",
+                    &format!("Failed to validate credentials: {}", e),
+                );
+                e
+            })?;
     }
 
     // 1. Create RBAC resources (conditionally based on service account settings)
@@ -86,15 +107,38 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     Ok(Action::await_change())
 }
 
-pub fn error_policy(_object: Arc<Tenant>, error: &Error, ctx: Arc<Context>) -> Action {
+pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
     error!("error_policy: {:?}", error);
 
-    // todo: update tenant status
+    // todo: update tenant status (issue #42)
+
+    // Use different requeue strategies based on error type:
+    // - User-fixable errors (credentials, validation): Longer intervals to reduce spam
+    // - Transient errors (API, network): Shorter intervals for quick recovery
     match error {
-        Error::Context { source } => {}
-        _ => {}
+        Error::Context { source } => match source {
+            // Credential validation errors - require user intervention
+            // Use 60-second requeue to reduce event/log spam while user fixes the issue
+            context::Error::CredentialSecretNotFound { .. }
+            | context::Error::CredentialSecretMissingKey { .. }
+            | context::Error::CredentialSecretInvalidEncoding { .. }
+            | context::Error::CredentialSecretTooShort { .. } => {
+                Action::requeue(Duration::from_secs(60))
+            }
+
+            // Kubernetes API errors - might be transient (network, API server issues)
+            // Use shorter requeue for faster recovery
+            context::Error::Kube { .. } | context::Error::Record { .. } => {
+                Action::requeue(Duration::from_secs(5))
+            }
+
+            // Other context errors - use moderate requeue
+            _ => Action::requeue(Duration::from_secs(15)),
+        },
+
+        // Type errors - validation issues, use moderate requeue
+        Error::Types { .. } => Action::requeue(Duration::from_secs(15)),
     }
-    Action::requeue(Duration::from_secs(5))
 }
 
 #[cfg(test)]

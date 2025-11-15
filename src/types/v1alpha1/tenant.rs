@@ -116,8 +116,25 @@ pub struct TenantSpec {
 
     // // #[serde(default, skip_serializing_if = "Option::is_none")]
     // // pub side_cars: Option<SideCars>,
+
+    /// Optional reference to a Secret containing RustFS credentials.
+    /// The Secret must contain 'accesskey' and 'secretkey' keys (both required, non-empty).
+    /// If not specified, credentials must be provided via environment variables in `env`.
+    /// When both are provided, Secret credentials take precedence over environment variables.
+    ///
+    /// # Example Secret
+    /// ```yaml
+    /// apiVersion: v1
+    /// kind: Secret
+    /// metadata:
+    ///   name: rustfs-credentials
+    /// type: Opaque
+    /// stringData:
+    ///   accesskey: "rustfsadmin"
+    ///   secretkey: "rustfsadmin123"
+    /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub configuration: Option<corev1::LocalObjectReference>,
+    pub creds_secret: Option<corev1::LocalObjectReference>,
 }
 
 impl Tenant {
