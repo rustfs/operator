@@ -30,8 +30,16 @@ spec:
         properties:
           spec:
             properties:
-              configuration:
-                description: LocalObjectReference contains enough information to let you locate the referenced object inside the same namespace.
+              createServiceAccountRbac:
+                nullable: true
+                type: boolean
+              credsSecret:
+                description: |-
+                  Optional reference to a Secret containing RustFS credentials.
+                  The Secret must contain 'accesskey' and 'secretkey' keys (both required, minimum 8 characters each).
+                  If not specified, credentials can be provided via environment variables in 'env'.
+                  Priority: Secret credentials > Environment variables > RustFS built-in defaults.
+                  For production use, always configure credentials via Secret or environment variables.
                 nullable: true
                 properties:
                   name:
@@ -40,9 +48,6 @@ spec:
                 required:
                 - name
                 type: object
-              createServiceAccountRbac:
-                nullable: true
-                type: boolean
               env:
                 items:
                   description: EnvVar represents an environment variable present in a Container.
@@ -129,6 +134,8 @@ spec:
                   - Always: Always pull the image
                   - Never: Never pull the image
                   - IfNotPresent: Pull the image if not present locally (default)
+
+                  https://kubernetes.io/docs/concepts/containers/images/#image-pull-policy
                 enum:
                 - Always
                 - Never
@@ -289,8 +296,18 @@ spec:
                         type: object
                     type: object
                 type: object
+              mountPath:
+                default: /data
+                nullable: true
+                type: string
               podManagementPolicy:
-                description: Pod management policy for StatefulSets
+                description: |-
+                  Pod management policy for StatefulSets
+                  - OrderedReady: Respect the ordering guarantees demonstrated
+                  - Parallel: launch or terminate all Pods in parallel, and not to wait for Pods to become Running
+                    and Ready or completely terminated prior to launching or terminating another Pod
+
+                  https://kubernetes.io/docs/tutorials/stateful-application/basic-stateful-set/#pod-management-policy
                 enum:
                 - OrderedReady
                 - Parallel
@@ -946,6 +963,10 @@ spec:
                               description: volumeName is the binding reference to the PersistentVolume backing this claim.
                               type: string
                           type: object
+                          x-kubernetes-validations:
+                          - message: a volume claim template must be specified
+                            reason: FieldValueRequired
+                            rule: '!has(self.volume_claim_template)'
                         volumesPerServer:
                           format: int32
                           type: integer
@@ -1112,7 +1133,12 @@ spec:
                   - servers
                   type: object
                   x-kubernetes-validations:
-                  - rule: self.servers * self.persistence.volumesPerServer >= 4
+                  - messageExpression: '"pool " + self.name + " with 2 servers must have at least 4 volumes in total"'
+                    reason: FieldValueInvalid
+                    rule: '!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 2)'
+                  - messageExpression: '"pool " + self.name + " with 3 servers must have at least 6 volumes in total"'
+                    reason: FieldValueInvalid
+                    rule: '!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 3)'
                 type: array
                 x-kubernetes-validations:
                 - message: pools must be configured
