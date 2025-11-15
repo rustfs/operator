@@ -116,8 +116,13 @@ pub struct TenantSpec {
 
     // // #[serde(default, skip_serializing_if = "Option::is_none")]
     // // pub side_cars: Option<SideCars>,
+    /// Optional reference to a Secret containing RustFS credentials.
+    /// The Secret must contain 'accesskey' and 'secretkey' keys (both required, minimum 8 characters each).
+    /// If not specified, credentials can be provided via environment variables in 'env'.
+    /// Priority: Secret credentials > Environment variables > RustFS built-in defaults.
+    /// For production use, always configure credentials via Secret or environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub configuration: Option<corev1::LocalObjectReference>,
+    pub creds_secret: Option<corev1::LocalObjectReference>,
 }
 
 impl Tenant {

@@ -7,7 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### **Code Refactoring**: Credential Validation Simplification (2025-11-15)
+
+- **Renamed**: `get_tenant_credentials()` → `validate_credential_secret()`
+  - Function now only validates Secret structure (exists, has required keys)
+  - No longer extracts or returns credential values
+  - Removed environment variable fallback logic
+  - Returns `Result<(), Error>` instead of `BTreeMap<String, String>`
+  - **Added**: Minimum length validation (8 characters for both accesskey and secretkey)
+
+- **Purpose**: Eliminate duplication between validation and runtime credential injection
+  - Validation: Performed by `validate_credential_secret()` in reconciliation loop
+  - Runtime: Handled by Kubernetes via `secretKeyRef` in StatefulSet environment variables
+
+- **Benefits**:
+  - Clearer separation of concerns
+  - Credentials never loaded into operator memory (more secure)
+  - Simpler code with single responsibility
+  - Consistent behavior between validation and runtime
+  - Better security with minimum length requirements
+
+#### **BREAKING CHANGE**: Field Rename - `configuration` → `credsSecret` (2025-11-15)
+
+- **Field Renamed**: `spec.configuration` → `spec.credsSecret`
+  - **Rationale**: The name `configuration` was too generic and didn't clearly indicate its purpose (referencing a Secret containing RustFS credentials)
+  - **New Name**: `credsSecret` follows Kubernetes naming conventions (similar to `imagePullSecrets`) and clearly indicates it references a Secret with credentials
+  - **Migration Required**: Update your Tenant manifests to use `credsSecret` instead of `configuration`
+
+**Before (v0.1.0):**
+```yaml
+spec:
+  configuration:
+    name: rustfs-credentials
+```
+
+**After (v0.2.0):**
+```yaml
+spec:
+  credsSecret:
+    name: rustfs-credentials
+```
+
+- **Impact**: All Tenant resources using `spec.configuration` must be updated
+- **Migration**: Simple find-and-replace: `configuration:` → `credsSecret:`
+- **Note**: This is acceptable at v0.1.0 (pre-release) stage before production adoption
+
 ### Added
+
+#### Secret-Based Credential Management (2025-11-15)
+
+- **Secure Credentials via Kubernetes Secrets**: New `spec.credsSecret` field for referencing credentials Secret
+  - **Recommended for production**: Store RustFS admin credentials in Kubernetes Secrets
+  - **Secret Structure**: Must contain `accesskey` and `secretkey` keys
+  - **Automatic Injection**: Credentials automatically injected as `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY` environment variables
+  - **Validation**: Optional validation when Secret is configured
+    - Secret must exist in the same namespace
+    - Must have both `accesskey` and `secretkey` keys
+    - Both keys must be valid UTF-8 strings
+    - Both keys must be at least 8 characters long
+  - **Priority**: Secret credentials take precedence over environment variables
+  - **Backward Compatible**: Environment variable-based credentials still supported
+
+- **Smart Error Retry Logic**:
+  - Credential validation errors (user-fixable): 60-second retry interval (reduces log spam)
+  - Transient API errors: 5-second retry (fast recovery)
+  - Other validation errors: 15-second retry
+  - Auto-recovery when Secret is fixed
+
+- **New Example**: `examples/secret-credentials-tenant.yaml`
+  - Complete working example with Secret + Tenant
+  - Production security best practices
+  - Troubleshooting guide
+  - Error retry behavior documentation
+
+- **Documentation Updates**:
+  - Updated CLAUDE.md with credential management section
+  - Updated ROADMAP.md (marked feature as completed ✅)
+  - Enhanced examples/README.md with security guidance
 
 #### Multi-Pool Scheduling Enhancements (2025-11-08)
 

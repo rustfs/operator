@@ -22,7 +22,7 @@ pub struct PersistenceConfig {
     #[x_kube(validation = Rule::new("self > 0").message("volumesPerServer must be greater than 0"))]
     pub volumes_per_server: i32,
 
-    #[x_kube(validation = Rule::new("!has(self.volume_claim_template)").message("a volume claim template must be specified").reason(Reason::FieldValueRequired))]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_claim_template: Option<corev1::PersistentVolumeClaimSpec>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,7 +40,7 @@ impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
             volumes_per_server: 4, // Default to 4 volumes to satisfy validation (must be > 0)
-            volume_claim_template: Default::default(),
+            volume_claim_template: None,
             path: None,
             labels: None,
             annotations: None,

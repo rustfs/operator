@@ -167,6 +167,37 @@ impl Tenant {
             ..Default::default()
         });
 
+        // Add credentials from Secret if credsSecret is specified
+        if let Some(ref cfg) = self.spec.creds_secret
+            && !cfg.name.is_empty()
+        {
+            env_vars.push(corev1::EnvVar {
+                name: "RUSTFS_ACCESS_KEY".to_owned(),
+                value_from: Some(corev1::EnvVarSource {
+                    secret_key_ref: Some(corev1::SecretKeySelector {
+                        name: cfg.name.clone(),
+                        key: "accesskey".to_string(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+
+            env_vars.push(corev1::EnvVar {
+                name: "RUSTFS_SECRET_KEY".to_owned(),
+                value_from: Some(corev1::EnvVarSource {
+                    secret_key_ref: Some(corev1::SecretKeySelector {
+                        name: cfg.name.clone(),
+                        key: "secretkey".to_string(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+
         // Merge with user-provided environment variables
         // User-provided vars can override operator-managed ones
         for user_env in &self.spec.env {

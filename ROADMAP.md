@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for the RustFS Kubernetes Operator. The roadmap is organized by release versions and includes features, improvements, and technical debt items.
 
-**Last Updated**: 2025-11-13
+**Last Updated**: 2025-11-15
 **Current Version**: 0.1.0 (pre-release)
 
 ---
@@ -40,11 +40,19 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 ### High Priority
 
-- [ ] **Secret-based credential management** (`src/context.rs:187`)
-  - Support for environment variables from Secrets
-  - Secure credential injection
-  - Validation of Secret structure
-  - Default Secret generation option
+- [x] **Secret-based credential management** ✅ **COMPLETED** (2025-11-15)
+  - ✅ Support for reading credentials from Kubernetes Secrets
+  - ✅ Secure credential injection via `secretKeyRef` (credentials never loaded into operator memory)
+  - ✅ Validation of Secret structure:
+    - Secret exists in same namespace
+    - Contains required keys (`accesskey`, `secretkey`)
+    - Valid UTF-8 encoding
+    - Minimum 8 characters for both keys
+  - ✅ Backward compatibility with environment variables
+  - ✅ Comprehensive error messages and event recording
+  - ✅ Smart retry logic (60s for credential errors, 5s for API errors)
+  - ✅ Production-ready examples and documentation
+  - See: `examples/secret-credentials-tenant.yaml`, Issue #41
 
 - [ ] **Status condition management** (`src/reconcile.rs:92`)
   - Update Tenant status on reconciliation errors

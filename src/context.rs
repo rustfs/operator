@@ -23,7 +23,6 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use snafu::Snafu;
 use snafu::futures::TryFutureExt;
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use tracing::info;
 
@@ -38,8 +37,30 @@ pub enum Error {
     #[snafu(transparent)]
     Types { source: types::error::Error },
 
-    #[snafu(display("empty tenant credentials"))]
-    EmptyRootCredentials,
+    #[snafu(display("credential secret '{}' not found", name))]
+    CredentialSecretNotFound { name: String },
+
+    #[snafu(display("credential secret '{}' missing required key '{}'", secret_name, key))]
+    CredentialSecretMissingKey { secret_name: String, key: String },
+
+    #[snafu(display(
+        "credential secret '{}' has invalid data encoding for key '{}'",
+        secret_name,
+        key
+    ))]
+    CredentialSecretInvalidEncoding { secret_name: String, key: String },
+
+    #[snafu(display(
+        "credential secret '{}' key '{}' must be at least 8 characters (got {} characters)",
+        secret_name,
+        key,
+        length
+    ))]
+    CredentialSecretTooShort {
+        secret_name: String,
+        key: String,
+        length: usize,
+    },
 }
 
 pub struct Context {
@@ -172,31 +193,95 @@ impl Context {
         .await
     }
 
-    pub async fn get_tenant_credentials(
-        &self,
-        tenant: &Tenant,
-    ) -> Result<BTreeMap<String, String>, Error> {
-        let config: std::collections::BTreeMap<_, _> = tenant
-            .spec
-            .env
-            .iter()
-            .filter_map(|item| item.value.as_ref().map(|v| (item.name.clone(), v.clone())))
-            .collect();
-
-        if let Some(ref cfg) = tenant.spec.configuration
+    /// Validates that a credential Secret exists and contains required keys.
+    ///
+    /// This function only validates the Secret structure when `spec.credsSecret` is configured.
+    /// It does NOT extract credential values - that's handled by Kubernetes at pod startup
+    /// via `secretKeyRef` in the StatefulSet environment variables.
+    ///
+    /// # Validation Rules
+    /// - Secret must exist in the same namespace as the Tenant
+    /// - Secret must contain both `accesskey` and `secretkey` keys
+    /// - Both keys must be valid UTF-8 strings
+    /// - Both keys must be at least 8 characters long
+    ///
+    /// # Returns
+    /// - `Ok(())` if Secret is valid or not configured
+    /// - `Err(...)` if Secret is configured but invalid (not found, missing keys, invalid encoding, too short)
+    ///
+    /// # Note
+    /// If no credentials are provided via Secret or environment variables, RustFS will use
+    /// its built-in defaults (`rustfsadmin`/`rustfsadmin`).
+    /// **This is acceptable for development but should be changed for production.**
+    pub async fn validate_credential_secret(&self, tenant: &Tenant) -> Result<(), Error> {
+        // Only validate if credsSecret is configured
+        if let Some(ref cfg) = tenant.spec.creds_secret
             && !cfg.name.is_empty()
         {
-            // todo: add env from Secret
-            let _secret: Secret = self.get(&cfg.name, &tenant.namespace()?).await?;
+            let secret: Secret = self
+                .get(&cfg.name, &tenant.namespace()?)
+                .await
+                .map_err(|_| Error::CredentialSecretNotFound {
+                    name: cfg.name.clone(),
+                })?;
+
+            // Validate Secret has required keys
+            if let Some(data) = secret.data {
+                let access_key = "accesskey".to_string();
+                let secret_key = "secretkey".to_string();
+
+                // Validate accesskey exists, is valid UTF-8, and meets minimum length
+                if let Some(accesskey_bytes) = data.get(&access_key) {
+                    let accesskey = String::from_utf8(accesskey_bytes.0.clone()).map_err(|_| {
+                        Error::CredentialSecretInvalidEncoding {
+                            secret_name: cfg.name.clone(),
+                            key: access_key.clone(),
+                        }
+                    })?;
+
+                    if accesskey.len() < 8 {
+                        return CredentialSecretTooShortSnafu {
+                            secret_name: cfg.name.clone(),
+                            key: access_key.clone(),
+                            length: accesskey.len(),
+                        }
+                        .fail();
+                    }
+                } else {
+                    return CredentialSecretMissingKeySnafu {
+                        secret_name: cfg.name.clone(),
+                        key: access_key,
+                    }
+                    .fail();
+                }
+
+                // Validate secretkey exists, is valid UTF-8, and meets minimum length
+                if let Some(secretkey_bytes) = data.get(&secret_key) {
+                    let secretkey = String::from_utf8(secretkey_bytes.0.clone()).map_err(|_| {
+                        Error::CredentialSecretInvalidEncoding {
+                            secret_name: cfg.name.clone(),
+                            key: secret_key.clone(),
+                        }
+                    })?;
+
+                    if secretkey.len() < 8 {
+                        return CredentialSecretTooShortSnafu {
+                            secret_name: cfg.name.clone(),
+                            key: secret_key.clone(),
+                            length: secretkey.len(),
+                        }
+                        .fail();
+                    }
+                } else {
+                    return CredentialSecretMissingKeySnafu {
+                        secret_name: cfg.name.clone(),
+                        key: secret_key,
+                    }
+                    .fail();
+                }
+            }
         }
 
-        // if no ak/sk or ak/sk is empty
-        if config.get("accesskey").is_none_or(|x| x.is_empty())
-            || config.get("secretkey").is_none_or(|x| x.is_empty())
-        {
-            return EmptyRootCredentialsSnafu.fail();
-        }
-
-        Ok(config)
+        Ok(())
     }
 }
