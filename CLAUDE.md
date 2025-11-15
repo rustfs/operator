@@ -79,7 +79,10 @@ The operator follows the standard Kubernetes controller pattern:
 - **Entry Point**: `src/main.rs` - CLI with two subcommands: `crd` and `server`
 - **Controller**: `src/lib.rs:run()` - Sets up the controller that watches `Tenant` resources and owned resources (ConfigMaps, Secrets, ServiceAccounts, Pods, StatefulSets)
 - **Reconciliation Logic**: `src/reconcile.rs:reconcile_rustfs()` - Main reconciliation function that creates/updates Kubernetes resources for a Tenant
-- **Error Handling**: `src/reconcile.rs:error_policy()` - Returns a 5-second requeue on errors
+- **Error Handling**: `src/reconcile.rs:error_policy()` - Intelligent retry intervals based on error type:
+  - Credential validation errors (user-fixable): 60-second requeue (reduces spam)
+  - Transient API errors: 5-second requeue (fast recovery)
+  - Other validation errors: 15-second requeue
 
 ### Custom Resource Definition (CRD)
 
@@ -119,9 +122,17 @@ The operator follows the standard Kubernetes controller pattern:
 - `RUSTFS_CONSOLE_ADDRESS` - Console binding address (0.0.0.0:9001)
 - `RUSTFS_CONSOLE_ENABLE` - Enable console UI (true)
 
-**Credentials** (from environment variables or Secrets):
-- `accesskey` - Required, must be non-empty
-- `secretkey` - Required, must be non-empty
+**Credentials** (optional - from Secrets or environment variables):
+- **Recommended**: Use a Secret referenced via `spec.credsSecret.name` (see `examples/secret-credentials-tenant.yaml`)
+- **Alternative**: Provide via environment variables in `spec.env` (e.g., `RUSTFS_ACCESS_KEY`, `RUSTFS_SECRET_KEY`)
+- **If neither provided**: RustFS will use built-in defaults (`rustfsadmin` / `rustfsadmin`) - acceptable for development, change for production
+- Secret must contain: `accesskey` and `secretkey` keys (both required, valid UTF-8, minimum 8 characters)
+- Priority: Secret credentials > Environment variables > RustFS defaults
+- Validation: Only performed when Secret is configured
+  - Secret exists in same namespace
+  - Has both required keys
+  - Keys are valid UTF-8
+  - Keys are at least 8 characters long
 
 ### Context and API Wrapper
 
@@ -130,8 +141,13 @@ The operator follows the standard Kubernetes controller pattern:
   - `get()`, `create()`, `delete()`, `list()` - Standard CRUD operations
   - `update_status()` - Updates Tenant status with retry logic for conflicts
   - `record()` - Publishes Kubernetes events for reconciliation actions
-  - `get_tenant_credentials()` - Extracts and validates tenant credentials (accesskey/secretkey)
-    - TODO at line 187: Add support for reading credentials from Secrets
+  - `validate_credential_secret()` - Validates credential Secret structure (when configured)
+    - ✅ Validates Secret exists and has required keys (`accesskey`, `secretkey`)
+    - ✅ Validates keys contain valid UTF-8 data
+    - ✅ Validates minimum 8 characters for both keys
+    - Does NOT extract credential values (for security)
+    - Actual credential injection handled by Kubernetes via `secretKeyRef`
+    - Returns comprehensive error messages for debugging
 
 ### Resource Creation
 
@@ -179,9 +195,9 @@ The `Tenant` type in `src/types/v1alpha1/tenant.rs` has factory methods for crea
 ## Known Issues and TODOs
 
 ### High Priority
-- [ ] **Secret-based credential management** (`src/context.rs:187`)
-- [ ] **Status condition management** (`src/reconcile.rs:92`)
-- [ ] **StatefulSet reconciliation** - Creation works, updates need refinement
+- [x] ~~**Secret-based credential management**~~ ✅ **COMPLETED** (2025-11-15, Issue #41)
+- [ ] **Status condition management** (`src/reconcile.rs:92`, Issue #42)
+- [ ] **StatefulSet reconciliation** (`reconcile.rs`) - Creation works, updates need refinement (Issue #43)
 - [ ] **Integration tests** - Only unit tests currently exist
 
 ### Medium Priority
