@@ -43,11 +43,24 @@ pub enum Error {
     #[snafu(display("credential secret '{}' missing required key '{}'", secret_name, key))]
     CredentialSecretMissingKey { secret_name: String, key: String },
 
-    #[snafu(display("credential secret '{}' has invalid data encoding for key '{}'", secret_name, key))]
+    #[snafu(display(
+        "credential secret '{}' has invalid data encoding for key '{}'",
+        secret_name,
+        key
+    ))]
     CredentialSecretInvalidEncoding { secret_name: String, key: String },
 
-    #[snafu(display("credential secret '{}' key '{}' must be at least 8 characters (got {} characters)", secret_name, key, length))]
-    CredentialSecretTooShort { secret_name: String, key: String, length: usize },
+    #[snafu(display(
+        "credential secret '{}' key '{}' must be at least 8 characters (got {} characters)",
+        secret_name,
+        key,
+        length
+    ))]
+    CredentialSecretTooShort {
+        secret_name: String,
+        key: String,
+        length: usize,
+    },
 }
 
 pub struct Context {

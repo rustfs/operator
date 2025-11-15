@@ -50,19 +50,18 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     // Actual credential injection happens via secretKeyRef in the StatefulSet.
     if let Some(ref cfg) = latest_tenant.spec.creds_secret
         && !cfg.name.is_empty()
+        && let Err(e) = ctx.validate_credential_secret(&latest_tenant).await
     {
-        ctx.validate_credential_secret(&latest_tenant)
-            .await
-            .map_err(|e| {
-                // Record event for credential validation failure
-                let _ = ctx.record(
-                    &latest_tenant,
-                    EventType::Warning,
-                    "CredentialValidationFailed",
-                    &format!("Failed to validate credentials: {}", e),
-                );
-                e
-            })?;
+        // Record event for credential validation failure
+        let _ = ctx
+            .record(
+                &latest_tenant,
+                EventType::Warning,
+                "CredentialValidationFailed",
+                &format!("Failed to validate credentials: {}", e),
+            )
+            .await;
+        return Err(e.into());
     }
 
     // 1. Create RBAC resources (conditionally based on service account settings)
