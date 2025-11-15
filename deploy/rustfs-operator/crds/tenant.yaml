@@ -963,10 +963,6 @@ spec:
                               description: volumeName is the binding reference to the PersistentVolume backing this claim.
                               type: string
                           type: object
-                          x-kubernetes-validations:
-                          - message: a volume claim template must be specified
-                            reason: FieldValueRequired
-                            rule: '!has(self.volume_claim_template)'
                         volumesPerServer:
                           format: int32
                           type: integer

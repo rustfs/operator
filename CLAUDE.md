@@ -102,7 +102,7 @@ The operator follows the standard Kubernetes controller pattern:
 
 - **Persistence Config**: `src/types/v1alpha1/persistence.rs`
   - `volumes_per_server`: Number of volumes per server (must be > 0)
-  - `volume_claim_template`: **Required** field - must be specified
+  - `volume_claim_template`: Optional PVC spec (defaults to ReadWriteOnce, 10Gi)
   - `path`: Optional custom volume mount path (default: `/data/rustfs{N}`)
   - `labels`, `annotations`: Optional metadata for PVCs
 
