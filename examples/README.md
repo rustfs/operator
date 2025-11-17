@@ -10,6 +10,7 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 |---------|----------|------------|---------|----------|
 | [minimal-dev-tenant.yaml](./minimal-dev-tenant.yaml) | Development/Learning | ⭐ Simple | 40Gi | **Start here** if new |
 | [simple-tenant.yaml](./simple-tenant.yaml) | Documentation Reference | ⭐⭐ Moderate | Configurable | Learning all options |
+| [secret-credentials-tenant.yaml](./secret-credentials-tenant.yaml) | Secret-based Credentials | ⭐ Simple | Configurable | **Production credential security** |
 | [multi-pool-tenant.yaml](./multi-pool-tenant.yaml) | Multiple Pools | ⭐⭐ Moderate | ~160Gi | Multi-pool setups |
 | [production-ha-tenant.yaml](./production-ha-tenant.yaml) | Production HA | ⭐⭐⭐ Advanced | 6.4TB | HA with zone distribution |
 | [cluster-expansion-tenant.yaml](./cluster-expansion-tenant.yaml) | Capacity Expansion | ⭐⭐⭐ Advanced | 384TB | Growing cluster capacity |
@@ -26,7 +27,8 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 **Important Notes:**
 - RustFS S3 API runs on port **9000**
 - RustFS Console UI runs on port **9001**
-- Default credentials: `rustfsadmin` / `rustfsadmin`
+- **Credentials**: Use Secrets for production (see `secret-credentials-tenant.yaml`)
+- Default dev credentials: `rustfsadmin` / `rustfsadmin` ⚠️ **Change for production!**
 - Operator automatically sets: `RUSTFS_VOLUMES`, `RUSTFS_ADDRESS`, `RUSTFS_CONSOLE_ADDRESS`, `RUSTFS_CONSOLE_ENABLE`
 
 **⚠️ Critical Architecture Understanding:**
@@ -75,7 +77,50 @@ kubectl apply -f examples/simple-tenant.yaml
 
 ---
 
-### 3. [multi-pool-tenant.yaml](./multi-pool-tenant.yaml) 🔄 **Multi-Pool**
+### 3. [secret-credentials-tenant.yaml](./secret-credentials-tenant.yaml) 🔒 **Secure Credentials**
+
+**RECOMMENDED for production**: Demonstrates secure credential management using Kubernetes Secrets.
+
+**Features demonstrated:**
+- Secret creation with RustFS credentials (`accesskey` and `secretkey`)
+- Tenant referencing Secret via `spec.configuration.name`
+- Automatic credential injection into pods as `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY`
+- Production security best practices
+- Alternative approaches (env var with `secretKeyRef`)
+- Credential rotation instructions
+
+**Configuration:**
+- 1 pool with 2 servers × 2 volumes = 4 volumes
+- Credentials stored in Secret (not hardcoded in YAML)
+- Secrets encrypted at rest (if cluster configured)
+
+**Use case:** Production deployments requiring secure credential management, compliance requirements, credential rotation.
+
+**Security benefits:**
+- ✅ Credentials not visible in Tenant YAML
+- ✅ RBAC-controlled Secret access
+- ✅ Compatible with external secret managers (Vault, AWS Secrets Manager, etc.)
+- ✅ Supports credential rotation without YAML changes
+- ✅ Audit trail for Secret access
+
+**Deployment:**
+```bash
+# Create Secret and Tenant
+kubectl apply -f examples/secret-credentials-tenant.yaml
+
+# Verify credentials injected (should not show actual values)
+kubectl describe pod secure-tenant-pool-0-0 | grep -A5 "Environment:"
+```
+
+**Production recommendations:**
+- Use External Secrets Operator or Sealed Secrets for GitOps
+- Enable Kubernetes Secret encryption at rest
+- Rotate credentials quarterly
+- Generate strong credentials: `openssl rand -hex 32`
+
+---
+
+### 4. [multi-pool-tenant.yaml](./multi-pool-tenant.yaml) 🔄 **Multi-Pool**
 
 Multiple storage pools within a single tenant.
 
@@ -99,7 +144,7 @@ kubectl apply -f examples/multi-pool-tenant.yaml
 
 ---
 
-### 4. [production-ha-tenant.yaml](./production-ha-tenant.yaml) 🏢 **Production Ready**
+### 5. [production-ha-tenant.yaml](./production-ha-tenant.yaml) 🏢 **Production Ready**
 
 **High-availability production configuration** with enterprise features.
 
@@ -128,7 +173,7 @@ kubectl apply -f examples/production-ha-tenant.yaml
 
 ---
 
-### 5. [cluster-expansion-tenant.yaml](./cluster-expansion-tenant.yaml) 📈 **Cluster Expansion**
+### 6. [cluster-expansion-tenant.yaml](./cluster-expansion-tenant.yaml) 📈 **Cluster Expansion**
 
 **Add capacity or migrate to new hardware** using multiple pools.
 
@@ -191,7 +236,7 @@ kubectl apply -f examples/hardware-pools-tenant.yaml
 
 ---
 
-### 6. [geographic-pools-tenant.yaml](./geographic-pools-tenant.yaml) 🌍 **Multi-Region**
+### 7. [geographic-pools-tenant.yaml](./geographic-pools-tenant.yaml) 🌍 **Multi-Region**
 
 **Geographic distribution** across multiple regions for compliance and latency.
 
@@ -222,7 +267,7 @@ kubectl apply -f examples/geographic-pools-tenant.yaml
 
 ---
 
-### 7. [spot-instance-tenant.yaml](./spot-instance-tenant.yaml) 💰 **Cost Optimization**
+### 8. [spot-instance-tenant.yaml](./spot-instance-tenant.yaml) 💰 **Cost Optimization**
 
 **Mix of on-demand and spot instances** for 70-90% cost savings.
 
@@ -254,7 +299,7 @@ kubectl apply -f examples/spot-instance-tenant.yaml
 
 ---
 
-### 8. [custom-rbac-tenant.yaml](./custom-rbac-tenant.yaml) 🔐 **Custom Security**
+### 9. [custom-rbac-tenant.yaml](./custom-rbac-tenant.yaml) 🔐 **Custom Security**
 
 **Custom RBAC configurations** for advanced security requirements.
 
