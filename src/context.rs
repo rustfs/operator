@@ -61,6 +61,9 @@ pub enum Error {
         key: String,
         length: usize,
     },
+
+    #[snafu(transparent)]
+    Serde { source: serde_json::Error },
 }
 
 pub struct Context {
@@ -119,7 +122,7 @@ impl Context {
             let mut status = tenant.status.clone().unwrap_or_default();
             status.available_replicas = replica;
             status.current_state = current_status.to_string();
-            let status_body = serde_json::to_vec(&status).unwrap();
+            let status_body = serde_json::to_vec(&status)?;
 
             api.replace_status(name, &PostParams::default(), status_body)
                 .context(KubeSnafu)
