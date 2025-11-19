@@ -33,3 +33,7 @@ shadow-rs = { version = "1.4.0", features = ["build"] }
 
 [lints.rust]
 unused_variables = "allow"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
