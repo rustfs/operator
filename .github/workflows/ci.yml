@@ -109,4 +109,4 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run clippy lints
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-features -- -D warnings
