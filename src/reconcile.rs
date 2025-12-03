@@ -97,10 +97,79 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     ctx.apply(&latest_tenant.new_headless_service(), &ns)
         .await?;
 
-    // 3. Create StatefulSets for each pool
+    // 3. Create or update StatefulSets for each pool
     for pool in &latest_tenant.spec.pools {
-        ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
-            .await?;
+        let ss_name = format!("{}-{}", latest_tenant.name(), pool.name);
+
+        // Try to get existing StatefulSet
+        match ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns).await {
+            Ok(existing_ss) => {
+                // StatefulSet exists - check if update is needed
+                debug!("StatefulSet {} exists, checking if update needed", ss_name);
+
+                // First, validate that the update is safe (no immutable field changes)
+                if let Err(e) = latest_tenant.validate_statefulset_update(&existing_ss, pool) {
+                    error!("StatefulSet {} update validation failed: {}", ss_name, e);
+
+                    // Record event for validation failure
+                    let _ = ctx
+                        .record(
+                            &latest_tenant,
+                            EventType::Warning,
+                            "StatefulSetUpdateValidationFailed",
+                            &format!("Cannot update StatefulSet {}: {}", ss_name, e),
+                        )
+                        .await;
+
+                    return Err(e.into());
+                }
+
+                // Check if update is actually needed
+                if latest_tenant.statefulset_needs_update(&existing_ss, pool)? {
+                    debug!("StatefulSet {} needs update, applying changes", ss_name);
+
+                    // Record event for update start
+                    let _ = ctx
+                        .record(
+                            &latest_tenant,
+                            EventType::Normal,
+                            "StatefulSetUpdateStarted",
+                            &format!("Updating StatefulSet {}", ss_name),
+                        )
+                        .await;
+
+                    // Apply the update
+                    ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns).await?;
+
+                    debug!("StatefulSet {} updated successfully", ss_name);
+                } else {
+                    debug!("StatefulSet {} is up to date, no changes needed", ss_name);
+                }
+            }
+            Err(e) if e.to_string().contains("NotFound") => {
+                // StatefulSet doesn't exist - create it
+                debug!("StatefulSet {} not found, creating", ss_name);
+
+                // Record event for creation
+                let _ = ctx
+                    .record(
+                        &latest_tenant,
+                        EventType::Normal,
+                        "StatefulSetCreated",
+                        &format!("Creating StatefulSet {}", ss_name),
+                    )
+                    .await;
+
+                ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns).await?;
+
+                debug!("StatefulSet {} created successfully", ss_name);
+            }
+            Err(e) => {
+                // Other error - propagate
+                error!("Failed to get StatefulSet {}: {}", ss_name, e);
+                return Err(e.into());
+            }
+        }
     }
 
     Ok(Action::await_change())
@@ -136,7 +205,16 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
         },
 
         // Type errors - validation issues, use moderate requeue
-        Error::Types { .. } => Action::requeue(Duration::from_secs(15)),
+        Error::Types { source } => match source {
+            // Immutable field modification errors - require user intervention
+            // Use 60-second requeue to reduce event/log spam while user fixes the issue
+            types::error::Error::ImmutableFieldModified { .. } => {
+                Action::requeue(Duration::from_secs(60))
+            }
+
+            // Other type errors - use moderate requeue
+            _ => Action::requeue(Duration::from_secs(15)),
+        },
     }
 }
 
