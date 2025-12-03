@@ -287,4 +287,92 @@ impl Context {
 
         Ok(())
     }
+
+    /// Gets the status of a StatefulSet including rollout progress
+    ///
+    /// # Returns
+    /// The StatefulSet status with replica counts and revision information
+    pub async fn get_statefulset_status(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<k8s_openapi::api::apps::v1::StatefulSetStatus, Error> {
+        let ss: k8s_openapi::api::apps::v1::StatefulSet =
+            self.get(name, namespace).await?;
+
+        ss.status.ok_or_else(|| Error::Types {
+            source: types::error::Error::InternalError {
+                msg: format!("StatefulSet {} has no status", name),
+            },
+        })
+    }
+
+    /// Checks if a StatefulSet rollout is complete
+    ///
+    /// A rollout is considered complete when:
+    /// - observedGeneration matches metadata.generation (controller has seen latest spec)
+    /// - replicas == readyReplicas (all pods are ready)
+    /// - currentRevision == updateRevision (all pods are on the new revision)
+    /// - updatedReplicas == replicas (all pods have been updated)
+    ///
+    /// # Returns
+    /// - `Ok(true)` if rollout is complete
+    /// - `Ok(false)` if rollout is still in progress
+    /// - `Err` if there's an error fetching the StatefulSet
+    pub async fn is_rollout_complete(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<bool, Error> {
+        let ss: k8s_openapi::api::apps::v1::StatefulSet =
+            self.get(name, namespace).await?;
+
+        let metadata = &ss.metadata;
+        let spec = ss.spec.as_ref().ok_or_else(|| Error::Types {
+            source: types::error::Error::InternalError {
+                msg: format!("StatefulSet {} missing spec", name),
+            },
+        })?;
+
+        let status = ss.status.as_ref().ok_or_else(|| Error::Types {
+            source: types::error::Error::InternalError {
+                msg: format!("StatefulSet {} missing status", name),
+            },
+        })?;
+
+        let desired_replicas = spec.replicas.unwrap_or(1);
+
+        // Check if controller has observed the latest generation
+        let generation_current = metadata.generation.is_some()
+            && status.observed_generation.is_some()
+            && metadata.generation == status.observed_generation;
+
+        // Check if all replicas are ready
+        let replicas_ready =
+            status.replicas == desired_replicas
+                && status.ready_replicas.unwrap_or(0) == desired_replicas
+                && status.updated_replicas.unwrap_or(0) == desired_replicas;
+
+        // Check if all pods are on the same revision
+        let revisions_match = status.current_revision.is_some()
+            && status.update_revision.is_some()
+            && status.current_revision == status.update_revision;
+
+        Ok(generation_current && replicas_ready && revisions_match)
+    }
+
+    /// Gets the current and update revision of a StatefulSet
+    ///
+    /// # Returns
+    /// A tuple of (current_revision, update_revision)
+    /// Returns None for either value if not available
+    pub async fn get_statefulset_revisions(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<(Option<String>, Option<String>), Error> {
+        let status = self.get_statefulset_status(name, namespace).await?;
+
+        Ok((status.current_revision, status.update_revision))
+    }
 }

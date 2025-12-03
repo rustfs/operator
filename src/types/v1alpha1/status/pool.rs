@@ -21,8 +21,39 @@ use strum::Display;
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Pool {
+    /// Name of the StatefulSet for this pool
     pub ss_name: String,
+
+    /// Current state of the pool
     pub state: PoolState,
+
+    /// Total number of non-terminated pods targeted by this pool's StatefulSet
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<i32>,
+
+    /// Number of pods with Ready condition
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_replicas: Option<i32>,
+
+    /// Number of pods with current revision
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_replicas: Option<i32>,
+
+    /// Number of pods with updated revision
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_replicas: Option<i32>,
+
+    /// Current revision hash of the StatefulSet
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<String>,
+
+    /// Update revision hash of the StatefulSet (different from current during rollout)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_revision: Option<String>,
+
+    /// Last time the pool status was updated
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_update_time: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Display)]
@@ -35,6 +66,18 @@ pub enum PoolState {
 
     #[strum(to_string = "PoolInitialized")]
     Initialized,
+
+    #[strum(to_string = "PoolUpdating")]
+    Updating,
+
+    #[strum(to_string = "PoolRolloutComplete")]
+    RolloutComplete,
+
+    #[strum(to_string = "PoolRolloutFailed")]
+    RolloutFailed,
+
+    #[strum(to_string = "PoolDegraded")]
+    Degraded,
 }
 
 impl JsonSchema for PoolState {
