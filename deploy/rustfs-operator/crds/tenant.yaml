@@ -1157,15 +1157,87 @@ spec:
               availableReplicas:
                 format: int32
                 type: integer
+              conditions:
+                description: Kubernetes standard conditions
+                items:
+                  description: Kubernetes standard condition for Tenant resources
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned from one status to another
+                      nullable: true
+                      type: string
+                    message:
+                      description: Human-readable message indicating details about the transition
+                      type: string
+                    observedGeneration:
+                      description: The generation of the Tenant resource that this condition reflects
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: One-word CamelCase reason for the condition's last transition
+                      type: string
+                    status:
+                      description: Status of the condition (True, False, Unknown)
+                      type: string
+                    type:
+                      description: Type of condition (Ready, Progressing, Degraded)
+                      type: string
+                  required:
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
               currentState:
                 type: string
+              observedGeneration:
+                description: The generation observed by the operator
+                format: int64
+                nullable: true
+                type: integer
               pools:
                 items:
                   properties:
+                    currentReplicas:
+                      description: Number of pods with current revision
+                      format: int32
+                      nullable: true
+                      type: integer
+                    currentRevision:
+                      description: Current revision hash of the StatefulSet
+                      nullable: true
+                      type: string
+                    lastUpdateTime:
+                      description: Last time the pool status was updated
+                      nullable: true
+                      type: string
+                    readyReplicas:
+                      description: Number of pods with Ready condition
+                      format: int32
+                      nullable: true
+                      type: integer
+                    replicas:
+                      description: Total number of non-terminated pods targeted by this pool's StatefulSet
+                      format: int32
+                      nullable: true
+                      type: integer
                     ssName:
+                      description: Name of the StatefulSet for this pool
                       type: string
                     state:
+                      description: Current state of the pool
                       type: string
+                    updateRevision:
+                      description: Update revision hash of the StatefulSet (different from current during rollout)
+                      nullable: true
+                      type: string
+                    updatedReplicas:
+                      description: Number of pods with updated revision
+                      format: int32
+                      nullable: true
+                      type: integer
                   required:
                   - ssName
                   - state

@@ -38,6 +38,7 @@ pub mod tests;
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_level(true)
         .with_file(true)
         .with_line_number(true)
