@@ -38,7 +38,6 @@ mod workloads;
     plural = "tenants",
     singular = "tenant",
     printcolumn = r#"{"name":"State", "type":"string", "jsonPath":".status.currentState"}"#,
-    printcolumn = r#"{"name":"Health", "type":"string", "jsonPath":".status.healthStatus"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#,
     crates(serde_json = "k8s_openapi::serde_json")
 )]

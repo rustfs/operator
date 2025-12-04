@@ -17,9 +17,6 @@ spec:
     - jsonPath: .status.currentState
       name: State
       type: string
-    - jsonPath: .status.healthStatus
-      name: Health
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
