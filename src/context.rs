@@ -113,25 +113,32 @@ impl Context {
     ) -> Result<Tenant, Error>
     {
         let api: Api<Tenant> = Api::namespaced(self.client.clone(), &resource.namespace()?);
-        let name = &resource.name();
+        let name = resource.name();
 
-        let update_func = async |_tenant: &Tenant| {
-            let status_body = serde_json::to_vec(&status)?;
+        // Try to update status
+        let mut updated_tenant = resource.clone();
+        updated_tenant.status = Some(status.clone());
+        let status_body = serde_json::to_vec(&updated_tenant)?;
 
-            api.replace_status(name, &PostParams::default(), status_body)
-                .context(KubeSnafu)
-                .await
-        };
-
-        match update_func(resource).await {
+        match api.replace_status(&name, &PostParams::default(), status_body.clone())
+            .context(KubeSnafu)
+            .await
+        {
             Ok(t) => return Ok(t),
             _ => {}
         }
 
         info!("status update failed due to conflict, retrieve the latest resource and retry.");
 
-        let new_one = api.get(name).context(KubeSnafu).await?;
-        update_func(&new_one).await
+        // Retry with latest resource
+        let new_one = api.get(&name).context(KubeSnafu).await?;
+        let mut updated_tenant = new_one.clone();
+        updated_tenant.status = Some(status);
+        let status_body = serde_json::to_vec(&updated_tenant)?;
+
+        api.replace_status(&name, &PostParams::default(), status_body)
+            .context(KubeSnafu)
+            .await
     }
 
     pub async fn delete<T>(&self, name: &str, namespace: &str) -> Result<(), Error>
