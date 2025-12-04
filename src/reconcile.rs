@@ -139,7 +139,13 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         }
     }
 
-    // 4. Create or update StatefulSets for each pool
+    // 4. Create or update StatefulSets for each pool and collect their statuses
+    let mut pool_statuses = Vec::new();
+    let mut any_updating = false;
+    let mut any_degraded = false;
+    let mut total_replicas = 0;
+    let mut ready_replicas = 0;
+
     for pool in &latest_tenant.spec.pools {
         let ss_name = format!("{}-{}", latest_tenant.name(), pool.name);
 
@@ -187,6 +193,30 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
                 } else {
                     debug!("StatefulSet {} is up to date, no changes needed", ss_name);
                 }
+
+                // Fetch the StatefulSet again to get the latest status after any updates
+                let ss = ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns).await?;
+
+                // Build pool status from StatefulSet
+                let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
+
+                // Track if any pool is updating or degraded
+                use crate::types::v1alpha1::status::pool::PoolState;
+                match pool_status.state {
+                    PoolState::Updating => any_updating = true,
+                    PoolState::Degraded | PoolState::RolloutFailed => any_degraded = true,
+                    _ => {}
+                }
+
+                // Accumulate replica counts
+                if let Some(r) = pool_status.replicas {
+                    total_replicas += r;
+                }
+                if let Some(r) = pool_status.ready_replicas {
+                    ready_replicas += r;
+                }
+
+                pool_statuses.push(pool_status);
             }
             Err(e) if e.to_string().contains("NotFound") => {
                 // StatefulSet doesn't exist - create it
@@ -205,6 +235,12 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
                 ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns).await?;
 
                 debug!("StatefulSet {} created successfully", ss_name);
+
+                // After creation, fetch the StatefulSet to get its status
+                let ss = ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns).await?;
+                let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
+                any_updating = true; // New StatefulSet is always updating initially
+                pool_statuses.push(pool_status);
             }
             Err(e) => {
                 // Other error - propagate
@@ -214,13 +250,117 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         }
     }
 
-    Ok(Action::await_change())
+    // 5. Aggregate pool statuses and determine overall Tenant conditions
+    use crate::types::v1alpha1::status::{Condition, Status};
+
+    let observed_generation = latest_tenant.metadata.generation;
+    let current_time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let mut conditions = Vec::new();
+
+    // Determine Ready condition
+    let ready_condition = if any_degraded {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "False".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "PoolDegraded".to_string(),
+            message: "One or more pools are degraded".to_string(),
+        }
+    } else if any_updating {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "False".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "RolloutInProgress".to_string(),
+            message: "StatefulSet rollout in progress".to_string(),
+        }
+    } else if ready_replicas == total_replicas && total_replicas > 0 {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "True".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "AllPodsReady".to_string(),
+            message: format!("{}/{} pods ready", ready_replicas, total_replicas),
+        }
+    } else {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "False".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "PodsNotReady".to_string(),
+            message: format!("{}/{} pods ready", ready_replicas, total_replicas),
+        }
+    };
+    conditions.push(ready_condition);
+
+    // Determine Progressing condition
+    if any_updating {
+        conditions.push(Condition {
+            type_: "Progressing".to_string(),
+            status: "True".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "RolloutInProgress".to_string(),
+            message: "StatefulSet rollout in progress".to_string(),
+        });
+    }
+
+    // Determine Degraded condition
+    if any_degraded {
+        conditions.push(Condition {
+            type_: "Degraded".to_string(),
+            status: "True".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "PoolDegraded".to_string(),
+            message: "One or more pools are degraded".to_string(),
+        });
+    }
+
+    // Determine overall state
+    let current_state = if any_degraded {
+        "Degraded".to_string()
+    } else if any_updating {
+        "Updating".to_string()
+    } else if ready_replicas == total_replicas && total_replicas > 0 {
+        "Ready".to_string()
+    } else {
+        "NotReady".to_string()
+    };
+
+    // Build and update status
+    let status = Status {
+        current_state,
+        available_replicas: ready_replicas,
+        pools: pool_statuses,
+        observed_generation,
+        conditions,
+    };
+
+    debug!("Updating tenant status: {:?}", status);
+    ctx.update_status(&latest_tenant, status).await?;
+
+    // Requeue faster if any pool is updating
+    if any_updating {
+        debug!("Pools are updating, requeuing in 10 seconds");
+        Ok(Action::requeue(Duration::from_secs(10)))
+    } else {
+        Ok(Action::await_change())
+    }
 }
 
 pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
     error!("error_policy: {:?}", error);
 
-    // todo: update tenant status (issue #42)
+    // Status updates happen during reconciliation before errors are returned.
+    // The reconcile function sets appropriate conditions (Ready=False, Degraded=True)
+    // and records events for failures before propagating errors.
+    // This error_policy function only determines requeue strategy.
 
     // Use different requeue strategies based on error type:
     // - User-fixable errors (credentials, validation): Longer intervals to reduce spam

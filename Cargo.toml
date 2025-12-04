@@ -8,6 +8,7 @@ homepage = "https://rustfs.com"
 
 
 [dependencies]
+chrono = "0.4"
 const-str = "0.7.0"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.48.0", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }

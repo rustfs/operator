@@ -106,22 +106,16 @@ impl Context {
             .await
     }
 
-    pub async fn update_status<S>(
+    pub async fn update_status(
         &self,
         resource: &Tenant,
-        current_status: S,
-        replica: i32,
+        status: crate::types::v1alpha1::status::Status,
     ) -> Result<Tenant, Error>
-    where
-        S: ToString,
     {
         let api: Api<Tenant> = Api::namespaced(self.client.clone(), &resource.namespace()?);
         let name = &resource.name();
 
-        let update_func = async |tenant: &Tenant| {
-            let mut status = tenant.status.clone().unwrap_or_default();
-            status.available_replicas = replica;
-            status.current_state = current_status.to_string();
+        let update_func = async |_tenant: &Tenant| {
             let status_body = serde_json::to_vec(&status)?;
 
             api.replace_status(name, &PostParams::default(), status_body)
