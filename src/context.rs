@@ -112,15 +112,18 @@ impl Context {
         status: crate::types::v1alpha1::status::Status,
     ) -> Result<Tenant, Error>
     {
+        use kube::api::{Patch, PatchParams};
+
         let api: Api<Tenant> = Api::namespaced(self.client.clone(), &resource.namespace()?);
         let name = resource.name();
 
-        // Try to update status
-        let mut updated_tenant = resource.clone();
-        updated_tenant.status = Some(status.clone());
-        let status_body = serde_json::to_vec(&updated_tenant)?;
+        // Create a JSON merge patch for the status
+        let status_patch = serde_json::json!({
+            "status": status
+        });
 
-        match api.replace_status(&name, &PostParams::default(), status_body.clone())
+        // Try to patch the status
+        match api.patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch.clone()))
             .context(KubeSnafu)
             .await
         {
@@ -130,13 +133,8 @@ impl Context {
 
         info!("status update failed due to conflict, retrieve the latest resource and retry.");
 
-        // Retry with latest resource
-        let new_one = api.get(&name).context(KubeSnafu).await?;
-        let mut updated_tenant = new_one.clone();
-        updated_tenant.status = Some(status);
-        let status_body = serde_json::to_vec(&updated_tenant)?;
-
-        api.replace_status(&name, &PostParams::default(), status_body)
+        // Retry with the same patch
+        api.patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch))
             .context(KubeSnafu)
             .await
     }
