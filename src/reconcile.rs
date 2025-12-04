@@ -97,7 +97,49 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     ctx.apply(&latest_tenant.new_headless_service(), &ns)
         .await?;
 
-    // 3. Create or update StatefulSets for each pool
+    // 3. Validate no pool renames (detect orphaned StatefulSets)
+    // Pool renames create new StatefulSets but leave old ones orphaned
+    let owned_statefulsets = ctx
+        .list::<k8s_openapi::api::apps::v1::StatefulSet>(&ns)
+        .await?;
+
+    let current_pool_names: std::collections::HashSet<_> =
+        latest_tenant.spec.pools.iter().map(|p| p.name.as_str()).collect();
+
+    for ss in owned_statefulsets {
+        // Check if this StatefulSet is owned by this Tenant
+        if let Some(owner_refs) = &ss.metadata.owner_references {
+            let owned_by_tenant = owner_refs.iter().any(|owner| {
+                owner.kind == "Tenant"
+                    && owner.name == latest_tenant.name()
+                    && owner.uid == latest_tenant.metadata.uid.as_deref().unwrap_or("")
+            });
+
+            if owned_by_tenant {
+                let ss_name = ss.metadata.name.as_deref().unwrap_or("");
+                let tenant_prefix = format!("{}-", latest_tenant.name());
+
+                // Extract pool name from StatefulSet name (format: {tenant}-{pool})
+                if let Some(pool_name) = ss_name.strip_prefix(&tenant_prefix) {
+                    if !current_pool_names.contains(pool_name) {
+                        // Found orphaned StatefulSet - pool was renamed or removed
+                        return Err(types::error::Error::ImmutableFieldModified {
+                            name: latest_tenant.name(),
+                            field: "spec.pools[].name".to_string(),
+                            message: format!(
+                                "Pool name cannot be changed. Found StatefulSet '{}' for pool '{}' which no longer exists in spec. \
+                                Pool renames are not supported because they change the StatefulSet selector (immutable field). \
+                                To rename a pool: 1) Delete the Tenant, 2) Recreate with new pool names.",
+                                ss_name, pool_name
+                            ),
+                        }.into());
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Create or update StatefulSets for each pool
     for pool in &latest_tenant.spec.pools {
         let ss_name = format!("{}-{}", latest_tenant.name(), pool.name);
 
