@@ -251,10 +251,8 @@ impl Tenant {
         };
 
         // Get current time for last_update_time
-        let last_update_time = Some(
-            chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        );
+        let last_update_time =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
 
         crate::types::v1alpha1::status::pool::Pool {
             ss_name,

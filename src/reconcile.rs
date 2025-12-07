@@ -103,8 +103,12 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         .list::<k8s_openapi::api::apps::v1::StatefulSet>(&ns)
         .await?;
 
-    let current_pool_names: std::collections::HashSet<_> =
-        latest_tenant.spec.pools.iter().map(|p| p.name.as_str()).collect();
+    let current_pool_names: std::collections::HashSet<_> = latest_tenant
+        .spec
+        .pools
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
 
     for ss in owned_statefulsets {
         // Check if this StatefulSet is owned by this Tenant
@@ -120,20 +124,20 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
                 let tenant_prefix = format!("{}-", latest_tenant.name());
 
                 // Extract pool name from StatefulSet name (format: {tenant}-{pool})
-                if let Some(pool_name) = ss_name.strip_prefix(&tenant_prefix) {
-                    if !current_pool_names.contains(pool_name) {
-                        // Found orphaned StatefulSet - pool was renamed or removed
-                        return Err(types::error::Error::ImmutableFieldModified {
-                            name: latest_tenant.name(),
-                            field: "spec.pools[].name".to_string(),
-                            message: format!(
-                                "Pool name cannot be changed. Found StatefulSet '{}' for pool '{}' which no longer exists in spec. \
-                                Pool renames are not supported because they change the StatefulSet selector (immutable field). \
-                                To rename a pool: 1) Delete the Tenant, 2) Recreate with new pool names.",
-                                ss_name, pool_name
-                            ),
-                        }.into());
-                    }
+                if let Some(pool_name) = ss_name.strip_prefix(&tenant_prefix)
+                    && !current_pool_names.contains(pool_name)
+                {
+                    // Found orphaned StatefulSet - pool was renamed or removed
+                    return Err(types::error::Error::ImmutableFieldModified {
+                        name: latest_tenant.name(),
+                        field: "spec.pools[].name".to_string(),
+                        message: format!(
+                            "Pool name cannot be changed. Found StatefulSet '{}' for pool '{}' which no longer exists in spec. \
+                            Pool renames are not supported because they change the StatefulSet selector (immutable field). \
+                            To rename a pool: 1) Delete the Tenant, 2) Recreate with new pool names.",
+                            ss_name, pool_name
+                        ),
+                    }.into());
                 }
             }
         }
@@ -150,7 +154,10 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         let ss_name = format!("{}-{}", latest_tenant.name(), pool.name);
 
         // Try to get existing StatefulSet
-        match ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns).await {
+        match ctx
+            .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
+            .await
+        {
             Ok(existing_ss) => {
                 // StatefulSet exists - check if update is needed
                 debug!("StatefulSet {} exists, checking if update needed", ss_name);
@@ -187,7 +194,8 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
                         .await;
 
                     // Apply the update
-                    ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns).await?;
+                    ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
+                        .await?;
 
                     debug!("StatefulSet {} updated successfully", ss_name);
                 } else {
@@ -195,7 +203,9 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
                 }
 
                 // Fetch the StatefulSet again to get the latest status after any updates
-                let ss = ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns).await?;
+                let ss = ctx
+                    .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
+                    .await?;
 
                 // Build pool status from StatefulSet
                 let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
@@ -232,12 +242,15 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
                     )
                     .await;
 
-                ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns).await?;
+                ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
+                    .await?;
 
                 debug!("StatefulSet {} created successfully", ss_name);
 
                 // After creation, fetch the StatefulSet to get its status
-                let ss = ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns).await?;
+                let ss = ctx
+                    .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
+                    .await?;
                 let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
                 any_updating = true; // New StatefulSet is always updating initially
                 pool_statuses.push(pool_status);

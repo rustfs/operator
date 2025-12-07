@@ -110,8 +110,7 @@ impl Context {
         &self,
         resource: &Tenant,
         status: crate::types::v1alpha1::status::Status,
-    ) -> Result<Tenant, Error>
-    {
+    ) -> Result<Tenant, Error> {
         use kube::api::{Patch, PatchParams};
 
         let api: Api<Tenant> = Api::namespaced(self.client.clone(), &resource.namespace()?);
@@ -123,7 +122,12 @@ impl Context {
         });
 
         // Try to patch the status
-        match api.patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch.clone()))
+        match api
+            .patch_status(
+                &name,
+                &PatchParams::default(),
+                &Patch::Merge(status_patch.clone()),
+            )
             .context(KubeSnafu)
             .await
         {
@@ -296,8 +300,7 @@ impl Context {
         name: &str,
         namespace: &str,
     ) -> Result<k8s_openapi::api::apps::v1::StatefulSetStatus, Error> {
-        let ss: k8s_openapi::api::apps::v1::StatefulSet =
-            self.get(name, namespace).await?;
+        let ss: k8s_openapi::api::apps::v1::StatefulSet = self.get(name, namespace).await?;
 
         ss.status.ok_or_else(|| Error::Types {
             source: types::error::Error::InternalError {
@@ -318,13 +321,8 @@ impl Context {
     /// - `Ok(true)` if rollout is complete
     /// - `Ok(false)` if rollout is still in progress
     /// - `Err` if there's an error fetching the StatefulSet
-    pub async fn is_rollout_complete(
-        &self,
-        name: &str,
-        namespace: &str,
-    ) -> Result<bool, Error> {
-        let ss: k8s_openapi::api::apps::v1::StatefulSet =
-            self.get(name, namespace).await?;
+    pub async fn is_rollout_complete(&self, name: &str, namespace: &str) -> Result<bool, Error> {
+        let ss: k8s_openapi::api::apps::v1::StatefulSet = self.get(name, namespace).await?;
 
         let metadata = &ss.metadata;
         let spec = ss.spec.as_ref().ok_or_else(|| Error::Types {
@@ -347,10 +345,9 @@ impl Context {
             && metadata.generation == status.observed_generation;
 
         // Check if all replicas are ready
-        let replicas_ready =
-            status.replicas == desired_replicas
-                && status.ready_replicas.unwrap_or(0) == desired_replicas
-                && status.updated_replicas.unwrap_or(0) == desired_replicas;
+        let replicas_ready = status.replicas == desired_replicas
+            && status.ready_replicas.unwrap_or(0) == desired_replicas
+            && status.updated_replicas.unwrap_or(0) == desired_replicas;
 
         // Check if all pods are on the same revision
         let revisions_match = status.current_revision.is_some()

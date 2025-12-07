@@ -98,6 +98,7 @@ impl Tenant {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     // Test: ServiceAccount resource creation
     #[test]

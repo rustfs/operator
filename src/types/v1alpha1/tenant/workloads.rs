@@ -340,25 +340,33 @@ impl Tenant {
         let desired_template = &desired_spec.template;
 
         // Check if pod template metadata labels changed
-        if existing_template.metadata.as_ref().and_then(|m| m.labels.as_ref())
-            != desired_template.metadata.as_ref().and_then(|m| m.labels.as_ref())
+        if existing_template
+            .metadata
+            .as_ref()
+            .and_then(|m| m.labels.as_ref())
+            != desired_template
+                .metadata
+                .as_ref()
+                .and_then(|m| m.labels.as_ref())
         {
             return Ok(true);
         }
 
-        let existing_pod_spec = existing_template
-            .spec
-            .as_ref()
-            .ok_or(types::error::Error::InternalError {
-                msg: "Existing pod template missing spec".to_string(),
-            })?;
+        let existing_pod_spec =
+            existing_template
+                .spec
+                .as_ref()
+                .ok_or(types::error::Error::InternalError {
+                    msg: "Existing pod template missing spec".to_string(),
+                })?;
 
-        let desired_pod_spec = desired_template
-            .spec
-            .as_ref()
-            .ok_or(types::error::Error::InternalError {
-                msg: "Desired pod template missing spec".to_string(),
-            })?;
+        let desired_pod_spec =
+            desired_template
+                .spec
+                .as_ref()
+                .ok_or(types::error::Error::InternalError {
+                    msg: "Desired pod template missing spec".to_string(),
+                })?;
 
         // Check service account
         if existing_pod_spec.service_account_name != desired_pod_spec.service_account_name {
@@ -539,18 +547,8 @@ impl Tenant {
             for (i, (existing_vct, desired_vct)) in
                 existing_vcts.iter().zip(desired_vcts.iter()).enumerate()
             {
-                let existing_name = existing_vct
-                    .metadata
-                    .name
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let desired_name = desired_vct
-                    .metadata
-                    .name
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
+                let existing_name = existing_vct.metadata.name.as_deref().unwrap_or("");
+                let desired_name = desired_vct.metadata.name.as_deref().unwrap_or("");
 
                 if existing_name != desired_name {
                     return Err(types::error::Error::ImmutableFieldModified {
@@ -591,6 +589,7 @@ impl Tenant {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use k8s_openapi::api::core::v1 as corev1;
 
@@ -812,7 +811,10 @@ mod tests {
             .statefulset_needs_update(&statefulset, pool)
             .expect("Should check update need");
 
-        assert!(!needs_update, "StatefulSet should not need update when comparing to itself");
+        assert!(
+            !needs_update,
+            "StatefulSet should not need update when comparing to itself"
+        );
     }
 
     // Test: StatefulSet diff detection - image change
@@ -833,7 +835,10 @@ mod tests {
             .statefulset_needs_update(&statefulset, pool)
             .expect("Should check update need");
 
-        assert!(needs_update, "StatefulSet should need update when image changes");
+        assert!(
+            needs_update,
+            "StatefulSet should need update when image changes"
+        );
     }
 
     // Test: StatefulSet diff detection - replicas change
@@ -855,7 +860,10 @@ mod tests {
             .statefulset_needs_update(&statefulset, pool)
             .expect("Should check update need");
 
-        assert!(needs_update, "StatefulSet should need update when replicas change");
+        assert!(
+            needs_update,
+            "StatefulSet should need update when replicas change"
+        );
     }
 
     // Test: StatefulSet diff detection - environment variable change
@@ -881,7 +889,10 @@ mod tests {
             .statefulset_needs_update(&statefulset, pool)
             .expect("Should check update need");
 
-        assert!(needs_update, "StatefulSet should need update when env vars change");
+        assert!(
+            needs_update,
+            "StatefulSet should need update when env vars change"
+        );
     }
 
     // Test: StatefulSet diff detection - resources change
@@ -914,7 +925,10 @@ mod tests {
             .statefulset_needs_update(&statefulset, pool)
             .expect("Should check update need");
 
-        assert!(needs_update, "StatefulSet should need update when resources change");
+        assert!(
+            needs_update,
+            "StatefulSet should need update when resources change"
+        );
     }
 
     // Test: StatefulSet validation - selector change rejected
@@ -928,10 +942,10 @@ mod tests {
             .expect("Should create StatefulSet");
 
         // Modify selector (immutable field)
-        if let Some(ref mut spec) = statefulset.spec {
-            if let Some(ref mut labels) = spec.selector.match_labels {
-                labels.insert("modified".to_string(), "true".to_string());
-            }
+        if let Some(ref mut spec) = statefulset.spec
+            && let Some(ref mut labels) = spec.selector.match_labels
+        {
+            labels.insert("modified".to_string(), "true".to_string());
         }
 
         // Validation should fail
@@ -945,7 +959,10 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             crate::types::error::Error::ImmutableFieldModified { field, .. } => {
-                assert_eq!(field, "spec.selector", "Error should indicate selector field");
+                assert_eq!(
+                    field, "spec.selector",
+                    "Error should indicate selector field"
+                );
             }
             _ => panic!("Expected ImmutableFieldModified error"),
         }
@@ -977,7 +994,10 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             crate::types::error::Error::ImmutableFieldModified { field, .. } => {
-                assert_eq!(field, "spec.serviceName", "Error should indicate serviceName field");
+                assert_eq!(
+                    field, "spec.serviceName",
+                    "Error should indicate serviceName field"
+                );
             }
             _ => panic!("Expected ImmutableFieldModified error"),
         }
@@ -1009,8 +1029,14 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             crate::types::error::Error::ImmutableFieldModified { field, message, .. } => {
-                assert_eq!(field, "spec.volumeClaimTemplates", "Error should indicate volumeClaimTemplates field");
-                assert!(message.contains("volumesPerServer"), "Error message should mention volumesPerServer");
+                assert_eq!(
+                    field, "spec.volumeClaimTemplates",
+                    "Error should indicate volumeClaimTemplates field"
+                );
+                assert!(
+                    message.contains("volumesPerServer"),
+                    "Error message should mention volumesPerServer"
+                );
             }
             _ => panic!("Expected ImmutableFieldModified error"),
         }
