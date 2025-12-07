@@ -98,7 +98,6 @@ impl Tenant {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     // Test: ServiceAccount resource creation
     #[test]
@@ -112,12 +111,14 @@ mod tests {
         assert_eq!(sa.metadata.namespace, Some("default".to_string()));
 
         // Verify owner reference exists
-        assert!(sa.metadata.owner_references.is_some());
-        let owner_refs = sa.metadata.owner_references.unwrap();
-        assert_eq!(owner_refs.len(), 1);
-        assert_eq!(owner_refs[0].kind, "Tenant");
-        assert_eq!(owner_refs[0].name, "test-tenant");
-        assert_eq!(owner_refs[0].controller, Some(true));
+        if let Some(owner_refs) = &sa.metadata.owner_references {
+            assert_eq!(owner_refs.len(), 1);
+            assert_eq!(owner_refs[0].kind, "Tenant");
+            assert_eq!(owner_refs[0].name, "test-tenant");
+            assert_eq!(owner_refs[0].controller, Some(true));
+        } else {
+            panic!("ServiceAccount should have owner references");
+        }
     }
 
     // Test: Role structure validation
@@ -132,27 +133,30 @@ mod tests {
         assert_eq!(role.metadata.namespace, Some("default".to_string()));
 
         // Verify rules
-        let rules = role.rules.expect("Role should have rules");
-        assert_eq!(rules.len(), 3, "Role should have 3 policy rules");
+        if let Some(rules) = &role.rules {
+            assert_eq!(rules.len(), 3, "Role should have 3 policy rules");
 
-        // Verify secrets rule
-        let secrets_rule = &rules[0];
-        assert_eq!(secrets_rule.resources, Some(vec!["secrets".to_string()]));
-        assert!(secrets_rule.verbs.contains(&"get".to_string()));
-        assert!(secrets_rule.verbs.contains(&"list".to_string()));
-        assert!(secrets_rule.verbs.contains(&"watch".to_string()));
+            // Verify secrets rule
+            let secrets_rule = &rules[0];
+            assert_eq!(secrets_rule.resources, Some(vec!["secrets".to_string()]));
+            assert!(secrets_rule.verbs.contains(&"get".to_string()));
+            assert!(secrets_rule.verbs.contains(&"list".to_string()));
+            assert!(secrets_rule.verbs.contains(&"watch".to_string()));
 
-        // Verify services rule
-        let services_rule = &rules[1];
-        assert_eq!(services_rule.resources, Some(vec!["services".to_string()]));
-        assert!(services_rule.verbs.contains(&"create".to_string()));
-        assert!(services_rule.verbs.contains(&"delete".to_string()));
-        assert!(services_rule.verbs.contains(&"get".to_string()));
+            // Verify services rule
+            let services_rule = &rules[1];
+            assert_eq!(services_rule.resources, Some(vec!["services".to_string()]));
+            assert!(services_rule.verbs.contains(&"create".to_string()));
+            assert!(services_rule.verbs.contains(&"delete".to_string()));
+            assert!(services_rule.verbs.contains(&"get".to_string()));
 
-        // Verify tenants rule
-        let tenants_rule = &rules[2];
-        assert_eq!(tenants_rule.resources, Some(vec!["tenants".to_string()]));
-        assert!(tenants_rule.verbs.contains(&"get".to_string()));
+            // Verify tenants rule
+            let tenants_rule = &rules[2];
+            assert_eq!(tenants_rule.resources, Some(vec!["tenants".to_string()]));
+            assert!(tenants_rule.verbs.contains(&"get".to_string()));
+        } else {
+            panic!("Role should have rules");
+        }
     }
 
     // Test: RoleBinding with default SA
@@ -171,13 +175,14 @@ mod tests {
         );
 
         // Verify subject points to default SA
-        let subjects = role_binding
-            .subjects
-            .expect("RoleBinding should have subjects");
-        assert_eq!(subjects.len(), 1);
-        assert_eq!(subjects[0].kind, "ServiceAccount");
-        assert_eq!(subjects[0].name, "test-tenant-sa");
-        assert_eq!(subjects[0].namespace, Some("default".to_string()));
+        if let Some(subjects) = &role_binding.subjects {
+            assert_eq!(subjects.len(), 1);
+            assert_eq!(subjects[0].kind, "ServiceAccount");
+            assert_eq!(subjects[0].name, "test-tenant-sa");
+            assert_eq!(subjects[0].namespace, Some("default".to_string()));
+        } else {
+            panic!("RoleBinding should have subjects");
+        }
 
         // Verify role ref
         assert_eq!(role_binding.role_ref.kind, "Role");
@@ -194,13 +199,14 @@ mod tests {
         let role_binding = tenant.new_role_binding(&sa_name, &role);
 
         // Verify subject points to custom SA
-        let subjects = role_binding
-            .subjects
-            .expect("RoleBinding should have subjects");
-        assert_eq!(subjects.len(), 1);
-        assert_eq!(
-            subjects[0].name, "my-custom-sa",
-            "RoleBinding should reference custom service account"
-        );
+        if let Some(subjects) = &role_binding.subjects {
+            assert_eq!(subjects.len(), 1);
+            assert_eq!(
+                subjects[0].name, "my-custom-sa",
+                "RoleBinding should reference custom service account"
+            );
+        } else {
+            panic!("RoleBinding should have subjects");
+        }
     }
 }
