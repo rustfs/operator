@@ -18,6 +18,32 @@ pub mod state;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Kubernetes standard condition for Tenant resources
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Condition {
+    /// Type of condition (Ready, Progressing, Degraded)
+    #[serde(rename = "type")]
+    pub type_: String,
+
+    /// Status of the condition (True, False, Unknown)
+    pub status: String,
+
+    /// Last time the condition transitioned from one status to another
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_transition_time: Option<String>,
+
+    /// The generation of the Tenant resource that this condition reflects
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
+    /// One-word CamelCase reason for the condition's last transition
+    pub reason: String,
+
+    /// Human-readable message indicating details about the transition
+    pub message: String,
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
@@ -26,5 +52,13 @@ pub struct Status {
     pub available_replicas: i32,
 
     pub pools: Vec<pool::Pool>,
+
+    /// The generation observed by the operator
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+
+    /// Kubernetes standard conditions
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
     // pub certificates: certificate::Status,
 }

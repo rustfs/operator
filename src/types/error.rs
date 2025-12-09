@@ -19,4 +19,23 @@ use snafu::Snafu;
 pub enum Error {
     #[snafu(display("object has no namespace associated"))]
     NoNamespace,
+
+    #[snafu(display("internal error: {}", msg))]
+    InternalError { msg: String },
+
+    #[snafu(display("cannot modify immutable field '{}' in {}: {}", field, name, message))]
+    ImmutableFieldModified {
+        name: String,
+        field: String,
+        message: String,
+    },
+
+    #[snafu(display("serde_json error: {}", source))]
+    SerdeJson { source: serde_json::Error },
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(source: serde_json::Error) -> Self {
+        Error::SerdeJson { source }
+    }
 }

@@ -97,19 +97,283 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     ctx.apply(&latest_tenant.new_headless_service(), &ns)
         .await?;
 
-    // 3. Create StatefulSets for each pool
-    for pool in &latest_tenant.spec.pools {
-        ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
-            .await?;
+    // 3. Validate no pool renames (detect orphaned StatefulSets)
+    // Pool renames create new StatefulSets but leave old ones orphaned
+    let owned_statefulsets = ctx
+        .list::<k8s_openapi::api::apps::v1::StatefulSet>(&ns)
+        .await?;
+
+    let current_pool_names: std::collections::HashSet<_> = latest_tenant
+        .spec
+        .pools
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+
+    for ss in owned_statefulsets {
+        // Check if this StatefulSet is owned by this Tenant
+        if let Some(owner_refs) = &ss.metadata.owner_references {
+            let owned_by_tenant = owner_refs.iter().any(|owner| {
+                owner.kind == "Tenant"
+                    && owner.name == latest_tenant.name()
+                    && owner.uid == latest_tenant.metadata.uid.as_deref().unwrap_or("")
+            });
+
+            if owned_by_tenant {
+                let ss_name = ss.metadata.name.as_deref().unwrap_or("");
+                let tenant_prefix = format!("{}-", latest_tenant.name());
+
+                // Extract pool name from StatefulSet name (format: {tenant}-{pool})
+                if let Some(pool_name) = ss_name.strip_prefix(&tenant_prefix)
+                    && !current_pool_names.contains(pool_name)
+                {
+                    // Found orphaned StatefulSet - pool was renamed or removed
+                    return Err(types::error::Error::ImmutableFieldModified {
+                        name: latest_tenant.name(),
+                        field: "spec.pools[].name".to_string(),
+                        message: format!(
+                            "Pool name cannot be changed. Found StatefulSet '{}' for pool '{}' which no longer exists in spec. \
+                            Pool renames are not supported because they change the StatefulSet selector (immutable field). \
+                            To rename a pool: 1) Delete the Tenant, 2) Recreate with new pool names.",
+                            ss_name, pool_name
+                        ),
+                    }.into());
+                }
+            }
+        }
     }
 
-    Ok(Action::await_change())
+    // 4. Create or update StatefulSets for each pool and collect their statuses
+    let mut pool_statuses = Vec::new();
+    let mut any_updating = false;
+    let mut any_degraded = false;
+    let mut total_replicas = 0;
+    let mut ready_replicas = 0;
+
+    for pool in &latest_tenant.spec.pools {
+        let ss_name = format!("{}-{}", latest_tenant.name(), pool.name);
+
+        // Try to get existing StatefulSet
+        match ctx
+            .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
+            .await
+        {
+            Ok(existing_ss) => {
+                // StatefulSet exists - check if update is needed
+                debug!("StatefulSet {} exists, checking if update needed", ss_name);
+
+                // First, validate that the update is safe (no immutable field changes)
+                if let Err(e) = latest_tenant.validate_statefulset_update(&existing_ss, pool) {
+                    error!("StatefulSet {} update validation failed: {}", ss_name, e);
+
+                    // Record event for validation failure
+                    let _ = ctx
+                        .record(
+                            &latest_tenant,
+                            EventType::Warning,
+                            "StatefulSetUpdateValidationFailed",
+                            &format!("Cannot update StatefulSet {}: {}", ss_name, e),
+                        )
+                        .await;
+
+                    return Err(e.into());
+                }
+
+                // Check if update is actually needed
+                if latest_tenant.statefulset_needs_update(&existing_ss, pool)? {
+                    debug!("StatefulSet {} needs update, applying changes", ss_name);
+
+                    // Record event for update start
+                    let _ = ctx
+                        .record(
+                            &latest_tenant,
+                            EventType::Normal,
+                            "StatefulSetUpdateStarted",
+                            &format!("Updating StatefulSet {}", ss_name),
+                        )
+                        .await;
+
+                    // Apply the update
+                    ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
+                        .await?;
+
+                    debug!("StatefulSet {} updated successfully", ss_name);
+                } else {
+                    debug!("StatefulSet {} is up to date, no changes needed", ss_name);
+                }
+
+                // Fetch the StatefulSet again to get the latest status after any updates
+                let ss = ctx
+                    .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
+                    .await?;
+
+                // Build pool status from StatefulSet
+                let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
+
+                // Track if any pool is updating or degraded
+                use crate::types::v1alpha1::status::pool::PoolState;
+                match pool_status.state {
+                    PoolState::Updating => any_updating = true,
+                    PoolState::Degraded | PoolState::RolloutFailed => any_degraded = true,
+                    _ => {}
+                }
+
+                // Accumulate replica counts
+                if let Some(r) = pool_status.replicas {
+                    total_replicas += r;
+                }
+                if let Some(r) = pool_status.ready_replicas {
+                    ready_replicas += r;
+                }
+
+                pool_statuses.push(pool_status);
+            }
+            Err(e) if e.to_string().contains("NotFound") => {
+                // StatefulSet doesn't exist - create it
+                debug!("StatefulSet {} not found, creating", ss_name);
+
+                // Record event for creation
+                let _ = ctx
+                    .record(
+                        &latest_tenant,
+                        EventType::Normal,
+                        "StatefulSetCreated",
+                        &format!("Creating StatefulSet {}", ss_name),
+                    )
+                    .await;
+
+                ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
+                    .await?;
+
+                debug!("StatefulSet {} created successfully", ss_name);
+
+                // After creation, fetch the StatefulSet to get its status
+                let ss = ctx
+                    .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
+                    .await?;
+                let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
+                any_updating = true; // New StatefulSet is always updating initially
+                pool_statuses.push(pool_status);
+            }
+            Err(e) => {
+                // Other error - propagate
+                error!("Failed to get StatefulSet {}: {}", ss_name, e);
+                return Err(e.into());
+            }
+        }
+    }
+
+    // 5. Aggregate pool statuses and determine overall Tenant conditions
+    use crate::types::v1alpha1::status::{Condition, Status};
+
+    let observed_generation = latest_tenant.metadata.generation;
+    let current_time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let mut conditions = Vec::new();
+
+    // Determine Ready condition
+    let ready_condition = if any_degraded {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "False".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "PoolDegraded".to_string(),
+            message: "One or more pools are degraded".to_string(),
+        }
+    } else if any_updating {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "False".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "RolloutInProgress".to_string(),
+            message: "StatefulSet rollout in progress".to_string(),
+        }
+    } else if ready_replicas == total_replicas && total_replicas > 0 {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "True".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "AllPodsReady".to_string(),
+            message: format!("{}/{} pods ready", ready_replicas, total_replicas),
+        }
+    } else {
+        Condition {
+            type_: "Ready".to_string(),
+            status: "False".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "PodsNotReady".to_string(),
+            message: format!("{}/{} pods ready", ready_replicas, total_replicas),
+        }
+    };
+    conditions.push(ready_condition);
+
+    // Determine Progressing condition
+    if any_updating {
+        conditions.push(Condition {
+            type_: "Progressing".to_string(),
+            status: "True".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "RolloutInProgress".to_string(),
+            message: "StatefulSet rollout in progress".to_string(),
+        });
+    }
+
+    // Determine Degraded condition
+    if any_degraded {
+        conditions.push(Condition {
+            type_: "Degraded".to_string(),
+            status: "True".to_string(),
+            last_transition_time: Some(current_time.clone()),
+            observed_generation,
+            reason: "PoolDegraded".to_string(),
+            message: "One or more pools are degraded".to_string(),
+        });
+    }
+
+    // Determine overall state
+    let current_state = if any_degraded {
+        "Degraded".to_string()
+    } else if any_updating {
+        "Updating".to_string()
+    } else if ready_replicas == total_replicas && total_replicas > 0 {
+        "Ready".to_string()
+    } else {
+        "NotReady".to_string()
+    };
+
+    // Build and update status
+    let status = Status {
+        current_state,
+        available_replicas: ready_replicas,
+        pools: pool_statuses,
+        observed_generation,
+        conditions,
+    };
+
+    debug!("Updating tenant status: {:?}", status);
+    ctx.update_status(&latest_tenant, status).await?;
+
+    // Requeue faster if any pool is updating
+    if any_updating {
+        debug!("Pools are updating, requeuing in 10 seconds");
+        Ok(Action::requeue(Duration::from_secs(10)))
+    } else {
+        Ok(Action::await_change())
+    }
 }
 
 pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
     error!("error_policy: {:?}", error);
 
-    // todo: update tenant status (issue #42)
+    // Status updates happen during reconciliation before errors are returned.
+    // The reconcile function sets appropriate conditions (Ready=False, Degraded=True)
+    // and records events for failures before propagating errors.
+    // This error_policy function only determines requeue strategy.
 
     // Use different requeue strategies based on error type:
     // - User-fixable errors (credentials, validation): Longer intervals to reduce spam
@@ -136,7 +400,16 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
         },
 
         // Type errors - validation issues, use moderate requeue
-        Error::Types { .. } => Action::requeue(Duration::from_secs(15)),
+        Error::Types { source } => match source {
+            // Immutable field modification errors - require user intervention
+            // Use 60-second requeue to reduce event/log spam while user fixes the issue
+            types::error::Error::ImmutableFieldModified { .. } => {
+                Action::requeue(Duration::from_secs(60))
+            }
+
+            // Other type errors - use moderate requeue
+            _ => Action::requeue(Duration::from_secs(15)),
+        },
     }
 }
 

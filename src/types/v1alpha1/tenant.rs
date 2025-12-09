@@ -38,7 +38,6 @@ mod workloads;
     plural = "tenants",
     singular = "tenant",
     printcolumn = r#"{"name":"State", "type":"string", "jsonPath":".status.currentState"}"#,
-    printcolumn = r#"{"name":"Health", "type":"string", "jsonPath":".status.healthStatus"}"#,
     printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#,
     crates(serde_json = "k8s_openapi::serde_json")
 )]
@@ -201,6 +200,71 @@ impl Tenant {
         let mut labels = self.selector_labels();
         labels.insert("rustfs.pool".to_owned(), pool.name.clone());
         labels
+    }
+
+    /// Build pool status from a StatefulSet.
+    /// This method extracts replica counts, revisions, and determines the pool state
+    /// based on the StatefulSet's status.
+    pub(crate) fn build_pool_status(
+        &self,
+        pool_name: &str,
+        ss: &k8s_openapi::api::apps::v1::StatefulSet,
+    ) -> crate::types::v1alpha1::status::pool::Pool {
+        use crate::types::v1alpha1::status::pool::PoolState;
+
+        let ss_name = format!("{}-{}", self.name(), pool_name);
+        let status = ss.status.as_ref();
+
+        // Extract replica counts
+        let replicas = status.map(|s| s.replicas);
+        let ready_replicas = status.and_then(|s| s.ready_replicas);
+        let current_replicas = status.and_then(|s| s.current_replicas);
+        let updated_replicas = status.and_then(|s| s.updated_replicas);
+
+        // Extract revisions
+        let current_revision = status.and_then(|s| s.current_revision.clone());
+        let update_revision = status.and_then(|s| s.update_revision.clone());
+
+        // Determine pool state based on StatefulSet status
+        let state = if let Some(status) = status {
+            let desired = status.replicas;
+            let ready = status.ready_replicas.unwrap_or(0);
+            let updated = status.updated_replicas.unwrap_or(0);
+            let current = status.current_replicas.unwrap_or(0);
+
+            if desired == 0 {
+                PoolState::NotCreated
+            } else if ready == desired && updated == desired {
+                // All replicas are ready and updated
+                PoolState::RolloutComplete
+            } else if updated < desired || current < desired {
+                // Rollout in progress
+                PoolState::Updating
+            } else if ready < desired {
+                // Some replicas not ready
+                PoolState::Degraded
+            } else {
+                PoolState::Initialized
+            }
+        } else {
+            PoolState::NotCreated
+        };
+
+        // Get current time for last_update_time
+        let last_update_time =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+
+        crate::types::v1alpha1::status::pool::Pool {
+            ss_name,
+            state,
+            replicas,
+            ready_replicas,
+            current_replicas,
+            updated_replicas,
+            current_revision,
+            update_revision,
+            last_update_time,
+        }
     }
 }
 

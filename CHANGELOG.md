@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### **StatefulSet Reconciliation Improvements** (2025-12-03, Issue #43)
+
+Implemented intelligent StatefulSet update detection and validation to improve reconciliation efficiency and safety:
+
+- **Diff Detection**: Added `statefulset_needs_update()` method to detect actual changes
+  - Compares existing vs desired StatefulSet specs semantically
+  - Avoids unnecessary API calls when no changes are needed
+  - Checks: replicas, image, env vars, resources, scheduling, pod management policy, etc.
+
+- **Immutable Field Validation**: Added `validate_statefulset_update()` method
+  - Prevents modifications to immutable StatefulSet fields (selector, volumeClaimTemplates, serviceName)
+  - Provides clear error messages for invalid updates (e.g., changing volumesPerServer)
+  - Protects against API rejections during reconciliation
+
+- **Enhanced Reconciliation Logic**: Refactored StatefulSet reconciliation loop
+  - Checks if StatefulSet exists before attempting update
+  - Validates update safety before applying changes
+  - Only applies updates when actual changes are detected
+  - Records Kubernetes events for update lifecycle (Created, UpdateStarted, UpdateValidationFailed)
+
+- **Error Handling**: Extended error policy
+  - Added 60-second requeue for immutable field modification errors (user-fixable)
+  - Consistent error handling across credential and validation failures
+
+- **New Error Types**: Added to `types::error::Error`
+  - `InternalError` - For unexpected internal conditions
+  - `ImmutableFieldModified` - For attempted modifications to immutable fields
+  - `SerdeJson` - For JSON serialization errors during comparisons
+
+- **Comprehensive Test Coverage**: Added 9 new unit tests (35 tests total)
+  - Tests for diff detection (no changes, image, replicas, env vars, resources)
+  - Tests for validation (selector, serviceName, volumesPerServer changes rejected)
+  - Test for safe updates (image changes allowed)
+
+**Benefits**:
+- Reduces unnecessary API calls and reconciliation overhead
+- Prevents reconciliation failures from invalid updates
+- Provides better error messages for users
+- Foundation for rollout monitoring (Phase 2)
+
 ### Changed
 
 #### **Code Refactoring**: Credential Validation Simplification (2025-11-15)

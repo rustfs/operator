@@ -292,9 +292,304 @@ impl Tenant {
             ..Default::default()
         })
     }
+
+    /// Checks if a StatefulSet needs to be updated based on differences between
+    /// the existing StatefulSet and the desired state defined in the Tenant spec.
+    ///
+    /// This method performs a semantic comparison of key StatefulSet fields to
+    /// determine if an update is necessary, avoiding unnecessary API calls.
+    ///
+    /// # Returns
+    /// - `Ok(true)` if the StatefulSet needs to be updated
+    /// - `Ok(false)` if the StatefulSet matches the desired state
+    /// - `Err` if comparison fails
+    pub fn statefulset_needs_update(
+        &self,
+        existing: &v1::StatefulSet,
+        pool: &Pool,
+    ) -> Result<bool, types::error::Error> {
+        let desired = self.new_statefulset(pool)?;
+
+        // Compare key spec fields that should trigger updates
+        let existing_spec = existing
+            .spec
+            .as_ref()
+            .ok_or(types::error::Error::InternalError {
+                msg: "Existing StatefulSet missing spec".to_string(),
+            })?;
+
+        let desired_spec = desired
+            .spec
+            .as_ref()
+            .ok_or(types::error::Error::InternalError {
+                msg: "Desired StatefulSet missing spec".to_string(),
+            })?;
+
+        // Check replicas (server count)
+        if existing_spec.replicas != desired_spec.replicas {
+            return Ok(true);
+        }
+
+        // Check pod management policy
+        if existing_spec.pod_management_policy != desired_spec.pod_management_policy {
+            return Ok(true);
+        }
+
+        // Compare pod template spec
+        let existing_template = &existing_spec.template;
+        let desired_template = &desired_spec.template;
+
+        // Check if pod template metadata labels changed
+        if existing_template
+            .metadata
+            .as_ref()
+            .and_then(|m| m.labels.as_ref())
+            != desired_template
+                .metadata
+                .as_ref()
+                .and_then(|m| m.labels.as_ref())
+        {
+            return Ok(true);
+        }
+
+        let existing_pod_spec =
+            existing_template
+                .spec
+                .as_ref()
+                .ok_or(types::error::Error::InternalError {
+                    msg: "Existing pod template missing spec".to_string(),
+                })?;
+
+        let desired_pod_spec =
+            desired_template
+                .spec
+                .as_ref()
+                .ok_or(types::error::Error::InternalError {
+                    msg: "Desired pod template missing spec".to_string(),
+                })?;
+
+        // Check service account
+        if existing_pod_spec.service_account_name != desired_pod_spec.service_account_name {
+            return Ok(true);
+        }
+
+        // Check scheduler
+        if existing_pod_spec.scheduler_name != desired_pod_spec.scheduler_name {
+            return Ok(true);
+        }
+
+        // Check priority class
+        if existing_pod_spec.priority_class_name != desired_pod_spec.priority_class_name {
+            return Ok(true);
+        }
+
+        // Check node selector
+        if existing_pod_spec.node_selector != desired_pod_spec.node_selector {
+            return Ok(true);
+        }
+
+        // Check affinity (compare as JSON to handle deep equality)
+        if serde_json::to_value(&existing_pod_spec.affinity)?
+            != serde_json::to_value(&desired_pod_spec.affinity)?
+        {
+            return Ok(true);
+        }
+
+        // Check tolerations
+        if serde_json::to_value(&existing_pod_spec.tolerations)?
+            != serde_json::to_value(&desired_pod_spec.tolerations)?
+        {
+            return Ok(true);
+        }
+
+        // Check topology spread constraints
+        if serde_json::to_value(&existing_pod_spec.topology_spread_constraints)?
+            != serde_json::to_value(&desired_pod_spec.topology_spread_constraints)?
+        {
+            return Ok(true);
+        }
+
+        // Compare container specs
+        if existing_pod_spec.containers.is_empty() || desired_pod_spec.containers.is_empty() {
+            return Err(types::error::Error::InternalError {
+                msg: "Pod spec missing container".to_string(),
+            });
+        }
+
+        let existing_container = &existing_pod_spec.containers[0];
+        let desired_container = &desired_pod_spec.containers[0];
+
+        // Check image
+        if existing_container.image != desired_container.image {
+            return Ok(true);
+        }
+
+        // Check image pull policy
+        if existing_container.image_pull_policy != desired_container.image_pull_policy {
+            return Ok(true);
+        }
+
+        // Check environment variables (compare as JSON for deep equality)
+        if serde_json::to_value(&existing_container.env)?
+            != serde_json::to_value(&desired_container.env)?
+        {
+            return Ok(true);
+        }
+
+        // Check resources (compare as JSON for deep equality)
+        if serde_json::to_value(&existing_container.resources)?
+            != serde_json::to_value(&desired_container.resources)?
+        {
+            return Ok(true);
+        }
+
+        // Check lifecycle hooks
+        if serde_json::to_value(&existing_container.lifecycle)?
+            != serde_json::to_value(&desired_container.lifecycle)?
+        {
+            return Ok(true);
+        }
+
+        // Check volume mounts (compare as JSON for deep equality)
+        if serde_json::to_value(&existing_container.volume_mounts)?
+            != serde_json::to_value(&desired_container.volume_mounts)?
+        {
+            return Ok(true);
+        }
+
+        // If we reach here, no updates are needed
+        Ok(false)
+    }
+
+    /// Validates that a StatefulSet update is safe by checking for changes to
+    /// immutable fields that would cause API rejection.
+    ///
+    /// StatefulSet has several immutable fields that cannot be changed after creation:
+    /// - spec.selector: Pod selector labels cannot be modified
+    /// - spec.volumeClaimTemplates: PVC templates cannot be modified
+    /// - spec.serviceName: Headless service name cannot be changed
+    ///
+    /// # Returns
+    /// - `Ok(())` if the update is safe
+    /// - `Err` if the update would modify immutable fields
+    pub fn validate_statefulset_update(
+        &self,
+        existing: &v1::StatefulSet,
+        pool: &Pool,
+    ) -> Result<(), types::error::Error> {
+        let desired = self.new_statefulset(pool)?;
+
+        let existing_spec = existing
+            .spec
+            .as_ref()
+            .ok_or(types::error::Error::InternalError {
+                msg: "Existing StatefulSet missing spec".to_string(),
+            })?;
+
+        let desired_spec = desired
+            .spec
+            .as_ref()
+            .ok_or(types::error::Error::InternalError {
+                msg: "Desired StatefulSet missing spec".to_string(),
+            })?;
+
+        let ss_name = existing
+            .metadata
+            .name
+            .as_ref()
+            .unwrap_or(&"<unknown>".to_string())
+            .clone();
+
+        // Validate selector is unchanged (immutable field)
+        if serde_json::to_value(&existing_spec.selector)?
+            != serde_json::to_value(&desired_spec.selector)?
+        {
+            return Err(types::error::Error::ImmutableFieldModified {
+                name: ss_name,
+                field: "spec.selector".to_string(),
+                message: "StatefulSet selector cannot be modified. Pool name may have changed."
+                    .to_string(),
+            });
+        }
+
+        // Validate serviceName is unchanged (immutable field)
+        if existing_spec.service_name != desired_spec.service_name {
+            return Err(types::error::Error::ImmutableFieldModified {
+                name: ss_name,
+                field: "spec.serviceName".to_string(),
+                message: "StatefulSet serviceName cannot be modified.".to_string(),
+            });
+        }
+
+        // Validate volumeClaimTemplates are unchanged (immutable field)
+        // Note: This is a simplified check. In reality, you can only change certain fields
+        // like storage size (depending on storage class), but template structure and names cannot change.
+        let existing_vcts = existing_spec.volume_claim_templates.as_ref();
+        let desired_vcts = desired_spec.volume_claim_templates.as_ref();
+
+        // Check if the number of volume claim templates changed
+        let existing_vct_count = existing_vcts.map(|v| v.len()).unwrap_or(0);
+        let desired_vct_count = desired_vcts.map(|v| v.len()).unwrap_or(0);
+
+        if existing_vct_count != desired_vct_count {
+            return Err(types::error::Error::ImmutableFieldModified {
+                name: ss_name,
+                field: "spec.volumeClaimTemplates".to_string(),
+                message: format!(
+                    "Cannot change volumesPerServer from {} to {}. This would modify volumeClaimTemplates which is immutable.",
+                    existing_vct_count, desired_vct_count
+                ),
+            });
+        }
+
+        // Check if volume claim template names changed (indicates structure change)
+        if let (Some(existing_vcts), Some(desired_vcts)) = (existing_vcts, desired_vcts) {
+            for (i, (existing_vct, desired_vct)) in
+                existing_vcts.iter().zip(desired_vcts.iter()).enumerate()
+            {
+                let existing_name = existing_vct.metadata.name.as_deref().unwrap_or("");
+                let desired_name = desired_vct.metadata.name.as_deref().unwrap_or("");
+
+                if existing_name != desired_name {
+                    return Err(types::error::Error::ImmutableFieldModified {
+                        name: ss_name,
+                        field: format!("spec.volumeClaimTemplates[{}].metadata.name", i),
+                        message: format!(
+                            "Volume claim template name changed from '{}' to '{}'. This is not allowed.",
+                            existing_name, desired_name
+                        ),
+                    });
+                }
+
+                // Check if storage class changed (also problematic)
+                let existing_sc = existing_vct
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.storage_class_name.as_ref());
+                let desired_sc = desired_vct
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.storage_class_name.as_ref());
+
+                if existing_sc != desired_sc {
+                    return Err(types::error::Error::ImmutableFieldModified {
+                        name: ss_name.clone(),
+                        field: format!("spec.volumeClaimTemplates[{}].spec.storageClassName", i),
+                        message: format!(
+                            "Storage class changed from '{:?}' to '{:?}'. This is not allowed.",
+                            existing_sc, desired_sc
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use k8s_openapi::api::core::v1 as corev1;
 
@@ -498,6 +793,275 @@ mod tests {
             container.resources.as_ref().unwrap().requests,
             Some(requests),
             "Container should use pool-level resource requests"
+        );
+    }
+
+    // Test: StatefulSet diff detection - no changes needed
+    #[test]
+    fn test_statefulset_no_update_needed() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Check if update is needed comparing StatefulSet to itself
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            !needs_update,
+            "StatefulSet should not need update when comparing to itself"
+        );
+    }
+
+    // Test: StatefulSet diff detection - image change
+    #[test]
+    fn test_statefulset_image_change_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some("rustfs:v1".to_string());
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Change image
+        tenant.spec.image = Some("rustfs:v2".to_string());
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when image changes"
+        );
+    }
+
+    // Test: StatefulSet diff detection - replicas change
+    #[test]
+    fn test_statefulset_replicas_change_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 4;
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Change replicas
+        tenant.spec.pools[0].servers = 6;
+        let pool = &tenant.spec.pools[0];
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when replicas change"
+        );
+    }
+
+    // Test: StatefulSet diff detection - environment variable change
+    #[test]
+    fn test_statefulset_env_change_detected() {
+        use k8s_openapi::api::core::v1 as corev1;
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Add environment variable
+        tenant.spec.env = vec![corev1::EnvVar {
+            name: "NEW_VAR".to_string(),
+            value: Some("value".to_string()),
+            ..Default::default()
+        }];
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when env vars change"
+        );
+    }
+
+    // Test: StatefulSet diff detection - resources change
+    #[test]
+    fn test_statefulset_resources_change_detected() {
+        use k8s_openapi::api::core::v1 as corev1;
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Add resource requirements
+        let mut requests = std::collections::BTreeMap::new();
+        requests.insert(
+            "cpu".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity("2".to_string()),
+        );
+
+        tenant.spec.pools[0].scheduling.resources = Some(corev1::ResourceRequirements {
+            requests: Some(requests),
+            limits: None,
+            claims: None,
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when resources change"
+        );
+    }
+
+    // Test: StatefulSet validation - selector change rejected
+    #[test]
+    fn test_statefulset_selector_change_rejected() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Modify selector (immutable field)
+        if let Some(ref mut spec) = statefulset.spec
+            && let Some(ref mut labels) = spec.selector.match_labels
+        {
+            labels.insert("modified".to_string(), "true".to_string());
+        }
+
+        // Validation should fail
+        let result = tenant.validate_statefulset_update(&statefulset, pool);
+
+        assert!(
+            result.is_err(),
+            "Validation should fail when selector changes"
+        );
+
+        let err = result.unwrap_err();
+        match err {
+            crate::types::error::Error::ImmutableFieldModified { field, .. } => {
+                assert_eq!(
+                    field, "spec.selector",
+                    "Error should indicate selector field"
+                );
+            }
+            _ => panic!("Expected ImmutableFieldModified error"),
+        }
+    }
+
+    // Test: StatefulSet validation - serviceName change rejected
+    #[test]
+    fn test_statefulset_service_name_change_rejected() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Modify serviceName (immutable field)
+        if let Some(ref mut spec) = statefulset.spec {
+            spec.service_name = Some("different-service".to_string());
+        }
+
+        // Validation should fail
+        let result = tenant.validate_statefulset_update(&statefulset, pool);
+
+        assert!(
+            result.is_err(),
+            "Validation should fail when serviceName changes"
+        );
+
+        let err = result.unwrap_err();
+        match err {
+            crate::types::error::Error::ImmutableFieldModified { field, .. } => {
+                assert_eq!(
+                    field, "spec.serviceName",
+                    "Error should indicate serviceName field"
+                );
+            }
+            _ => panic!("Expected ImmutableFieldModified error"),
+        }
+    }
+
+    // Test: StatefulSet validation - volumesPerServer change rejected
+    #[test]
+    fn test_statefulset_volumes_per_server_change_rejected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].persistence.volumes_per_server = 2;
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Change volumesPerServer (would modify volumeClaimTemplates - immutable)
+        tenant.spec.pools[0].persistence.volumes_per_server = 4;
+        let pool = &tenant.spec.pools[0];
+
+        // Validation should fail
+        let result = tenant.validate_statefulset_update(&statefulset, pool);
+
+        assert!(
+            result.is_err(),
+            "Validation should fail when volumesPerServer changes"
+        );
+
+        let err = result.unwrap_err();
+        match err {
+            crate::types::error::Error::ImmutableFieldModified { field, message, .. } => {
+                assert_eq!(
+                    field, "spec.volumeClaimTemplates",
+                    "Error should indicate volumeClaimTemplates field"
+                );
+                assert!(
+                    message.contains("volumesPerServer"),
+                    "Error message should mention volumesPerServer"
+                );
+            }
+            _ => panic!("Expected ImmutableFieldModified error"),
+        }
+    }
+
+    // Test: StatefulSet validation - safe update allowed
+    #[test]
+    fn test_statefulset_safe_update_allowed() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some("rustfs:v1".to_string());
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Change image (safe update)
+        tenant.spec.image = Some("rustfs:v2".to_string());
+
+        // Validation should pass
+        let result = tenant.validate_statefulset_update(&statefulset, pool);
+
+        assert!(
+            result.is_ok(),
+            "Validation should pass for safe updates like image changes"
         );
     }
 }
