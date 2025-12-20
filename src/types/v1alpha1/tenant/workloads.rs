@@ -20,6 +20,11 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 
 const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
+const LOG_VOLUME_NAME: &str = "logs";
+const LOG_VOLUME_MOUNT_PATH: &str = "/logs";
+const DEFAULT_RUN_AS_USER: i64 = 10001;
+const DEFAULT_RUN_AS_GROUP: i64 = 10001;
+const DEFAULT_FS_GROUP: i64 = 10001;
 
 fn volume_claim_template_name(shard: i32) -> String {
     format!("{VOLUME_CLAIM_TEMPLATE_PREFIX}-{shard}")
@@ -129,13 +134,20 @@ impl Tenant {
         // Volume mount names must match the volume claim template names (vol-0, vol-1, etc.)
         // Mount paths follow RustFS convention: /data/rustfs0, /data/rustfs1, etc.
         let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
-        let volume_mounts: Vec<corev1::VolumeMount> = (0..pool.persistence.volumes_per_server)
+        let mut volume_mounts: Vec<corev1::VolumeMount> = (0..pool.persistence.volumes_per_server)
             .map(|i| corev1::VolumeMount {
                 name: volume_claim_template_name(i),
                 mount_path: format!("{}/rustfs{}", base_path.trim_end_matches('/'), i),
                 ..Default::default()
             })
             .collect();
+
+        // Mount in-memory volume for RustFS logs to avoid permissions issues on the root filesystem
+        volume_mounts.push(corev1::VolumeMount {
+            name: LOG_VOLUME_NAME.to_string(),
+            mount_path: LOG_VOLUME_MOUNT_PATH.to_string(),
+            ..Default::default()
+        });
 
         // Generate environment variables: operator-managed + user-provided
         let mut env_vars = Vec::new();
@@ -206,6 +218,22 @@ impl Tenant {
             env_vars.push(user_env.clone());
         }
 
+        // Use an in-memory volume for logs to avoid permission issues on container filesystems
+        let pod_volumes = vec![corev1::Volume {
+            name: LOG_VOLUME_NAME.to_string(),
+            empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+            ..Default::default()
+        }];
+
+        // Enforce non-root execution and make mounted volumes writable by RustFS user
+        let pod_security_context = Some(corev1::PodSecurityContext {
+            run_as_user: Some(DEFAULT_RUN_AS_USER),
+            run_as_group: Some(DEFAULT_RUN_AS_GROUP),
+            fs_group: Some(DEFAULT_FS_GROUP),
+            fs_group_change_policy: Some("OnRootMismatch".to_string()),
+            ..Default::default()
+        });
+
         let container = corev1::Container {
             name: "rustfs".to_owned(),
             image: self.spec.image.clone(),
@@ -268,6 +296,8 @@ impl Tenant {
                     spec: Some(corev1::PodSpec {
                         service_account_name: Some(self.service_account_name()),
                         containers: vec![container],
+                        security_context: pod_security_context,
+                        volumes: Some(pod_volumes),
                         scheduler_name: self.spec.scheduler.clone(),
                         // Pool-level priority class overrides tenant-level
                         priority_class_name: pool
@@ -591,7 +621,79 @@ impl Tenant {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::{
+        DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER, LOG_VOLUME_MOUNT_PATH,
+        LOG_VOLUME_NAME,
+    };
     use k8s_openapi::api::core::v1 as corev1;
+
+    // Test: Pod runs as non-root and mounts writable log volume
+    #[test]
+    fn test_statefulset_sets_security_context_and_log_volume() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        let security_context = pod_spec
+            .security_context
+            .as_ref()
+            .expect("Pod should have securityContext");
+
+        assert_eq!(
+            security_context.run_as_user,
+            Some(DEFAULT_RUN_AS_USER),
+            "Pod should run as RustFS user"
+        );
+        assert_eq!(
+            security_context.run_as_group,
+            Some(DEFAULT_RUN_AS_GROUP),
+            "Pod should use RustFS primary group"
+        );
+        assert_eq!(
+            security_context.fs_group,
+            Some(DEFAULT_FS_GROUP),
+            "Mounted volumes should be owned by RustFS group"
+        );
+        assert_eq!(
+            security_context.fs_group_change_policy,
+            Some("OnRootMismatch".to_string()),
+            "fsGroup change policy should be set for PVC mounts"
+        );
+
+        let volumes = pod_spec
+            .volumes
+            .as_ref()
+            .expect("Pod should define volumes including logs");
+        let log_volume = volumes
+            .iter()
+            .find(|v| v.name == LOG_VOLUME_NAME)
+            .expect("Logs volume should be present");
+        assert!(
+            log_volume.empty_dir.is_some(),
+            "Logs volume should be an EmptyDir"
+        );
+
+        let container = &pod_spec.containers[0];
+        let log_mount = container
+            .volume_mounts
+            .as_ref()
+            .and_then(|mounts| mounts.iter().find(|m| m.name == LOG_VOLUME_NAME))
+            .expect("Container should mount logs volume");
+        assert_eq!(
+            log_mount.mount_path, LOG_VOLUME_MOUNT_PATH,
+            "Logs volume should mount at /logs"
+        );
+    }
 
     // Test: StatefulSet uses correct service account
     #[test]
