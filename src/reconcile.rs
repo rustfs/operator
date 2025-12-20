@@ -23,7 +23,7 @@ use kube::runtime::events::EventType;
 use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -430,6 +430,10 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
         }
 
         let pod_name = pod.name_any();
+        warn!(
+            "Node {} is detected down. Pod {} is terminating on it.",
+            node_name, pod_name
+        );
         let delete_params = match policy {
             crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing => continue,
             // Legacy option: normal delete.
