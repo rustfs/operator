@@ -311,6 +311,25 @@ spec:
                 - null
                 nullable: true
                 type: string
+              podDeletionPolicyWhenNodeIsDown:
+                description: |-
+                  Controls how the operator handles Pods when the node hosting them is down (NotReady/Unknown).
+
+                  Typical use-case: a StatefulSet Pod gets stuck in Terminating when the node goes down.
+                  Setting this to ForceDelete allows the operator to force delete the Pod object so the
+                  StatefulSet controller can recreate it elsewhere.
+
+                  Values: DoNothing | Delete | ForceDelete
+                enum:
+                - DoNothing
+                - Delete
+                - ForceDelete
+                - DeleteStatefulSetPod
+                - DeleteDeploymentPod
+                - DeleteBothStatefulSetAndDeploymentPod
+                - null
+                nullable: true
+                type: string
               pools:
                 items:
                   description: |-

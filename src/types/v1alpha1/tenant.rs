@@ -67,6 +67,16 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_management_policy: Option<k8s::PodManagementPolicy>,
 
+    /// Controls how the operator handles Pods when the node hosting them is down (NotReady/Unknown).
+    ///
+    /// Typical use-case: a StatefulSet Pod gets stuck in Terminating when the node goes down.
+    /// Setting this to `ForceDelete` allows the operator to force delete the Pod object so the
+    /// StatefulSet controller can recreate it elsewhere.
+    ///
+    /// Values: DoNothing | Delete | ForceDelete
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_deletion_policy_when_node_is_down: Option<k8s::PodDeletionPolicyWhenNodeIsDown>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
 
