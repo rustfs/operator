@@ -56,3 +56,41 @@ pub enum ImagePullPolicy {
     #[default]
     IfNotPresent,
 }
+
+/// Pod deletion policy when the node hosting the Pod is down (NotReady/Unknown).
+///
+/// This is primarily intended to unblock StatefulSet pods stuck in terminating state
+/// when the node becomes unreachable.
+///
+/// WARNING: Force-deleting pods can have data consistency implications depending on
+/// your storage backend and workload semantics.
+#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema, Display, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+#[schemars(rename_all = "PascalCase")]
+pub enum PodDeletionPolicyWhenNodeIsDown {
+    /// Do not delete pods automatically.
+    #[strum(to_string = "DoNothing")]
+    #[default]
+    DoNothing,
+
+    /// Request a normal delete for the pod.
+    #[strum(to_string = "Delete")]
+    Delete,
+
+    /// Force delete the pod with gracePeriodSeconds=0.
+    #[strum(to_string = "ForceDelete")]
+    ForceDelete,
+
+    /// Longhorn-compatible: force delete StatefulSet terminating pods on down nodes.
+    #[strum(to_string = "DeleteStatefulSetPod")]
+    DeleteStatefulSetPod,
+
+    /// Longhorn-compatible: force delete Deployment terminating pods on down nodes.
+    /// (Deployment pods are owned by ReplicaSet.)
+    #[strum(to_string = "DeleteDeploymentPod")]
+    DeleteDeploymentPod,
+
+    /// Longhorn-compatible: force delete both StatefulSet and Deployment terminating pods on down nodes.
+    #[strum(to_string = "DeleteBothStatefulSetAndDeploymentPod")]
+    DeleteBothStatefulSetAndDeploymentPod,
+}
