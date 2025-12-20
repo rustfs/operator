@@ -18,6 +18,7 @@ use crate::types::v1alpha1::pool::Pool;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 
@@ -230,6 +231,48 @@ impl Tenant {
             ]),
             volume_mounts: Some(volume_mounts),
             lifecycle: self.spec.lifecycle.clone(),
+            liveness_probe: self.spec.liveness_probe.clone().or_else(|| {
+                Some(corev1::Probe {
+                    http_get: Some(corev1::HTTPGetAction {
+                        path: Some("/rustfs/health/live".to_string()),
+                        port: IntOrString::Int(9000),
+                        ..Default::default()
+                    }),
+                    initial_delay_seconds: Some(120),
+                    period_seconds: Some(15),
+                    timeout_seconds: Some(5),
+                    failure_threshold: Some(3),
+                    ..Default::default()
+                })
+            }),
+            readiness_probe: self.spec.readiness_probe.clone().or_else(|| {
+                Some(corev1::Probe {
+                    http_get: Some(corev1::HTTPGetAction {
+                        path: Some("/rustfs/health/ready".to_string()),
+                        port: IntOrString::Int(9000),
+                        ..Default::default()
+                    }),
+                    initial_delay_seconds: Some(30),
+                    period_seconds: Some(10),
+                    timeout_seconds: Some(5),
+                    failure_threshold: Some(3),
+                    ..Default::default()
+                })
+            }),
+            startup_probe: self.spec.startup_probe.clone().or_else(|| {
+                Some(corev1::Probe {
+                    http_get: Some(corev1::HTTPGetAction {
+                        path: Some("/rustfs/health/startup".to_string()),
+                        port: IntOrString::Int(9000),
+                        ..Default::default()
+                    }),
+                    initial_delay_seconds: Some(10),
+                    period_seconds: Some(5),
+                    timeout_seconds: Some(3),
+                    failure_threshold: Some(30), // 5min total
+                    ..Default::default()
+                })
+            }),
             // Apply pool-level resource requirements to container
             resources: pool.scheduling.resources.clone(),
             image_pull_policy: self
@@ -450,6 +493,25 @@ impl Tenant {
             return Ok(true);
         }
 
+        // Check probes
+        if serde_json::to_value(&existing_container.liveness_probe)?
+            != serde_json::to_value(&desired_container.liveness_probe)?
+        {
+            return Ok(true);
+        }
+
+        if serde_json::to_value(&existing_container.readiness_probe)?
+            != serde_json::to_value(&desired_container.readiness_probe)?
+        {
+            return Ok(true);
+        }
+
+        if serde_json::to_value(&existing_container.startup_probe)?
+            != serde_json::to_value(&desired_container.startup_probe)?
+        {
+            return Ok(true);
+        }
+
         // Check volume mounts (compare as JSON for deep equality)
         if serde_json::to_value(&existing_container.volume_mounts)?
             != serde_json::to_value(&desired_container.volume_mounts)?
@@ -592,6 +654,7 @@ impl Tenant {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use k8s_openapi::api::core::v1 as corev1;
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
     // Test: StatefulSet uses correct service account
     #[test]
@@ -1063,5 +1126,121 @@ mod tests {
             result.is_ok(),
             "Validation should pass for safe updates like image changes"
         );
+    }
+
+    // Test: Default probes are applied when not specified
+    #[test]
+    fn test_default_probes_applied() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+
+        // Check Liveness Probe
+        let liveness = container
+            .liveness_probe
+            .as_ref()
+            .expect("Should have liveness probe");
+        assert_eq!(
+            liveness.http_get.as_ref().unwrap().path,
+            Some("/rustfs/health/live".to_string())
+        );
+        assert_eq!(liveness.initial_delay_seconds, Some(120));
+
+        // Check Readiness Probe
+        let readiness = container
+            .readiness_probe
+            .as_ref()
+            .expect("Should have readiness probe");
+        assert_eq!(
+            readiness.http_get.as_ref().unwrap().path,
+            Some("/rustfs/health/ready".to_string())
+        );
+        assert_eq!(readiness.initial_delay_seconds, Some(30));
+
+        // Check Startup Probe
+        let startup = container
+            .startup_probe
+            .as_ref()
+            .expect("Should have startup probe");
+        assert_eq!(
+            startup.http_get.as_ref().unwrap().path,
+            Some("/rustfs/health/startup".to_string())
+        );
+        assert_eq!(startup.failure_threshold, Some(30));
+    }
+
+    // Test: Custom probes override defaults
+    #[test]
+    fn test_custom_probes_override() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+
+        // Configure custom liveness probe
+        tenant.spec.liveness_probe = Some(corev1::Probe {
+            http_get: Some(corev1::HTTPGetAction {
+                path: Some("/custom/health".to_string()),
+                port: IntOrString::Int(8080),
+                ..Default::default()
+            }),
+            initial_delay_seconds: Some(60),
+            ..Default::default()
+        });
+
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+
+        // Check Liveness Probe (should be custom)
+        let liveness = container
+            .liveness_probe
+            .as_ref()
+            .expect("Should have liveness probe");
+        assert_eq!(
+            liveness.http_get.as_ref().unwrap().path,
+            Some("/custom/health".to_string())
+        );
+        assert_eq!(liveness.initial_delay_seconds, Some(60));
+
+        // Check Readiness Probe (should still be default)
+        let readiness = container
+            .readiness_probe
+            .as_ref()
+            .expect("Should have readiness probe");
+        assert_eq!(
+            readiness.http_get.as_ref().unwrap().path,
+            Some("/rustfs/health/ready".to_string())
+        );
+    }
+
+    // Test: Probe update detection
+    #[test]
+    fn test_probe_update_detection() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        // Create initial StatefulSet with default probes
+        let existing_ss = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Update tenant with custom probe
+        tenant.spec.liveness_probe = Some(corev1::Probe {
+            initial_delay_seconds: Some(200), // Changed from default 120
+            ..Default::default()
+        });
+
+        // Should detect update
+        let needs_update = tenant
+            .statefulset_needs_update(&existing_ss, pool)
+            .expect("Should check update");
+
+        assert!(needs_update, "Should detect probe change");
     }
 }

@@ -97,6 +97,15 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<corev1::Lifecycle>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_probe: Option<corev1::Probe>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_probe: Option<corev1::Probe>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_probe: Option<corev1::Probe>,
+
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // features: Option<corev1::Lifecycle>,
 
