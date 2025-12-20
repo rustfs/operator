@@ -72,10 +72,9 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         .spec
         .pod_deletion_policy_when_node_is_down
         .clone()
+        && policy != crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing
     {
-        if policy != crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing {
-            cleanup_stuck_terminating_pods_on_down_nodes(&latest_tenant, &ns, &ctx, policy).await?;
-        }
+        cleanup_stuck_terminating_pods_on_down_nodes(&latest_tenant, &ns, &ctx, policy).await?;
     }
 
     // 1. Create RBAC resources (conditionally based on service account settings)
