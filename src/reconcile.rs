@@ -16,8 +16,8 @@ use crate::context::Context;
 use crate::types::v1alpha1::tenant::Tenant;
 use crate::{context, types};
 use k8s_openapi::api::core::v1 as corev1;
-use kube::api::{DeleteParams, ListParams, PropagationPolicy};
 use kube::ResourceExt;
+use kube::api::{DeleteParams, ListParams, PropagationPolicy};
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
 use snafu::Snafu;
@@ -74,8 +74,7 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         .clone()
     {
         if policy != crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing {
-            cleanup_stuck_terminating_pods_on_down_nodes(&latest_tenant, &ns, &ctx, policy)
-                .await?;
+            cleanup_stuck_terminating_pods_on_down_nodes(&latest_tenant, &ns, &ctx, policy).await?;
         }
     }
 
@@ -777,11 +776,23 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(pod_matches_policy_controller_kind(&ss_pod, &P::DeleteStatefulSetPod));
-        assert!(!pod_matches_policy_controller_kind(&deploy_pod, &P::DeleteStatefulSetPod));
+        assert!(pod_matches_policy_controller_kind(
+            &ss_pod,
+            &P::DeleteStatefulSetPod
+        ));
+        assert!(!pod_matches_policy_controller_kind(
+            &deploy_pod,
+            &P::DeleteStatefulSetPod
+        ));
 
-        assert!(pod_matches_policy_controller_kind(&deploy_pod, &P::DeleteDeploymentPod));
-        assert!(!pod_matches_policy_controller_kind(&ss_pod, &P::DeleteDeploymentPod));
+        assert!(pod_matches_policy_controller_kind(
+            &deploy_pod,
+            &P::DeleteDeploymentPod
+        ));
+        assert!(!pod_matches_policy_controller_kind(
+            &ss_pod,
+            &P::DeleteDeploymentPod
+        ));
 
         assert!(pod_matches_policy_controller_kind(
             &ss_pod,
