@@ -12,6 +12,8 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
+#![allow(clippy::unwrap_used)]
+
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 
 use crate::types::v1alpha1::persistence::PersistenceConfig;

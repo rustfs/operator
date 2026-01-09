@@ -51,6 +51,7 @@ pub enum Error {
 
 /// Generates a self-signed certificate and private key (RSA 2048)
 /// Returns (cert_pem, key_pem)
+#[allow(clippy::expect_used)]
 pub fn generate_self_signed_cert(
     common_name: &str,
     san_dns_names: Vec<String>,
@@ -59,7 +60,13 @@ pub fn generate_self_signed_cert(
         rcgen::CertificateParams::new(vec![common_name.to_string()]).context(GenerateCertSnafu)?;
     params.subject_alt_names = san_dns_names
         .into_iter()
-        .map(|s| rcgen::SanType::DnsName(s.try_into().unwrap()))
+        .map(|s| {
+            rcgen::SanType::DnsName(
+                s.try_into()
+                    .map_err(|_| rcgen::Error::CouldNotParseCertificate)
+                    .unwrap_or(rcgen::string::Ia5String::try_from("invalid").expect("invalid is ASCII")),
+            )
+        })
         .collect();
 
     // Set valid period to 10 years for simplicity in this version
@@ -117,6 +124,7 @@ pub fn x509_key_pair<T: AsRef<[u8]>>(cert_pem: T, key_pem: T) -> Result<(), Erro
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     #[test]
@@ -272,7 +280,6 @@ do0DpyMVNy4vlS2yIvg6NmbMcDq6ugLh3A==
 
         assert!(x509_key_pair(cert_pem, key_pem).is_ok());
     }
-}
 
 #[test]
 fn test_generate_self_signed_cert() {
@@ -288,4 +295,5 @@ fn test_generate_self_signed_cert() {
 
     // Verify key pair matches
     assert!(x509_key_pair(&cert_pem, &key_pem).is_ok());
+}
 }
