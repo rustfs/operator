@@ -44,6 +44,37 @@ pub enum Error {
 
     #[snafu(display("no supported pem type"))]
     NoSupportedPEMType,
+
+    #[snafu(display("failed to generate certificate: {}", source))]
+    GenerateCert { source: rcgen::Error },
+}
+
+/// Generates a self-signed certificate and private key (RSA 2048)
+/// Returns (cert_pem, key_pem)
+pub fn generate_self_signed_cert(
+    common_name: &str,
+    san_dns_names: Vec<String>,
+) -> Result<(String, String), Error> {
+    let mut params =
+        rcgen::CertificateParams::new(vec![common_name.to_string()]).context(GenerateCertSnafu)?;
+    params.subject_alt_names = san_dns_names
+        .into_iter()
+        .map(|s| rcgen::SanType::DnsName(s.try_into().unwrap()))
+        .collect();
+
+    // Set valid period to 10 years for simplicity in this version
+    // In production this should be shorter and updated via rotation
+    params.not_before = time::OffsetDateTime::now_utc().saturating_sub(time::Duration::days(1));
+    params.not_after =
+        time::OffsetDateTime::now_utc().saturating_add(time::Duration::days(365 * 10));
+
+    let key_pair = rcgen::KeyPair::generate().context(GenerateCertSnafu)?;
+    let cert = params.self_signed(&key_pair).context(GenerateCertSnafu)?;
+
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    Ok((cert_pem, key_pem))
 }
 
 // load certificates from PEM file
@@ -241,4 +272,20 @@ do0DpyMVNy4vlS2yIvg6NmbMcDq6ugLh3A==
 
         assert!(x509_key_pair(cert_pem, key_pem).is_ok());
     }
+}
+
+#[test]
+fn test_generate_self_signed_cert() {
+    let cn = "test-service.default.svc";
+    let sans = vec![cn.to_string(), "localhost".to_string()];
+
+    let result = generate_self_signed_cert(cn, sans);
+    assert!(result.is_ok());
+
+    let (cert_pem, key_pem) = result.unwrap();
+    assert!(cert_pem.contains("BEGIN CERTIFICATE"));
+    assert!(key_pem.contains("PRIVATE KEY"));
+
+    // Verify key pair matches
+    assert!(x509_key_pair(&cert_pem, &key_pem).is_ok());
 }

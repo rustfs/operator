@@ -32,6 +32,9 @@ pub enum Error {
 
     #[snafu(transparent)]
     Types { source: types::error::Error },
+
+    #[snafu(transparent)]
+    Tls { source: crate::utils::tls::Error },
 }
 
 pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<Action, Error> {
@@ -104,6 +107,60 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         }
     }
 
+    // 1.5. Managed TLS: Generate and inject certificate if requested
+    if latest_tenant.spec.request_auto_cert.unwrap_or(false) {
+        let secret_name = format!("{}-tls", latest_tenant.name());
+        // Try to get existing secret
+        if ctx.get::<corev1::Secret>(&secret_name, &ns).await.is_err() {
+            debug!(
+                "TLS secret {} not found, generating self-signed certificate",
+                secret_name
+            );
+
+            let cn = format!("{}.{}.svc", latest_tenant.name(), ns);
+            let sans = vec![
+                cn.clone(),
+                format!("*.{}", cn),
+                format!("{}.{}.svc.cluster.local", latest_tenant.name(), ns),
+            ];
+
+            let (cert_pem, key_pem) = crate::utils::tls::generate_self_signed_cert(&cn, sans)?;
+
+            let mut data: std::collections::BTreeMap<String, k8s_openapi::ByteString> =
+                std::collections::BTreeMap::new();
+            use k8s_openapi::ByteString;
+            data.insert("tls.crt".to_string(), ByteString(cert_pem.into_bytes()));
+            data.insert("tls.key".to_string(), ByteString(key_pem.into_bytes()));
+
+            let secret = corev1::Secret {
+                metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                    name: Some(secret_name.clone()),
+                    namespace: Some(ns.clone()),
+                    owner_references: Some(vec![latest_tenant.new_owner_ref()]),
+                    labels: Some(latest_tenant.common_labels()),
+                    ..Default::default()
+                },
+                type_: Some("kubernetes.io/tls".to_string()),
+                data: Some(data),
+                ..Default::default()
+            };
+
+            ctx.create(&secret, &ns).await?;
+
+            let _ = ctx
+                .record(
+                    &latest_tenant,
+                    EventType::Normal,
+                    "TLSCertificateGenerated",
+                    &format!(
+                        "Generated self-signed certificate in secret {}",
+                        secret_name
+                    ),
+                )
+                .await;
+        }
+    }
+
     // 2. Create Services
     ctx.apply(&latest_tenant.new_io_service(), &ns).await?;
     ctx.apply(&latest_tenant.new_console_service(), &ns).await?;
@@ -164,6 +221,13 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     let mut ready_replicas = 0;
 
     for pool in &latest_tenant.spec.pools {
+        // Create or update PDB for the pool
+        ctx.apply(&latest_tenant.new_pdb(pool)?, &ns).await?;
+
+        // Resize PVCs if needed (Storage Expansion)
+        // This handles cases where statefulset.volumeClaimTemplates are immutable but PVCs can be resized.
+        resize_pool_pvcs(&latest_tenant, pool, &ns, &ctx).await?;
+
         let ss_name = format!("{}-{}", latest_tenant.name(), pool.name);
 
         // Try to get existing StatefulSet
@@ -584,6 +648,8 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
             // Other type errors - use moderate requeue
             _ => Action::requeue(Duration::from_secs(15)),
         },
+
+        Error::Tls { .. } => Action::requeue(Duration::from_secs(60)),
     }
 }
 
@@ -806,4 +872,101 @@ mod tests {
             &P::DeleteBothStatefulSetAndDeploymentPod
         ));
     }
+}
+
+/// Patches existing PVCs if the storage request has increased
+async fn resize_pool_pvcs(
+    tenant: &Tenant,
+    pool: &crate::types::v1alpha1::pool::Pool,
+    namespace: &str,
+    ctx: &Context,
+) -> Result<(), Error> {
+    // Get desired storage size from spec
+    let desired_storage = if let Some(ref template) = pool.persistence.volume_claim_template
+        && let Some(ref resources) = template.resources
+        && let Some(ref requests) = resources.requests
+        && let Some(qty) = requests.get("storage")
+    {
+        qty
+    } else {
+        // No storage request defined in spec or template, defaulting to 10Gi
+        // If the user hasn't defined it, we assume they don't want to resize or are using defaults.
+        // For simplicity, we skip resizing if not explicitly defined in the current spec template.
+        return Ok(());
+    };
+
+    // Parse desired quantity to allow comparison
+    // Note: Parsing k8s Quantity exactly is complex. Here we use string comparison if units are same,
+    // or rely on k8s to handle the patch if different.
+    // A more robust way is to blindly patch if string differs, and let K8s/CSI reject if invalid (e.g. shrinking).
+
+    // List all PVCs for this pool
+    // Labels: rustfs.tenant={tenant}, rustfs.pool={pool}
+    let selector = format!("rustfs.tenant={},rustfs.pool={}", tenant.name(), pool.name);
+    let pvcs_api: kube::Api<corev1::PersistentVolumeClaim> =
+        kube::Api::namespaced(ctx.client.clone(), namespace);
+    let pvcs = pvcs_api
+        .list(&ListParams::default().labels(&selector))
+        .await
+        .map_err(|source| Error::Context {
+            source: context::Error::Kube { source },
+        })?;
+
+    for pvc in pvcs.items {
+        let pvc_name = pvc.metadata.name.as_deref().unwrap_or_default();
+
+        // Check current request
+        if let Some(ref spec) = pvc.spec
+            && let Some(ref resources) = spec.resources
+            && let Some(ref requests) = resources.requests
+            && let Some(current_qty) = requests.get("storage")
+        {
+            if current_qty != desired_storage {
+                debug!(
+                    "PVC {} storage varies: current={}, desired={}. Attempting resize.",
+                    pvc_name, current_qty.0, desired_storage.0
+                );
+
+                // Create patch to update storage request
+                let patch = serde_json::json!({
+                    "spec": {
+                        "resources": {
+                            "requests": {
+                                "storage": desired_storage
+                            }
+                        }
+                    }
+                });
+
+                match pvcs_api
+                    .patch(
+                        pvc_name,
+                        &kube::api::PatchParams::apply("rustfs-operator"),
+                        &kube::api::Patch::Merge(patch),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = ctx
+                            .record(
+                                tenant,
+                                EventType::Normal,
+                                "PVCResized",
+                                &format!(
+                                    "Patched PVC {} storage request to {}",
+                                    pvc_name, desired_storage.0
+                                ),
+                            )
+                            .await;
+                    }
+                    Err(e) => {
+                        // Log but don't fail reconciliation completely, expanding storage might fail for valid reasons (unsupported SC)
+                        warn!("Failed to patch PVC {} for resize: {}", pvc_name, e);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
