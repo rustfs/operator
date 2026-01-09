@@ -210,6 +210,33 @@ impl Tenant {
             });
         }
 
+        // Configure TLS if requested
+        if self.spec.request_auto_cert.unwrap_or(false) {
+            env_vars.push(corev1::EnvVar {
+                name: "RUSTFS_TLS_ENABLE".to_string(),
+                value: Some("true".to_string()),
+                ..Default::default()
+            });
+            env_vars.push(corev1::EnvVar {
+                name: "RUSTFS_TLS_CERT_FILE".to_string(),
+                value: Some("/etc/rustfs-tls/tls.crt".to_string()),
+                ..Default::default()
+            });
+            env_vars.push(corev1::EnvVar {
+                name: "RUSTFS_TLS_KEY_FILE".to_string(),
+                value: Some("/etc/rustfs-tls/tls.key".to_string()),
+                ..Default::default()
+            });
+
+            // Mount the certificate secret
+            volume_mounts.push(corev1::VolumeMount {
+                name: "tls-certs".to_string(),
+                mount_path: "/etc/rustfs-tls".to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+
         // Merge with user-provided environment variables
         // User-provided vars can override operator-managed ones
         for user_env in &self.spec.env {
@@ -219,11 +246,24 @@ impl Tenant {
         }
 
         // Use an in-memory volume for logs to avoid permission issues on container filesystems
-        let pod_volumes = vec![corev1::Volume {
+        let mut pod_volumes = vec![corev1::Volume {
             name: LOG_VOLUME_NAME.to_string(),
             empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
             ..Default::default()
         }];
+
+        if self.spec.request_auto_cert.unwrap_or(false) {
+            let secret_name = format!("{}-tls", self.name());
+            pod_volumes.push(corev1::Volume {
+                name: "tls-certs".to_string(),
+                secret: Some(corev1::SecretVolumeSource {
+                    secret_name: Some(secret_name),
+                    default_mode: Some(420), // 0644
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
 
         // Enforce non-root execution and make mounted volumes writable by RustFS user
         let pod_security_context = Some(corev1::PodSecurityContext {
@@ -257,6 +297,9 @@ impl Tenant {
                 },
             ]),
             volume_mounts: Some(volume_mounts),
+            liveness_probe: self.spec.liveness.clone(),
+            readiness_probe: self.spec.readiness.clone(),
+            startup_probe: self.spec.startup.clone(),
             lifecycle: self.spec.lifecycle.clone(),
             // Apply pool-level resource requirements to container
             resources: pool.scheduling.resources.clone(),
