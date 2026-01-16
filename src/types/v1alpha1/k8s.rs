@@ -15,7 +15,9 @@
 //! Common Kubernetes enum types used across the operator
 
 use k8s_openapi::schemars::JsonSchema;
+use schemars::{Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use strum::Display;
 
 /// Pod management policy for StatefulSets
@@ -64,9 +66,8 @@ pub enum ImagePullPolicy {
 ///
 /// WARNING: Force-deleting pods can have data consistency implications depending on
 /// your storage backend and workload semantics.
-#[derive(Default, Deserialize, Serialize, Clone, Debug, JsonSchema, Display, PartialEq, Eq)]
+#[derive(Default, Deserialize, Serialize, Clone, Debug, Display, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
-#[schemars(rename_all = "PascalCase")]
 pub enum PodDeletionPolicyWhenNodeIsDown {
     /// Do not delete pods automatically.
     #[strum(to_string = "DoNothing")]
@@ -93,4 +94,31 @@ pub enum PodDeletionPolicyWhenNodeIsDown {
     /// Longhorn-compatible: force delete both StatefulSet and Deployment terminating pods on down nodes.
     #[strum(to_string = "DeleteBothStatefulSetAndDeploymentPod")]
     DeleteBothStatefulSetAndDeploymentPod,
+}
+
+impl JsonSchema for PodDeletionPolicyWhenNodeIsDown {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("PodDeletionPolicyWhenNodeIsDown")
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        Cow::Borrowed(concat!(module_path!(), "::", "PodDeletionPolicyWhenNodeIsDown"))
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        json_schema! {
+            {
+                "type": "string",
+                "enum": [
+                    "DoNothing",
+                    "Delete",
+                    "ForceDelete",
+                    "DeleteStatefulSetPod",
+                    "DeleteDeploymentPod",
+                    "DeleteBothStatefulSetAndDeploymentPod"
+                ],
+                "description": "Pod deletion policy when the node hosting the Pod is down (NotReady/Unknown). Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod"
+            }
+        }
+    }
 }
