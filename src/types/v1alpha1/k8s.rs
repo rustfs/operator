@@ -102,7 +102,11 @@ impl JsonSchema for PodDeletionPolicyWhenNodeIsDown {
     }
 
     fn schema_id() -> Cow<'static, str> {
-        Cow::Borrowed(concat!(module_path!(), "::", "PodDeletionPolicyWhenNodeIsDown"))
+        Cow::Borrowed(concat!(
+            module_path!(),
+            "::",
+            "PodDeletionPolicyWhenNodeIsDown"
+        ))
     }
 
     fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
