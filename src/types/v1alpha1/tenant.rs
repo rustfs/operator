@@ -23,6 +23,7 @@ use snafu::OptionExt;
 
 // Submodules for resource factory methods
 mod helper;
+mod pdb;
 mod rbac;
 mod services;
 mod workloads;
@@ -80,20 +81,20 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
 
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub request_auto_cert: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_auto_cert: Option<bool>,
     //
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub cert_expiry_alert_threshold: Option<i32>,
     //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub liveness: Option<corev1::Probe>,
-    //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub readiness: Option<corev1::Probe>,
-    //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub startup: Option<corev1::Probe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<corev1::Probe>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<corev1::Probe>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<corev1::Probe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<corev1::Lifecycle>,
 
