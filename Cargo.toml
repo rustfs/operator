@@ -15,22 +15,22 @@ tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros", "fs
 futures = "0.3.31"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-serde_json = "1.0.148"
+serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
 strum = { version = "0.27.2", features = ["derive"] }
 k8s-openapi = { version = "0.26.1", features = ["v1_30", "schemars"] }
-kube = { version = "2.0.1", features = ["runtime", "derive", "client", "rustls-tls"] }
+kube = { version = "3.0.0", features = ["runtime", "derive", "client", "rustls-tls"] }
 schemars = "1"
 clap = { version = "4.5.54", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pemfile = "2.2.0"
-shadow-rs = "1.5.0"
+shadow-rs = "1.6.0"
 snafu = { version = "0.8.9", features = ["futures"] }
 
 [dev-dependencies]
 
 [build-dependencies]
-shadow-rs = { version = "1.5.0", features = ["build"] }
+shadow-rs = { version = "1.6.0", features = ["build"] }
 
 [lints.rust]
 unused_variables = "allow"
