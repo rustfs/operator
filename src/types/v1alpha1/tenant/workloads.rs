@@ -20,8 +20,6 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 
 const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
-const LOG_VOLUME_NAME: &str = "logs";
-const LOG_VOLUME_MOUNT_PATH: &str = "/logs";
 const DEFAULT_RUN_AS_USER: i64 = 10001;
 const DEFAULT_RUN_AS_GROUP: i64 = 10001;
 const DEFAULT_FS_GROUP: i64 = 10001;
@@ -64,6 +62,50 @@ impl Tenant {
             .collect();
 
         Ok(volume_specs.join(" "))
+    }
+
+    /// Configure logging based on tenant.spec.logging
+    /// Returns (pod_volumes, volume_mounts) tuple
+    fn configure_logging(
+        &self,
+    ) -> Result<(Vec<corev1::Volume>, Vec<corev1::VolumeMount>), types::error::Error> {
+        use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
+
+        let default_logging = LoggingConfig::default();
+        let logging = self.spec.logging.as_ref().unwrap_or(&default_logging);
+        let mount_path = logging.mount_path.as_deref().unwrap_or("/logs");
+
+        match &logging.mode {
+            LoggingMode::Stdout => {
+                // Default: no volumes, logs to stdout
+                // This is cloud-native best practice
+                Ok((vec![], vec![]))
+            }
+            LoggingMode::EmptyDir => {
+                // Create emptyDir volume for temporary logs
+                let volume = corev1::Volume {
+                    name: "logs".to_string(),
+                    empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+                    ..Default::default()
+                };
+                let mount = corev1::VolumeMount {
+                    name: "logs".to_string(),
+                    mount_path: mount_path.to_string(),
+                    ..Default::default()
+                };
+                Ok((vec![volume], vec![mount]))
+            }
+            LoggingMode::Persistent => {
+                // Persistent logs via PVC will be handled in volume_claim_templates
+                // For now, we only mount it here
+                let mount = corev1::VolumeMount {
+                    name: "logs".to_string(),
+                    mount_path: mount_path.to_string(),
+                    ..Default::default()
+                };
+                Ok((vec![], vec![mount]))
+            }
+        }
     }
 
     /// Creates volume claim templates for a pool
@@ -119,7 +161,58 @@ impl Tenant {
             })
             .collect();
 
-        Ok(templates)
+        // Add log PVC if persistent logging is enabled
+        let mut all_templates = templates;
+        if let Some(logging) = &self.spec.logging {
+            use crate::types::v1alpha1::logging::LoggingMode;
+            if logging.mode == LoggingMode::Persistent {
+                let log_pvc = self.create_log_pvc(pool, logging)?;
+                all_templates.push(log_pvc);
+            }
+        }
+
+        Ok(all_templates)
+    }
+
+    /// Create PVC for persistent logging
+    fn create_log_pvc(
+        &self,
+        pool: &Pool,
+        logging: &crate::types::v1alpha1::logging::LoggingConfig,
+    ) -> Result<corev1::PersistentVolumeClaim, types::error::Error> {
+        let labels = self.pool_labels(pool);
+
+        let storage_size = logging.storage_size.as_deref().unwrap_or("5Gi");
+
+        let mut resources = std::collections::BTreeMap::new();
+        resources.insert(
+            "storage".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity(storage_size.to_string()),
+        );
+
+        let mut spec = corev1::PersistentVolumeClaimSpec {
+            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            resources: Some(corev1::VolumeResourceRequirements {
+                requests: Some(resources),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Set storage class if specified
+        if let Some(storage_class) = &logging.storage_class {
+            spec.storage_class_name = Some(storage_class.clone());
+        }
+
+        Ok(corev1::PersistentVolumeClaim {
+            metadata: metav1::ObjectMeta {
+                name: Some("logs".to_string()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: Some(spec),
+            ..Default::default()
+        })
     }
 
     pub fn new_statefulset(&self, pool: &Pool) -> Result<v1::StatefulSet, types::error::Error> {
@@ -141,13 +234,6 @@ impl Tenant {
                 ..Default::default()
             })
             .collect();
-
-        // Mount in-memory volume for RustFS logs to avoid permissions issues on the root filesystem
-        volume_mounts.push(corev1::VolumeMount {
-            name: LOG_VOLUME_NAME.to_string(),
-            mount_path: LOG_VOLUME_MOUNT_PATH.to_string(),
-            ..Default::default()
-        });
 
         // Generate environment variables: operator-managed + user-provided
         let mut env_vars = Vec::new();
@@ -218,14 +304,15 @@ impl Tenant {
             env_vars.push(user_env.clone());
         }
 
-        // Use an in-memory volume for logs to avoid permission issues on container filesystems
-        let pod_volumes = vec![corev1::Volume {
-            name: LOG_VOLUME_NAME.to_string(),
-            empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
-            ..Default::default()
-        }];
+        // Configure logging based on tenant.spec.logging
+        // Default: stdout (cloud-native best practice)
+        let (pod_volumes, mut log_volume_mounts) = self.configure_logging()?;
+
+        // Merge log volume mounts with data volume mounts
+        volume_mounts.append(&mut log_volume_mounts);
 
         // Enforce non-root execution and make mounted volumes writable by RustFS user
+        // This aligns with Pod Security Standards (restricted tier)
         let pod_security_context = Some(corev1::PodSecurityContext {
             run_as_user: Some(DEFAULT_RUN_AS_USER),
             run_as_group: Some(DEFAULT_RUN_AS_GROUP),
@@ -621,15 +708,13 @@ impl Tenant {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{
-        DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER, LOG_VOLUME_MOUNT_PATH,
-        LOG_VOLUME_NAME,
-    };
+    use super::{DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER};
+    use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
     use k8s_openapi::api::core::v1 as corev1;
 
-    // Test: Pod runs as non-root and mounts writable log volume
+    // Test: Pod runs as non-root with proper security context
     #[test]
-    fn test_statefulset_sets_security_context_and_log_volume() {
+    fn test_statefulset_sets_security_context() {
         let tenant = crate::tests::create_test_tenant(None, None);
         let pool = &tenant.spec.pools[0];
 
@@ -669,30 +754,132 @@ mod tests {
             Some("OnRootMismatch".to_string()),
             "fsGroup change policy should be set for PVC mounts"
         );
+    }
 
+    // Test: Default logging mode is stdout (no volumes)
+    #[test]
+    fn test_default_logging_is_stdout() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        // Default: no log volumes (stdout logging)
+        let volumes = pod_spec.volumes.unwrap_or_default();
+        let has_log_volume = volumes.iter().any(|v| v.name == "logs");
+        assert!(!has_log_volume, "Default should not have log volume");
+
+        // Should not have log volume mounts
+        let container = pod_spec.containers.first().expect("Should have container");
+        let empty_mounts = vec![];
+        let mounts = container.volume_mounts.as_ref().unwrap_or(&empty_mounts);
+        let has_log_mount = mounts.iter().any(|m| m.name == "logs");
+        assert!(!has_log_mount, "Default should not have log volume mount");
+    }
+
+    // Test: EmptyDir logging mode creates volume
+    #[test]
+    fn test_emptydir_logging_creates_volume() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.logging = Some(LoggingConfig {
+            mode: LoggingMode::EmptyDir,
+            storage_size: None,
+            storage_class: None,
+            mount_path: None,
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        // Should have emptyDir log volume
         let volumes = pod_spec
             .volumes
             .as_ref()
-            .expect("Pod should define volumes including logs");
+            .expect("Pod should define volumes");
         let log_volume = volumes
             .iter()
-            .find(|v| v.name == LOG_VOLUME_NAME)
-            .expect("Logs volume should be present");
+            .find(|v| v.name == "logs")
+            .expect("Should have logs volume");
         assert!(
             log_volume.empty_dir.is_some(),
-            "Logs volume should be an EmptyDir"
+            "Logs volume should be emptyDir"
         );
 
-        let container = &pod_spec.containers[0];
-        let log_mount = container
+        // Should have log volume mount
+        let container = pod_spec.containers.first().expect("Should have container");
+        let mounts = container
             .volume_mounts
             .as_ref()
-            .and_then(|mounts| mounts.iter().find(|m| m.name == LOG_VOLUME_NAME))
-            .expect("Container should mount logs volume");
+            .expect("Container should have mounts");
+        let log_mount = mounts
+            .iter()
+            .find(|m| m.name == "logs")
+            .expect("Should have logs mount");
+        assert_eq!(log_mount.mount_path, "/logs", "Logs should mount at /logs");
+    }
+
+    // Test: Persistent logging mode creates PVC
+    #[test]
+    fn test_persistent_logging_creates_pvc() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.logging = Some(LoggingConfig {
+            mode: LoggingMode::Persistent,
+            storage_size: Some("10Gi".to_string()),
+            storage_class: Some("fast-ssd".to_string()),
+            mount_path: None,
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        // Should have log PVC in volumeClaimTemplates
+        let vcts = statefulset
+            .spec
+            .as_ref()
+            .and_then(|s| s.volume_claim_templates.as_ref())
+            .expect("Should have volumeClaimTemplates");
+
+        let log_pvc = vcts
+            .iter()
+            .find(|v| v.metadata.name.as_deref() == Some("logs"))
+            .expect("Should have logs PVC");
+
+        // Verify PVC spec
+        let pvc_spec = log_pvc.spec.as_ref().expect("PVC should have spec");
         assert_eq!(
-            log_mount.mount_path, LOG_VOLUME_MOUNT_PATH,
-            "Logs volume should mount at /logs"
+            pvc_spec.storage_class_name.as_deref(),
+            Some("fast-ssd"),
+            "Should use specified storage class"
         );
+
+        let storage = pvc_spec
+            .resources
+            .as_ref()
+            .and_then(|r| r.requests.as_ref())
+            .and_then(|r| r.get("storage"))
+            .map(|q| q.0.as_str())
+            .expect("Should have storage request");
+        assert_eq!(storage, "10Gi", "Should request 10Gi storage");
     }
 
     // Test: StatefulSet uses correct service account
