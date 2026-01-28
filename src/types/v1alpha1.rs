@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod k8s;
+pub mod logging;
 pub mod persistence;
 pub mod pool;
 pub mod status;

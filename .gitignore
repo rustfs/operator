@@ -7,3 +7,7 @@
 *.tgz
 deploy/rustfs-operator/charts/
 deploy/rustfs-operator/Chart.lock
+
+# Operator
+operator.log
+operator.pid

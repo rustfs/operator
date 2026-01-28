@@ -293,6 +293,46 @@ spec:
                         type: object
                     type: object
                 type: object
+              logging:
+                description: |-
+                  Logging configuration for RustFS
+
+                  Controls how RustFS outputs logs. Defaults to stdout (cloud-native best practice).
+                  Can also configure emptyDir (temporary) or persistent (PVC-backed) logging.
+                nullable: true
+                properties:
+                  mode:
+                    default: stdout
+                    description: |-
+                      Logging mode: stdout, emptyDir, or persistent
+
+                      - stdout: Output logs to stdout/stderr (default, recommended for cloud-native)
+                      - emptyDir: Write logs to an emptyDir volume (temporary, lost on Pod restart)
+                      - persistent: Write logs to a PersistentVolumeClaim (persisted across restarts)
+                    enum:
+                    - stdout
+                    - emptydir
+                    - persistent
+                    type: string
+                  mountPath:
+                    description: |-
+                      Custom mount path for log directory
+                      Defaults to /logs if not specified
+                    nullable: true
+                    type: string
+                  storageClass:
+                    description: |-
+                      Storage class for persistent logs (only used when mode=persistent)
+                      If not specified, uses the cluster's default StorageClass
+                    nullable: true
+                    type: string
+                  storageSize:
+                    description: |-
+                      Storage size for persistent logs (only used when mode=persistent)
+                      Defaults to 5Gi if not specified
+                    nullable: true
+                    type: string
+                type: object
               mountPath:
                 default: /data
                 nullable: true

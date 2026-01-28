@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::types::v1alpha1::k8s;
+use crate::types::v1alpha1::logging::LoggingConfig;
 use crate::types::v1alpha1::pool::Pool;
 use crate::types::{self, error::NoNamespaceSnafu};
 use k8s_openapi::api::core::v1 as corev1;
@@ -122,6 +123,13 @@ pub struct TenantSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_pull_policy: Option<k8s::ImagePullPolicy>,
+
+    /// Logging configuration for RustFS
+    ///
+    /// Controls how RustFS outputs logs. Defaults to stdout (cloud-native best practice).
+    /// Can also configure emptyDir (temporary) or persistent (PVC-backed) logging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<LoggingConfig>,
 
     // // #[serde(default, skip_serializing_if = "Option::is_none")]
     // // pub side_cars: Option<SideCars>,
