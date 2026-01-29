@@ -1,0 +1,41 @@
+{{- if and .Values.console.enabled .Values.console.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-console
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+rules:
+  # Tenant resources - read and manage
+  - apiGroups: ["rustfs.com"]
+    resources: ["tenants"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rustfs.com"]
+    resources: ["tenants/status"]
+    verbs: ["get"]
+
+  # Core resources - read and limited write for tenant management
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create"]
+  - apiGroups: [""]
+    resources: ["services", "pods", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # StatefulSets - read only
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch"]
+
+  # PersistentVolumeClaims - read only
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

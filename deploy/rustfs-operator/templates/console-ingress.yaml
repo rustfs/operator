@@ -1,0 +1,43 @@
+{{- if and .Values.console.enabled .Values.console.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-console
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+  {{- with .Values.console.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.console.ingress.className }}
+  ingressClassName: {{ .Values.console.ingress.className }}
+  {{- end }}
+  {{- if .Values.console.ingress.tls }}
+  tls:
+    {{- range .Values.console.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .secretName }}
+    {{- end }}
+  {{- end }}
+  rules:
+    {{- range .Values.console.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ include "rustfs-operator.fullname" $ }}-console
+                port:
+                  number: {{ $.Values.console.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

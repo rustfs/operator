@@ -68,3 +68,14 @@ Namespace
 {{- define "rustfs-operator.namespace" -}}
 {{- default .Release.Namespace .Values.namespace }}
 {{- end }}
+
+{{/*
+Create the name of the console service account to use
+*/}}
+{{- define "rustfs-operator.consoleServiceAccountName" -}}
+{{- if .Values.console.serviceAccount.create }}
+{{- default (printf "%s-console" (include "rustfs-operator.fullname" .)) .Values.console.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.console.serviceAccount.name }}
+{{- end }}
+{{- end }}

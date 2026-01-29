@@ -8,7 +8,7 @@ homepage = "https://rustfs.com"
 
 
 [dependencies]
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 const-str = "1.0.0"
 serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
@@ -26,6 +26,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pemfile = "2.2.0"
 shadow-rs = "1.5.0"
 snafu = { version = "0.8.9", features = ["futures"] }
+
+# Console dependencies
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+jsonwebtoken = "9.3"
+http = "1.2"
 
 [dev-dependencies]
 

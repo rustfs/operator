@@ -145,6 +145,30 @@ start_operator() {
     sleep 3
 }
 
+# Start console (background)
+start_console() {
+    log_info "Starting console..."
+
+    # Check if console is already running
+    if pgrep -f "target/release/operator.*console" >/dev/null; then
+        log_warning "Detected existing console process"
+        log_info "Stopping old console process..."
+        pkill -f "target/release/operator.*console" || true
+        sleep 2
+    fi
+
+    # Start new console process (background)
+    nohup cargo run --release -- console --port 9090 > console.log 2>&1 &
+    CONSOLE_PID=$!
+    echo $CONSOLE_PID > console.pid
+
+    log_success "Console started (PID: $CONSOLE_PID)"
+    log_info "Log file: console.log"
+
+    # Wait for console to start
+    sleep 2
+}
+
 # Deploy Tenant (EC 2+1 configuration)
 deploy_tenant() {
     log_info "Deploying RustFS Tenant (using examples/simple-tenant.yaml)..."
@@ -224,13 +248,24 @@ show_access_info() {
     echo "  kubectl port-forward -n rustfs-system svc/rustfs 9000:9000"
     echo ""
 
-    echo "🌐 Port forward Web Console (9001):"
+    echo "🌐 Port forward RustFS Web Console (9001):"
     echo "  kubectl port-forward -n rustfs-system svc/example-tenant-console 9001:9001"
     echo ""
 
-    echo "🔐 Credentials:"
+    echo "🖥️  Operator Console (Management API):"
+    echo "  Listening on: http://localhost:9090"
+    echo "  Health check: curl http://localhost:9090/healthz"
+    echo ""
+
+    echo "🔐 RustFS Credentials:"
     echo "  Username: admin"
     echo "  Password: admin123"
+    echo ""
+
+    echo "🔑 Operator Console Login:"
+    echo "  Create K8s token: kubectl create token default --duration=24h"
+    echo "  Login: POST http://localhost:9090/api/v1/login"
+    echo "  Docs: deploy/console/README.md"
     echo ""
 
     echo "📊 Check cluster status:"
@@ -241,8 +276,9 @@ show_access_info() {
     echo "  ./cleanup-rustfs.sh"
     echo ""
 
-    echo "📝 Operator logs:"
-    echo "  tail -f operator.log"
+    echo "📝 Logs:"
+    echo "  Operator: tail -f operator.log"
+    echo "  Console:  tail -f console.log"
     echo ""
 }
 
@@ -264,6 +300,7 @@ main() {
     create_namespace
     build_operator
     start_operator
+    start_console
     deploy_tenant
 
     echo ""
