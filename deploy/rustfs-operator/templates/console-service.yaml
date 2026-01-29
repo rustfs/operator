@@ -1,0 +1,37 @@
+{{- if .Values.console.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-console
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+  {{- with .Values.console.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.console.service.type }}
+  {{- if and (eq .Values.console.service.type "LoadBalancer") .Values.console.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.console.service.loadBalancerIP }}
+  {{- end }}
+  {{- if and (eq .Values.console.service.type "LoadBalancer") .Values.console.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml .Values.console.service.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  {{- if and (eq .Values.console.service.type "ClusterIP") .Values.console.service.clusterIP }}
+  clusterIP: {{ .Values.console.service.clusterIP }}
+  {{- end }}
+  ports:
+    - port: {{ .Values.console.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+      {{- if and (or (eq .Values.console.service.type "NodePort") (eq .Values.console.service.type "LoadBalancer")) .Values.console.service.nodePort }}
+      nodePort: {{ .Values.console.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "rustfs-operator.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+{{- end }}

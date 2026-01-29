@@ -75,3 +75,108 @@ commonLabels: {}
 
 # Additional annotations to add to all resources
 commonAnnotations: {}
+
+# Console web UI configuration
+console:
+  # Enable console deployment
+  enabled: true
+
+  # Number of console replicas
+  replicas: 1
+
+  # Console server port
+  port: 9090
+
+  # Log level for console (trace, debug, info, warn, error)
+  logLevel: info
+
+  # JWT secret for session token signing
+  # If not set, a random secret will be generated
+  # Generate with: openssl rand -base64 32
+  jwtSecret: ""
+
+  image:
+    # Console uses the same image as operator
+    repository: rustfs/operator
+    tag: ""  # Defaults to operator.image.tag
+    pullPolicy: IfNotPresent
+
+  # Image pull secrets for private registries
+  imagePullSecrets: []
+
+  # Resource limits and requests
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # Environment variables
+  env: []
+
+  # Security context for the console pod
+  podSecurityContext:
+    fsGroup: 65534
+
+  # Security context for the console container
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    runAsUser: 65534
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Node selector for console pod placement
+  nodeSelector: {}
+
+  # Tolerations for console pod scheduling
+  tolerations: []
+
+  # Affinity rules for console pod scheduling
+  affinity: {}
+
+  # Service configuration
+  service:
+    type: ClusterIP
+    port: 9090
+    nodePort: ""
+    clusterIP: ""
+    loadBalancerIP: ""
+    loadBalancerSourceRanges: []
+    annotations: {}
+
+  # ServiceAccount configuration
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    name: ""
+
+  # RBAC configuration
+  rbac:
+    # Specifies whether RBAC resources should be created
+    create: true
+
+  # Ingress configuration
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+      # kubernetes.io/ingress.class: nginx
+      # cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: console.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+      # - secretName: console-tls
+      #   hosts:
+      #     - console.example.com

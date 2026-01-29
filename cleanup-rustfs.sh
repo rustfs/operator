@@ -122,6 +122,41 @@ stop_operator() {
     log_success "Operator stopped"
 }
 
+# Stop Console
+stop_console() {
+    log_info "Stopping Console process..."
+
+    # Method 1: Read from PID file
+    if [ -f console.pid ]; then
+        local pid=$(cat console.pid)
+        if ps -p $pid > /dev/null 2>&1; then
+            log_info "Stopping Console (PID: $pid)..."
+            kill $pid 2>/dev/null || true
+            sleep 2
+
+            # If process still exists, force kill
+            if ps -p $pid > /dev/null 2>&1; then
+                log_warning "Process did not exit normally, forcing termination..."
+                kill -9 $pid 2>/dev/null || true
+            fi
+        fi
+        rm -f console.pid
+    fi
+
+    # Method 2: Find all console processes
+    local console_pids=$(pgrep -f "target/release/operator.*console" 2>/dev/null || true)
+    if [ -n "$console_pids" ]; then
+        log_info "Found Console processes: $console_pids"
+        pkill -f "target/release/operator.*console" || true
+        sleep 2
+
+        # Force kill remaining processes
+        pkill -9 -f "target/release/operator.*console" 2>/dev/null || true
+    fi
+
+    log_success "Console stopped"
+}
+
 # Delete Namespace
 delete_namespace() {
     log_info "Deleting Namespace: rustfs-system..."
@@ -190,6 +225,8 @@ cleanup_local_files() {
     local files_to_clean=(
         "operator.log"
         "operator.pid"
+        "console.log"
+        "console.pid"
         "deploy/rustfs-operator/crds/tenant-crd.yaml"
     )
 
@@ -242,6 +279,14 @@ verify_cleanup() {
         log_success "✓ Operator stopped"
     fi
 
+    # Check Console process
+    if pgrep -f "target/release/operator.*console" >/dev/null; then
+        log_error "Console process still running"
+        issues=$((issues + 1))
+    else
+        log_success "✓ Console stopped"
+    fi
+
     echo ""
     if [ $issues -eq 0 ]; then
         log_success "Cleanup verification passed!"
@@ -286,6 +331,7 @@ main() {
     echo ""
 
     delete_tenant
+    stop_console
     stop_operator
     delete_namespace
     delete_crd

@@ -33,6 +33,9 @@ pub mod reconcile;
 pub mod types;
 pub mod utils;
 
+// Console module (Web UI)
+pub mod console;
+
 #[cfg(test)]
 pub mod tests;
 

@@ -67,6 +67,13 @@ enum Commands {
 
     /// Run the controller
     Server {},
+
+    /// Run the console web server
+    Console {
+        /// Port to listen on
+        #[arg(long, default_value = "9090")]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -76,5 +83,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Crd { file } => crd(file).await,
         Commands::Server {} => run().await,
+        Commands::Console { port } => operator::console::server::run(port).await,
     }
 }

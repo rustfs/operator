@@ -117,6 +117,22 @@ echo "  Access RustFS"
 echo "========================================="
 echo ""
 
+# Check if Console is running locally
+if pgrep -f "target/release/operator.*console" >/dev/null; then
+    echo "✅ Operator Console (local):"
+    echo "  Running at: http://localhost:9090"
+    echo "  Health check: curl http://localhost:9090/healthz"
+    echo "  API docs: deploy/console/README.md"
+    echo ""
+    echo "  Create K8s token: kubectl create token default --duration=24h"
+    echo "  Login: POST http://localhost:9090/api/v1/login"
+    echo ""
+else
+    echo "⚠️  Operator Console not running locally"
+    echo "  Start with: cargo run -- console --port 9090"
+    echo ""
+fi
+
 # Dynamically get Service information
 # Find all related Services by labels
 SERVICES=$(kubectl get svc -n "$NAMESPACE" -l "rustfs.tenant=$TENANT_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
