@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{routing::{delete, get, post}, Router};
+use axum::{routing::{delete, get, post, put}, Router};
 
 use crate::console::{handlers, state::AppState};
 
@@ -39,7 +39,53 @@ pub fn tenant_routes() -> Router<AppState> {
         )
         .route(
             "/namespaces/:namespace/tenants/:name",
+            put(handlers::tenants::update_tenant),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name",
             delete(handlers::tenants::delete_tenant),
+        )
+}
+
+/// Pool 管理路由
+pub fn pool_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/namespaces/:namespace/tenants/:name/pools",
+            get(handlers::pools::list_pools),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pools",
+            post(handlers::pools::add_pool),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pools/:pool",
+            delete(handlers::pools::delete_pool),
+        )
+}
+
+/// Pod 管理路由
+pub fn pod_routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/namespaces/:namespace/tenants/:name/pods",
+            get(handlers::pods::list_pods),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pods/:pod",
+            get(handlers::pods::get_pod_details),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pods/:pod",
+            delete(handlers::pods::delete_pod),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pods/:pod/restart",
+            post(handlers::pods::restart_pod),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pods/:pod/logs",
+            get(handlers::pods::get_pod_logs),
         )
 }
 
