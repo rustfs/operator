@@ -15,4 +15,6 @@
 pub mod auth;
 pub mod cluster;
 pub mod events;
+pub mod pods;
+pub mod pools;
 pub mod tenants;

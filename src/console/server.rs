@@ -82,6 +82,8 @@ fn api_routes() -> Router<AppState> {
     Router::new()
         .merge(routes::auth_routes())
         .merge(routes::tenant_routes())
+        .merge(routes::pool_routes())
+        .merge(routes::pod_routes())
         .merge(routes::event_routes())
         .merge(routes::cluster_routes())
 }
