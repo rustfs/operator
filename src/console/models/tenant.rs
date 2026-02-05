@@ -94,3 +94,53 @@ pub struct DeleteTenantResponse {
     pub success: bool,
     pub message: String,
 }
+
+/// 更新 Tenant 请求
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTenantRequest {
+    /// 更新镜像版本
+    pub image: Option<String>,
+
+    /// 更新挂载路径
+    pub mount_path: Option<String>,
+
+    /// 更新环境变量
+    pub env: Option<Vec<EnvVar>>,
+
+    /// 更新凭证 Secret
+    pub creds_secret: Option<String>,
+
+    /// 更新 Pod 管理策略
+    pub pod_management_policy: Option<String>,
+
+    /// 更新镜像拉取策略
+    pub image_pull_policy: Option<String>,
+
+    /// 更新日志配置
+    pub logging: Option<LoggingConfig>,
+}
+
+/// 环境变量
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: Option<String>,
+}
+
+/// 日志配置
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoggingConfig {
+    pub log_type: String,  // "stdout" | "emptyDir" | "persistent"
+    pub volume_size: Option<String>,
+    pub storage_class: Option<String>,
+}
+
+/// 更新 Tenant 响应
+#[derive(Debug, Serialize)]
+pub struct UpdateTenantResponse {
+    pub success: bool,
+    pub message: String,
+    pub tenant: TenantListItem,
+}

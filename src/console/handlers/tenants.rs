@@ -307,6 +307,157 @@ pub async fn delete_tenant(
     }))
 }
 
+/// 更新 Tenant
+pub async fn update_tenant(
+    Path((namespace, name)): Path<(String, String)>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<UpdateTenantRequest>,
+) -> Result<Json<UpdateTenantResponse>> {
+    let client = create_client(&claims).await?;
+    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+
+    // 获取当前 Tenant
+    let mut tenant = api.get(&name).await.context(error::KubeApiSnafu)?;
+
+    // 应用更新（仅更新提供的字段）
+    let mut updated_fields = Vec::new();
+
+    if let Some(image) = req.image {
+        tenant.spec.image = Some(image.clone());
+        updated_fields.push(format!("image={}", image));
+    }
+
+    if let Some(mount_path) = req.mount_path {
+        tenant.spec.mount_path = Some(mount_path.clone());
+        updated_fields.push(format!("mount_path={}", mount_path));
+    }
+
+    if let Some(env_vars) = req.env {
+        tenant.spec.env = env_vars
+            .into_iter()
+            .map(|e| corev1::EnvVar {
+                name: e.name,
+                value: e.value,
+                ..Default::default()
+            })
+            .collect();
+        updated_fields.push("env".to_string());
+    }
+
+    if let Some(creds_secret) = req.creds_secret {
+        if creds_secret.is_empty() {
+            tenant.spec.creds_secret = None;
+            updated_fields.push("creds_secret=<removed>".to_string());
+        } else {
+            tenant.spec.creds_secret = Some(corev1::LocalObjectReference {
+                name: creds_secret.clone(),
+            });
+            updated_fields.push(format!("creds_secret={}", creds_secret));
+        }
+    }
+
+    if let Some(pod_mgmt_policy) = req.pod_management_policy {
+        use crate::types::v1alpha1::k8s::PodManagementPolicy;
+        tenant.spec.pod_management_policy = match pod_mgmt_policy.as_str() {
+            "OrderedReady" => Some(PodManagementPolicy::OrderedReady),
+            "Parallel" => Some(PodManagementPolicy::Parallel),
+            _ => {
+                return Err(Error::BadRequest {
+                    message: format!(
+                        "Invalid pod_management_policy '{}', must be 'OrderedReady' or 'Parallel'",
+                        pod_mgmt_policy
+                    ),
+                })
+            }
+        };
+        updated_fields.push(format!("pod_management_policy={}", pod_mgmt_policy));
+    }
+
+    if let Some(image_pull_policy) = req.image_pull_policy {
+        use crate::types::v1alpha1::k8s::ImagePullPolicy;
+        tenant.spec.image_pull_policy = match image_pull_policy.as_str() {
+            "Always" => Some(ImagePullPolicy::Always),
+            "IfNotPresent" => Some(ImagePullPolicy::IfNotPresent),
+            "Never" => Some(ImagePullPolicy::Never),
+            _ => {
+                return Err(Error::BadRequest {
+                    message: format!(
+                        "Invalid image_pull_policy '{}', must be 'Always', 'IfNotPresent', or 'Never'",
+                        image_pull_policy
+                    ),
+                })
+            }
+        };
+        updated_fields.push(format!("image_pull_policy={}", image_pull_policy));
+    }
+
+    if let Some(logging) = req.logging {
+        use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
+
+        let mode = match logging.log_type.as_str() {
+            "stdout" => LoggingMode::Stdout,
+            "emptyDir" => LoggingMode::EmptyDir,
+            "persistent" => LoggingMode::Persistent,
+            _ => {
+                return Err(Error::BadRequest {
+                    message: format!(
+                        "Invalid logging type '{}', must be 'stdout', 'emptyDir', or 'persistent'",
+                        logging.log_type
+                    ),
+                })
+            }
+        };
+
+        tenant.spec.logging = Some(LoggingConfig {
+            mode,
+            storage_size: logging.volume_size,
+            storage_class: logging.storage_class,
+            mount_path: None,
+        });
+        updated_fields.push(format!("logging={}", logging.log_type));
+    }
+
+    if updated_fields.is_empty() {
+        return Err(Error::BadRequest {
+            message: "No fields to update".to_string(),
+        });
+    }
+
+    // 提交更新
+    let updated_tenant = api
+        .replace(&name, &Default::default(), &tenant)
+        .await
+        .context(error::KubeApiSnafu)?;
+
+    Ok(Json(UpdateTenantResponse {
+        success: true,
+        message: format!("Tenant updated: {}", updated_fields.join(", ")),
+        tenant: TenantListItem {
+            name: updated_tenant.name_any(),
+            namespace: updated_tenant.namespace().unwrap_or_default(),
+            pools: updated_tenant
+                .spec
+                .pools
+                .iter()
+                .map(|p| PoolInfo {
+                    name: p.name.clone(),
+                    servers: p.servers,
+                    volumes_per_server: p.persistence.volumes_per_server,
+                })
+                .collect(),
+            state: updated_tenant
+                .status
+                .as_ref()
+                .map(|s| s.current_state.to_string())
+                .unwrap_or_else(|| "Unknown".to_string()),
+            created_at: updated_tenant
+                .metadata
+                .creation_timestamp
+                .map(|ts| ts.0.to_rfc3339()),
+        },
+    }))
+}
+
 /// 创建 Kubernetes 客户端
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer().await.map_err(|e| Error::InternalServer {
