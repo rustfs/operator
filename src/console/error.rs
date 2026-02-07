@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Serialize;
 use snafu::Snafu;
@@ -61,9 +61,12 @@ struct ErrorResponse {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, error_type, message, details) = match &self {
-            Error::Unauthorized { message } => {
-                (StatusCode::UNAUTHORIZED, "Unauthorized", message.clone(), None)
-            }
+            Error::Unauthorized { message } => (
+                StatusCode::UNAUTHORIZED,
+                "Unauthorized",
+                message.clone(),
+                None,
+            ),
             Error::Forbidden { message } => {
                 (StatusCode::FORBIDDEN, "Forbidden", message.clone(), None)
             }

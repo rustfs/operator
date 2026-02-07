@@ -14,6 +14,7 @@
 # limitations under the License.
 
 # RustFS Operator deployment script - uses examples/simple-tenant.yaml
+# Deploys Operator and Console as Kubernetes Deployments (Pods in K8s)
 # For quick deployment and CRD modification verification
 
 set -e
@@ -50,6 +51,7 @@ check_prerequisites() {
     command -v kubectl >/dev/null 2>&1 || missing_tools+=("kubectl")
     command -v cargo >/dev/null 2>&1 || missing_tools+=("cargo")
     command -v kind >/dev/null 2>&1 || missing_tools+=("kind")
+    command -v docker >/dev/null 2>&1 || missing_tools+=("docker")
 
     if [ ${#missing_tools[@]} -ne 0 ]; then
         log_error "Missing required tools: ${missing_tools[*]}"
@@ -57,6 +59,39 @@ check_prerequisites() {
     fi
 
     log_success "All required tools are installed"
+}
+
+# Fix "too many open files" for kind (inotify limits)
+# See: https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files
+fix_inotify_limits() {
+    log_info "Applying inotify limits (fix for 'too many open files')..."
+
+    local sysctl_conf="/etc/sysctl.d/99-rustfs-kind.conf"
+    local persisted=false
+
+    if sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null 2>&1 \
+        && sudo sysctl -w fs.inotify.max_user_instances=512 >/dev/null 2>&1; then
+        log_success "Inotify limits applied (current session)"
+        persisted=true
+    fi
+
+    if sudo test -w /etc/sysctl.d 2>/dev/null; then
+        if ! sudo grep -qs "fs.inotify.max_user_watches" "$sysctl_conf" 2>/dev/null; then
+            printf 'fs.inotify.max_user_watches = 524288\nfs.inotify.max_user_instances = 512\n' \
+                | sudo tee "$sysctl_conf" >/dev/null 2>&1 && \
+                log_success "Inotify limits persisted to $sysctl_conf"
+        fi
+    fi
+
+    if [ "$persisted" = true ]; then
+        return 0
+    fi
+
+    log_warning "Could not set inotify limits (may need root). If you see kube-proxy 'too many open files' errors:"
+    echo "  sudo sysctl fs.inotify.max_user_watches=524288"
+    echo "  sudo sysctl fs.inotify.max_user_instances=512"
+    echo "  # Make persistent: add to /etc/sysctl.conf or $sysctl_conf"
+    return 1
 }
 
 # Check Kubernetes cluster connection
@@ -67,6 +102,8 @@ check_cluster() {
         log_error "Unable to connect to Kubernetes cluster"
         log_info "Attempting to start kind cluster..."
 
+        fix_inotify_limits || true
+
         if kind get clusters | grep -q "rustfs-dev"; then
             log_info "Detected kind cluster 'rustfs-dev', attempting to restart..."
             kind delete cluster --name rustfs-dev
@@ -74,6 +111,8 @@ check_cluster() {
 
         log_info "Creating new kind cluster..."
         kind create cluster --name rustfs-dev
+    else
+        fix_inotify_limits || true
     fi
 
     log_success "Kubernetes cluster connection OK: $(kubectl config current-context)"
@@ -121,52 +160,47 @@ build_operator() {
     log_success "Operator build completed"
 }
 
-# Start operator (background)
-start_operator() {
-    log_info "Starting operator..."
+# Build Docker image and deploy Operator + Console as Kubernetes Deployments
+deploy_operator_and_console() {
+    local kind_cluster="rustfs-dev"
+    local image_name="rustfs/operator:dev"
 
-    # Check if operator is already running
-    if pgrep -f "target/release/operator.*server" >/dev/null; then
-        log_warning "Detected existing operator process"
-        log_info "Stopping old operator process..."
-        pkill -f "target/release/operator.*server" || true
-        sleep 2
+    log_info "Building Docker image..."
+
+    if ! docker build -t "$image_name" .; then
+        log_error "Docker build failed"
+        exit 1
     fi
 
-    # Start new operator process (background)
-    nohup cargo run --release -- server > operator.log 2>&1 &
-    OPERATOR_PID=$!
-    echo $OPERATOR_PID > operator.pid
+    log_info "Loading image into kind cluster '$kind_cluster'..."
 
-    log_success "Operator started (PID: $OPERATOR_PID)"
-    log_info "Log file: operator.log"
-
-    # Wait for operator to start
-    sleep 3
-}
-
-# Start console (background)
-start_console() {
-    log_info "Starting console..."
-
-    # Check if console is already running
-    if pgrep -f "target/release/operator.*console" >/dev/null; then
-        log_warning "Detected existing console process"
-        log_info "Stopping old console process..."
-        pkill -f "target/release/operator.*console" || true
-        sleep 2
+    if ! kind load docker-image "$image_name" --name "$kind_cluster"; then
+        log_error "Failed to load image into kind cluster"
+        log_info "Verify: 1) kind cluster exists: kind get clusters"
+        log_info "        2) kind cluster 'rustfs-dev' exists: kind get clusters"
+        log_info "        3) Docker is running and accessible"
+        exit 1
     fi
 
-    # Start new console process (background)
-    nohup cargo run --release -- console --port 9090 > console.log 2>&1 &
-    CONSOLE_PID=$!
-    echo $CONSOLE_PID > console.pid
+    log_info "Creating Console JWT secret..."
 
-    log_success "Console started (PID: $CONSOLE_PID)"
-    log_info "Log file: console.log"
+    local jwt_secret
+    jwt_secret=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
 
-    # Wait for console to start
-    sleep 2
+    kubectl create secret generic rustfs-operator-console-secret \
+        --namespace rustfs-system \
+        --from-literal=jwt-secret="$jwt_secret" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+    log_info "Deploying Operator and Console (Deployment)..."
+
+    kubectl apply -f deploy/k8s-dev/operator-rbac.yaml
+    kubectl apply -f deploy/k8s-dev/console-rbac.yaml
+    kubectl apply -f deploy/k8s-dev/operator-deployment.yaml
+    kubectl apply -f deploy/k8s-dev/console-deployment.yaml
+    kubectl apply -f deploy/k8s-dev/console-service.yaml
+
+    log_success "Operator and Console deployed to Kubernetes"
 }
 
 # Deploy Tenant (EC 2+1 configuration)
@@ -178,24 +212,25 @@ deploy_tenant() {
     log_success "Tenant submitted"
 }
 
-# Wait for pods to be ready
+# Wait for pods to be ready (1 operator + 1 console + 2 tenant = 4)
 wait_for_pods() {
     log_info "Waiting for pods to start (max 5 minutes)..."
 
     local timeout=300
     local elapsed=0
     local interval=5
+    local expected_pods=4
 
     while [ $elapsed -lt $timeout ]; do
         local ready_count=$(kubectl get pods -n rustfs-system --no-headers 2>/dev/null | grep -c "Running" || echo "0")
         local total_count=$(kubectl get pods -n rustfs-system --no-headers 2>/dev/null | wc -l || echo "0")
 
-        if [ "$ready_count" -eq 2 ] && [ "$total_count" -eq 2 ]; then
-            log_success "All pods are ready (2/2 Running)"
+        if [ "$ready_count" -eq "$expected_pods" ] && [ "$total_count" -eq "$expected_pods" ]; then
+            log_success "All pods are ready ($expected_pods/$expected_pods Running)"
             return 0
         fi
 
-        echo -ne "${BLUE}[INFO]${NC} Pod status: $ready_count/2 Running, waited ${elapsed}s...\r"
+        echo -ne "${BLUE}[INFO]${NC} Pod status: $ready_count/$expected_pods Running, waited ${elapsed}s...\r"
         sleep $interval
         elapsed=$((elapsed + interval))
     done
@@ -212,23 +247,27 @@ show_status() {
     log_info "=========================================="
     echo ""
 
-    log_info "1. Tenant status:"
+    log_info "1. Deployment status:"
+    kubectl get deployment -n rustfs-system
+    echo ""
+
+    log_info "2. Tenant status:"
     kubectl get tenant -n rustfs-system
     echo ""
 
-    log_info "2. Pod status:"
+    log_info "3. Pod status:"
     kubectl get pods -n rustfs-system -o wide
     echo ""
 
-    log_info "3. Service status:"
+    log_info "4. Service status:"
     kubectl get svc -n rustfs-system
     echo ""
 
-    log_info "4. PVC status:"
+    log_info "5. PVC status:"
     kubectl get pvc -n rustfs-system
     echo ""
 
-    log_info "5. StatefulSet status:"
+    log_info "6. StatefulSet status:"
     kubectl get statefulset -n rustfs-system
     echo ""
 }
@@ -241,7 +280,9 @@ show_access_info() {
     echo ""
 
     echo "📋 View logs:"
-    echo "  kubectl logs -f example-tenant-primary-0 -n rustfs-system"
+    echo "  Operator:  kubectl logs -f deployment/rustfs-operator -n rustfs-system"
+    echo "  Console:   kubectl logs -f deployment/rustfs-operator-console -n rustfs-system"
+    echo "  RustFS:    kubectl logs -f example-tenant-primary-0 -n rustfs-system"
     echo ""
 
     echo "🔌 Port forward S3 API (9000):"
@@ -252,9 +293,9 @@ show_access_info() {
     echo "  kubectl port-forward -n rustfs-system svc/example-tenant-console 9001:9001"
     echo ""
 
-    echo "🖥️  Operator Console (Management API):"
-    echo "  Listening on: http://localhost:9090"
-    echo "  Health check: curl http://localhost:9090/healthz"
+    echo "🖥️  Operator Console (Management API, port 9090):"
+    echo "  kubectl port-forward -n rustfs-system svc/rustfs-operator-console 9090:9090"
+    echo "  Then: curl http://localhost:9090/healthz"
     echo ""
 
     echo "🔐 RustFS Credentials:"
@@ -276,9 +317,10 @@ show_access_info() {
     echo "  ./cleanup-rustfs.sh"
     echo ""
 
-    echo "📝 Logs:"
-    echo "  Operator: tail -f operator.log"
-    echo "  Console:  tail -f console.log"
+    echo "⚠️  If pods show 'ImagePullBackOff' or 'image not present':"
+    echo "  docker build -t rustfs/operator:dev ."
+    echo "  kind load docker-image rustfs/operator:dev --name rustfs-dev"
+    echo "  kubectl rollout restart deployment -n rustfs-system"
     echo ""
 }
 
@@ -299,8 +341,7 @@ main() {
     deploy_crd
     create_namespace
     build_operator
-    start_operator
-    start_console
+    deploy_operator_and_console
     deploy_tenant
 
     echo ""
@@ -317,6 +358,27 @@ main() {
 
 # Catch Ctrl+C
 trap 'log_error "Deployment interrupted"; exit 1' INT
+
+# Parse arguments
+case "${1:-}" in
+    --fix-limits)
+        log_info "Fix inotify limits for kind (kube-proxy 'too many open files')"
+        fix_inotify_limits
+        echo ""
+        log_info "If cluster already has issues, delete and recreate:"
+        echo "  kind delete cluster --name rustfs-dev"
+        echo "  ./deploy-rustfs.sh"
+        exit 0
+        ;;
+    -h|--help)
+        echo "Usage: $0 [options]"
+        echo ""
+        echo "Options:"
+        echo "  --fix-limits  Apply inotify limits (fix 'too many open files'), then exit"
+        echo "  -h, --help    Show this help"
+        exit 0
+        ;;
+esac
 
 # 执行主流程
 main "$@"

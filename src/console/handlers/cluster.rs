@@ -14,7 +14,7 @@
 
 use axum::{Extension, Json};
 use k8s_openapi::api::core::v1 as corev1;
-use kube::{api::ListParams, Api, Client, ResourceExt};
+use kube::{Api, Client, ResourceExt, api::ListParams};
 use snafu::ResultExt;
 
 use crate::console::{
@@ -138,10 +138,7 @@ pub async fn list_namespaces(
                 .as_ref()
                 .and_then(|s| s.phase.clone())
                 .unwrap_or_else(|| "Unknown".to_string()),
-            created_at: ns
-                .metadata
-                .creation_timestamp
-                .map(|ts| ts.0.to_rfc3339()),
+            created_at: ns.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
         })
         .collect();
 
@@ -198,24 +195,24 @@ pub async fn get_cluster_resources(
     let total_nodes = nodes.items.len();
 
     // 简化统计 (实际生产中需要更精确的计算)
-    let (total_cpu, total_memory, allocatable_cpu, allocatable_memory) = nodes
-        .items
-        .iter()
-        .fold(
-            (String::new(), String::new(), String::new(), String::new()),
-            |acc, node| {
-                // 这里简化处理,实际需要累加 Quantity
-                if let Some(status) = &node.status {
-                    if let Some(capacity) = &status.capacity {
-                        // 实际应该累加,这里仅作演示
-                        let cpu = capacity.get("cpu").map(|q| q.0.clone()).unwrap_or_default();
-                        let mem = capacity.get("memory").map(|q| q.0.clone()).unwrap_or_default();
-                        return (cpu, mem, acc.2, acc.3);
-                    }
+    let (total_cpu, total_memory, allocatable_cpu, allocatable_memory) = nodes.items.iter().fold(
+        (String::new(), String::new(), String::new(), String::new()),
+        |acc, node| {
+            // 这里简化处理,实际需要累加 Quantity
+            if let Some(status) = &node.status {
+                if let Some(capacity) = &status.capacity {
+                    // 实际应该累加,这里仅作演示
+                    let cpu = capacity.get("cpu").map(|q| q.0.clone()).unwrap_or_default();
+                    let mem = capacity
+                        .get("memory")
+                        .map(|q| q.0.clone())
+                        .unwrap_or_default();
+                    return (cpu, mem, acc.2, acc.3);
                 }
-                acc
-            },
-        );
+            }
+            acc
+        },
+    );
 
     Ok(Json(ClusterResourcesResponse {
         total_nodes,
@@ -228,9 +225,11 @@ pub async fn get_cluster_resources(
 
 /// 创建 Kubernetes 客户端
 async fn create_client(claims: &Claims) -> Result<Client> {
-    let mut config = kube::Config::infer().await.map_err(|e| Error::InternalServer {
-        message: format!("Failed to load kubeconfig: {}", e),
-    })?;
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(|e| Error::InternalServer {
+            message: format!("Failed to load kubeconfig: {}", e),
+        })?;
 
     config.auth_info.token = Some(claims.k8s_token.clone().into());
 

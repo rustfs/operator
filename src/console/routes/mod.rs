@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{routing::{delete, get, post, put}, Router};
+use axum::{
+    Router,
+    routing::{delete, get, post},
+};
 
 use crate::console::{handlers, state::AppState};
 
@@ -101,7 +104,10 @@ pub fn event_routes() -> Router<AppState> {
 pub fn cluster_routes() -> Router<AppState> {
     Router::new()
         .route("/cluster/nodes", get(handlers::cluster::list_nodes))
-        .route("/cluster/resources", get(handlers::cluster::get_cluster_resources))
+        .route(
+            "/cluster/resources",
+            get(handlers::cluster::get_cluster_resources),
+        )
         .route("/namespaces", get(handlers::cluster::list_namespaces))
         .route("/namespaces", post(handlers::cluster::create_namespace))
 }
