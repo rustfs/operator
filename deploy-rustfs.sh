@@ -14,8 +14,8 @@
 # limitations under the License.
 
 # RustFS Operator deployment script - uses examples/simple-tenant.yaml
-# Deploys Operator and Console as Kubernetes Deployments (Pods in K8s)
-# For quick deployment and CRD modification verification
+# Deploys Operator, Console (API) and Console Web (frontend) as Kubernetes Deployments (Pods in K8s)
+# Images built locally and loaded into kind. For quick deployment and CRD modification verification.
 
 set -e
 
@@ -160,25 +160,49 @@ build_operator() {
     log_success "Operator build completed"
 }
 
-# Build Docker image and deploy Operator + Console as Kubernetes Deployments
+# Build Console Web (frontend) Docker image for local dev (port-forward: API at localhost:9090)
+build_console_web_image() {
+    log_info "Building Console Web Docker image (API URL: http://localhost:9090/api/v1 for port-forward)..."
+
+    if ! docker build \
+        --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1 \
+        -t rustfs/console-web:dev \
+        -f console-web/Dockerfile \
+        console-web/; then
+        log_error "Console Web Docker build failed"
+        exit 1
+    fi
+
+    log_success "Console Web image built: rustfs/console-web:dev"
+}
+
+# Build Docker image and deploy Operator + Console + Console Web as Kubernetes Deployments
 deploy_operator_and_console() {
     local kind_cluster="rustfs-dev"
     local image_name="rustfs/operator:dev"
+    local console_web_image="rustfs/console-web:dev"
 
-    log_info "Building Docker image..."
+    log_info "Building Operator Docker image..."
 
     if ! docker build -t "$image_name" .; then
         log_error "Docker build failed"
         exit 1
     fi
 
-    log_info "Loading image into kind cluster '$kind_cluster'..."
+    build_console_web_image
+
+    log_info "Loading images into kind cluster '$kind_cluster'..."
 
     if ! kind load docker-image "$image_name" --name "$kind_cluster"; then
-        log_error "Failed to load image into kind cluster"
+        log_error "Failed to load operator image into kind cluster"
         log_info "Verify: 1) kind cluster exists: kind get clusters"
         log_info "        2) kind cluster 'rustfs-dev' exists: kind get clusters"
         log_info "        3) Docker is running and accessible"
+        exit 1
+    fi
+
+    if ! kind load docker-image "$console_web_image" --name "$kind_cluster"; then
+        log_error "Failed to load console-web image into kind cluster"
         exit 1
     fi
 
@@ -192,15 +216,17 @@ deploy_operator_and_console() {
         --from-literal=jwt-secret="$jwt_secret" \
         --dry-run=client -o yaml | kubectl apply -f -
 
-    log_info "Deploying Operator and Console (Deployment)..."
+    log_info "Deploying Operator, Console and Console Web (Deployments)..."
 
     kubectl apply -f deploy/k8s-dev/operator-rbac.yaml
     kubectl apply -f deploy/k8s-dev/console-rbac.yaml
     kubectl apply -f deploy/k8s-dev/operator-deployment.yaml
     kubectl apply -f deploy/k8s-dev/console-deployment.yaml
     kubectl apply -f deploy/k8s-dev/console-service.yaml
+    kubectl apply -f deploy/k8s-dev/console-frontend-deployment.yaml
+    kubectl apply -f deploy/k8s-dev/console-frontend-service.yaml
 
-    log_success "Operator and Console deployed to Kubernetes"
+    log_success "Operator, Console and Console Web deployed to Kubernetes"
 }
 
 # Deploy Tenant (EC 2+1 configuration)
@@ -212,14 +238,14 @@ deploy_tenant() {
     log_success "Tenant submitted"
 }
 
-# Wait for pods to be ready (1 operator + 1 console + 2 tenant = 4)
+# Wait for pods to be ready (1 operator + 1 console + 1 console-web + 2 tenant = 5)
 wait_for_pods() {
     log_info "Waiting for pods to start (max 5 minutes)..."
 
     local timeout=300
     local elapsed=0
     local interval=5
-    local expected_pods=4
+    local expected_pods=5
 
     while [ $elapsed -lt $timeout ]; do
         local ready_count=$(kubectl get pods -n rustfs-system --no-headers 2>/dev/null | grep -c "Running" || echo "0")
@@ -280,9 +306,10 @@ show_access_info() {
     echo ""
 
     echo "📋 View logs:"
-    echo "  Operator:  kubectl logs -f deployment/rustfs-operator -n rustfs-system"
-    echo "  Console:   kubectl logs -f deployment/rustfs-operator-console -n rustfs-system"
-    echo "  RustFS:    kubectl logs -f example-tenant-primary-0 -n rustfs-system"
+    echo "  Operator:   kubectl logs -f deployment/rustfs-operator -n rustfs-system"
+    echo "  Console:    kubectl logs -f deployment/rustfs-operator-console -n rustfs-system"
+    echo "  Console UI: kubectl logs -f deployment/rustfs-operator-console-frontend -n rustfs-system"
+    echo "  RustFS:     kubectl logs -f example-tenant-primary-0 -n rustfs-system"
     echo ""
 
     echo "🔌 Port forward S3 API (9000):"
@@ -293,9 +320,15 @@ show_access_info() {
     echo "  kubectl port-forward -n rustfs-system svc/example-tenant-console 9001:9001"
     echo ""
 
-    echo "🖥️  Operator Console (Management API, port 9090):"
+    echo "🖥️  Operator Console API (port 9090):"
     echo "  kubectl port-forward -n rustfs-system svc/rustfs-operator-console 9090:9090"
     echo "  Then: curl http://localhost:9090/healthz"
+    echo ""
+
+    echo "🖥️  Operator Console Web UI (port 8080):"
+    echo "  # Need both: API on 9090 (above) and frontend below"
+    echo "  kubectl port-forward -n rustfs-system svc/rustfs-operator-console-frontend 8080:80"
+    echo "  Then open: http://localhost:8080 (frontend calls http://localhost:9090/api/v1)"
     echo ""
 
     echo "🔐 RustFS Credentials:"
@@ -306,7 +339,7 @@ show_access_info() {
     echo "🔑 Operator Console Login:"
     echo "  Create K8s token: kubectl create token default --duration=24h"
     echo "  Login: POST http://localhost:9090/api/v1/login"
-    echo "  Docs: deploy/console/README.md"
+    echo "  Docs: deploy/README.md"
     echo ""
 
     echo "📊 Check cluster status:"
@@ -319,7 +352,9 @@ show_access_info() {
 
     echo "⚠️  If pods show 'ImagePullBackOff' or 'image not present':"
     echo "  docker build -t rustfs/operator:dev ."
+    echo "  docker build --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1 -t rustfs/console-web:dev -f console-web/Dockerfile console-web/"
     echo "  kind load docker-image rustfs/operator:dev --name rustfs-dev"
+    echo "  kind load docker-image rustfs/console-web:dev --name rustfs-dev"
     echo "  kubectl rollout restart deployment -n rustfs-system"
     echo ""
 }

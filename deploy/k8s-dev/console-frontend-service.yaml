@@ -1,0 +1,18 @@
+# Copyright 2025 RustFS Team
+# Console Web Frontend Service (used by deploy-rustfs.sh)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-operator-console-frontend
+  namespace: rustfs-system
+  labels:
+    app.kubernetes.io/name: rustfs-operator-console-frontend
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: rustfs-operator-console-frontend

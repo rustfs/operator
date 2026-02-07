@@ -117,19 +117,29 @@ echo "  Access RustFS"
 echo "========================================="
 echo ""
 
-# Operator Console (deployed in K8s)
+# Operator Console backend (deployed in K8s)
 if kubectl get deployment rustfs-operator-console -n rustfs-system >/dev/null 2>&1; then
-    echo "✅ Operator Console (K8s Deployment):"
+    echo "✅ Operator Console API (K8s Deployment):"
     echo "  Port forward: kubectl port-forward -n rustfs-system svc/rustfs-operator-console 9090:9090"
-    echo "  Then access: http://localhost:9090"
     echo "  Health check: curl http://localhost:9090/healthz"
-    echo "  API docs: deploy/console/README.md"
-    echo ""
     echo "  Create K8s token: kubectl create token default --duration=24h"
     echo "  Login: POST http://localhost:9090/api/v1/login"
     echo ""
 else
     echo "⚠️  Operator Console Deployment not found in rustfs-system"
+    echo "  Deploy with: ./deploy-rustfs.sh"
+    echo ""
+fi
+
+# Operator Console Web (frontend)
+if kubectl get deployment rustfs-operator-console-frontend -n rustfs-system >/dev/null 2>&1; then
+    echo "✅ Operator Console Web UI (K8s Deployment):"
+    echo "  Port forward (UI): kubectl port-forward -n rustfs-system svc/rustfs-operator-console-frontend 8080:80"
+    echo "  Then open: http://localhost:8080"
+    echo "  (Also port-forward Console API to 9090 so login works)"
+    echo ""
+else
+    echo "⚠️  Operator Console Web (frontend) Deployment not found in rustfs-system"
     echo "  Deploy with: ./deploy-rustfs.sh"
     echo ""
 fi
@@ -200,37 +210,8 @@ else
     echo ""
 fi
 
-# Dynamically get credentials
-echo "Credentials:"
-CREDS_SECRET=$(kubectl get tenant "$TENANT_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.credsSecret.name}' 2>/dev/null || echo "")
 
-if [ -n "$CREDS_SECRET" ]; then
-    # Read credentials from Secret
-    ACCESS_KEY=$(kubectl get secret "$CREDS_SECRET" -n "$NAMESPACE" -o jsonpath='{.data.accesskey}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
-    SECRET_KEY=$(kubectl get secret "$CREDS_SECRET" -n "$NAMESPACE" -o jsonpath='{.data.secretkey}' 2>/dev/null | base64 -d 2>/dev/null || echo "")
-    
-    if [ -n "$ACCESS_KEY" ] && [ -n "$SECRET_KEY" ]; then
-        echo "  Source: Secret '$CREDS_SECRET'"
-        echo "  Access Key: $ACCESS_KEY"
-        echo "  Secret Key: [hidden]"
-    else
-        echo "  ⚠️  Unable to read credentials from Secret '$CREDS_SECRET'"
-    fi
-else
-    # Try to read from environment variables
-    ROOT_USER=$(kubectl get tenant "$TENANT_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.env[?(@.name=="RUSTFS_ROOT_USER")].value}' 2>/dev/null || echo "")
-    ROOT_PASSWORD=$(kubectl get tenant "$TENANT_NAME" -n "$NAMESPACE" -o jsonpath='{.spec.env[?(@.name=="RUSTFS_ROOT_PASSWORD")].value}' 2>/dev/null || echo "")
-    
-    if [ -n "$ROOT_USER" ] && [ -n "$ROOT_PASSWORD" ]; then
-        echo "  Source: Environment variables"
-        echo "  Username: $ROOT_USER"
-        echo "  Password: $ROOT_PASSWORD"
-    else
-        echo "  ⚠️  Credentials not configured"
-        echo "  Note: RustFS may use built-in default credentials, please refer to RustFS documentation"
-    fi
-fi
-echo ""
+echo "longin with kubectl create token default --duration=24h"
 
 # Show cluster configuration
 echo "========================================="

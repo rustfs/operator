@@ -132,6 +132,56 @@ To upgrade the operator:
 helm upgrade rustfs-operator deploy/rustfs-operator/
 ```
 
+## Console UI (Frontend + Backend in K8s)
+
+The console has a **backend** (Rust API, `/api/v1/*`) and an optional **frontend** (static web app, `console-web`). To have the browser reach the API correctly when both run in Kubernetes:
+
+### Same-origin deployment (recommended)
+
+Serve the frontend and the API under **one host** so the browser sends requests to the same origin (no CORS, cookies work):
+
+1. Enable the frontend and Ingress in `values.yaml`:
+
+   ```yaml
+   console:
+     enabled: true
+     frontend:
+       enabled: true
+       image:
+         repository: your-registry/console-web
+         tag: latest
+     ingress:
+       enabled: true
+       className: nginx
+       hosts:
+         - host: console.example.com
+           paths: []   # ignored when frontend.enabled; / and /api are used
+   ```
+
+2. Build and push the frontend image from the repo root:
+
+   ```bash
+   docker build -t your-registry/console-web:latest console-web/
+   docker push your-registry/console-web:latest
+   ```
+
+3. Install/upgrade the chart. The Ingress will route **`/api`** to the console backend and **`/`** to the frontend. The frontend is built with `NEXT_PUBLIC_API_BASE_URL=/api/v1` (default), so all API calls are same-origin.
+
+No CORS configuration is needed on the backend for this setup.
+
+### Backend CORS (when frontend is on a different host)
+
+If the frontend is served from another host (e.g. `https://ui.example.com`) and the API at `https://api.example.com`, set allowed origins on the console backend:
+
+```yaml
+console:
+  env:
+    - name: CORS_ALLOWED_ORIGINS
+      value: "https://ui.example.com"
+```
+
+Multiple origins (e.g. dev + prod): comma-separated, e.g. `"https://ui.example.com,http://localhost:3000"`.
+
 ## Verifying the Installation
 
 Check that the operator is running:

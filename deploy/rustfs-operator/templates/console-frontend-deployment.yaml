@@ -1,0 +1,54 @@
+{{- if and .Values.console.enabled .Values.console.frontend.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-console-frontend
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console-frontend
+spec:
+  replicas: {{ .Values.console.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "rustfs-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: console-frontend
+  template:
+    metadata:
+      labels:
+        {{- include "rustfs-operator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: console-frontend
+    spec:
+      {{- with .Values.console.frontend.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: frontend
+          image: "{{ .Values.console.frontend.image.repository }}:{{ .Values.console.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.console.frontend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          {{- with .Values.console.frontend.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.console.frontend.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

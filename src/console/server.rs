@@ -13,9 +13,32 @@
 // limitations under the License.
 
 use crate::console::{routes, state::AppState};
-use axum::http::{HeaderValue, Method, header};
-use axum::{Router, http::StatusCode, middleware, response::IntoResponse, routing::get};
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::{middleware, response::IntoResponse, routing::get, Router};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+
+/// Build CORS allowed origins from env or default.
+/// Env: CORS_ALLOWED_ORIGINS, comma-separated (e.g. "https://console.example.com,http://localhost:3000").
+/// When frontend and backend are served under the same host (e.g. Ingress path / and /api/v1),
+/// browser requests are same-origin and CORS is not used; this is mainly for dev or split-host deployments.
+fn cors_allowed_origins() -> Vec<HeaderValue> {
+    let default = vec!["http://localhost:3000".parse::<HeaderValue>().unwrap()];
+    let s = match std::env::var("CORS_ALLOWED_ORIGINS") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return default,
+    };
+    let parsed: Vec<HeaderValue> = s
+        .split(',')
+        .map(|o| o.trim())
+        .filter(|o| !o.is_empty())
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    if parsed.is_empty() {
+        default
+    } else {
+        parsed
+    }
+}
 
 /// 启动 Console HTTP Server
 pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
@@ -26,6 +49,8 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "rustfs-console-secret-change-me-in-production".to_string());
 
     let state = AppState::new(jwt_secret);
+
+    let cors_origins = cors_allowed_origins();
 
     // 构建应用
     let app = Router::new()
@@ -41,7 +66,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .layer(CompressionLayer::new())
         .layer(
             CorsLayer::new()
-                .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
+                .allow_origin(cors_origins)
                 .allow_methods([
                     Method::GET,
                     Method::POST,
