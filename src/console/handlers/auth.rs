@@ -12,13 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{
-    extract::State,
-    http::header,
-    response::IntoResponse,
-    Extension, Json,
-};
-use jsonwebtoken::{encode, EncodingKey, Header};
+use axum::{Extension, Json, extract::State, http::header, response::IntoResponse};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use kube::Client;
 use snafu::ResultExt;
 
@@ -30,8 +25,11 @@ use crate::console::{
 use crate::types::v1alpha1::tenant::Tenant;
 
 /// 登录处理
-///
-/// 验证 Kubernetes Token 并生成 Console Session Token
+// TOKEN=$(kubectl create token rustfs-operator -n rustfs-system --duration=24h)
+
+// curl -X POST http://localhost:9090/api/v1/login \
+//   -H "Content-Type: application/json" \
+//   -d "{\"token\": \"$TOKEN\"}" 
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
@@ -96,8 +94,8 @@ pub async fn logout() -> impl IntoResponse {
 
 /// 检查会话
 pub async fn session_check(Extension(claims): Extension<Claims>) -> Json<SessionResponse> {
-    let expires_at = chrono::DateTime::from_timestamp(claims.exp as i64, 0)
-        .map(|dt| dt.to_rfc3339());
+    let expires_at =
+        chrono::DateTime::from_timestamp(claims.exp as i64, 0).map(|dt| dt.to_rfc3339());
 
     Json(SessionResponse {
         valid: true,
@@ -108,9 +106,11 @@ pub async fn session_check(Extension(claims): Extension<Claims>) -> Json<Session
 /// 创建 Kubernetes 客户端 (使用 Token)
 async fn create_k8s_client(token: &str) -> Result<Client> {
     // 使用默认配置加载
-    let mut config = kube::Config::infer().await.map_err(|e| Error::InternalServer {
-        message: format!("Failed to load kubeconfig: {}", e),
-    })?;
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(|e| Error::InternalServer {
+            message: format!("Failed to load kubeconfig: {}", e),
+        })?;
 
     // 覆盖 token
     config.auth_info.token = Some(token.to_string().into());

@@ -1,0 +1,48 @@
+# Copyright 2025 RustFS Team
+# RBAC for RustFS Operator (used by deploy-rustfs.sh)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rustfs-operator
+  namespace: rustfs-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rustfs-operator
+rules:
+  - apiGroups: ["rustfs.com"]
+    resources: ["tenants"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["rustfs.com"]
+    resources: ["tenants/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "serviceaccounts", "pods", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rustfs-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rustfs-operator
+subjects:
+  - kind: ServiceAccount
+    name: rustfs-operator
+    namespace: rustfs-system

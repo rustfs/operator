@@ -1,0 +1,18 @@
+# Copyright 2025 RustFS Team
+# Operator Console Service (used by deploy-rustfs.sh)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-operator-console
+  namespace: rustfs-system
+  labels:
+    app.kubernetes.io/name: rustfs-operator-console
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9090
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: rustfs-operator-console

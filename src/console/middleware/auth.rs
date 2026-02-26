@@ -14,11 +14,11 @@
 
 use axum::{
     extract::{Request, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware::Next,
     response::Response,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Validation, decode};
 
 use crate::console::state::{AppState, Claims};
 
@@ -72,16 +72,14 @@ pub async fn auth_middleware(
 
 /// 从 Cookie 字符串中解析 session token
 fn parse_session_cookie(cookies: &str) -> Option<String> {
-    cookies
-        .split(';')
-        .find_map(|cookie| {
-            let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
-            if parts.len() == 2 && parts[0] == "session" {
-                Some(parts[1].to_string())
-            } else {
-                None
-            }
-        })
+    cookies.split(';').find_map(|cookie| {
+        let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
+        if parts.len() == 2 && parts[0] == "session" {
+            Some(parts[1].to_string())
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -91,7 +89,10 @@ mod tests {
     #[test]
     fn test_parse_session_cookie() {
         let cookies = "session=test_token; other=value";
-        assert_eq!(parse_session_cookie(cookies), Some("test_token".to_string()));
+        assert_eq!(
+            parse_session_cookie(cookies),
+            Some("test_token".to_string())
+        );
 
         let cookies = "other=value";
         assert_eq!(parse_session_cookie(cookies), None);

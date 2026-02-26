@@ -12,21 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{
-    middleware,
-    routing::get,
-    Router,
-    http::StatusCode,
-    response::IntoResponse,
-};
-use tower_http::{
-    compression::CompressionLayer,
-    cors::CorsLayer,
-    trace::TraceLayer,
-};
+use crate::console::{routes, state::AppState};
 use axum::http::{HeaderValue, Method, header};
-
-use crate::console::{state::AppState, routes};
+use axum::{Router, http::StatusCode, middleware, response::IntoResponse, routing::get};
+use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 
 /// 启动 Console HTTP Server
 pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +42,13 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .layer(
             CorsLayer::new()
                 .allow_origin("http://localhost:3000".parse::<HeaderValue>().unwrap())
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
                 .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
                 .allow_credentials(true),
         )
@@ -90,7 +85,10 @@ fn api_routes() -> Router<AppState> {
 
 /// 健康检查
 async fn health_check() -> impl IntoResponse {
-    (StatusCode::OK, "OK")
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    (StatusCode::OK, format!("OK: {}", since_epoch.as_secs()))
 }
 
 /// 就绪检查

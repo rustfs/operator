@@ -117,10 +117,11 @@ echo "  Access RustFS"
 echo "========================================="
 echo ""
 
-# Check if Console is running locally
-if pgrep -f "target/release/operator.*console" >/dev/null; then
-    echo "✅ Operator Console (local):"
-    echo "  Running at: http://localhost:9090"
+# Operator Console (deployed in K8s)
+if kubectl get deployment rustfs-operator-console -n rustfs-system >/dev/null 2>&1; then
+    echo "✅ Operator Console (K8s Deployment):"
+    echo "  Port forward: kubectl port-forward -n rustfs-system svc/rustfs-operator-console 9090:9090"
+    echo "  Then access: http://localhost:9090"
     echo "  Health check: curl http://localhost:9090/healthz"
     echo "  API docs: deploy/console/README.md"
     echo ""
@@ -128,8 +129,8 @@ if pgrep -f "target/release/operator.*console" >/dev/null; then
     echo "  Login: POST http://localhost:9090/api/v1/login"
     echo ""
 else
-    echo "⚠️  Operator Console not running locally"
-    echo "  Start with: cargo run -- console --port 9090"
+    echo "⚠️  Operator Console Deployment not found in rustfs-system"
+    echo "  Deploy with: ./deploy-rustfs.sh"
     echo ""
 fi
 
