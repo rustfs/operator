@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{extract::Path, Extension, Json};
+use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
-use kube::{api::ListParams, Api, Client, ResourceExt};
+use kube::{Api, Client, ResourceExt, api::ListParams};
 use snafu::ResultExt;
 
 use crate::console::{
@@ -24,8 +24,15 @@ use crate::console::{
 };
 use crate::types::v1alpha1::{persistence::PersistenceConfig, pool::Pool, tenant::Tenant};
 
-/// 列出所有 Tenants
-pub async fn list_all_tenants(Extension(claims): Extension<Claims>) -> Result<Json<TenantListResponse>> {
+// curl -s -X POST http://localhost:9090/api/v1/login \
+//   -H "Content-Type: application/json" \
+//   -d "{\"token\": \"$(kubectl create token rustfs-operator-console -n rustfs-system --duration=24h)\"}" \
+//   -c cookies.txt
+
+// curl -b cookies.txt http://localhost:9090/api/v1/tenants
+pub async fn list_all_tenants(
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<TenantListResponse>> {
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::all(client);
 
@@ -55,10 +62,7 @@ pub async fn list_all_tenants(Extension(claims): Extension<Claims>) -> Result<Js
                 .as_ref()
                 .map(|s| s.current_state.to_string())
                 .unwrap_or_else(|| "Unknown".to_string()),
-            created_at: t
-                .metadata
-                .creation_timestamp
-                .map(|ts| ts.0.to_rfc3339()),
+            created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
         })
         .collect();
 
@@ -99,10 +103,7 @@ pub async fn list_tenants_by_namespace(
                 .as_ref()
                 .map(|s| s.current_state.to_string())
                 .unwrap_or_else(|| "Unknown".to_string()),
-            created_at: t
-                .metadata
-                .creation_timestamp
-                .map(|ts| ts.0.to_rfc3339()),
+            created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
         })
         .collect();
 
@@ -213,7 +214,10 @@ pub async fn create_tenant(
             },
             ..Default::default()
         };
-        ns_api.create(&Default::default(), &ns).await.context(error::KubeApiSnafu)?;
+        ns_api
+            .create(&Default::default(), &ns)
+            .await
+            .context(error::KubeApiSnafu)?;
     }
 
     // 构造 Tenant CRD
@@ -229,9 +233,14 @@ pub async fn create_tenant(
                     access_modes: Some(vec!["ReadWriteOnce".to_string()]),
                     resources: Some(corev1::VolumeResourceRequirements {
                         requests: Some(
-                            vec![("storage".to_string(), k8s_openapi::apimachinery::pkg::api::resource::Quantity(p.storage_size))]
-                                .into_iter()
-                                .collect(),
+                            vec![(
+                                "storage".to_string(),
+                                k8s_openapi::apimachinery::pkg::api::resource::Quantity(
+                                    p.storage_size,
+                                ),
+                            )]
+                            .into_iter()
+                            .collect(),
                         ),
                         ..Default::default()
                     }),
@@ -256,7 +265,9 @@ pub async fn create_tenant(
             pools,
             image: req.image,
             mount_path: req.mount_path,
-            creds_secret: req.creds_secret.map(|name| corev1::LocalObjectReference { name }),
+            creds_secret: req
+                .creds_secret
+                .map(|name| corev1::LocalObjectReference { name }),
             ..Default::default()
         },
         status: None,
@@ -460,9 +471,11 @@ pub async fn update_tenant(
 
 /// 创建 Kubernetes 客户端
 async fn create_client(claims: &Claims) -> Result<Client> {
-    let mut config = kube::Config::infer().await.map_err(|e| Error::InternalServer {
-        message: format!("Failed to load kubeconfig: {}", e),
-    })?;
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(|e| Error::InternalServer {
+            message: format!("Failed to load kubeconfig: {}", e),
+        })?;
 
     config.auth_info.token = Some(claims.k8s_token.clone().into());
 

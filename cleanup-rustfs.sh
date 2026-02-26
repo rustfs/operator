@@ -47,9 +47,8 @@ confirm_cleanup() {
         echo ""
         log_warning "This operation will delete all RustFS resources:"
         echo "  - Tenant: example-tenant"
-        echo "  - Namespace: rustfs-system (including all Pods, PVCs, Services)"
+        echo "  - Namespace: rustfs-system (including Operator, Console, Pods, PVCs, Services)"
         echo "  - CRD: tenants.rustfs.com"
-        echo "  - Operator process"
         echo ""
         read -p "Confirm deletion? (yes/no): " confirm
 
@@ -85,76 +84,6 @@ delete_tenant() {
     else
         log_info "Tenant does not exist, skipping"
     fi
-}
-
-# Stop Operator
-stop_operator() {
-    log_info "Stopping Operator process..."
-
-    # Method 1: Read from PID file
-    if [ -f operator.pid ]; then
-        local pid=$(cat operator.pid)
-        if ps -p $pid > /dev/null 2>&1; then
-            log_info "Stopping Operator (PID: $pid)..."
-            kill $pid 2>/dev/null || true
-            sleep 2
-
-            # If process still exists, force kill
-            if ps -p $pid > /dev/null 2>&1; then
-                log_warning "Process did not exit normally, forcing termination..."
-                kill -9 $pid 2>/dev/null || true
-            fi
-        fi
-        rm -f operator.pid
-    fi
-
-    # Method 2: Find all operator processes
-    local operator_pids=$(pgrep -f "target/release/operator.*server" 2>/dev/null || true)
-    if [ -n "$operator_pids" ]; then
-        log_info "Found Operator processes: $operator_pids"
-        pkill -f "target/release/operator.*server" || true
-        sleep 2
-
-        # Force kill remaining processes
-        pkill -9 -f "target/release/operator.*server" 2>/dev/null || true
-    fi
-
-    log_success "Operator stopped"
-}
-
-# Stop Console
-stop_console() {
-    log_info "Stopping Console process..."
-
-    # Method 1: Read from PID file
-    if [ -f console.pid ]; then
-        local pid=$(cat console.pid)
-        if ps -p $pid > /dev/null 2>&1; then
-            log_info "Stopping Console (PID: $pid)..."
-            kill $pid 2>/dev/null || true
-            sleep 2
-
-            # If process still exists, force kill
-            if ps -p $pid > /dev/null 2>&1; then
-                log_warning "Process did not exit normally, forcing termination..."
-                kill -9 $pid 2>/dev/null || true
-            fi
-        fi
-        rm -f console.pid
-    fi
-
-    # Method 2: Find all console processes
-    local console_pids=$(pgrep -f "target/release/operator.*console" 2>/dev/null || true)
-    if [ -n "$console_pids" ]; then
-        log_info "Found Console processes: $console_pids"
-        pkill -f "target/release/operator.*console" || true
-        sleep 2
-
-        # Force kill remaining processes
-        pkill -9 -f "target/release/operator.*console" 2>/dev/null || true
-    fi
-
-    log_success "Console stopped"
 }
 
 # Delete Namespace
@@ -223,10 +152,6 @@ cleanup_local_files() {
     log_info "Cleaning up local files..."
 
     local files_to_clean=(
-        "operator.log"
-        "operator.pid"
-        "console.log"
-        "console.pid"
         "deploy/rustfs-operator/crds/tenant-crd.yaml"
     )
 
@@ -271,21 +196,7 @@ verify_cleanup() {
         log_success "✓ CRD cleaned"
     fi
 
-    # Check Operator process
-    if pgrep -f "target/release/operator.*server" >/dev/null; then
-        log_error "Operator process still running"
-        issues=$((issues + 1))
-    else
-        log_success "✓ Operator stopped"
-    fi
-
-    # Check Console process
-    if pgrep -f "target/release/operator.*console" >/dev/null; then
-        log_error "Console process still running"
-        issues=$((issues + 1))
-    else
-        log_success "✓ Console stopped"
-    fi
+    # Operator and Console are deleted with namespace (no local process check)
 
     echo ""
     if [ $issues -eq 0 ]; then
@@ -331,8 +242,6 @@ main() {
     echo ""
 
     delete_tenant
-    stop_console
-    stop_operator
     delete_namespace
     delete_crd
     cleanup_local_files

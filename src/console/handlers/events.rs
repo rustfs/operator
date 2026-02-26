@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{extract::Path, Extension, Json};
+use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
-use kube::{api::ListParams, Api, Client};
+use kube::{Api, Client, api::ListParams};
 use snafu::ResultExt;
 
 use crate::console::{
@@ -60,9 +60,11 @@ pub async fn list_tenant_events(
 
 /// 创建 Kubernetes 客户端
 async fn create_client(claims: &Claims) -> Result<Client> {
-    let mut config = kube::Config::infer().await.map_err(|e| Error::InternalServer {
-        message: format!("Failed to load kubeconfig: {}", e),
-    })?;
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(|e| Error::InternalServer {
+            message: format!("Failed to load kubeconfig: {}", e),
+        })?;
 
     config.auth_info.token = Some(claims.k8s_token.clone().into());
 
