@@ -30,9 +30,26 @@ spec:
     - host: {{ .host | quote }}
       http:
         paths:
-          {{- range .paths }}
-          - path: {{ .path }}
-            pathType: {{ .pathType | default "Prefix" }}
+          {{- if .Values.console.frontend.enabled }}
+          # API first so /api/v1/* goes to backend (same-origin for browser)
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "rustfs-operator.fullname" $ }}-console
+                port:
+                  number: {{ $.Values.console.service.port }}
+          # Frontend serves UI at /
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "rustfs-operator.fullname" $ }}-console-frontend
+                port:
+                  number: {{ $.Values.console.frontend.service.port }}
+          {{- else }}
+          - path: /
+            pathType: Prefix
             backend:
               service:
                 name: {{ include "rustfs-operator.fullname" $ }}-console

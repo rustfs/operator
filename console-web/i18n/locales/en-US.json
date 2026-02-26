@@ -1,0 +1,21 @@
+{
+  "RustFS Operator Console": "RustFS Operator Console",
+  "Login": "Login",
+  "Logout": "Logout",
+  "JWT Token": "JWT Token",
+  "Enter your Kubernetes ServiceAccount token": "Enter your Kubernetes ServiceAccount token",
+  "Sign In": "Sign In",
+  "Signing In...": "Signing In...",
+  "Login successful": "Login successful",
+  "Login failed": "Login failed",
+  "Token is required": "Token is required",
+  "Session expired, please login again": "Session expired, please login again",
+  "Unauthorized, redirecting to login": "Unauthorized, redirecting to login",
+  "Dashboard": "Dashboard",
+  "Tenants": "Tenants",
+  "Welcome to RustFS Operator Console": "Welcome to RustFS Operator Console",
+  "Manage your RustFS tenants and clusters from this dashboard.": "Manage your RustFS tenants and clusters from this dashboard.",
+  "How to get a token": "How to get a token",
+  "Run the following command to generate a token:": "Run the following command to generate a token:",
+  "Paste the token above to sign in.": "Paste the token above to sign in."
+}

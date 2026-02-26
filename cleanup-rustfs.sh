@@ -47,7 +47,7 @@ confirm_cleanup() {
         echo ""
         log_warning "This operation will delete all RustFS resources:"
         echo "  - Tenant: example-tenant"
-        echo "  - Namespace: rustfs-system (including Operator, Console, Pods, PVCs, Services)"
+        echo "  - Namespace: rustfs-system (including Operator, Console, Console Web, Pods, PVCs, Services)"
         echo "  - CRD: tenants.rustfs.com"
         echo ""
         read -p "Confirm deletion? (yes/no): " confirm

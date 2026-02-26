@@ -164,7 +164,35 @@ console:
     # Specifies whether RBAC resources should be created
     create: true
 
-  # Ingress configuration
+  # Frontend (console-web) deployment. When enabled, Ingress serves / from frontend and /api from backend (same host = same-origin, no CORS).
+  frontend:
+    enabled: false
+    replicas: 1
+    image:
+      repository: rustfs/console-web
+      tag: latest
+      pullPolicy: IfNotPresent
+    imagePullSecrets: []
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: 101
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
+    service:
+      port: 80
+
+  # Ingress configuration. When frontend.enabled is true, / is served by frontend and /api by backend (same origin).
   ingress:
     enabled: false
     className: ""
