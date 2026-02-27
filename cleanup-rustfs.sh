@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # RustFS Operator cleanup script
-# For complete cleanup of deployed resources for redeployment or testing
+# Thorough cleanup: Tenants, Namespace, ClusterRole/ClusterRoleBinding, CRD, local files
 
 set -e
 
@@ -46,9 +46,14 @@ confirm_cleanup() {
     if [ "$FORCE" != "true" ]; then
         echo ""
         log_warning "This operation will delete all RustFS resources:"
-        echo "  - Tenant: example-tenant"
-        echo "  - Namespace: rustfs-system (including Operator, Console, Console Web, Pods, PVCs, Services)"
+        echo "  - All Tenants (rustfs-system + cluster-wide)"
+        echo "  - Namespace: rustfs-system (Operator, Console, Console Web, Pods, PVCs, Services)"
+        echo "  - ClusterRole / ClusterRoleBinding: rustfs-operator, rustfs-operator-console"
         echo "  - CRD: tenants.rustfs.com"
+        echo "  - Local generated file: deploy/rustfs-operator/crds/tenant-crd.yaml"
+        if [ "$WITH_KIND" = "true" ]; then
+            echo "  - Kind cluster: rustfs-dev (Docker container will be removed)"
+        fi
         echo ""
         read -p "Confirm deletion? (yes/no): " confirm
 
@@ -59,31 +64,43 @@ confirm_cleanup() {
     fi
 }
 
-# Delete Tenant
-delete_tenant() {
-    log_info "Deleting Tenant..."
+# Delete all Tenants (cluster-wide; CRD must exist)
+delete_all_tenants() {
+    log_info "Deleting all Tenants (cluster-wide)..."
 
-    if kubectl get tenant example-tenant -n rustfs-system >/dev/null 2>&1; then
-        kubectl delete tenant example-tenant -n rustfs-system --timeout=60s
-
-        # Wait for Tenant to be deleted
-        log_info "Waiting for Tenant to be fully deleted..."
-        local timeout=60
-        local elapsed=0
-        while kubectl get tenant example-tenant -n rustfs-system >/dev/null 2>&1; do
-            if [ $elapsed -ge $timeout ]; then
-                log_warning "Wait timeout, forcing deletion..."
-                kubectl delete tenant example-tenant -n rustfs-system --force --grace-period=0 2>/dev/null || true
-                break
-            fi
-            sleep 2
-            elapsed=$((elapsed + 2))
-        done
-
-        log_success "Tenant deleted"
-    else
-        log_info "Tenant does not exist, skipping"
+    if ! kubectl get crd tenants.rustfs.com >/dev/null 2>&1; then
+        log_info "CRD tenants.rustfs.com does not exist, no tenants to delete"
+        return 0
     fi
+
+    local tenants
+    tenants=$(kubectl get tenants --all-namespaces -o name 2>/dev/null) || true
+    if [ -z "$tenants" ]; then
+        log_info "No tenants found, skipping"
+        return 0
+    fi
+
+    echo "$tenants" | while read -r line; do
+        [ -z "$line" ] && continue
+        log_info "Deleting $line..."
+        kubectl delete "$line" --timeout=60s 2>/dev/null || kubectl delete "$line" --force --grace-period=0 2>/dev/null || true
+    done
+
+    # Wait until no tenants remain
+    local timeout=90
+    local elapsed=0
+    while [ $elapsed -lt $timeout ]; do
+        local count
+        count=$(kubectl get tenants --all-namespaces -o name 2>/dev/null | wc -l)
+        count=$((count + 0))
+        if [ "$count" -eq 0 ]; then
+            log_success "All tenants deleted"
+            return 0
+        fi
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+    log_warning "Some tenants may still be terminating"
 }
 
 # Delete Namespace
@@ -120,6 +137,24 @@ delete_namespace() {
     fi
 }
 
+# Delete cluster-scoped RBAC (not removed when namespace is deleted)
+delete_cluster_rbac() {
+    log_info "Deleting ClusterRoleBinding and ClusterRole..."
+
+    for name in rustfs-operator rustfs-operator-console; do
+        if kubectl get clusterrolebinding "$name" >/dev/null 2>&1; then
+            kubectl delete clusterrolebinding "$name" --timeout=30s 2>/dev/null || true
+            log_info "Deleted ClusterRoleBinding: $name"
+        fi
+        if kubectl get clusterrole "$name" >/dev/null 2>&1; then
+            kubectl delete clusterrole "$name" --timeout=30s 2>/dev/null || true
+            log_info "Deleted ClusterRole: $name"
+        fi
+    done
+
+    log_success "Cluster RBAC cleaned"
+}
+
 # Delete CRD
 delete_crd() {
     log_info "Deleting CRD: tenants.rustfs.com..."
@@ -144,6 +179,23 @@ delete_crd() {
         log_success "CRD deleted"
     else
         log_info "CRD does not exist, skipping"
+    fi
+}
+
+# Delete Kind cluster (removes the Docker container rustfs-dev-control-plane)
+delete_kind_cluster() {
+    log_info "Deleting Kind cluster: rustfs-dev..."
+
+    if ! command -v kind >/dev/null 2>&1; then
+        log_warning "kind not found in PATH, skipping Kind cluster deletion"
+        return 0
+    fi
+
+    if kind get clusters 2>/dev/null | grep -q "rustfs-dev"; then
+        kind delete cluster --name rustfs-dev
+        log_success "Kind cluster rustfs-dev deleted (Docker container removed)"
+    else
+        log_info "Kind cluster rustfs-dev does not exist, skipping"
     fi
 }
 
@@ -172,12 +224,17 @@ verify_cleanup() {
 
     local issues=0
 
-    # Check Tenant
-    if kubectl get tenant -n rustfs-system 2>/dev/null | grep -q "example-tenant"; then
-        log_error "Tenant still exists"
+    # Check Tenants (cluster-wide)
+    local tenant_count=0
+    if kubectl get crd tenants.rustfs.com >/dev/null 2>&1; then
+        tenant_count=$(kubectl get tenants --all-namespaces -o name 2>/dev/null | wc -l)
+        tenant_count=$((tenant_count + 0))
+    fi
+    if [ "$tenant_count" -gt 0 ]; then
+        log_error "Tenants still exist ($tenant_count)"
         issues=$((issues + 1))
     else
-        log_success "✓ Tenant cleaned"
+        log_success "✓ Tenants cleaned"
     fi
 
     # Check Namespace
@@ -196,7 +253,18 @@ verify_cleanup() {
         log_success "✓ CRD cleaned"
     fi
 
-    # Operator and Console are deleted with namespace (no local process check)
+    # Check ClusterRole / ClusterRoleBinding
+    local rbac_issues=0
+    for name in rustfs-operator rustfs-operator-console; do
+        kubectl get clusterrolebinding "$name" >/dev/null 2>&1 && rbac_issues=$((rbac_issues + 1))
+        kubectl get clusterrole "$name" >/dev/null 2>&1 && rbac_issues=$((rbac_issues + 1))
+    done
+    if [ $rbac_issues -gt 0 ]; then
+        log_error "Cluster RBAC still exists ($rbac_issues resources)"
+        issues=$((issues + 1))
+    else
+        log_success "✓ Cluster RBAC cleaned"
+    fi
 
     echo ""
     if [ $issues -eq 0 ]; then
@@ -224,9 +292,12 @@ show_next_steps() {
     echo "  kubectl get crd tenants.rustfs.com"
     echo ""
 
-    echo "Completely clean kind cluster (optional):"
-    echo "  kind delete cluster --name rustfs-dev"
-    echo ""
+    if [ "$WITH_KIND" != "true" ]; then
+        echo "Remove Kind cluster and Docker container (optional):"
+        echo "  ./cleanup-rustfs.sh -f -k"
+        echo "  # or: kind delete cluster --name rustfs-dev"
+        echo ""
+    fi
 }
 
 # Main flow
@@ -241,10 +312,16 @@ main() {
     log_info "Starting cleanup..."
     echo ""
 
-    delete_tenant
+    delete_all_tenants
     delete_namespace
+    delete_cluster_rbac
     delete_crd
     cleanup_local_files
+
+    if [ "$WITH_KIND" = "true" ]; then
+        echo ""
+        delete_kind_cluster
+    fi
 
     echo ""
     verify_cleanup
@@ -259,18 +336,29 @@ main() {
 
 # Parse arguments
 FORCE="false"
+WITH_KIND="false"
 while [[ $# -gt 0 ]]; do
     case $1 in
         -f|--force)
             FORCE="true"
             shift
             ;;
+        -k|--with-kind)
+            WITH_KIND="true"
+            shift
+            ;;
         -h|--help)
-            echo "Usage: $0 [-f|--force]"
+            echo "Usage: $0 [-f|--force] [-k|--with-kind]"
             echo ""
             echo "Options:"
-            echo "  -f, --force    Skip confirmation prompt, force cleanup"
-            echo "  -h, --help     Show help information"
+            echo "  -f, --force      Skip confirmation prompt, force cleanup"
+            echo "  -k, --with-kind  Also delete Kind cluster 'rustfs-dev' (removes Docker container)"
+            echo "  -h, --help       Show help information"
+            echo ""
+            echo "Examples:"
+            echo "  $0              # Clean K8s resources only, confirm first"
+            echo "  $0 -f           # Clean K8s resources, no confirm"
+            echo "  $0 -f -k        # Clean K8s resources + delete Kind cluster (no leftover container)"
             exit 0
             ;;
         *)

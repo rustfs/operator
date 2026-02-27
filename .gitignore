@@ -1,4 +1,5 @@
 /target
+/vendor
 .idea
 .DS_Store
 .direnv
@@ -14,6 +15,7 @@ operator.pid
 
 # Console Web Frontend
 console-web/.next/
+console-web/docs/
 console-web/out/
 console-web/node_modules/
 .cursor/

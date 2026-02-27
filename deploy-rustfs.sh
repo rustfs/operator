@@ -164,7 +164,7 @@ build_operator() {
 build_console_web_image() {
     log_info "Building Console Web Docker image (API URL: http://localhost:9090/api/v1 for port-forward)..."
 
-    if ! docker build \
+    if ! docker build --network=host \
         --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1 \
         -t rustfs/console-web:dev \
         -f console-web/Dockerfile \
@@ -184,7 +184,8 @@ deploy_operator_and_console() {
 
     log_info "Building Operator Docker image..."
 
-    if ! docker build -t "$image_name" .; then
+    # Use host network so build container can reach crates.io when host DNS is used (e.g. systemd-resolved)
+    if ! docker build --network=host -t "$image_name" .; then
         log_error "Docker build failed"
         exit 1
     fi
@@ -248,8 +249,17 @@ wait_for_pods() {
     local expected_pods=5
 
     while [ $elapsed -lt $timeout ]; do
-        local ready_count=$(kubectl get pods -n rustfs-system --no-headers 2>/dev/null | grep -c "Running" || echo "0")
-        local total_count=$(kubectl get pods -n rustfs-system --no-headers 2>/dev/null | wc -l || echo "0")
+        local pod_list
+        pod_list=$(kubectl get pods -n rustfs-system --no-headers 2>/dev/null) || true
+        local ready_count=0
+        local total_count=0
+        if [ -n "$pod_list" ]; then
+            ready_count=$(echo "$pod_list" | grep -c "Running" 2>/dev/null) || ready_count=0
+            total_count=$(echo "$pod_list" | wc -l)
+        fi
+        # Ensure integer (strip whitespace/newlines) to avoid "integer expression expected"
+        ready_count=$((ready_count + 0))
+        total_count=$((total_count + 0))
 
         if [ "$ready_count" -eq "$expected_pods" ] && [ "$total_count" -eq "$expected_pods" ]; then
             log_success "All pods are ready ($expected_pods/$expected_pods Running)"
@@ -328,7 +338,8 @@ show_access_info() {
     echo "🖥️  Operator Console Web UI (port 8080):"
     echo "  # Need both: API on 9090 (above) and frontend below"
     echo "  kubectl port-forward -n rustfs-system svc/rustfs-operator-console-frontend 8080:80"
-    echo "  Then open: http://localhost:8080 (frontend calls http://localhost:9090/api/v1)"
+    echo "  Then open: http://localhost:8080  (must use :8080; opening http://localhost only hits port 80 and will fail)"
+    echo "  If API requests fail, use: http://localhost:8080?apiBaseUrl=http://localhost:9090/api/v1"
     echo ""
 
     echo "🔐 RustFS Credentials:"
@@ -351,8 +362,8 @@ show_access_info() {
     echo ""
 
     echo "⚠️  If pods show 'ImagePullBackOff' or 'image not present':"
-    echo "  docker build -t rustfs/operator:dev ."
-    echo "  docker build --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1 -t rustfs/console-web:dev -f console-web/Dockerfile console-web/"
+    echo "  docker build --network=host -t rustfs/operator:dev ."
+    echo "  docker build --network=host --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1 -t rustfs/console-web:dev -f console-web/Dockerfile console-web/"
     echo "  kind load docker-image rustfs/operator:dev --name rustfs-dev"
     echo "  kind load docker-image rustfs/console-web:dev --name rustfs-dev"
     echo "  kubectl rollout restart deployment -n rustfs-system"

@@ -1,25 +1,20 @@
 import type { Metadata } from "next"
-import { Geist, Geist_Mono } from "next/font/google"
+import Script from "next/script"
 import { ThemeProvider } from "next-themes"
 import { I18nProvider } from "@/components/providers/i18n-provider"
 import { AuthProvider } from "@/contexts/auth-context"
 import { AppUiProvider } from "@/components/providers/app-ui-provider"
 import "./globals.css"
 
-const fontSans = Geist({
-  variable: "--font-sans",
-  subsets: ["latin"],
-})
-
-const fontMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-})
-
 export const metadata: Metadata = {
   title: "RustFS Operator Console",
   description: "Manage your RustFS tenants and clusters",
 }
+
+// Inline script: set <base href> to current origin (protocol + host + /) so relative URLs
+// (e.g. /tenants, /cluster) resolve to the same port as the page. Avoids prefetch/nav
+// going to port 80 when the app is actually served on e.g. port 8080 (port-forward).
+const setBaseHrefInline = `(function(){var u=location;var b=document.createElement('base');b.href=u.protocol+'//'+u.host+'/';if(document.head.firstChild){document.head.insertBefore(b,document.head.firstChild);}else{document.head.appendChild(b);}})();`
 
 export default function RootLayout({
   children,
@@ -28,7 +23,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${fontSans.variable} ${fontMono.variable} antialiased`}>
+      <body className="antialiased">
+        <Script id="set-base-href" strategy="beforeInteractive">
+          {setBaseHrefInline}
+        </Script>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <I18nProvider>
             <AuthProvider>
