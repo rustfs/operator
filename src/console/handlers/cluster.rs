@@ -199,16 +199,16 @@ pub async fn get_cluster_resources(
         (String::new(), String::new(), String::new(), String::new()),
         |acc, node| {
             // 这里简化处理,实际需要累加 Quantity
-            if let Some(status) = &node.status {
-                if let Some(capacity) = &status.capacity {
-                    // 实际应该累加,这里仅作演示
-                    let cpu = capacity.get("cpu").map(|q| q.0.clone()).unwrap_or_default();
-                    let mem = capacity
-                        .get("memory")
-                        .map(|q| q.0.clone())
-                        .unwrap_or_default();
-                    return (cpu, mem, acc.2, acc.3);
-                }
+            if let Some(status) = &node.status
+                && let Some(capacity) = &status.capacity
+            {
+                // 实际应该累加,这里仅作演示
+                let cpu = capacity.get("cpu").map(|q| q.0.clone()).unwrap_or_default();
+                let mem = capacity
+                    .get("memory")
+                    .map(|q| q.0.clone())
+                    .unwrap_or_default();
+                return (cpu, mem, acc.2, acc.3);
             }
             acc
         },

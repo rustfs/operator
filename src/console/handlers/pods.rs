@@ -319,7 +319,7 @@ pub async fn get_pod_details(
                         claim_name: v
                             .persistent_volume_claim
                             .as_ref()
-                            .and_then(|pvc| Some(pvc.claim_name.clone())),
+                            .map(|pvc| pvc.claim_name.clone()),
                     }
                 })
                 .collect()
@@ -359,14 +359,14 @@ pub async fn get_pod_logs(
         ..Default::default()
     };
 
-    if let Some(since_time) = query.since_time {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&since_time) {
-            log_params.since_seconds = Some(
-                chrono::Utc::now()
-                    .signed_duration_since(dt.with_timezone(&chrono::Utc))
-                    .num_seconds(),
-            );
-        }
+    if let Some(since_time) = query.since_time
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&since_time)
+    {
+        log_params.since_seconds = Some(
+            chrono::Utc::now()
+                .signed_duration_since(dt.with_timezone(&chrono::Utc))
+                .num_seconds(),
+        );
     }
 
     // 获取日志流
