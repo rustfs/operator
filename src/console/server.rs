@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::console::{routes, state::AppState};
-use axum::http::{header, HeaderValue, Method, StatusCode};
-use axum::{middleware, response::IntoResponse, routing::get, Router};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::{Router, middleware, response::IntoResponse, routing::get};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 
 /// Build CORS allowed origins from env or default.
@@ -38,11 +38,7 @@ fn cors_allowed_origins() -> Vec<HeaderValue> {
         .filter(|o| !o.is_empty())
         .filter_map(|o| o.parse().ok())
         .collect();
-    if parsed.is_empty() {
-        default
-    } else {
-        parsed
-    }
+    if parsed.is_empty() { default } else { parsed }
 }
 
 /// 启动 Console HTTP Server

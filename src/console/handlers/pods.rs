@@ -13,18 +13,18 @@
 // limitations under the License.
 
 use axum::{
+    Extension, Json,
     body::Body,
     extract::{Path, Query},
     response::{IntoResponse, Response},
-    Extension, Json,
 };
+use futures::TryStreamExt;
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{
-    api::{DeleteParams, ListParams, LogParams},
     Api, Client, ResourceExt,
+    api::{DeleteParams, ListParams, LogParams},
 };
 use snafu::ResultExt;
-use futures::TryStreamExt;
 
 use crate::console::{
     error::{self, Error, Result},
@@ -42,9 +42,7 @@ pub async fn list_pods(
 
     // 查询带有 Tenant 标签的 Pods
     let pods = api
-        .list(
-            &ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)),
-        )
+        .list(&ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)))
         .await
         .context(error::KubeApiSnafu)?;
 
@@ -92,7 +90,11 @@ pub async fn list_pods(
 
         // 容器就绪状态
         let (ready_count, total_count) = if let Some(status) = status {
-            let total = status.container_statuses.as_ref().map(|c| c.len()).unwrap_or(0);
+            let total = status
+                .container_statuses
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(0);
             let ready = status
                 .container_statuses
                 .as_ref()
@@ -106,12 +108,7 @@ pub async fn list_pods(
         // 重启次数
         let restarts = status
             .and_then(|s| s.container_statuses.as_ref())
-            .map(|containers| {
-                containers
-                    .iter()
-                    .map(|c| c.restart_count)
-                    .sum::<i32>()
-            })
+            .map(|containers| containers.iter().map(|c| c.restart_count).sum::<i32>())
             .unwrap_or(0);
 
         // 创建时间和 Age
@@ -237,7 +234,10 @@ pub async fn get_pod_details(
                         status: c.status.clone(),
                         reason: c.reason.clone(),
                         message: c.message.clone(),
-                        last_transition_time: c.last_transition_time.as_ref().map(|t| t.0.to_rfc3339()),
+                        last_transition_time: c
+                            .last_transition_time
+                            .as_ref()
+                            .map(|t| t.0.to_rfc3339()),
                     })
                     .collect()
             })
@@ -250,11 +250,15 @@ pub async fn get_pod_details(
     };
 
     // 容器信息
-    let containers = if let Some(container_statuses) = status_info.and_then(|s| s.container_statuses.as_ref()) {
+    let containers = if let Some(container_statuses) =
+        status_info.and_then(|s| s.container_statuses.as_ref())
+    {
         container_statuses
             .iter()
             .map(|cs| {
-                let state = if let Some(running) = &cs.state.as_ref().and_then(|s| s.running.as_ref()) {
+                let state = if let Some(running) =
+                    &cs.state.as_ref().and_then(|s| s.running.as_ref())
+                {
                     ContainerState::Running {
                         started_at: running.started_at.as_ref().map(|t| t.0.to_rfc3339()),
                     }
@@ -263,7 +267,9 @@ pub async fn get_pod_details(
                         reason: waiting.reason.clone(),
                         message: waiting.message.clone(),
                     }
-                } else if let Some(terminated) = &cs.state.as_ref().and_then(|s| s.terminated.as_ref()) {
+                } else if let Some(terminated) =
+                    &cs.state.as_ref().and_then(|s| s.terminated.as_ref())
+                {
                     ContainerState::Terminated {
                         reason: terminated.reason.clone(),
                         exit_code: terminated.exit_code,
@@ -331,10 +337,7 @@ pub async fn get_pod_details(
         ip: status_info.and_then(|s| s.pod_ip.clone()),
         labels: pod.metadata.labels.unwrap_or_default(),
         annotations: pod.metadata.annotations.unwrap_or_default(),
-        created_at: pod
-            .metadata
-            .creation_timestamp
-            .map(|ts| ts.0.to_rfc3339()),
+        created_at: pod.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
     }))
 }
 
@@ -386,9 +389,11 @@ pub async fn get_pod_logs(
 
 /// 创建 Kubernetes 客户端
 async fn create_client(claims: &Claims) -> Result<Client> {
-    let mut config = kube::Config::infer().await.map_err(|e| Error::InternalServer {
-        message: format!("Failed to load kubeconfig: {}", e),
-    })?;
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(|e| Error::InternalServer {
+            message: format!("Failed to load kubeconfig: {}", e),
+        })?;
 
     config.auth_info.token = Some(claims.k8s_token.clone().into());
 
