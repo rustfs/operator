@@ -27,9 +27,9 @@ spec:
           env:
             - name: RUST_LOG
               value: info
-            # Allow console-web when port-forwarded to localhost:8080
+            # Allow console-web when port-forwarded to localhost:8080 or 127.0.0.1:8080
             - name: CORS_ALLOWED_ORIGINS
-              value: "http://localhost:3000,http://localhost:8080"
+              value: "http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:8080"
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:

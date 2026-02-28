@@ -12,6 +12,7 @@ COPY . .
 # Same-origin: default /api/v1. For local port-forward dev use: --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1
 ARG NEXT_PUBLIC_API_BASE_URL=
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+# If build needs internet (e.g. next/font/google), run: docker build --network=host .
 RUN pnpm build
 
 # Run stage: nginx serves static files

@@ -14,7 +14,7 @@
 
 use axum::{
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{Method, StatusCode, header},
     middleware::Next,
     response::Response,
 };
@@ -30,6 +30,10 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    // 跳过 OPTIONS（CORS 预检），避免 401 导致浏览器报 CORS 错误
+    if request.method() == Method::OPTIONS {
+        return Ok(next.run(request).await);
+    }
     // 跳过公开路径
     let path = request.uri().path();
     if path == "/healthz" || path == "/readyz" || path.starts_with("/api/v1/login") {

@@ -55,6 +55,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [router])
 
   useEffect(() => {
+    // Sync with external auth API on mount; setState runs in async .finally() callback
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     checkSession().finally(() => setIsLoading(false))
   }, [checkSession])
 

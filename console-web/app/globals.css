@@ -47,6 +47,12 @@
   --radius-4xl: calc(var(--radius) + 16px);
 }
 
+/* ===== Fonts (system stack for offline Docker build; no Google Fonts fetch) ===== */
+:root {
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-geist-mono: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+}
+
 /* ===== Light Theme ===== */
 :root {
   --background: oklch(1 0 0);

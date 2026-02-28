@@ -7,7 +7,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    setReady(true)
+    queueMicrotask(() => setReady(true))
   }, [])
 
   if (!ready) return null
