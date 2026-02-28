@@ -22,7 +22,7 @@ pub struct PodListItem {
     pub status: String,
     pub phase: String,
     pub node: Option<String>,
-    pub ready: String,  // e.g., "1/1"
+    pub ready: String, // e.g., "1/1"
     pub restarts: i32,
     pub age: String,
     pub created_at: Option<String>,

@@ -132,7 +132,7 @@ pub struct EnvVar {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoggingConfig {
-    pub log_type: String,  // "stdout" | "emptyDir" | "persistent"
+    pub log_type: String, // "stdout" | "emptyDir" | "persistent"
     pub volume_size: Option<String>,
     pub storage_class: Option<String>,
 }

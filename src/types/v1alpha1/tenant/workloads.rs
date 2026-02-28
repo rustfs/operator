@@ -323,7 +323,9 @@ impl Tenant {
 
         let container = corev1::Container {
             name: "rustfs".to_owned(),
-            image: Some(super::helper::get_rustfs_image_or_default(self.spec.image.as_ref())),
+            image: Some(super::helper::get_rustfs_image_or_default(
+                self.spec.image.as_ref(),
+            )),
             env: if env_vars.is_empty() {
                 None
             } else {

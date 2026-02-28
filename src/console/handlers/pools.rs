@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{extract::Path, Extension, Json};
+use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
-use kube::{api::ListParams, Api, Client, ResourceExt};
+use kube::{Api, Client, ResourceExt, api::ListParams};
 use snafu::ResultExt;
 
 use crate::console::{
@@ -46,10 +46,7 @@ pub async fn list_pools(
     // 获取所有 StatefulSets
     let ss_api: Api<appsv1::StatefulSet> = Api::namespaced(client, &namespace);
     let statefulsets = ss_api
-        .list(
-            &ListParams::default()
-                .labels(&format!("rustfs.tenant={}", tenant_name)),
-        )
+        .list(&ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)))
         .await
         .context(error::KubeApiSnafu)?;
 
@@ -64,42 +61,36 @@ pub async fn list_pools(
             .iter()
             .find(|ss| ss.name_any() == ss_name);
 
-        let (
-            replicas,
-            ready_replicas,
-            updated_replicas,
-            current_revision,
-            update_revision,
-            state,
-        ) = if let Some(ss) = ss {
-            let status = ss.status.as_ref();
-            let replicas = status.map(|s| s.replicas).unwrap_or(0);
-            let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
-            let updated = status.and_then(|s| s.updated_replicas).unwrap_or(0);
-            let current_rev = status.and_then(|s| s.current_revision.clone());
-            let update_rev = status.and_then(|s| s.update_revision.clone());
+        let (replicas, ready_replicas, updated_replicas, current_revision, update_revision, state) =
+            if let Some(ss) = ss {
+                let status = ss.status.as_ref();
+                let replicas = status.map(|s| s.replicas).unwrap_or(0);
+                let ready = status.and_then(|s| s.ready_replicas).unwrap_or(0);
+                let updated = status.and_then(|s| s.updated_replicas).unwrap_or(0);
+                let current_rev = status.and_then(|s| s.current_revision.clone());
+                let update_rev = status.and_then(|s| s.update_revision.clone());
 
-            let state = if ready == replicas && updated == replicas && replicas > 0 {
-                "Ready"
-            } else if updated < replicas {
-                "Updating"
-            } else if ready < replicas {
-                "Degraded"
+                let state = if ready == replicas && updated == replicas && replicas > 0 {
+                    "Ready"
+                } else if updated < replicas {
+                    "Updating"
+                } else if ready < replicas {
+                    "Degraded"
+                } else {
+                    "NotReady"
+                };
+
+                (
+                    replicas,
+                    ready,
+                    updated,
+                    current_rev,
+                    update_rev,
+                    state.to_string(),
+                )
             } else {
-                "NotReady"
+                (0, 0, 0, None, None, "NotCreated".to_string())
             };
-
-            (
-                replicas,
-                ready,
-                updated,
-                current_rev,
-                update_rev,
-                state.to_string(),
-            )
-        } else {
-            (0, 0, 0, None, None, "NotCreated".to_string())
-        };
 
         // 获取存储配置
         let storage_class = pool
@@ -302,8 +293,7 @@ pub async fn delete_pool(
     // 检查是否为最后一个 Pool
     if tenant.spec.pools.len() == 1 {
         return Err(Error::BadRequest {
-            message: "Cannot delete the last pool. Delete the entire Tenant instead."
-                .to_string(),
+            message: "Cannot delete the last pool. Delete the entire Tenant instead.".to_string(),
         });
     }
 
@@ -338,9 +328,11 @@ pub async fn delete_pool(
 
 /// 创建 Kubernetes 客户端
 async fn create_client(claims: &Claims) -> Result<Client> {
-    let mut config = kube::Config::infer().await.map_err(|e| Error::InternalServer {
-        message: format!("Failed to load kubeconfig: {}", e),
-    })?;
+    let mut config = kube::Config::infer()
+        .await
+        .map_err(|e| Error::InternalServer {
+            message: format!("Failed to load kubeconfig: {}", e),
+        })?;
 
     config.auth_info.token = Some(claims.k8s_token.clone().into());
 

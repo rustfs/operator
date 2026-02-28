@@ -29,7 +29,7 @@ use crate::types::v1alpha1::tenant::Tenant;
 
 // curl -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \
-//   -d "{\"token\": \"$TOKEN\"}" 
+//   -d "{\"token\": \"$TOKEN\"}"
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,

@@ -378,7 +378,7 @@ pub async fn update_tenant(
                         "Invalid pod_management_policy '{}', must be 'OrderedReady' or 'Parallel'",
                         pod_mgmt_policy
                     ),
-                })
+                });
             }
         };
         updated_fields.push(format!("pod_management_policy={}", pod_mgmt_policy));
@@ -396,7 +396,7 @@ pub async fn update_tenant(
                         "Invalid image_pull_policy '{}', must be 'Always', 'IfNotPresent', or 'Never'",
                         image_pull_policy
                     ),
-                })
+                });
             }
         };
         updated_fields.push(format!("image_pull_policy={}", image_pull_policy));
@@ -415,7 +415,7 @@ pub async fn update_tenant(
                         "Invalid logging type '{}', must be 'stdout', 'emptyDir', or 'persistent'",
                         logging.log_type
                     ),
-                })
+                });
             }
         };
 
