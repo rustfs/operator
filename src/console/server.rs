@@ -22,12 +22,15 @@ use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLay
 /// When frontend and backend are served under the same host (e.g. Ingress path / and /api/v1),
 /// browser requests are same-origin and CORS is not used; this is mainly for dev or split-host deployments.
 fn cors_allowed_origins() -> Vec<HeaderValue> {
-    let default = vec![
-        "http://localhost:3000".parse::<HeaderValue>().unwrap(),
-        "http://localhost:8080".parse::<HeaderValue>().unwrap(),
-        "http://127.0.0.1:3000".parse::<HeaderValue>().unwrap(),
-        "http://127.0.0.1:8080".parse::<HeaderValue>().unwrap(),
-    ];
+    let default: Vec<HeaderValue> = [
+        "http://localhost:3000",
+        "http://localhost:8080",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8080",
+    ]
+    .iter()
+    .filter_map(|s| s.parse().ok())
+    .collect();
     let s = match std::env::var("CORS_ALLOWED_ORIGINS") {
         Ok(v) if !v.trim().is_empty() => v,
         _ => return default,
@@ -113,7 +116,7 @@ fn api_routes() -> Router<AppState> {
 async fn health_check() -> impl IntoResponse {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or_default();
     (StatusCode::OK, format!("OK: {}", since_epoch.as_secs()))
 }
 

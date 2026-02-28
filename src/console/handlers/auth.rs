@@ -26,7 +26,6 @@ use crate::types::v1alpha1::tenant::Tenant;
 
 /// 登录处理
 // TOKEN=$(kubectl create token rustfs-operator -n rustfs-system --duration=24h)
-
 // curl -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \
 //   -d "{\"token\": \"$TOKEN\"}"
