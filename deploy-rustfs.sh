@@ -184,7 +184,7 @@ deploy_operator_and_console() {
     log_info "Building Operator Docker image..."
 
     # Use host network so build container can reach crates.io when host DNS is used (e.g. systemd-resolved)
-    if ! docker build --network=host -t "$image_name" .; then
+    if ! docker build --network=host --no-cache -t "$image_name" .; then
         log_error "Docker build failed"
         exit 1
     fi
