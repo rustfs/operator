@@ -56,7 +56,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     let cors_origins = cors_allowed_origins();
 
-    // 构建应用
+    // 构建应用。CorsLayer 放在最外层，使 OPTIONS 预检由 CORS 直接响应，避免被 auth 或路由影响。
     let app = Router::new()
         // 健康检查 (无需认证)
         .route("/healthz", get(health_check))
@@ -65,9 +65,11 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .nest("/api/v1", api_routes())
         // 应用状态
         .with_state(state.clone())
-        // 应用中间件层 (从内到外)
-        .layer(TraceLayer::new_for_http())
-        .layer(CompressionLayer::new())
+        // 中间件：最后添加的最先执行，故请求顺序为 Trace -> Compression -> Cors -> auth
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::console::middleware::auth::auth_middleware,
+        ))
         .layer(
             CorsLayer::new()
                 .allow_origin(cors_origins)
@@ -81,10 +83,8 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
                 .allow_credentials(true),
         )
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::console::middleware::auth::auth_middleware,
-        ));
+        .layer(CompressionLayer::new())
+        .layer(TraceLayer::new_for_http());
 
     // 启动服务器
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

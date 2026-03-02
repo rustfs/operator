@@ -160,12 +160,11 @@ build_operator() {
     log_success "Operator build completed"
 }
 
-# Build Console Web (frontend) Docker image for local dev (port-forward: API at localhost:9090)
+# Build Console Web (frontend) Docker image. Uses default /api/v1 (nginx in image proxies to backend).
 build_console_web_image() {
-    log_info "Building Console Web Docker image (API URL: http://localhost:9090/api/v1 for port-forward)..."
+    log_info "Building Console Web Docker image (default /api/v1, no build-arg)..."
 
-    if ! docker build --network=host \
-        --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1 \
+    if ! docker build --network=host --no-cache \
         -t rustfs/console-web:dev \
         -f console-web/Dockerfile \
         console-web/; then
@@ -185,7 +184,7 @@ deploy_operator_and_console() {
     log_info "Building Operator Docker image..."
 
     # Use host network so build container can reach crates.io when host DNS is used (e.g. systemd-resolved)
-    if ! docker build --network=host -t "$image_name" .; then
+    if ! docker build --network=host --no-cache -t "$image_name" .; then
         log_error "Docker build failed"
         exit 1
     fi
@@ -336,10 +335,9 @@ show_access_info() {
     echo ""
 
     echo "🖥️  Operator Console Web UI (port 8080):"
-    echo "  # Need both: API on 9090 (above) and frontend below"
     echo "  kubectl port-forward -n rustfs-system svc/rustfs-operator-console-frontend 8080:80"
-    echo "  Then open: http://localhost:8080  (must use :8080; opening http://localhost only hits port 80 and will fail)"
-    echo "  If API requests fail, use: http://localhost:8080?apiBaseUrl=http://localhost:9090/api/v1"
+    echo "  Then open: http://localhost:8080  (API is same-origin /api/v1, nginx in pod proxies to backend)"
+    echo "  If login still goes to :9090: clear site localStorage (key rustfs_console_api_base_url) or open in private window"
     echo ""
 
     echo "🔐 RustFS Credentials:"
@@ -348,8 +346,8 @@ show_access_info() {
     echo ""
 
     echo "🔑 Operator Console Login:"
-    echo "  Create K8s token: kubectl create token default --duration=24h"
-    echo "  Login: POST http://localhost:9090/api/v1/login"
+    echo "  Create K8s token: kubectl create token rustfs-operator -n rustfs-system --duration=24h"
+    echo "  Login: use the token in Console Web UI at http://localhost:8080 (or POST /api/v1/login when same-origin)"
     echo "  Docs: deploy/README.md"
     echo ""
 
@@ -363,7 +361,7 @@ show_access_info() {
 
     echo "⚠️  If pods show 'ImagePullBackOff' or 'image not present':"
     echo "  docker build --network=host -t rustfs/operator:dev ."
-    echo "  docker build --network=host --build-arg NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1 -t rustfs/console-web:dev -f console-web/Dockerfile console-web/"
+    echo "  docker build --network=host --no-cache -t rustfs/console-web:dev -f console-web/Dockerfile console-web/"
     echo "  kind load docker-image rustfs/operator:dev --name rustfs-dev"
     echo "  kind load docker-image rustfs/console-web:dev --name rustfs-dev"
     echo "  kubectl rollout restart deployment -n rustfs-system"
