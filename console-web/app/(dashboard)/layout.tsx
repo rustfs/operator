@@ -21,6 +21,7 @@ import { Separator } from "@/components/ui/separator"
 import { useAuth } from "@/contexts/auth-context"
 import { routes } from "@/lib/routes"
 import { cn } from "@/lib/utils"
+import { LanguageSwitcher } from "@/components/language-switcher"
 
 const navItems = [
   { href: routes.dashboard, icon: RiDashboardLine, labelKey: "Dashboard" },
@@ -40,8 +41,8 @@ export default function DashboardLayout({
   return (
     <AuthGuard>
       <div className="flex min-h-screen">
-        <aside className="w-64 shrink-0 border-r border-border bg-muted/20 py-3">
-          <div className="flex min-w-0 items-baseline gap-2 px-3 py-4">
+        <aside className="w-64 shrink-0 border-r border-border bg-muted/20">
+          <div className="flex min-w-0 items-baseline gap-2 px-4 py-6">
             <Link href="/" prefetch={false} className="inline-flex items-center gap-2">
               <Image src="/logo.svg" width={64} height={16} alt="RustFS" className="h-4 w-auto shrink-0" />
             </Link>
@@ -89,9 +90,7 @@ export default function DashboardLayout({
               })()}
             </div>
             <div className="flex items-center gap-1">
-              <Button variant="ghost" size="icon-sm" aria-label="Language">
-                <RiTranslate className="size-4" />
-              </Button>
+              <LanguageSwitcher />
               <Button variant="ghost" size="icon-sm" aria-label="Theme">
                 <RiSunLine className="size-4" />
               </Button>
