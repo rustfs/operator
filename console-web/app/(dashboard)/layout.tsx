@@ -11,16 +11,23 @@ import {
   RiNodeTree,
   RiQuestionLine,
   RiGithubLine,
+  RiTwitterXLine,
   RiUser3Line,
 } from "@remixicon/react"
+
 import { AuthGuard } from "@/components/auth-guard"
 import { Button } from "@/components/ui/button"
-import { Separator } from "@/components/ui/separator"
 import { useAuth } from "@/contexts/auth-context"
 import { routes } from "@/lib/routes"
 import { cn } from "@/lib/utils"
 import { LanguageSwitcher } from "@/components/language-switcher"
 import { ThemeSwitcher } from "@/components/theme-switcher"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 
 const navItems = [
   { href: routes.dashboard, icon: RiDashboardLine, labelKey: "Dashboard" },
@@ -36,6 +43,8 @@ export default function DashboardLayout({
   const { t } = useTranslation()
   const { logout } = useAuth()
   const pathname = usePathname()
+  const GITHUB_URL = "https://github.com/KAI/console"
+  const X_URL = "https://x.com/KAIConsole"
 
   return (
     <AuthGuard>
@@ -91,20 +100,37 @@ export default function DashboardLayout({
             <div className="flex items-center gap-1">
               <LanguageSwitcher />
               <ThemeSwitcher />
-              <Button variant="ghost" size="icon-sm" aria-label="Help">
+              {/* <Button variant="ghost" size="icon-sm" aria-label="Help">
                 <RiQuestionLine className="size-4" />
-              </Button>
-              <Button variant="ghost" size="icon-sm" aria-label="GitHub">
-                <RiGithubLine className="size-4" />
-              </Button>
-              <Separator className="mx-1 h-5" orientation="vertical" />
-              <Button variant="ghost" size="sm" className="h-7" onClick={logout}>
-                <RiLogoutBoxLine className="mr-1 size-3.5" />
-                {t("Logout")}
-              </Button>
-              <Button variant="outline" size="icon-sm" aria-label="User">
-                <RiUser3Line className="size-4" />
-              </Button>
+              </Button> */}
+              {GITHUB_URL && (
+                <Button asChild variant="ghost" size="icon-sm" aria-label="GitHub">
+                  <Link href={GITHUB_URL} prefetch={false} target="_blank" rel="noopener noreferrer">
+                    <RiGithubLine className="size-4" />
+                  </Link>
+                </Button>
+              )}
+              {X_URL && (
+                <Button asChild variant="ghost" size="icon-sm" aria-label="X">
+                  <Link href={X_URL} prefetch={false} target="_blank" rel="noopener noreferrer">
+                    <RiTwitterXLine className="size-4" />
+                    
+                  </Link>
+                </Button>
+              )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="icon-sm" aria-label="User">
+                    <RiUser3Line className="size-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-40">
+                  <DropdownMenuItem onSelect={logout}>
+                    <RiLogoutBoxLine className="me-2 size-4" />
+                    {t("Logout")}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </header>
           <main className="flex-1 overflow-auto p-6 pt-4">{children}</main>
