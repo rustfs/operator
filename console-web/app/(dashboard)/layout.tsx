@@ -43,8 +43,8 @@ export default function DashboardLayout({
   const { t } = useTranslation()
   const { logout } = useAuth()
   const pathname = usePathname()
-  const GITHUB_URL = "https://github.com/KAI/console"
-  const X_URL = "https://x.com/KAIConsole"
+  const GITHUB_URL = "https://github.com/rustfs/operator"
+  const X_URL = "https://x.com/rustfsofficial"
 
   return (
     <AuthGuard>
