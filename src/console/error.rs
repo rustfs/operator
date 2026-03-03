@@ -95,9 +95,12 @@ impl IntoResponse for Error {
             Error::BadRequest { message } => {
                 (StatusCode::BAD_REQUEST, "BadRequest", message.clone(), None)
             }
-            Error::Conflict { message } => {
-                (StatusCode::CONFLICT, "Conflict", message.clone(), None)
-            }
+            Error::Conflict { message } => (
+                StatusCode::CONFLICT,
+                "Conflict",
+                message.clone(),
+                None,
+            ),
             Error::InternalServer { message } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "InternalServerError",
