@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Event 列表项
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EventItem {
     pub event_type: String,
     pub reason: String,
@@ -27,7 +28,7 @@ pub struct EventItem {
 }
 
 /// Event 列表响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct EventListResponse {
     pub events: Vec<EventItem>,
 }

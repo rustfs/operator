@@ -34,7 +34,9 @@ fn is_valid_k8s_name(s: &str) -> bool {
         return false;
     }
     let mut chars = s.chars();
-    let first = chars.next().unwrap();
+    let Some(first) = chars.next() else {
+        return false;
+    };
     if !first.is_ascii_alphanumeric() {
         return false;
     }
@@ -43,7 +45,7 @@ fn is_valid_k8s_name(s: &str) -> bool {
             return false;
         }
     }
-    s.chars().last().map_or(false, |c| c != '-')
+    s.chars().last().is_some_and(|c| c != '-')
 }
 
 /// Kubernetes Quantity 格式校验（如 10Gi、100M、1）
@@ -68,7 +70,7 @@ fn is_valid_k8s_quantity(s: &str) -> bool {
         let suffix = std::str::from_utf8(&bytes[i..]).unwrap_or("");
         const VALID: &[&str] = &[
             "Ei", "Pi", "Ti", "Gi", "Mi", "Ki", // 二进制后缀优先
-            "E", "P", "T", "G", "M", "K",       // 十进制后缀
+            "E", "P", "T", "G", "M", "K", // 十进制后缀
         ];
         if !VALID.contains(&suffix) {
             return false;
@@ -125,7 +127,9 @@ pub async fn list_pools(
     let statefulsets = ss_api
         .list(&ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)))
         .await
-        .map_err(|e| error::map_kube_error(e, format!("StatefulSets for tenant '{}'", tenant_name)))?;
+        .map_err(|e| {
+            error::map_kube_error(e, format!("StatefulSets for tenant '{}'", tenant_name))
+        })?;
 
     let mut pools_details = Vec::new();
 
@@ -354,10 +358,7 @@ pub async fn add_pool(
                         current_revision: None,
                         update_revision: None,
                         state: "Creating".to_string(),
-                        created_at: t
-                            .metadata
-                            .creation_timestamp
-                            .map(|ts| ts.0.to_rfc3339()),
+                        created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
                     },
                 }));
             }
@@ -393,7 +394,8 @@ pub async fn delete_pool(
 
         if tenant.spec.pools.len() == 1 {
             return Err(Error::BadRequest {
-                message: "Cannot delete the last pool. Delete the entire Tenant instead.".to_string(),
+                message: "Cannot delete the last pool. Delete the entire Tenant instead."
+                    .to_string(),
             });
         }
 

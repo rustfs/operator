@@ -20,6 +20,8 @@ pub mod error;
 pub mod handlers;
 pub mod middleware;
 pub mod models;
+#[allow(dead_code)]
+pub mod openapi;
 pub mod routes;
 pub mod server;
 pub mod state;

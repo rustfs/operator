@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::console::{routes, state::AppState};
+use crate::console::{openapi::ApiDoc, routes, state::AppState};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::{Router, middleware, response::IntoResponse, routing::get};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, api::ListParams};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 /// Build CORS allowed origins from env or default.
 /// Env: CORS_ALLOWED_ORIGINS, comma-separated (e.g. "https://console.example.com,http://localhost:3000").
@@ -63,6 +65,8 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         // 健康检查 (无需认证)
         .route("/healthz", get(health_check))
         .route("/readyz", get(ready_check))
+        // Swagger UI (无需认证)
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         // API v1 路由
         .nest("/api/v1", api_routes())
         // 应用状态
@@ -128,10 +132,7 @@ async fn ready_check() -> impl IntoResponse {
         Ok(()) => (StatusCode::OK, "Ready".to_string()),
         Err(e) => {
             tracing::warn!("Readiness check failed: {}", e);
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Not ready: {}", e),
-            )
+            (StatusCode::SERVICE_UNAVAILABLE, format!("Not ready: {}", e))
         }
     }
 }

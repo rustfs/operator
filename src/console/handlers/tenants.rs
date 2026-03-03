@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{Extension, Json, extract::Path};
-use k8s_openapi::api::core::v1 as corev1;
-use kube::{Api, Client, ResourceExt, api::ListParams};
 use crate::console::{
     error::{self, Error, Result},
     models::tenant::*,
     state::Claims,
 };
 use crate::types::v1alpha1::{persistence::PersistenceConfig, pool::Pool, tenant::Tenant};
+use axum::{Extension, Json, extract::Path};
+use k8s_openapi::api::core::v1 as corev1;
+use kube::{Api, Client, ResourceExt, api::ListParams};
 
 // curl -s -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \

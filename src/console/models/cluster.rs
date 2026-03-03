@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// 节点信息
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NodeInfo {
     pub name: String,
     pub status: String,
@@ -27,13 +28,13 @@ pub struct NodeInfo {
 }
 
 /// 节点列表响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NodeListResponse {
     pub nodes: Vec<NodeInfo>,
 }
 
 /// Namespace 列表项
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NamespaceItem {
     pub name: String,
     pub status: String,
@@ -41,19 +42,19 @@ pub struct NamespaceItem {
 }
 
 /// Namespace 列表响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NamespaceListResponse {
     pub namespaces: Vec<NamespaceItem>,
 }
 
 /// 创建 Namespace 请求
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, ToSchema)]
 pub struct CreateNamespaceRequest {
     pub name: String,
 }
 
 /// 集群资源响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ClusterResourcesResponse {
     pub total_nodes: usize,
     pub total_cpu: String,

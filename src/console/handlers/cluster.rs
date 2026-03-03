@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{Extension, Json};
-use k8s_openapi::api::core::v1 as corev1;
-use kube::{Api, Client, ResourceExt, api::ListParams};
 use crate::console::{
     error::{self, Error, Result},
     models::cluster::*,
     state::Claims,
 };
+use axum::{Extension, Json};
+use k8s_openapi::api::core::v1 as corev1;
+use kube::{Api, Client, ResourceExt, api::ListParams};
 
 /// 列出所有节点
 pub async fn list_nodes(Extension(claims): Extension<Claims>) -> Result<Json<NodeListResponse>> {
@@ -255,20 +255,20 @@ fn parse_cpu_to_millicores(s: &str) -> i64 {
     if s.is_empty() {
         return 0;
     }
-    if let Some(rest) = s.strip_suffix('n') {
-        if let Ok(n) = rest.trim().parse::<f64>() {
-            return (n / 1_000_000.0) as i64;
-        }
+    if let Some(rest) = s.strip_suffix('n')
+        && let Ok(n) = rest.trim().parse::<f64>()
+    {
+        return (n / 1_000_000.0) as i64;
     }
-    if let Some(rest) = s.strip_suffix('u') {
-        if let Ok(n) = rest.trim().parse::<f64>() {
-            return (n / 1000.0) as i64;
-        }
+    if let Some(rest) = s.strip_suffix('u')
+        && let Ok(n) = rest.trim().parse::<f64>()
+    {
+        return (n / 1000.0) as i64;
     }
-    if let Some(rest) = s.strip_suffix('m') {
-        if let Ok(n) = rest.trim().parse::<f64>() {
-            return n as i64;
-        }
+    if let Some(rest) = s.strip_suffix('m')
+        && let Ok(n) = rest.trim().parse::<f64>()
+    {
+        return n as i64;
     }
     if let Ok(n) = s.parse::<f64>() {
         return (n * 1000.0) as i64;

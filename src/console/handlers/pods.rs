@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::console::{
+    error::{self, Error, Result},
+    models::pod::*,
+    state::Claims,
+};
 use axum::{
     Extension, Json,
     body::Body,
@@ -23,11 +28,6 @@ use k8s_openapi::api::core::v1 as corev1;
 use kube::{
     Api, Client, ResourceExt,
     api::{DeleteParams, ListParams, LogParams},
-};
-use crate::console::{
-    error::{self, Error, Result},
-    models::pod::*,
-    state::Claims,
 };
 
 /// 校验 Pod 是否属于指定 Tenant（通过 rustfs.tenant 标签）
@@ -399,16 +399,16 @@ pub async fn get_pod_logs(
     };
 
     // since_time 校验：仅当时间不晚于当前时间时使用
-    if let Some(since_time) = &query.since_time {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(since_time) {
-            let dt_utc = dt.with_timezone(&chrono::Utc);
-            let now = chrono::Utc::now();
-            let duration = now.signed_duration_since(dt_utc);
-            if duration.num_seconds() >= 0 {
-                log_params.since_seconds = Some(duration.num_seconds());
-            }
-            // 若 since_time 在未来，忽略该参数（不设置 since_seconds）
+    if let Some(since_time) = &query.since_time
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(since_time)
+    {
+        let dt_utc = dt.with_timezone(&chrono::Utc);
+        let now = chrono::Utc::now();
+        let duration = now.signed_duration_since(dt_utc);
+        if duration.num_seconds() >= 0 {
+            log_params.since_seconds = Some(duration.num_seconds());
         }
+        // 若 since_time 在未来，忽略该参数（不设置 since_seconds）
     }
 
     // 获取日志流

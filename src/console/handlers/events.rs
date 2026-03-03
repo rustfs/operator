@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{Extension, Json, extract::Path};
-use k8s_openapi::api::core::v1 as corev1;
-use kube::{Api, Client, api::ListParams};
 use crate::console::{
     error::{self, Error, Result},
     models::event::{EventItem, EventListResponse},
     state::Claims,
 };
+use axum::{Extension, Json, extract::Path};
+use k8s_openapi::api::core::v1 as corev1;
+use kube::{Api, Client, api::ListParams};
 
 /// 列出 Tenant 相关的 Events
 pub async fn list_tenant_events(
