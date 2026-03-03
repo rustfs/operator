@@ -9,8 +9,6 @@ import {
   RiServerLine,
   RiLogoutBoxLine,
   RiNodeTree,
-  RiTranslate,
-  RiSunLine,
   RiQuestionLine,
   RiGithubLine,
   RiUser3Line,
@@ -22,6 +20,7 @@ import { useAuth } from "@/contexts/auth-context"
 import { routes } from "@/lib/routes"
 import { cn } from "@/lib/utils"
 import { LanguageSwitcher } from "@/components/language-switcher"
+import { ThemeSwitcher } from "@/components/theme-switcher"
 
 const navItems = [
   { href: routes.dashboard, icon: RiDashboardLine, labelKey: "Dashboard" },
@@ -91,9 +90,7 @@ export default function DashboardLayout({
             </div>
             <div className="flex items-center gap-1">
               <LanguageSwitcher />
-              <Button variant="ghost" size="icon-sm" aria-label="Theme">
-                <RiSunLine className="size-4" />
-              </Button>
+              <ThemeSwitcher />
               <Button variant="ghost" size="icon-sm" aria-label="Help">
                 <RiQuestionLine className="size-4" />
               </Button>
