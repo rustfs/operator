@@ -15,8 +15,6 @@
 use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, api::ListParams};
-use snafu::ResultExt;
-
 use crate::console::{
     error::{self, Error, Result},
     models::event::{EventItem, EventListResponse},
@@ -35,7 +33,7 @@ pub async fn list_tenant_events(
     let events = api
         .list(&ListParams::default().fields(&format!("involvedObject.name={}", tenant)))
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Events for tenant '{}'", tenant)))?;
 
     let items: Vec<EventItem> = events
         .items

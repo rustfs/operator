@@ -15,6 +15,8 @@
 use crate::console::{routes, state::AppState};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::{Router, middleware, response::IntoResponse, routing::get};
+use k8s_openapi::api::core::v1 as corev1;
+use kube::{Api, Client, api::ListParams};
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 
 /// Build CORS allowed origins from env or default.
@@ -120,8 +122,29 @@ async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, format!("OK: {}", since_epoch.as_secs()))
 }
 
-/// 就绪检查
+/// 就绪检查：验证 K8s API 可连通
 async fn ready_check() -> impl IntoResponse {
-    // TODO: 检查 K8s 连接等
-    (StatusCode::OK, "Ready")
+    match check_k8s_connectivity().await {
+        Ok(()) => (StatusCode::OK, "Ready".to_string()),
+        Err(e) => {
+            tracing::warn!("Readiness check failed: {}", e);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Not ready: {}", e),
+            )
+        }
+    }
+}
+
+/// 验证 K8s 连接：加载配置、创建客户端、执行轻量级 API 调用
+async fn check_k8s_connectivity() -> Result<(), String> {
+    let config = kube::Config::infer()
+        .await
+        .map_err(|e| format!("kubeconfig: {}", e))?;
+    let client = Client::try_from(config).map_err(|e| format!("client: {}", e))?;
+    let api: Api<corev1::Namespace> = Api::all(client);
+    api.list(&ListParams::default().limit(1))
+        .await
+        .map_err(|e| format!("API: {}", e))?;
+    Ok(())
 }

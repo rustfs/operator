@@ -36,6 +36,9 @@ pub enum Error {
     #[snafu(display("Bad request: {}", message))]
     BadRequest { message: String },
 
+    #[snafu(display("Conflict: {}", message))]
+    Conflict { message: String },
+
     #[snafu(display("Internal server error: {}", message))]
     InternalServer { message: String },
 
@@ -47,6 +50,19 @@ pub enum Error {
 
     #[snafu(display("JSON serialization error: {}", source))]
     Json { source: serde_json::Error },
+}
+
+/// 将 kube::Error 映射为合适的 Console Error（404 -> NotFound, 409 -> Conflict）
+pub fn map_kube_error(e: kube::Error, not_found_resource: impl Into<String>) -> Error {
+    match &e {
+        kube::Error::Api(ae) if ae.code == 404 => Error::NotFound {
+            resource: not_found_resource.into(),
+        },
+        kube::Error::Api(ae) if ae.code == 409 => Error::Conflict {
+            message: "Resource was modified by another request, please retry".to_string(),
+        },
+        _ => Error::KubeApi { source: e },
+    }
 }
 
 /// API 错误响应格式
@@ -79,6 +95,12 @@ impl IntoResponse for Error {
             Error::BadRequest { message } => {
                 (StatusCode::BAD_REQUEST, "BadRequest", message.clone(), None)
             }
+            Error::Conflict { message } => (
+                StatusCode::CONFLICT,
+                "Conflict",
+                message.clone(),
+                None,
+            ),
             Error::InternalServer { message } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "InternalServerError",

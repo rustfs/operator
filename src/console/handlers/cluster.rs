@@ -15,8 +15,6 @@
 use axum::{Extension, Json};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, ResourceExt, api::ListParams};
-use snafu::ResultExt;
-
 use crate::console::{
     error::{self, Error, Result},
     models::cluster::*,
@@ -31,7 +29,7 @@ pub async fn list_nodes(Extension(claims): Extension<Claims>) -> Result<Json<Nod
     let nodes = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Nodes"))?;
 
     let items: Vec<NodeInfo> = nodes
         .items
@@ -126,7 +124,7 @@ pub async fn list_namespaces(
     let namespaces = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Namespaces"))?;
 
     let items: Vec<NamespaceItem> = namespaces
         .items
@@ -164,7 +162,7 @@ pub async fn create_namespace(
     let created = api
         .create(&Default::default(), &ns)
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Namespace '{}'", req.name)))?;
 
     Ok(Json(NamespaceItem {
         name: created.name_any(),
@@ -190,7 +188,7 @@ pub async fn get_cluster_resources(
     let nodes = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Nodes"))?;
 
     let total_nodes = nodes.items.len();
 
