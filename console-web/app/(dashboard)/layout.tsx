@@ -48,8 +48,8 @@ export default function DashboardLayout({
 
   return (
     <AuthGuard>
-      <div className="flex min-h-screen">
-        <aside className="w-64 shrink-0 border-r border-border bg-muted/20">
+      <div className="flex h-screen overflow-hidden">
+        <aside className="w-64 shrink-0 h-screen overflow-hidden border-r border-border bg-muted/20">
           <div className="flex min-w-0 items-baseline gap-2 px-4 py-6">
             <Link href="/" prefetch={false} className="inline-flex items-center gap-2">
               <Image src="/logo.svg" width={64} height={16} alt="RustFS" className="h-4 w-auto shrink-0" />
@@ -78,7 +78,7 @@ export default function DashboardLayout({
             })}
           </nav>
         </aside>
-        <div className="flex flex-1 flex-col">
+        <div className="flex flex-1 flex-col overflow-hidden">
           <header className="flex h-16 shrink-0 items-center justify-between gap-2 border-b border-border bg-background px-4">
             <div className="flex items-center gap-3">
               {(() => {

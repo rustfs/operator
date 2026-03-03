@@ -5,14 +5,21 @@ export function PageHeader({
   description,
   actions,
   className,
+  sticky = true,
 }: {
   children: React.ReactNode
   description?: React.ReactNode
   actions?: React.ReactNode
   className?: string
+  sticky?: boolean
 }) {
   return (
-    <div className={cn("sticky bg-background top-0 z-10 flex flex-col justify-between gap-2 lg:flex-row", className)}>
+    <div
+      className={cn(
+        "bg-background flex flex-col justify-between gap-2 lg:flex-row",
+        className,
+      )}
+    >
       <div className="space-y-1">
         {children}
         {description}

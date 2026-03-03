@@ -96,6 +96,7 @@ export default function TenantCreatePage() {
   return (
     <Page>
       <PageHeader
+        sticky={false}
         actions={
           <Button asChild variant="outline" size="sm">
             <Link href={routes.tenants} prefetch={false}>
