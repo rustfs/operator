@@ -12,17 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{Extension, Json, extract::Path};
-use k8s_openapi::api::core::v1 as corev1;
-use kube::{Api, Client, ResourceExt, api::ListParams};
-use snafu::ResultExt;
-
 use crate::console::{
     error::{self, Error, Result},
     models::tenant::*,
     state::Claims,
 };
 use crate::types::v1alpha1::{persistence::PersistenceConfig, pool::Pool, tenant::Tenant};
+use axum::{Extension, Json, extract::Path};
+use k8s_openapi::api::core::v1 as corev1;
+use kube::{Api, Client, ResourceExt, api::ListParams};
 
 // curl -s -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \
@@ -39,7 +37,7 @@ pub async fn list_all_tenants(
     let tenants = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Tenants"))?;
 
     let items: Vec<TenantListItem> = tenants
         .items
@@ -80,7 +78,7 @@ pub async fn list_tenants_by_namespace(
     let tenants = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Tenants"))?;
 
     let items: Vec<TenantListItem> = tenants
         .items
@@ -118,14 +116,17 @@ pub async fn get_tenant_details(
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::namespaced(client.clone(), &namespace);
 
-    let tenant = api.get(&name).await.context(error::KubeApiSnafu)?;
+    let tenant = api
+        .get(&name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
     // 获取 Services
     let svc_api: Api<corev1::Service> = Api::namespaced(client, &namespace);
     let services = svc_api
         .list(&ListParams::default().labels(&format!("rustfs.tenant={}", name)))
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Services for tenant '{}'", name)))?;
 
     let service_infos: Vec<ServiceInfo> = services
         .items
@@ -217,7 +218,7 @@ pub async fn create_tenant(
         ns_api
             .create(&Default::default(), &ns)
             .await
-            .context(error::KubeApiSnafu)?;
+            .map_err(|e| error::map_kube_error(e, format!("Namespace '{}'", req.namespace)))?;
     }
 
     // 构造 Tenant CRD
@@ -277,7 +278,7 @@ pub async fn create_tenant(
     let created = api
         .create(&Default::default(), &tenant)
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", req.name)))?;
 
     Ok(Json(TenantListItem {
         name: created.name_any(),
@@ -310,7 +311,7 @@ pub async fn delete_tenant(
 
     api.delete(&name, &Default::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
     Ok(Json(DeleteTenantResponse {
         success: true,
@@ -328,7 +329,10 @@ pub async fn update_tenant(
     let api: Api<Tenant> = Api::namespaced(client, &namespace);
 
     // 获取当前 Tenant
-    let mut tenant = api.get(&name).await.context(error::KubeApiSnafu)?;
+    let mut tenant = api
+        .get(&name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
     // 应用更新（仅更新提供的字段）
     let mut updated_fields = Vec::new();
@@ -438,7 +442,7 @@ pub async fn update_tenant(
     let updated_tenant = api
         .replace(&name, &Default::default(), &tenant)
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
     Ok(Json(UpdateTenantResponse {
         success: true,

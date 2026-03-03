@@ -16,7 +16,6 @@ use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, ResourceExt, api::ListParams};
-use snafu::ResultExt;
 
 use crate::console::{
     error::{self, Error, Result},
@@ -28,6 +27,86 @@ use crate::types::v1alpha1::{
     pool::{Pool, SchedulingConfig},
     tenant::Tenant,
 };
+
+/// Kubernetes 资源名称校验（RFC 1123 子域名：小写字母数字、连字符，1-63 字符）
+fn is_valid_k8s_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > 63 {
+        return false;
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    for c in chars {
+        if c != '-' && !c.is_ascii_alphanumeric() {
+            return false;
+        }
+    }
+    s.chars().last().is_some_and(|c| c != '-')
+}
+
+/// Kubernetes Quantity 格式校验（如 10Gi、100M、1）
+fn is_valid_k8s_quantity(s: &str) -> bool {
+    if s.is_empty() || s.len() > 32 {
+        return false;
+    }
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // 允许：纯数字、数字+小数、数字+后缀(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i] == b'.' || (bytes[i] as char).is_ascii_digit()) {
+        i += 1;
+    }
+    if i == 0 {
+        return false;
+    }
+    if i < bytes.len() {
+        let suffix = std::str::from_utf8(&bytes[i..]).unwrap_or("");
+        const VALID: &[&str] = &[
+            "Ei", "Pi", "Ti", "Gi", "Mi", "Ki", // 二进制后缀优先
+            "E", "P", "T", "G", "M", "K", // 十进制后缀
+        ];
+        if !VALID.contains(&suffix) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 校验 Pool 卷数（与 CRD 一致：2 server 至少 4 卷，3 server 至少 6 卷，其余至少 4 卷）
+fn validate_pool_volumes(servers: i32, volumes_per_server: i32) -> Result<i32> {
+    let total = servers * volumes_per_server;
+    if servers <= 0 || volumes_per_server <= 0 {
+        return Err(Error::BadRequest {
+            message: "servers and volumes_per_server must be positive".to_string(),
+        });
+    }
+    if servers == 2 && total < 4 {
+        return Err(Error::BadRequest {
+            message: "Pool with 2 servers must have at least 4 volumes in total".to_string(),
+        });
+    }
+    if servers == 3 && total < 6 {
+        return Err(Error::BadRequest {
+            message: "Pool with 3 servers must have at least 6 volumes in total".to_string(),
+        });
+    }
+    if total < 4 {
+        return Err(Error::BadRequest {
+            message: format!(
+                "Pool must have at least 4 total volumes (got {} servers × {} volumes = {})",
+                servers, volumes_per_server, total
+            ),
+        });
+    }
+    Ok(total)
+}
 
 /// 列出 Tenant 的所有 Pools
 pub async fn list_pools(
@@ -41,14 +120,16 @@ pub async fn list_pools(
     let tenant = tenant_api
         .get(&tenant_name)
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", tenant_name)))?;
 
     // 获取所有 StatefulSets
     let ss_api: Api<appsv1::StatefulSet> = Api::namespaced(client, &namespace);
     let statefulsets = ss_api
         .list(&ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)))
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| {
+            error::map_kube_error(e, format!("StatefulSets for tenant '{}'", tenant_name))
+        })?;
 
     let mut pools_details = Vec::new();
 
@@ -138,7 +219,7 @@ pub async fn list_pools(
     }))
 }
 
-/// 添加新的 Pool 到 Tenant
+/// 添加新的 Pool 到 Tenant（乐观锁重试）
 pub async fn add_pool(
     Path((namespace, tenant_name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -147,33 +228,29 @@ pub async fn add_pool(
     let client = create_client(&claims).await?;
     let tenant_api: Api<Tenant> = Api::namespaced(client, &namespace);
 
-    // 获取当前 Tenant
-    let mut tenant = tenant_api
-        .get(&tenant_name)
-        .await
-        .context(error::KubeApiSnafu)?;
-
-    // 验证 Pool 名称不重复
-    if tenant.spec.pools.iter().any(|p| p.name == req.name) {
-        return Err(Error::BadRequest {
-            message: format!("Pool '{}' already exists", req.name),
-        });
-    }
-
-    // 验证最小卷数要求 (servers * volumes_per_server >= 4)
-    let total_volumes = req.servers * req.volumes_per_server;
-    if total_volumes < 4 {
+    // 输入校验（pool name 需符合 K8s 资源命名）
+    let pool_name = req.name.trim();
+    if !is_valid_k8s_name(pool_name) {
         return Err(Error::BadRequest {
             message: format!(
-                "Pool must have at least 4 total volumes (got {} servers × {} volumes = {})",
-                req.servers, req.volumes_per_server, total_volumes
+                "Invalid pool name '{}': must be 1-63 chars, lowercase alphanumeric and hyphens (RFC 1123)",
+                req.name
             ),
         });
     }
+    if !is_valid_k8s_quantity(req.storage_size.trim()) {
+        return Err(Error::BadRequest {
+            message: format!(
+                "Invalid storage size '{}': must be a valid Kubernetes quantity (e.g. 10Gi, 100M)",
+                req.storage_size
+            ),
+        });
+    }
+    let total_volumes = validate_pool_volumes(req.servers, req.volumes_per_server)?;
 
     // 构建新的 Pool
     let new_pool = Pool {
-        name: req.name.clone(),
+        name: pool_name.to_string(),
         servers: req.servers,
         persistence: PersistenceConfig {
             volumes_per_server: req.volumes_per_server,
@@ -184,7 +261,7 @@ pub async fn add_pool(
                         vec![(
                             "storage".to_string(),
                             k8s_openapi::apimachinery::pkg::api::resource::Quantity(
-                                req.storage_size.clone(),
+                                req.storage_size.trim().to_string(),
                             ),
                         )]
                         .into_iter()
@@ -243,40 +320,63 @@ pub async fn add_pool(
         },
     };
 
-    // 添加到 Tenant
-    tenant.spec.pools.push(new_pool);
+    // 乐观锁重试：get -> 校验 -> push -> replace，409 时重试
+    const MAX_RETRIES: u32 = 3;
+    let mut last_conflict = None;
+    for _ in 0..MAX_RETRIES {
+        let mut tenant = tenant_api
+            .get(&tenant_name)
+            .await
+            .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", tenant_name)))?;
 
-    // 更新 Tenant
-    let updated_tenant = tenant_api
-        .replace(&tenant_name, &Default::default(), &tenant)
-        .await
-        .context(error::KubeApiSnafu)?;
+        if tenant.spec.pools.iter().any(|p| p.name == pool_name) {
+            return Err(Error::BadRequest {
+                message: format!("Pool '{}' already exists", req.name),
+            });
+        }
 
-    Ok(Json(AddPoolResponse {
-        success: true,
-        message: format!("Pool '{}' added successfully", req.name),
-        pool: PoolDetails {
-            name: req.name.clone(),
-            servers: req.servers,
-            volumes_per_server: req.volumes_per_server,
-            total_volumes,
-            storage_class: req.storage_class,
-            volume_size: Some(req.storage_size),
-            replicas: 0,
-            ready_replicas: 0,
-            updated_replicas: 0,
-            current_revision: None,
-            update_revision: None,
-            state: "Creating".to_string(),
-            created_at: updated_tenant
-                .metadata
-                .creation_timestamp
-                .map(|ts| ts.0.to_rfc3339()),
-        },
+        tenant.spec.pools.push(new_pool.clone());
+
+        match tenant_api
+            .replace(&tenant_name, &Default::default(), &tenant)
+            .await
+        {
+            Ok(t) => {
+                return Ok(Json(AddPoolResponse {
+                    success: true,
+                    message: format!("Pool '{}' added successfully", req.name),
+                    pool: PoolDetails {
+                        name: req.name.clone(),
+                        servers: req.servers,
+                        volumes_per_server: req.volumes_per_server,
+                        total_volumes,
+                        storage_class: req.storage_class,
+                        volume_size: Some(req.storage_size),
+                        replicas: 0,
+                        ready_replicas: 0,
+                        updated_replicas: 0,
+                        current_revision: None,
+                        update_revision: None,
+                        state: "Creating".to_string(),
+                        created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
+                    },
+                }));
+            }
+            Err(e) => {
+                let mapped = error::map_kube_error(e, String::new());
+                if !matches!(&mapped, Error::Conflict { .. }) {
+                    return Err(mapped);
+                }
+                last_conflict = Some(mapped);
+            }
+        }
+    }
+    Err(last_conflict.unwrap_or_else(|| Error::Conflict {
+        message: "Resource was modified by another request, please retry".to_string(),
     }))
 }
 
-/// 删除 Pool
+/// 删除 Pool（乐观锁重试）
 pub async fn delete_pool(
     Path((namespace, tenant_name, pool_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
@@ -284,45 +384,59 @@ pub async fn delete_pool(
     let client = create_client(&claims).await?;
     let tenant_api: Api<Tenant> = Api::namespaced(client, &namespace);
 
-    // 获取当前 Tenant
-    let mut tenant = tenant_api
-        .get(&tenant_name)
-        .await
-        .context(error::KubeApiSnafu)?;
+    const MAX_RETRIES: u32 = 3;
+    let mut last_conflict = None;
+    for _ in 0..MAX_RETRIES {
+        let mut tenant = tenant_api
+            .get(&tenant_name)
+            .await
+            .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", tenant_name)))?;
 
-    // 检查是否为最后一个 Pool
-    if tenant.spec.pools.len() == 1 {
-        return Err(Error::BadRequest {
-            message: "Cannot delete the last pool. Delete the entire Tenant instead.".to_string(),
-        });
+        if tenant.spec.pools.len() == 1 {
+            return Err(Error::BadRequest {
+                message: "Cannot delete the last pool. Delete the entire Tenant instead."
+                    .to_string(),
+            });
+        }
+
+        let pool_index = tenant
+            .spec
+            .pools
+            .iter()
+            .position(|p| p.name == pool_name)
+            .ok_or_else(|| Error::NotFound {
+                resource: format!("Pool '{}'", pool_name),
+            })?;
+
+        tenant.spec.pools.remove(pool_index);
+
+        match tenant_api
+            .replace(&tenant_name, &Default::default(), &tenant)
+            .await
+        {
+            Ok(_) => {
+                return Ok(Json(DeletePoolResponse {
+                    success: true,
+                    message: format!("Pool '{}' deleted successfully", pool_name),
+                    warning: Some(
+                        "The StatefulSet and PVCs will be deleted by the Operator. \
+                         Data may be lost if PVCs are not using a retain policy."
+                            .to_string(),
+                    ),
+                }));
+            }
+            Err(e) => {
+                let mapped = error::map_kube_error(e, String::new());
+                if !matches!(&mapped, Error::Conflict { .. }) {
+                    return Err(mapped);
+                }
+                last_conflict = Some(mapped);
+            }
+        }
     }
 
-    // 查找并移除 Pool
-    let pool_index = tenant
-        .spec
-        .pools
-        .iter()
-        .position(|p| p.name == pool_name)
-        .ok_or_else(|| Error::NotFound {
-            resource: format!("Pool '{}'", pool_name),
-        })?;
-
-    tenant.spec.pools.remove(pool_index);
-
-    // 更新 Tenant
-    tenant_api
-        .replace(&tenant_name, &Default::default(), &tenant)
-        .await
-        .context(error::KubeApiSnafu)?;
-
-    Ok(Json(DeletePoolResponse {
-        success: true,
-        message: format!("Pool '{}' deleted successfully", pool_name),
-        warning: Some(
-            "The StatefulSet and PVCs will be deleted by the Operator. \
-             Data may be lost if PVCs are not using a retain policy."
-                .to_string(),
-        ),
+    Err(last_conflict.unwrap_or_else(|| Error::Conflict {
+        message: "Resource was modified by another request, please retry".to_string(),
     }))
 }
 

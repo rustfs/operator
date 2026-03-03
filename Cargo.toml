@@ -29,11 +29,13 @@ shadow-rs = "1.5.0"
 snafu = { version = "0.8.9", features = ["futures"] }
 
 # Console dependencies
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "json"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
 jsonwebtoken = "9.3"
 http = "1.2"
+utoipa = { version = "5", features = ["chrono"] }
+utoipa-swagger-ui = { version = "8", features = ["axum", "vendored"] }
 
 [dev-dependencies]
 

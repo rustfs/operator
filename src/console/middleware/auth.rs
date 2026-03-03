@@ -36,7 +36,12 @@ pub async fn auth_middleware(
     }
     // 跳过公开路径
     let path = request.uri().path();
-    if path == "/healthz" || path == "/readyz" || path.starts_with("/api/v1/login") {
+    if path == "/healthz"
+        || path == "/readyz"
+        || path.starts_with("/api/v1/login")
+        || path.starts_with("/swagger-ui")
+        || path.starts_with("/api-docs")
+    {
         return Ok(next.run(request).await);
     }
 

@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{Extension, Json};
-use k8s_openapi::api::core::v1 as corev1;
-use kube::{Api, Client, ResourceExt, api::ListParams};
-use snafu::ResultExt;
-
 use crate::console::{
     error::{self, Error, Result},
     models::cluster::*,
     state::Claims,
 };
+use axum::{Extension, Json};
+use k8s_openapi::api::core::v1 as corev1;
+use kube::{Api, Client, ResourceExt, api::ListParams};
 
 /// 列出所有节点
 pub async fn list_nodes(Extension(claims): Extension<Claims>) -> Result<Json<NodeListResponse>> {
@@ -31,7 +29,7 @@ pub async fn list_nodes(Extension(claims): Extension<Claims>) -> Result<Json<Nod
     let nodes = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Nodes"))?;
 
     let items: Vec<NodeInfo> = nodes
         .items
@@ -126,7 +124,7 @@ pub async fn list_namespaces(
     let namespaces = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Namespaces"))?;
 
     let items: Vec<NamespaceItem> = namespaces
         .items
@@ -164,7 +162,7 @@ pub async fn create_namespace(
     let created = api
         .create(&Default::default(), &ns)
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Namespace '{}'", req.name)))?;
 
     Ok(Json(NamespaceItem {
         name: created.name_any(),
@@ -190,7 +188,7 @@ pub async fn get_cluster_resources(
     let nodes = api
         .list(&ListParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, "Nodes"))?;
 
     let total_nodes = nodes.items.len();
 
@@ -257,20 +255,20 @@ fn parse_cpu_to_millicores(s: &str) -> i64 {
     if s.is_empty() {
         return 0;
     }
-    if let Some(rest) = s.strip_suffix('n') {
-        if let Ok(n) = rest.trim().parse::<f64>() {
-            return (n / 1_000_000.0) as i64;
-        }
+    if let Some(rest) = s.strip_suffix('n')
+        && let Ok(n) = rest.trim().parse::<f64>()
+    {
+        return (n / 1_000_000.0) as i64;
     }
-    if let Some(rest) = s.strip_suffix('u') {
-        if let Ok(n) = rest.trim().parse::<f64>() {
-            return (n / 1000.0) as i64;
-        }
+    if let Some(rest) = s.strip_suffix('u')
+        && let Ok(n) = rest.trim().parse::<f64>()
+    {
+        return (n / 1000.0) as i64;
     }
-    if let Some(rest) = s.strip_suffix('m') {
-        if let Ok(n) = rest.trim().parse::<f64>() {
-            return n as i64;
-        }
+    if let Some(rest) = s.strip_suffix('m')
+        && let Ok(n) = rest.trim().parse::<f64>()
+    {
+        return n as i64;
     }
     if let Ok(n) = s.parse::<f64>() {
         return (n * 1000.0) as i64;

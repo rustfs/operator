@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Pod 列表项
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PodListItem {
     pub name: String,
     pub pool: String,
@@ -29,13 +30,13 @@ pub struct PodListItem {
 }
 
 /// Pod 列表响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PodListResponse {
     pub pods: Vec<PodListItem>,
 }
 
 /// Pod 详情
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PodDetails {
     pub name: String,
     pub namespace: String,
@@ -51,7 +52,7 @@ pub struct PodDetails {
 }
 
 /// Pod 状态
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PodStatus {
     pub phase: String,
     pub conditions: Vec<PodCondition>,
@@ -61,7 +62,7 @@ pub struct PodStatus {
 }
 
 /// Pod 条件
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PodCondition {
     #[serde(rename = "type")]
     pub type_: String,
@@ -72,7 +73,7 @@ pub struct PodCondition {
 }
 
 /// 容器信息
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ContainerInfo {
     pub name: String,
     pub image: String,
@@ -82,7 +83,7 @@ pub struct ContainerInfo {
 }
 
 /// 容器状态
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "status")]
 pub enum ContainerState {
     Running {
@@ -100,7 +101,7 @@ pub enum ContainerState {
 }
 
 /// Volume 信息
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct VolumeInfo {
     pub name: String,
     pub volume_type: String,
@@ -108,21 +109,21 @@ pub struct VolumeInfo {
 }
 
 /// 删除 Pod 响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeletePodResponse {
     pub success: bool,
     pub message: String,
 }
 
 /// 重启 Pod 请求
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RestartPodRequest {
     #[serde(default)]
     pub force: bool,
 }
 
 /// Pod 日志请求参数
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct LogsQuery {
     /// 容器名称
     pub container: Option<String>,

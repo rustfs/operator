@@ -1,0 +1,238 @@
+// Copyright 2025 RustFS Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! OpenAPI documentation for RustFS Console API
+//!
+//! The api_* functions below are documentation stubs only; they are never called.
+//! They exist solely for the #[utoipa::path] macro to generate the OpenAPI spec.
+
+use axum::Json;
+use utoipa::OpenApi;
+
+use crate::console::models::auth::{LoginRequest, LoginResponse, SessionResponse};
+use crate::console::models::cluster::{
+    ClusterResourcesResponse, CreateNamespaceRequest, NamespaceItem, NamespaceListResponse,
+    NodeInfo, NodeListResponse,
+};
+use crate::console::models::event::{EventItem, EventListResponse};
+use crate::console::models::pod::{
+    ContainerInfo, ContainerState, DeletePodResponse, LogsQuery, PodCondition, PodDetails,
+    PodListItem, PodListResponse, PodStatus, RestartPodRequest, VolumeInfo,
+};
+use crate::console::models::pool::{
+    AddPoolRequest, AddPoolResponse, DeletePoolResponse, PoolDetails, PoolListResponse,
+    ResourceList, ResourceRequirements,
+};
+use crate::console::models::tenant::{
+    CreatePoolRequest, CreateTenantRequest, DeleteTenantResponse, EnvVar, LoggingConfig, PoolInfo,
+    ServiceInfo, ServicePort, TenantDetailsResponse, TenantListItem, TenantListResponse,
+    UpdateTenantRequest, UpdateTenantResponse,
+};
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        api_login,
+        api_logout,
+        api_session,
+        api_list_tenants,
+        api_create_tenant,
+        api_list_tenants_by_ns,
+        api_get_tenant,
+        api_update_tenant,
+        api_delete_tenant,
+        api_list_pools,
+        api_add_pool,
+        api_delete_pool,
+        api_list_pods,
+        api_get_pod,
+        api_delete_pod,
+        api_restart_pod,
+        api_get_pod_logs,
+        api_list_events,
+        api_list_nodes,
+        api_get_cluster_resources,
+        api_list_namespaces,
+        api_create_namespace,
+    ),
+    components(schemas(
+        LoginRequest,
+        LoginResponse,
+        SessionResponse,
+        TenantListItem,
+        TenantListResponse,
+        TenantDetailsResponse,
+        CreateTenantRequest,
+        CreatePoolRequest,
+        PoolInfo,
+        ServiceInfo,
+        ServicePort,
+        EnvVar,
+        LoggingConfig,
+        UpdateTenantRequest,
+        UpdateTenantResponse,
+        DeleteTenantResponse,
+        PoolDetails,
+        PoolListResponse,
+        AddPoolRequest,
+        ResourceRequirements,
+        ResourceList,
+        AddPoolResponse,
+        DeletePoolResponse,
+        PodListItem,
+        PodListResponse,
+        PodDetails,
+        PodStatus,
+        PodCondition,
+        ContainerInfo,
+        ContainerState,
+        VolumeInfo,
+        RestartPodRequest,
+        LogsQuery,
+        EventItem,
+        EventListResponse,
+        NodeInfo,
+        NodeListResponse,
+        ClusterResourcesResponse,
+        NamespaceItem,
+        NamespaceListResponse,
+        CreateNamespaceRequest,
+    )),
+    tags(
+        (name = "auth", description = "Authentication"),
+        (name = "tenants", description = "Tenant management"),
+        (name = "pools", description = "Pool management"),
+        (name = "pods", description = "Pod management"),
+        (name = "events", description = "Event management"),
+        (name = "cluster", description = "Cluster resources"),
+    ),
+    info(
+        title = "RustFS Console API",
+        version = "v1",
+        description = "RustFS Operator Console REST API for managing RustFS storage clusters",
+    ),
+)]
+pub struct ApiDoc;
+
+// --- Auth ---
+#[utoipa::path(post, path = "/api/v1/login", request_body = LoginRequest, responses((status = 200, body = LoginResponse)), tag = "auth")]
+fn api_login(_body: Json<LoginRequest>) -> Json<LoginResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(post, path = "/api/v1/logout", responses((status = 200)), tag = "auth")]
+fn api_logout() {}
+
+#[utoipa::path(get, path = "/api/v1/session", responses((status = 200, body = SessionResponse)), tag = "auth")]
+fn api_session() -> Json<SessionResponse> {
+    unimplemented!("Documentation only")
+}
+
+// --- Tenants ---
+#[utoipa::path(get, path = "/api/v1/tenants", responses((status = 200, body = TenantListResponse)), tag = "tenants")]
+fn api_list_tenants() -> Json<TenantListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(post, path = "/api/v1/tenants", request_body = CreateTenantRequest, responses((status = 200, body = TenantListItem)), tag = "tenants")]
+fn api_create_tenant(_body: Json<CreateTenantRequest>) -> Json<TenantListItem> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants", params(("namespace" = String, Path, description = "Namespace")), responses((status = 200, body = TenantListResponse)), tag = "tenants")]
+fn api_list_tenants_by_ns() -> Json<TenantListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = TenantDetailsResponse)), tag = "tenants")]
+fn api_get_tenant() -> Json<TenantDetailsResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(put, path = "/api/v1/namespaces/{namespace}/tenants/{name}", params(("namespace" = String, Path), ("name" = String, Path)), request_body = UpdateTenantRequest, responses((status = 200, body = UpdateTenantResponse)), tag = "tenants")]
+fn api_update_tenant(_body: Json<UpdateTenantRequest>) -> Json<UpdateTenantResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(delete, path = "/api/v1/namespaces/{namespace}/tenants/{name}", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = DeleteTenantResponse)), tag = "tenants")]
+fn api_delete_tenant() -> Json<DeleteTenantResponse> {
+    unimplemented!("Documentation only")
+}
+
+// --- Pools ---
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = PoolListResponse)), tag = "pools")]
+fn api_list_pools() -> Json<PoolListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(post, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools", params(("namespace" = String, Path), ("name" = String, Path)), request_body = AddPoolRequest, responses((status = 200, body = AddPoolResponse)), tag = "pools")]
+fn api_add_pool(_body: Json<AddPoolRequest>) -> Json<AddPoolResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(delete, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools/{pool}", params(("namespace" = String, Path), ("name" = String, Path), ("pool" = String, Path)), responses((status = 200, body = DeletePoolResponse)), tag = "pools")]
+fn api_delete_pool() -> Json<DeletePoolResponse> {
+    unimplemented!("Documentation only")
+}
+
+// --- Pods ---
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = PodListResponse)), tag = "pods")]
+fn api_list_pods() -> Json<PodListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods/{pod}", params(("namespace" = String, Path), ("name" = String, Path), ("pod" = String, Path)), responses((status = 200, body = PodDetails)), tag = "pods")]
+fn api_get_pod() -> Json<PodDetails> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(delete, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods/{pod}", params(("namespace" = String, Path), ("name" = String, Path), ("pod" = String, Path)), responses((status = 200, body = DeletePodResponse)), tag = "pods")]
+fn api_delete_pod() -> Json<DeletePodResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(post, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods/{pod}/restart", params(("namespace" = String, Path), ("name" = String, Path), ("pod" = String, Path)), request_body = RestartPodRequest, responses((status = 200, body = DeletePodResponse)), tag = "pods")]
+fn api_restart_pod(_body: Json<RestartPodRequest>) -> Json<DeletePodResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods/{pod}/logs", params(("namespace" = String, Path), ("name" = String, Path), ("pod" = String, Path), ("container" = Option<String>, Query), ("tail_lines" = Option<i64>, Query), ("timestamps" = Option<bool>, Query)), responses((status = 200, description = "Plain text log output", content_type = "text/plain")), tag = "pods")]
+fn api_get_pod_logs() {}
+
+// --- Events ---
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{tenant}/events", params(("namespace" = String, Path), ("tenant" = String, Path)), responses((status = 200, body = EventListResponse)), tag = "events")]
+fn api_list_events() -> Json<EventListResponse> {
+    unimplemented!("Documentation only")
+}
+
+// --- Cluster ---
+#[utoipa::path(get, path = "/api/v1/cluster/nodes", responses((status = 200, body = NodeListResponse)), tag = "cluster")]
+fn api_list_nodes() -> Json<NodeListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/cluster/resources", responses((status = 200, body = ClusterResourcesResponse)), tag = "cluster")]
+fn api_get_cluster_resources() -> Json<ClusterResourcesResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces", responses((status = 200, body = NamespaceListResponse)), tag = "cluster")]
+fn api_list_namespaces() -> Json<NamespaceListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(post, path = "/api/v1/namespaces", request_body = CreateNamespaceRequest, responses((status = 200, body = NamespaceItem)), tag = "cluster")]
+fn api_create_namespace(_body: Json<CreateNamespaceRequest>) -> Json<NamespaceItem> {
+    unimplemented!("Documentation only")
+}

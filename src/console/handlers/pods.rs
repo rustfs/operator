@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::console::{
+    error::{self, Error, Result},
+    models::pod::*,
+    state::Claims,
+};
 use axum::{
     Extension, Json,
     body::Body,
@@ -24,13 +29,25 @@ use kube::{
     Api, Client, ResourceExt,
     api::{DeleteParams, ListParams, LogParams},
 };
-use snafu::ResultExt;
 
-use crate::console::{
-    error::{self, Error, Result},
-    models::pod::*,
-    state::Claims,
-};
+/// 校验 Pod 是否属于指定 Tenant（通过 rustfs.tenant 标签）
+fn ensure_pod_belongs_to_tenant(
+    pod: &corev1::Pod,
+    tenant_name: &str,
+    pod_name: &str,
+) -> Result<()> {
+    let pod_tenant = pod
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("rustfs.tenant").map(String::as_str));
+    if pod_tenant != Some(tenant_name) {
+        return Err(Error::NotFound {
+            resource: format!("Pod '{}'", pod_name),
+        });
+    }
+    Ok(())
+}
 
 /// 列出 Tenant 的所有 Pods
 pub async fn list_pods(
@@ -44,7 +61,7 @@ pub async fn list_pods(
     let pods = api
         .list(&ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)))
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Pods for tenant '{}'", tenant_name)))?;
 
     let mut pod_list = Vec::new();
 
@@ -146,15 +163,21 @@ pub async fn list_pods(
 
 /// 删除 Pod
 pub async fn delete_pod(
-    Path((namespace, _tenant_name, pod_name)): Path<(String, String, String)>,
+    Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<DeletePodResponse>> {
     let client = create_client(&claims).await?;
     let api: Api<corev1::Pod> = Api::namespaced(client, &namespace);
 
+    let pod = api
+        .get(&pod_name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
+    ensure_pod_belongs_to_tenant(&pod, &tenant_name, &pod_name)?;
+
     api.delete(&pod_name, &DeleteParams::default())
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
 
     Ok(Json(DeletePodResponse {
         success: true,
@@ -174,6 +197,12 @@ pub async fn restart_pod(
     let client = create_client(&claims).await?;
     let api: Api<corev1::Pod> = Api::namespaced(client, &namespace);
 
+    let pod = api
+        .get(&pod_name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
+    ensure_pod_belongs_to_tenant(&pod, &tenant_name, &pod_name)?;
+
     // 删除 Pod，StatefulSet 控制器会自动重建
     let delete_params = if req.force {
         DeleteParams {
@@ -186,7 +215,7 @@ pub async fn restart_pod(
 
     api.delete(&pod_name, &delete_params)
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
 
     Ok(Json(DeletePodResponse {
         success: true,
@@ -199,13 +228,17 @@ pub async fn restart_pod(
 
 /// 获取 Pod 详情
 pub async fn get_pod_details(
-    Path((namespace, _tenant_name, pod_name)): Path<(String, String, String)>,
+    Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<PodDetails>> {
     let client = create_client(&claims).await?;
     let api: Api<corev1::Pod> = Api::namespaced(client, &namespace);
 
-    let pod = api.get(&pod_name).await.context(error::KubeApiSnafu)?;
+    let pod = api
+        .get(&pod_name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
+    ensure_pod_belongs_to_tenant(&pod, &tenant_name, &pod_name)?;
 
     // 提取详细信息
     let pool = pod
@@ -343,12 +376,18 @@ pub async fn get_pod_details(
 
 /// 获取 Pod 日志（流式传输）
 pub async fn get_pod_logs(
-    Path((namespace, _tenant_name, pod_name)): Path<(String, String, String)>,
+    Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Query(query): Query<LogsQuery>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Response> {
     let client = create_client(&claims).await?;
     let api: Api<corev1::Pod> = Api::namespaced(client, &namespace);
+
+    let pod = api
+        .get(&pod_name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
+    ensure_pod_belongs_to_tenant(&pod, &tenant_name, &pod_name)?;
 
     // 构建日志参数
     let mut log_params = LogParams {
@@ -359,21 +398,24 @@ pub async fn get_pod_logs(
         ..Default::default()
     };
 
-    if let Some(since_time) = query.since_time
-        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&since_time)
+    // since_time 校验：仅当时间不晚于当前时间时使用
+    if let Some(since_time) = &query.since_time
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(since_time)
     {
-        log_params.since_seconds = Some(
-            chrono::Utc::now()
-                .signed_duration_since(dt.with_timezone(&chrono::Utc))
-                .num_seconds(),
-        );
+        let dt_utc = dt.with_timezone(&chrono::Utc);
+        let now = chrono::Utc::now();
+        let duration = now.signed_duration_since(dt_utc);
+        if duration.num_seconds() >= 0 {
+            log_params.since_seconds = Some(duration.num_seconds());
+        }
+        // 若 since_time 在未来，忽略该参数（不设置 since_seconds）
     }
 
     // 获取日志流
     let log_stream = api
         .log_stream(&pod_name, &log_params)
         .await
-        .context(error::KubeApiSnafu)?;
+        .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
 
     // 将字节流转换为可用的 Body
     // kube-rs 返回的是 impl AsyncBufRead，我们需要逐行读取并转换为字节流

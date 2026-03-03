@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Pool 信息（扩展版）
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PoolDetails {
     pub name: String,
     pub servers: i32,
@@ -33,13 +34,13 @@ pub struct PoolDetails {
 }
 
 /// Pool 列表响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PoolListResponse {
     pub pools: Vec<PoolDetails>,
 }
 
 /// 添加 Pool 请求
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AddPoolRequest {
     pub name: String,
@@ -54,21 +55,21 @@ pub struct AddPoolRequest {
 }
 
 /// 资源需求
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ResourceRequirements {
     pub requests: Option<ResourceList>,
     pub limits: Option<ResourceList>,
 }
 
 /// 资源列表
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ResourceList {
     pub cpu: Option<String>,
     pub memory: Option<String>,
 }
 
 /// 删除 Pool 响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeletePoolResponse {
     pub success: bool,
     pub message: String,
@@ -76,7 +77,7 @@ pub struct DeletePoolResponse {
 }
 
 /// Pool 添加响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AddPoolResponse {
     pub success: bool,
     pub message: String,

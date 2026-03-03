@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Tenant 列表项
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TenantListItem {
     pub name: String,
     pub namespace: String,
@@ -25,7 +26,7 @@ pub struct TenantListItem {
 }
 
 /// Pool 信息
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PoolInfo {
     pub name: String,
     pub servers: i32,
@@ -33,13 +34,13 @@ pub struct PoolInfo {
 }
 
 /// Tenant 列表响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TenantListResponse {
     pub tenants: Vec<TenantListItem>,
 }
 
 /// Tenant 详情响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TenantDetailsResponse {
     pub name: String,
     pub namespace: String,
@@ -52,7 +53,7 @@ pub struct TenantDetailsResponse {
 }
 
 /// Service 信息
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceInfo {
     pub name: String,
     pub service_type: String,
@@ -60,7 +61,7 @@ pub struct ServiceInfo {
 }
 
 /// Service 端口信息
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServicePort {
     pub name: String,
     pub port: i32,
@@ -68,7 +69,7 @@ pub struct ServicePort {
 }
 
 /// 创建 Tenant 请求
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTenantRequest {
     pub name: String,
     pub namespace: String,
@@ -79,7 +80,7 @@ pub struct CreateTenantRequest {
 }
 
 /// 创建 Pool 请求
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePoolRequest {
     pub name: String,
     pub servers: i32,
@@ -89,14 +90,14 @@ pub struct CreatePoolRequest {
 }
 
 /// 删除 Tenant 响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteTenantResponse {
     pub success: bool,
     pub message: String,
 }
 
 /// 更新 Tenant 请求
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTenantRequest {
     /// 更新镜像版本
@@ -122,14 +123,14 @@ pub struct UpdateTenantRequest {
 }
 
 /// 环境变量
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct EnvVar {
     pub name: String,
     pub value: Option<String>,
 }
 
 /// 日志配置
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoggingConfig {
     pub log_type: String, // "stdout" | "emptyDir" | "persistent"
@@ -138,7 +139,7 @@ pub struct LoggingConfig {
 }
 
 /// 更新 Tenant 响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UpdateTenantResponse {
     pub success: bool,
     pub message: String,
