@@ -21,7 +21,7 @@ export default function DashboardPage() {
   return (
     <Page>
       <PageHeader>
-        <h1 className="text-lg font-semibold">{t("Dashboard")}</h1>
+        <h1 className="text-base font-medium">{t("Dashboard")}</h1>
       </PageHeader>
 
       <div className="grid gap-4 sm:grid-cols-2">
