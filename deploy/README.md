@@ -41,8 +41,8 @@ kubectl get pods -n rustfs-system
 # View operator logs
 kubectl logs -n rustfs-system -l app.kubernetes.io/name=rustfs-operator -f
 
-# Create a sample tenant
-kubectl apply -f deploy/rustfs-operator/examples/simple-tenant.yaml
+# Create a sample tenant (from project root)
+kubectl apply -f examples/simple-tenant.yaml
 
 # View tenants
 kubectl get tenants --all-namespaces

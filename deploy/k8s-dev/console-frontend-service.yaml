@@ -1,5 +1,5 @@
 # Copyright 2025 RustFS Team
-# Console Web Frontend Service (used by deploy-rustfs.sh)
+# Console Web Frontend Service (used by scripts/deploy/deploy-rustfs.sh)
 apiVersion: v1
 kind: Service
 metadata:

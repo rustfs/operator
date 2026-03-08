@@ -43,6 +43,15 @@ docker build -t operator .
 
 Note: The Dockerfile uses a multi-stage build with Rust 1.91-alpine.
 
+### Scripts (deploy / cleanup / check)
+Shell scripts are under `scripts/` and grouped by purpose. Run from project root (scripts will `cd` to project root automatically):
+- **Deploy**: `scripts/deploy/deploy-rustfs.sh`, `scripts/deploy/deploy-rustfs-4node.sh`
+- **Cleanup**: `scripts/cleanup/cleanup-rustfs.sh`, `scripts/cleanup/cleanup-rustfs-4node.sh`
+- **Check**: `scripts/check/check-rustfs.sh`
+- **Test script syntax**: `scripts/test/script-test.sh`
+- Kind 4-node config: `deploy/kind/kind-rustfs-cluster.yaml`
+See `scripts/README.md` for details.
+
 ## Architecture Overview
 
 ### Critical Architectural Understanding

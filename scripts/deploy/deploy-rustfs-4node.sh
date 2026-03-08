@@ -34,6 +34,11 @@
 set -e
 set -o pipefail
 
+# 保证从项目根目录执行（可从任意位置调用本脚本）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
 ################################################################################
 # 颜色定义
 ################################################################################
@@ -93,7 +98,7 @@ trap 'error_handler $? $LINENO' ERR
 
 error_handler() {
     log_error "脚本在第 $2 行失败，退出码: $1"
-    log_warning "部署失败，可运行 ./cleanup-rustfs-4node.sh 清理环境"
+    log_warning "部署失败，可运行 ./scripts/cleanup/cleanup-rustfs-4node.sh 清理环境"
     exit 1
 }
 
@@ -156,13 +161,14 @@ create_kind_cluster() {
         fi
     fi
 
-    if [ ! -f "kind-rustfs-cluster.yaml" ]; then
-        log_error "配置文件 kind-rustfs-cluster.yaml 不存在"
+    local kind_config="${PROJECT_ROOT}/deploy/kind/kind-rustfs-cluster.yaml"
+    if [ ! -f "$kind_config" ]; then
+        log_error "配置文件不存在: $kind_config"
         exit 1
     fi
 
     log_info "创建新集群 (1 control-plane + 3 workers，约需几分钟)..."
-    kind create cluster --config kind-rustfs-cluster.yaml
+    kind create cluster --config "$kind_config"
 
     kubectl config use-context kind-${CLUSTER_NAME} >/dev/null
     log_success "Kind 集群已创建"
@@ -523,7 +529,7 @@ show_summary() {
     echo -e "  ${BLUE}kubectl logs -f ${TENANT_NAME}-primary-0 -n ${OPERATOR_NAMESPACE}${NC}"
     echo ""
     echo "销毁环境:"
-    echo -e "  ${RED}./cleanup-rustfs-4node.sh${NC}"
+    echo -e "  ${RED}./scripts/cleanup/cleanup-rustfs-4node.sh${NC}"
     echo ""
 
     log_success "部署完成，可访问 Operator Console 和 Tenant Console"
@@ -562,7 +568,7 @@ case "${1:-}" in
         echo ""
         echo "依赖: kubectl, kind, docker, cargo (Rust)"
         echo ""
-        echo "清理: ./cleanup-rustfs-4node.sh"
+        echo "清理: ./scripts/cleanup/cleanup-rustfs-4node.sh"
         exit 0
         ;;
 esac

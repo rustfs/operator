@@ -1,5 +1,5 @@
 # Copyright 2025 RustFS Team
-# Operator Deployment (used by deploy-rustfs.sh)
+# Operator Deployment (used by scripts/deploy/deploy-rustfs.sh)
 # Image is replaced at runtime - use rustfs/operator:dev
 apiVersion: apps/v1
 kind: Deployment

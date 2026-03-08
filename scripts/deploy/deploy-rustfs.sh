@@ -19,6 +19,11 @@
 
 set -e
 
+# 保证从项目根目录执行（可从任意位置调用本脚本）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -348,15 +353,15 @@ show_access_info() {
     echo "🔑 Operator Console Login:"
     echo "  Create K8s token: kubectl create token rustfs-operator -n rustfs-system --duration=24h"
     echo "  Login: use the token in Console Web UI at http://localhost:8080 (or POST /api/v1/login when same-origin)"
-    echo "  Docs: deploy/README.md"
+    echo "  Docs: deploy/README.md、scripts/README.md"
     echo ""
 
     echo "📊 Check cluster status:"
-    echo "  ./check-rustfs.sh"
+    echo "  ./scripts/check/check-rustfs.sh"
     echo ""
 
     echo "🗑️  Cleanup deployment:"
-    echo "  ./cleanup-rustfs.sh"
+    echo "  ./scripts/cleanup/cleanup-rustfs.sh"
     echo ""
 
     echo "⚠️  If pods show 'ImagePullBackOff' or 'image not present':"
@@ -411,7 +416,7 @@ case "${1:-}" in
         echo ""
         log_info "If cluster already has issues, delete and recreate:"
         echo "  kind delete cluster --name rustfs-dev"
-        echo "  ./deploy-rustfs.sh"
+        echo "  ./scripts/deploy/deploy-rustfs.sh"
         exit 0
         ;;
     -h|--help)

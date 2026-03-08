@@ -118,10 +118,10 @@ helm install rustfs-operator deploy/rustfs-operator/ -f custom-values.yaml
 
 ## Creating Tenant Resources
 
-After installing the operator, you can create Tenant resources. See the `examples/` directory for sample manifests:
+After installing the operator, you can create Tenant resources. See the project root `examples/` directory for sample manifests:
 
 ```bash
-kubectl apply -f deploy/rustfs-operator/examples/simple-tenant.yaml
+kubectl apply -f examples/simple-tenant.yaml
 ```
 
 ## Upgrading

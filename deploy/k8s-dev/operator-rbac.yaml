@@ -1,5 +1,5 @@
 # Copyright 2025 RustFS Team
-# RBAC for RustFS Operator (used by deploy-rustfs.sh)
+# RBAC for RustFS Operator (used by scripts/deploy/deploy-rustfs.sh)
 ---
 apiVersion: v1
 kind: ServiceAccount
