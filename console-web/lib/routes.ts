@@ -4,6 +4,6 @@ export const routes = {
   tenants: "/tenants",
   tenantNew: "/tenants/new",
   tenantDetail: (namespace: string, name: string) =>
-    `/tenants/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`,
+    `/tenants/detail?namespace=${encodeURIComponent(namespace)}&name=${encodeURIComponent(name)}`,
   cluster: "/cluster",
 }

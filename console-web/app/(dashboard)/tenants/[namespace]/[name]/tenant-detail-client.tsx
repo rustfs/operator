@@ -82,23 +82,35 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
   const [editLoading, setEditLoading] = useState(false)
 
   const loadTenant = async () => {
-    try {
-      const [detail, poolRes, podRes, eventRes] = await Promise.all([
-        api.getTenant(namespace, name),
-        api.listPools(namespace, name),
-        api.listPods(namespace, name),
-        api.listTenantEvents(namespace, name),
-      ])
-      setTenant(detail)
-      setPools(poolRes.pools)
-      setPods(podRes.pods)
-      setEvents(eventRes.events)
-    } catch (e) {
-      const err = e as ApiError
-      toast.error(err.message || t("Failed to load tenant"))
-    } finally {
-      setLoading(false)
+    const [detailResult, poolResult, podResult, eventResult] = await Promise.allSettled([
+      api.getTenant(namespace, name),
+      api.listPools(namespace, name),
+      api.listPods(namespace, name),
+      api.listTenantEvents(namespace, name),
+    ])
+
+    const detailOk = detailResult.status === "fulfilled"
+    const poolOk = poolResult.status === "fulfilled"
+    const podOk = podResult.status === "fulfilled"
+    const eventOk = eventResult.status === "fulfilled"
+
+    if (detailOk && poolOk && podOk) {
+      setTenant(detailResult.value)
+      setPools(poolResult.value.pools)
+      setPods(podResult.value.pods)
+      setEvents(eventOk ? eventResult.value.events : [])
+      if (!eventOk) {
+        toast.error(t("Events could not be loaded"))
+      }
+    } else {
+      const err = !detailOk
+        ? (detailResult as PromiseRejectedResult).reason
+        : !poolOk
+          ? (poolResult as PromiseRejectedResult).reason
+          : (podResult as PromiseRejectedResult).reason
+      toast.error((err as ApiError).message || t("Failed to load tenant"))
     }
+    setLoading(false)
   }
 
   useEffect(() => {
@@ -305,6 +317,9 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">{t("Services")}</CardTitle>
+                <CardDescription>
+                  {t("Only services created for this tenant are listed (operator/console services are not included).")}
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 <Table>
@@ -379,6 +394,13 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
 
       {tab === "pools" && (
         <div className="space-y-4">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardDescription>
+                {t("All pools in this tenant form one unified cluster. Data is distributed across all pools (erasure-coded); every pool is in use. To see disk usage per pool, use RustFS Console (S3 API port 9001) or check PVC usage in the cluster (e.g. kubectl).")}
+              </CardDescription>
+            </CardHeader>
+          </Card>
           <div className="flex justify-end">
             <Button size="sm" onClick={() => setAddPoolOpen(true)}>
               <RiAddLine className="mr-1 size-4" />
