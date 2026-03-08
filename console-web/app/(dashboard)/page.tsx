@@ -5,13 +5,7 @@ import Link from "next/link"
 import { RiServerLine, RiNodeTree } from "@remixicon/react"
 import { Page } from "@/components/page"
 import { PageHeader } from "@/components/page-header"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { routes } from "@/lib/routes"
 
@@ -37,7 +31,9 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent>
             <Button asChild variant="default" size="sm">
-              <Link href={routes.tenants} prefetch={false}>{t("View Tenants")}</Link>
+              <Link href={routes.tenants} prefetch={false}>
+                {t("View Tenants")}
+              </Link>
             </Button>
           </CardContent>
         </Card>
@@ -48,13 +44,13 @@ export default function DashboardPage() {
               <RiNodeTree className="size-5" />
               <CardTitle className="text-base">{t("Cluster")}</CardTitle>
             </div>
-            <CardDescription className="text-sm">
-              {t("View cluster nodes, resources and namespaces.")}
-            </CardDescription>
+            <CardDescription className="text-sm">{t("View cluster nodes, resources and namespaces.")}</CardDescription>
           </CardHeader>
           <CardContent>
             <Button asChild variant="default" size="sm">
-              <Link href={routes.cluster} prefetch={false}>{t("View Cluster")}</Link>
+              <Link href={routes.cluster} prefetch={false}>
+                {t("View Cluster")}
+              </Link>
             </Button>
           </CardContent>
         </Card>

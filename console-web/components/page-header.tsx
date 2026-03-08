@@ -14,12 +14,7 @@ export function PageHeader({
   sticky?: boolean
 }) {
   return (
-    <div
-      className={cn(
-        "bg-background flex flex-col justify-between gap-2 lg:flex-row",
-        className,
-      )}
-    >
+    <div className={cn("bg-background flex flex-col justify-between gap-2 lg:flex-row", className)}>
       <div className="space-y-1">
         {children}
         {description}

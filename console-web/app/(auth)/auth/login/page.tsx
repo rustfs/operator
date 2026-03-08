@@ -32,7 +32,10 @@ export default function LoginPage() {
       await login(token.trim())
       toast.success(t("Login successful"))
     } catch (error: unknown) {
-      const message = error && typeof error === "object" && "message" in error ? (error as { message: string }).message : t("Login failed")
+      const message =
+        error && typeof error === "object" && "message" in error
+          ? (error as { message: string }).message
+          : t("Login failed")
       toast.error(message)
     } finally {
       setLoading(false)

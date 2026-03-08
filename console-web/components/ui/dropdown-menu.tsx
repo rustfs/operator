@@ -81,7 +81,10 @@ function DropdownMenuCheckboxItem({
       )}
       {...props}
     >
-      <span className="pointer-events-none absolute right-2 flex items-center justify-center" data-slot="dropdown-menu-checkbox-item-indicator">
+      <span
+        className="pointer-events-none absolute right-2 flex items-center justify-center"
+        data-slot="dropdown-menu-checkbox-item-indicator"
+      >
         <DropdownMenuPrimitive.ItemIndicator>
           <RiCheckLine />
         </DropdownMenuPrimitive.ItemIndicator>
@@ -109,7 +112,10 @@ function DropdownMenuRadioItem({
       )}
       {...props}
     >
-      <span className="pointer-events-none absolute right-2 flex items-center justify-center" data-slot="dropdown-menu-radio-item-indicator">
+      <span
+        className="pointer-events-none absolute right-2 flex items-center justify-center"
+        data-slot="dropdown-menu-radio-item-indicator"
+      >
         <DropdownMenuPrimitive.ItemIndicator>
           <RiCheckLine />
         </DropdownMenuPrimitive.ItemIndicator>
@@ -138,13 +144,21 @@ function DropdownMenuLabel({
 
 function DropdownMenuSeparator({ className, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.Separator>) {
   return (
-    <DropdownMenuPrimitive.Separator data-slot="dropdown-menu-separator" className={cn("bg-border -mx-1 h-px", className)} {...props} />
+    <DropdownMenuPrimitive.Separator
+      data-slot="dropdown-menu-separator"
+      className={cn("bg-border -mx-1 h-px", className)}
+      {...props}
+    />
   )
 }
 
 function DropdownMenuShortcut({ className, ...props }: React.ComponentProps<"span">) {
   return (
-    <span data-slot="dropdown-menu-shortcut" className={cn("text-muted-foreground ml-auto text-xs tracking-widest", className)} {...props} />
+    <span
+      data-slot="dropdown-menu-shortcut"
+      className={cn("text-muted-foreground ml-auto text-xs tracking-widest", className)}
+      {...props}
+    />
   )
 }
 
@@ -174,7 +188,10 @@ function DropdownMenuSubTrigger({
   )
 }
 
-function DropdownMenuSubContent({ className, ...props }: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
+function DropdownMenuSubContent({
+  className,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
   return (
     <DropdownMenuPrimitive.SubContent
       data-slot="dropdown-menu-sub-content"

@@ -145,3 +145,9 @@ pub struct UpdateTenantResponse {
     pub message: String,
     pub tenant: TenantListItem,
 }
+
+/// Tenant YAML 请求/响应
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct TenantYAML {
+    pub yaml: String,
+}
