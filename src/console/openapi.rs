@@ -37,7 +37,7 @@ use crate::console::models::pool::{
 use crate::console::models::tenant::{
     CreatePoolRequest, CreateTenantRequest, DeleteTenantResponse, EnvVar, LoggingConfig, PoolInfo,
     ServiceInfo, ServicePort, TenantDetailsResponse, TenantListItem, TenantListResponse,
-    UpdateTenantRequest, UpdateTenantResponse,
+    TenantYAML, UpdateTenantRequest, UpdateTenantResponse,
 };
 
 #[derive(OpenApi)]
@@ -52,6 +52,8 @@ use crate::console::models::tenant::{
         api_get_tenant,
         api_update_tenant,
         api_delete_tenant,
+        api_get_tenant_yaml,
+        api_put_tenant_yaml,
         api_list_pools,
         api_add_pool,
         api_delete_pool,
@@ -83,6 +85,7 @@ use crate::console::models::tenant::{
         UpdateTenantRequest,
         UpdateTenantResponse,
         DeleteTenantResponse,
+        TenantYAML,
         PoolDetails,
         PoolListResponse,
         AddPoolRequest,
@@ -167,6 +170,16 @@ fn api_update_tenant(_body: Json<UpdateTenantRequest>) -> Json<UpdateTenantRespo
 
 #[utoipa::path(delete, path = "/api/v1/namespaces/{namespace}/tenants/{name}", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = DeleteTenantResponse)), tag = "tenants")]
 fn api_delete_tenant() -> Json<DeleteTenantResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}/yaml", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = TenantYAML)), tag = "tenants")]
+fn api_get_tenant_yaml() -> Json<TenantYAML> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(put, path = "/api/v1/namespaces/{namespace}/tenants/{name}/yaml", params(("namespace" = String, Path), ("name" = String, Path)), request_body = TenantYAML, responses((status = 200, body = TenantYAML)), tag = "tenants")]
+fn api_put_tenant_yaml(_body: Json<TenantYAML>) -> Json<TenantYAML> {
     unimplemented!("Documentation only")
 }
 

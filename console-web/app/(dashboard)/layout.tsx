@@ -22,12 +22,7 @@ import { routes } from "@/lib/routes"
 import { cn } from "@/lib/utils"
 import { LanguageSwitcher } from "@/components/language-switcher"
 import { ThemeSwitcher } from "@/components/theme-switcher"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 
 const navItems = [
   { href: routes.dashboard, icon: RiDashboardLine, labelKey: "Dashboard" },
@@ -35,11 +30,7 @@ const navItems = [
   { href: routes.cluster, icon: RiNodeTree, labelKey: "Cluster" },
 ]
 
-export default function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation()
   const { logout } = useAuth()
   const pathname = usePathname()
@@ -59,8 +50,7 @@ export default function DashboardLayout({
             {navItems.map((item) => {
               const Icon = item.icon
               const isActive =
-                pathname === item.href ||
-                (item.href !== routes.dashboard && pathname.startsWith(item.href))
+                pathname === item.href || (item.href !== routes.dashboard && pathname.startsWith(item.href))
               return (
                 <Link
                   key={item.href}
@@ -68,7 +58,7 @@ export default function DashboardLayout({
                   prefetch={false}
                   className={cn(
                     "flex items-center gap-3 rounded-none px-2.5 py-2 text-xs font-medium transition-colors",
-                    isActive ? "bg-muted text-foreground" : "text-foreground/70 hover:bg-muted"
+                    isActive ? "bg-muted text-foreground" : "text-foreground/70 hover:bg-muted",
                   )}
                 >
                   <Icon className="size-4 shrink-0" />
@@ -85,8 +75,7 @@ export default function DashboardLayout({
                 const activeItem =
                   navItems.find(
                     (item) =>
-                      pathname === item.href ||
-                      (item.href !== routes.dashboard && pathname.startsWith(item.href)),
+                      pathname === item.href || (item.href !== routes.dashboard && pathname.startsWith(item.href)),
                   ) ?? navItems[0]
                 const ActiveIcon = activeItem.icon
                 return (
@@ -114,7 +103,6 @@ export default function DashboardLayout({
                 <Button asChild variant="ghost" size="icon-sm" aria-label="X">
                   <Link href={X_URL} prefetch={false} target="_blank" rel="noopener noreferrer">
                     <RiTwitterXLine className="size-4" />
-                    
                   </Link>
                 </Button>
               )}

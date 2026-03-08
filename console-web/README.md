@@ -50,7 +50,7 @@ Then configure the backend with `CORS_ALLOWED_ORIGINS` (see deploy README).
 
 ## Environment variables
 
-| Variable | Description | Default |
-|----------|-------------|--------|
-| `NEXT_PUBLIC_BASE_PATH` | Base path for the app (e.g. `/console`) | `""` |
-| `NEXT_PUBLIC_API_BASE_URL` | API base URL (relative or absolute) | `"/api/v1"` |
+| Variable                   | Description                             | Default     |
+| -------------------------- | --------------------------------------- | ----------- |
+| `NEXT_PUBLIC_BASE_PATH`    | Base path for the app (e.g. `/console`) | `""`        |
+| `NEXT_PUBLIC_API_BASE_URL` | API base URL (relative or absolute)     | `"/api/v1"` |
