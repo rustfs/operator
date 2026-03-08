@@ -18,6 +18,11 @@
 
 set -e
 
+# 保证从项目根目录执行（可从任意位置调用本脚本）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
 # Configuration parameters (can be overridden via environment variables)
 TENANT_NAME="${TENANT_NAME:-}"
 NAMESPACE="${NAMESPACE:-}"
@@ -127,7 +132,7 @@ if kubectl get deployment rustfs-operator-console -n rustfs-system >/dev/null 2>
     echo ""
 else
     echo "⚠️  Operator Console Deployment not found in rustfs-system"
-    echo "  Deploy with: ./deploy-rustfs.sh"
+    echo "  Deploy with: ./scripts/deploy/deploy-rustfs.sh"
     echo ""
 fi
 
@@ -140,7 +145,7 @@ if kubectl get deployment rustfs-operator-console-frontend -n rustfs-system >/de
     echo ""
 else
     echo "⚠️  Operator Console Web (frontend) Deployment not found in rustfs-system"
-    echo "  Deploy with: ./deploy-rustfs.sh"
+    echo "  Deploy with: ./scripts/deploy/deploy-rustfs.sh"
     echo ""
 fi
 

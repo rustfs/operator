@@ -23,6 +23,11 @@
 
 set -e
 
+# 保证从项目根目录执行（可从任意位置调用本脚本）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
 CLUSTER_NAME="rustfs-cluster"
 OPERATOR_NAMESPACE="rustfs-system"
 
@@ -212,7 +217,7 @@ cleanup_local_files() {
 show_next_steps() {
     echo ""
     log_info "重新部署:"
-    echo "  ./deploy-rustfs-4node.sh"
+    echo "  ./scripts/deploy/deploy-rustfs-4node.sh"
     echo ""
 }
 

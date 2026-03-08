@@ -1,5 +1,5 @@
 # Copyright 2025 RustFS Team
-# Operator Console Service (used by deploy-rustfs.sh)
+# Operator Console Service (used by scripts/deploy/deploy-rustfs.sh)
 apiVersion: v1
 kind: Service
 metadata:

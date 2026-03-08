@@ -18,6 +18,11 @@
 
 set -e
 
+# 保证从项目根目录执行（可从任意位置调用本脚本）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -284,7 +289,7 @@ show_next_steps() {
     echo ""
 
     echo "Redeploy:"
-    echo "  ./deploy-rustfs.sh"
+    echo "  ./scripts/deploy/deploy-rustfs.sh"
     echo ""
 
     echo "Check cluster status:"
@@ -294,7 +299,7 @@ show_next_steps() {
 
     if [ "$WITH_KIND" != "true" ]; then
         echo "Remove Kind cluster and Docker container (optional):"
-        echo "  ./cleanup-rustfs.sh -f -k"
+        echo "  ./scripts/cleanup/cleanup-rustfs.sh -f -k"
         echo "  # or: kind delete cluster --name rustfs-dev"
         echo ""
     fi
