@@ -1,0 +1,53 @@
+# Copyright 2025 RustFS Team
+# Operator Console Deployment (used by scripts/deploy/deploy-rustfs.sh)
+# Image is replaced at runtime - use rustfs/operator:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs-operator-console
+  namespace: rustfs-system
+  labels:
+    app.kubernetes.io/name: rustfs-operator-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs-operator-console
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs-operator-console
+    spec:
+      serviceAccountName: rustfs-operator-console
+      containers:
+        - name: console
+          image: rustfs/operator:dev
+          imagePullPolicy: Never
+          command: ["./operator", "console", "--port", "9090"]
+          env:
+            - name: RUST_LOG
+              value: info
+            # Allow console-web when port-forwarded to localhost:8080 or 127.0.0.1:8080
+            - name: CORS_ALLOWED_ORIGINS
+              value: "http://localhost:3000,http://localhost:8080,http://127.0.0.1:3000,http://127.0.0.1:8080"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-operator-console-secret
+                  key: jwt-secret
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5

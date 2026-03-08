@@ -1,0 +1,29 @@
+# Copyright 2025 RustFS Team
+# Operator Deployment (used by scripts/deploy/deploy-rustfs.sh)
+# Image is replaced at runtime - use rustfs/operator:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs-operator
+  namespace: rustfs-system
+  labels:
+    app.kubernetes.io/name: rustfs-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs-operator
+    spec:
+      serviceAccountName: rustfs-operator
+      containers:
+        - name: operator
+          image: rustfs/operator:dev
+          imagePullPolicy: Never
+          command: ["./operator", "server"]
+          env:
+            - name: RUST_LOG
+              value: info

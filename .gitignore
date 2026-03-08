@@ -1,4 +1,5 @@
 /target
+/vendor
 .idea
 .DS_Store
 .direnv
@@ -11,3 +12,14 @@ deploy/rustfs-operator/Chart.lock
 # Operator
 operator.log
 operator.pid
+
+# Console Web Frontend
+console-web/.next/
+console-web/docs/
+console-web/out/
+console-web/node_modules/
+.cursor/
+
+# Docs / summaries (local or generated)
+CONSOLE-INTEGRATION-SUMMARY.md
+SCRIPTS-UPDATE.md

@@ -1,0 +1,74 @@
+# RustFS Tenant - 4-node distributed deployment (Kind multi-node + local storage)
+# Architecture: 4 servers x 2 volumes = 8 drives (servers * volumesPerServer >= 4)
+# Requires: kind-rustfs-cluster (3 workers), StorageClass local-storage, 12 PVs
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: example-tenant
+  namespace: rustfs-system
+  labels:
+    app: rustfs
+spec:
+  image: rustfs/rustfs:latest
+  podManagementPolicy: Parallel
+
+  # Credentials (optional - RustFS has built-in defaults if not specified)
+  credsSecret:
+    name: rustfs-creds-secret
+
+  pools:
+    - name: primary
+      servers: 4
+      persistence:
+        volumesPerServer: 2
+        volumeClaimTemplate:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+          storageClassName: local-storage
+        labels:
+          app: rustfs
+          environment: production
+        annotations:
+          description: "RustFS 4-node distributed storage volumes"
+
+      # Schedule pods on worker nodes with rustfs-storage label
+      nodeSelector:
+        rustfs-storage: "true"
+
+      # Spread pods across worker nodes (preferred)
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: rustfs.tenant
+                      operator: In
+                      values:
+                        - example-tenant
+                    - key: rustfs.pool
+                      operator: In
+                      values:
+                        - primary
+                topologyKey: kubernetes.io/hostname
+
+  env:
+    - name: RUST_LOG
+      value: info
+
+---
+# Credentials Secret for RustFS (至少 8 字符)
+# 用户名: admin123, 密码: admin12345
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-creds-secret
+  namespace: rustfs-system
+type: Opaque
+stringData:
+  accesskey: admin123
+  secretkey: admin12345

@@ -323,7 +323,9 @@ impl Tenant {
 
         let container = corev1::Container {
             name: "rustfs".to_owned(),
-            image: self.spec.image.clone(),
+            image: Some(super::helper::get_rustfs_image_or_default(
+                self.spec.image.as_ref(),
+            )),
             env: if env_vars.is_empty() {
                 None
             } else {
@@ -366,11 +368,14 @@ impl Tenant {
             spec: Some(v1::StatefulSetSpec {
                 replicas: Some(pool.servers),
                 service_name: Some(self.headless_service_name()),
-                pod_management_policy: self
-                    .spec
-                    .pod_management_policy
-                    .as_ref()
-                    .map(ToString::to_string),
+                pod_management_policy: Some(
+                    self.spec
+                        .pod_management_policy
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
                 selector: metav1::LabelSelector {
                     match_labels: Some(selector_labels),
                     ..Default::default()

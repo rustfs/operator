@@ -12,8 +12,21 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 
+/// Default RustFS container image when neither spec.image nor TENANT_RUSTFS_IMAGE is set.
+pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:latest";
+
 pub(crate) fn get_rustfs_image() -> Option<String> {
     std::env::var("TENANT_RUSTFS_IMAGE").ok()
+}
+
+/// Returns the RustFS image to use: spec image > TENANT_RUSTFS_IMAGE env > default.
+/// Never returns empty; StatefulSet container.image is required by Kubernetes.
+pub(crate) fn get_rustfs_image_or_default(explicit: Option<&String>) -> String {
+    explicit
+        .cloned()
+        .or_else(get_rustfs_image)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_RUSTFS_IMAGE.to_string())
 }
 
 pub(crate) fn get_rustfs_mount_path() -> Option<String> {

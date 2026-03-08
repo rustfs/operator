@@ -1,0 +1,40 @@
+# Copyright 2025 RustFS Team
+# Console Web Frontend Deployment (used by scripts/deploy/deploy-rustfs.sh)
+# Image built locally: rustfs/console-web:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustfs-operator-console-frontend
+  namespace: rustfs-system
+  labels:
+    app.kubernetes.io/name: rustfs-operator-console-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs-operator-console-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs-operator-console-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: rustfs/console-web:dev
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5

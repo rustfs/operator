@@ -32,6 +32,10 @@
 
           # For testing
           minio-client
+
+          # For console-web frontend
+          nodejs_22
+          nodePackages.pnpm
         ];
 
       in

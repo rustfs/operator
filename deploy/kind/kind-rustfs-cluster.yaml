@@ -1,0 +1,50 @@
+# Kind cluster configuration for RustFS Operator 4-node deployment
+# Architecture: 1 control-plane + 3 workers (same as MinIO)
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: rustfs-cluster
+nodes:
+  # Control plane node (无 extraPortMappings，避免与主机 80/443 冲突，访问通过 kubectl port-forward)
+  - role: control-plane
+    kubeadmConfigPatches:
+    - |
+      kind: InitConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "ingress-ready=true"
+
+  # Worker node 1
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "worker-group=storage-1,rustfs-storage=true"
+    extraMounts:
+    - hostPath: /tmp/rustfs-storage-1
+      containerPath: /mnt/data
+
+  # Worker node 2
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "worker-group=storage-2,rustfs-storage=true"
+    extraMounts:
+    - hostPath: /tmp/rustfs-storage-2
+      containerPath: /mnt/data
+
+  # Worker node 3
+  - role: worker
+    kubeadmConfigPatches:
+    - |
+      kind: JoinConfiguration
+      nodeRegistration:
+        kubeletExtraArgs:
+          node-labels: "worker-group=storage-3,rustfs-storage=true"
+    extraMounts:
+    - hostPath: /tmp/rustfs-storage-3
+      containerPath: /mnt/data
