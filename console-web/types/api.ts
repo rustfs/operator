@@ -181,10 +181,7 @@ export interface ContainerStateTerminated {
   finished_at?: string
 }
 
-export type ContainerState =
-  | ContainerStateRunning
-  | ContainerStateWaiting
-  | ContainerStateTerminated
+export type ContainerState = ContainerStateRunning | ContainerStateWaiting | ContainerStateTerminated
 
 export interface ContainerInfo {
   name: string

@@ -7,21 +7,8 @@ import { RiAddLine } from "@remixicon/react"
 import { Page } from "@/components/page"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
@@ -96,9 +83,7 @@ export default function ClusterPage() {
     <Page>
       <PageHeader>
         <h1 className="text-lg font-semibold">{t("Cluster")}</h1>
-        <p className="text-sm text-muted-foreground">
-          {t("Cluster nodes, capacity and namespaces.")}
-        </p>
+        <p className="text-sm text-muted-foreground">{t("Cluster nodes, capacity and namespaces.")}</p>
       </PageHeader>
 
       <div className="flex gap-2 border-b border-border mb-4">
@@ -259,9 +244,7 @@ export default function ClusterPage() {
                         <TableCell className="font-medium">{ns.name}</TableCell>
                         <TableCell>{ns.status}</TableCell>
                         <TableCell className="text-muted-foreground">
-                          {ns.created_at
-                            ? new Date(ns.created_at).toLocaleString()
-                            : "-"}
+                          {ns.created_at ? new Date(ns.created_at).toLocaleString() : "-"}
                         </TableCell>
                       </TableRow>
                     ))}

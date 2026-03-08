@@ -473,6 +473,113 @@ pub async fn update_tenant(
     }))
 }
 
+/// 获取 Tenant YAML
+pub async fn get_tenant_yaml(
+    Path((namespace, name)): Path<(String, String)>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<TenantYAML>> {
+    let client = create_client(&claims).await?;
+    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+
+    let mut tenant = api
+        .get(&name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+
+    // Remove managed fields to keep YAML readable (same as MinIO operator)
+    tenant.metadata.managed_fields = None;
+
+    let yaml_str = serde_yaml_ng::to_string(&tenant).map_err(|e| Error::InternalServer {
+        message: format!("Failed to serialize Tenant to YAML: {}", e),
+    })?;
+
+    Ok(Json(TenantYAML { yaml: yaml_str }))
+}
+
+/// 更新 Tenant YAML
+pub async fn put_tenant_yaml(
+    Path((namespace, name)): Path<(String, String)>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<TenantYAML>,
+) -> Result<Json<TenantYAML>> {
+    let in_tenant: Tenant = serde_yaml_ng::from_str(&req.yaml).map_err(|e| Error::BadRequest {
+        message: format!("Invalid Tenant YAML: {}", e),
+    })?;
+
+    // Validate: name and namespace in YAML must match URL params
+    let in_name = in_tenant.metadata.name.as_deref().unwrap_or_default();
+    let in_ns = in_tenant.metadata.namespace.as_deref().unwrap_or_default();
+    if !in_name.is_empty() && in_name != name {
+        return Err(Error::BadRequest {
+            message: format!(
+                "Tenant name in YAML '{}' does not match URL '{}'",
+                in_name, name
+            ),
+        });
+    }
+    if !in_ns.is_empty() && in_ns != namespace {
+        return Err(Error::BadRequest {
+            message: format!(
+                "Tenant namespace in YAML '{}' does not match URL '{}'",
+                in_ns, namespace
+            ),
+        });
+    }
+
+    // Validate: at least one pool
+    if in_tenant.spec.pools.is_empty() {
+        return Err(Error::BadRequest {
+            message: "Tenant must have at least one pool".to_string(),
+        });
+    }
+
+    // Validate: no duplicate pool names
+    let mut pool_names = std::collections::HashSet::new();
+    for pool in &in_tenant.spec.pools {
+        if !pool_names.insert(&pool.name) {
+            return Err(Error::BadRequest {
+                message: format!("Duplicate pool name '{}'", pool.name),
+            });
+        }
+    }
+
+    let client = create_client(&claims).await?;
+    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+
+    // Get the current Tenant (to preserve resourceVersion and safe metadata)
+    let mut current = api
+        .get(&name)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+
+    // Only update safe fields: spec, metadata.labels, metadata.annotations, metadata.finalizers
+    current.spec = in_tenant.spec;
+    if let Some(labels) = in_tenant.metadata.labels {
+        current.metadata.labels = Some(labels);
+    }
+    if let Some(annotations) = in_tenant.metadata.annotations {
+        current.metadata.annotations = Some(annotations);
+    }
+    if let Some(finalizers) = in_tenant.metadata.finalizers {
+        current.metadata.finalizers = Some(finalizers);
+    }
+
+    let updated = api
+        .replace(&name, &Default::default(), &current)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+
+    // Return the updated Tenant YAML (clean, without managedFields)
+    let mut clean = updated;
+    clean.metadata.managed_fields = None;
+
+    let yaml_str = serde_yaml_ng::to_string(&clean).map_err(|e| Error::InternalServer {
+        message: format!("Failed to serialize Tenant to YAML: {}", e),
+    })?;
+
+    Ok(Json(TenantYAML { yaml: yaml_str }))
+}
+
 /// 创建 Kubernetes 客户端
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()

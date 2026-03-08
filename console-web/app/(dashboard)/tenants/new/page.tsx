@@ -37,9 +37,7 @@ export default function TenantCreatePage() {
   const [loading, setLoading] = useState(false)
 
   const updatePool = (index: number, field: keyof CreatePoolRequest, value: string | number) => {
-    setPools((prev) =>
-      prev.map((p, i) => (i === index ? { ...p, [field]: value } : p))
-    )
+    setPools((prev) => prev.map((p, i) => (i === index ? { ...p, [field]: value } : p)))
   }
 
   const addPool = () => {
@@ -119,12 +117,7 @@ export default function TenantCreatePage() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="name">{t("Name")}</Label>
-                <Input
-                  id="name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="my-tenant"
-                />
+                <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-tenant" />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="namespace">{t("Namespace")}</Label>
@@ -137,7 +130,9 @@ export default function TenantCreatePage() {
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="image">{t("Image")} ({t("Optional")})</Label>
+              <Label htmlFor="image">
+                {t("Image")} ({t("Optional")})
+              </Label>
               <Input
                 id="image"
                 value={image}
@@ -146,7 +141,9 @@ export default function TenantCreatePage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="creds">{t("Credentials Secret")} ({t("Optional")})</Label>
+              <Label htmlFor="creds">
+                {t("Credentials Secret")} ({t("Optional")})
+              </Label>
               <Input
                 id="creds"
                 value={credsSecret}
@@ -169,12 +166,11 @@ export default function TenantCreatePage() {
           </CardHeader>
           <CardContent className="space-y-4">
             {pools.map((pool, index) => (
-              <div
-                key={index}
-                className="rounded-lg border border-border p-4 space-y-4"
-              >
+              <div key={index} className="rounded-lg border border-border p-4 space-y-4">
                 <div className="flex justify-between items-center">
-                  <span className="text-sm font-medium">{t("Pool")} {index + 1}</span>
+                  <span className="text-sm font-medium">
+                    {t("Pool")} {index + 1}
+                  </span>
                   {pools.length > 1 && (
                     <Button
                       type="button"
@@ -202,9 +198,7 @@ export default function TenantCreatePage() {
                       type="number"
                       min={1}
                       value={pool.servers}
-                      onChange={(e) =>
-                        updatePool(index, "servers", parseInt(e.target.value, 10) || 0)
-                      }
+                      onChange={(e) => updatePool(index, "servers", parseInt(e.target.value, 10) || 0)}
                     />
                   </div>
                   <div className="space-y-2">
@@ -213,9 +207,7 @@ export default function TenantCreatePage() {
                       type="number"
                       min={1}
                       value={pool.volumes_per_server}
-                      onChange={(e) =>
-                        updatePool(index, "volumes_per_server", parseInt(e.target.value, 10) || 0)
-                      }
+                      onChange={(e) => updatePool(index, "volumes_per_server", parseInt(e.target.value, 10) || 0)}
                     />
                   </div>
                   <div className="space-y-2">
@@ -227,7 +219,9 @@ export default function TenantCreatePage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label>{t("Storage Class")} ({t("Optional")})</Label>
+                    <Label>
+                      {t("Storage Class")} ({t("Optional")})
+                    </Label>
                     <Input
                       value={pool.storage_class || ""}
                       onChange={(e) => updatePool(index, "storage_class", e.target.value)}
@@ -246,7 +240,9 @@ export default function TenantCreatePage() {
             {loading ? t("Creating...") : t("Create Tenant")}
           </Button>
           <Button asChild type="button" variant="outline">
-            <Link href={routes.tenants} prefetch={false}>{t("Cancel")}</Link>
+            <Link href={routes.tenants} prefetch={false}>
+              {t("Cancel")}
+            </Link>
           </Button>
         </div>
       </form>

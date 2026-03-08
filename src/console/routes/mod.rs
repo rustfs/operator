@@ -48,6 +48,14 @@ pub fn tenant_routes() -> Router<AppState> {
             "/namespaces/:namespace/tenants/:name",
             delete(handlers::tenants::delete_tenant),
         )
+        .route(
+            "/namespaces/:namespace/tenants/:name/yaml",
+            get(handlers::tenants::get_tenant_yaml),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/yaml",
+            put(handlers::tenants::put_tenant_yaml),
+        )
 }
 
 /// Pool 管理路由
