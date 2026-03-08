@@ -105,7 +105,15 @@ export default function TenantsListPage() {
               {tenants.map((tnt) => (
                 <TableRow key={`${tnt.namespace}/${tnt.name}`}>
                   <TableCell className="font-medium">{tnt.namespace}</TableCell>
-                  <TableCell>{tnt.name}</TableCell>
+                  <TableCell>
+                    <Link
+                      href={routes.tenantDetail(tnt.namespace, tnt.name)}
+                      prefetch={false}
+                      className="text-primary hover:underline"
+                    >
+                      {tnt.name}
+                    </Link>
+                  </TableCell>
                   <TableCell>{tnt.state}</TableCell>
                   <TableCell>
                     {tnt.pools.length === 0
@@ -119,15 +127,14 @@ export default function TenantsListPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex gap-1">
-                      <Button asChild variant="ghost" size="icon-sm">
-                        <Link
-                          href={routes.tenantDetail(tnt.namespace, tnt.name)}
-                          prefetch={false}
-                          title={t("View")}
-                        >
-                          <RiEyeLine className="size-4" />
-                        </Link>
-                      </Button>
+                      <Link
+                        href={routes.tenantDetail(tnt.namespace, tnt.name)}
+                        prefetch={false}
+                        title={t("View")}
+                        className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                      >
+                        <RiEyeLine className="size-4" />
+                      </Link>
                       <Button
                         variant="ghost"
                         size="icon-sm"

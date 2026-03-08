@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::console::{
-    error::{self, Error, Result},
+    error::{Error, Result},
     models::event::{EventItem, EventListResponse},
     state::Claims,
 };
@@ -21,19 +21,34 @@ use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, api::ListParams};
 
-/// 列出 Tenant 相关的 Events
+/// 列出 Tenant 相关的 Events。
+/// 若 K8s API 失败（权限、field selector 等），返回空列表并打日志，避免 500 导致详情页整页失败。
 pub async fn list_tenant_events(
     Path((namespace, tenant)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<EventListResponse>> {
-    let client = create_client(&claims).await?;
+    let client = match create_client(&claims).await {
+        Ok(c) => c,
+        Err(e) => return Err(e),
+    };
     let api: Api<corev1::Event> = Api::namespaced(client, &namespace);
 
-    // 查询与 Tenant 相关的 Events
-    let events = api
-        .list(&ListParams::default().fields(&format!("involvedObject.name={}", tenant)))
+    let field_selector = format!("involvedObject.name={}", tenant);
+    let events = match api
+        .list(&ListParams::default().fields(&field_selector))
         .await
-        .map_err(|e| error::map_kube_error(e, format!("Events for tenant '{}'", tenant)))?;
+    {
+        Ok(ev) => ev,
+        Err(e) => {
+            tracing::warn!(
+                "List events for tenant {}/{} failed (returning empty): {}",
+                namespace,
+                tenant,
+                e
+            );
+            return Ok(Json(EventListResponse { events: vec![] }));
+        }
+    };
 
     let items: Vec<EventItem> = events
         .items

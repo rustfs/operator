@@ -18,6 +18,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "serviceaccounts", "pods", "services"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 
   # Node status lookup (node down detection)
   - apiGroups: [""]
@@ -34,8 +37,8 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Events for reconciliation notifications
+  # Events for reconciliation notifications and console event list
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
 {{- end }}
