@@ -1,0 +1,24 @@
+# Dependencies: install inside container; avoid copying host node_modules (pnpm symlinks break COPY)
+node_modules
+
+# Build outputs
+.next
+out
+build
+
+# Git and IDE
+.git
+.gitignore
+.vscode
+.DS_Store
+
+# Env and debug
+.env*
+*.pem
+*.log
+
+# Test and misc
+coverage
+.vercel
+*.tsbuildinfo
+next-env.d.ts
