@@ -17,6 +17,7 @@ import type {
   NodeListResponse,
   NamespaceListResponse,
   ClusterResourcesResponse,
+  TenantYamlPayload,
 } from "@/types/api"
 
 const ns = (namespace: string) => `/namespaces/${encodeURIComponent(namespace)}`
@@ -29,6 +30,7 @@ const pod = (namespace: string, name: string, podName: string) =>
   `${pods(namespace, name)}/${encodeURIComponent(podName)}`
 const events = (namespace: string, tenantName: string) =>
   `${ns(namespace)}/tenants/${encodeURIComponent(tenantName)}/events`
+const tenantYaml = (namespace: string, name: string) => `${tenant(namespace, name)}/yaml`
 
 // ----- Tenants -----
 export async function listTenants(): Promise<TenantListResponse> {
@@ -65,6 +67,18 @@ export async function updateTenant(
 
 export async function deleteTenant(namespace: string, name: string): Promise<{ success: boolean; message: string }> {
   return apiClient.delete(`${tenant(namespace, name)}`)
+}
+
+export async function getTenantYaml(namespace: string, name: string): Promise<TenantYamlPayload> {
+  return apiClient.get<TenantYamlPayload>(tenantYaml(namespace, name))
+}
+
+export async function updateTenantYaml(
+  namespace: string,
+  name: string,
+  body: TenantYamlPayload,
+): Promise<TenantYamlPayload> {
+  return apiClient.put<TenantYamlPayload>(tenantYaml(namespace, name), body)
 }
 
 // ----- Pools -----

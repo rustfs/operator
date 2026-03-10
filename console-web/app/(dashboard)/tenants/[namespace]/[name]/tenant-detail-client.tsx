@@ -22,7 +22,6 @@ import type {
   PodListItem,
   EventItem,
   AddPoolRequest,
-  UpdateTenantRequest,
 } from "@/types/api"
 import { ApiError } from "@/lib/api-client"
 
@@ -59,7 +58,9 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
   const [logsPod, setLogsPod] = useState<string | null>(null)
   const [logsContent, setLogsContent] = useState("")
   const [logsLoading, setLogsLoading] = useState(false)
-  const [editForm, setEditForm] = useState<UpdateTenantRequest>({})
+  const [tenantYaml, setTenantYaml] = useState("")
+  const [tenantYamlLoaded, setTenantYamlLoaded] = useState(false)
+  const [tenantYamlLoading, setTenantYamlLoading] = useState(false)
   const [editLoading, setEditLoading] = useState(false)
 
   const loadTenant = async () => {
@@ -94,9 +95,33 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
     setLoading(false)
   }
 
+  const loadTenantYaml = async () => {
+    setTenantYamlLoading(true)
+    try {
+      const res = await api.getTenantYaml(namespace, name)
+      setTenantYaml(res.yaml)
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Failed to load tenant YAML"))
+    } finally {
+      setTenantYamlLoaded(true)
+      setTenantYamlLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadTenant()
   }, [namespace, name]) // eslint-disable-line react-hooks/exhaustive-deps -- reload when route params change
+
+  useEffect(() => {
+    setTenantYaml("")
+    setTenantYamlLoaded(false)
+  }, [namespace, name])
+
+  useEffect(() => {
+    if (tab !== "edit" || tenantYamlLoaded || tenantYamlLoading) return
+    loadTenantYaml()
+  }, [tab, tenantYamlLoaded, tenantYamlLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
 
   const handleDeleteTenant = async () => {
     if (!confirm(t("Delete this tenant? This cannot be undone."))) return
@@ -194,22 +219,18 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
     }
   }
 
-  const handleUpdateTenant = async (e: React.FormEvent) => {
+  const handleUpdateTenantYaml = async (e: React.FormEvent) => {
     e.preventDefault()
-    const body: UpdateTenantRequest = {}
-    if (editForm.image !== undefined) body.image = editForm.image || undefined
-    if (editForm.mount_path !== undefined) body.mount_path = editForm.mount_path || undefined
-    if (editForm.creds_secret !== undefined) body.creds_secret = editForm.creds_secret || undefined
-    if (Object.keys(body).length === 0) {
-      toast.warning(t("No changes to save"))
+    if (!tenantYaml.trim()) {
+      toast.warning(t("YAML content is required"))
       return
     }
     setEditLoading(true)
     try {
-      await api.updateTenant(namespace, name, body)
-      toast.success(t("Tenant updated"))
+      const res = await api.updateTenantYaml(namespace, name, { yaml: tenantYaml })
+      setTenantYaml(res.yaml)
+      toast.success(t("Tenant YAML updated"))
       loadTenant()
-      setEditForm({})
     } catch (e) {
       const err = e as ApiError
       toast.error(err.message || t("Update failed"))
@@ -228,10 +249,10 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
 
   const tabs: { id: Tab; labelKey: string }[] = [
     { id: "overview", labelKey: "Overview" },
-    { id: "edit", labelKey: "Edit" },
     { id: "pools", labelKey: "Pools" },
     { id: "pods", labelKey: "Pods" },
     { id: "events", labelKey: "Events" },
+    { id: "edit", labelKey: "YAML" },
   ]
 
   return (
@@ -333,42 +354,38 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
         <Card>
           <CardHeader>
             <CardTitle className="text-base">{t("Edit Tenant")}</CardTitle>
-            <CardDescription>{t("Update tenant image, mount path or credentials secret.")}</CardDescription>
+            <CardDescription>{t("Update tenant by editing YAML directly.")}</CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleUpdateTenant} className="space-y-4 max-w-md">
-              <div className="space-y-2">
-                <Label htmlFor="edit-image">{t("Image")}</Label>
-                <Input
-                  id="edit-image"
-                  value={editForm.image ?? tenant.image ?? ""}
-                  onChange={(e) => setEditForm((f) => ({ ...f, image: e.target.value }))}
-                  placeholder="rustfs/rustfs:latest"
-                />
+            {tenantYamlLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Spinner className="size-4" />
+                {t("Loading tenant YAML...")}
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="edit-mount">{t("Mount Path")}</Label>
-                <Input
-                  id="edit-mount"
-                  value={editForm.mount_path ?? tenant.mount_path ?? ""}
-                  onChange={(e) => setEditForm((f) => ({ ...f, mount_path: e.target.value }))}
-                  placeholder="/data/rustfs"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="edit-creds">{t("Credentials Secret")}</Label>
-                <Input
-                  id="edit-creds"
-                  value={editForm.creds_secret ?? ""}
-                  onChange={(e) => setEditForm((f) => ({ ...f, creds_secret: e.target.value }))}
-                  placeholder=""
-                />
-              </div>
-              <Button type="submit" disabled={editLoading}>
-                {editLoading && <Spinner className="mr-2 size-4" />}
-                {editLoading ? t("Saving...") : t("Save")}
-              </Button>
-            </form>
+            ) : (
+              <form onSubmit={handleUpdateTenantYaml} className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="tenant-yaml-editor">{t("YAML Content")}</Label>
+                  <textarea
+                    id="tenant-yaml-editor"
+                    value={tenantYaml}
+                    onChange={(e) => setTenantYaml(e.target.value)}
+                    className="dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 min-h-[460px] w-full rounded-none border bg-transparent px-2.5 py-2 font-mono text-xs transition-colors placeholder:text-muted-foreground focus-visible:ring-1 md:text-xs outline-none"
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={editLoading}>
+                    {editLoading && <Spinner className="mr-2 size-4" />}
+                    {editLoading ? t("Saving...") : t("Save")}
+                  </Button>
+                  <Button type="button" variant="outline" onClick={loadTenantYaml} disabled={tenantYamlLoading}>
+                    {tenantYamlLoading && <Spinner className="mr-2 size-4" />}
+                    {t("Reload YAML")}
+                  </Button>
+                </div>
+              </form>
+            )}
           </CardContent>
         </Card>
       )}

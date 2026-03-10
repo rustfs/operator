@@ -84,6 +84,10 @@ export interface UpdateTenantResponse {
   tenant: TenantListItem
 }
 
+export interface TenantYamlPayload {
+  yaml: string
+}
+
 // ----- Pool -----
 export interface PoolDetails {
   name: string
