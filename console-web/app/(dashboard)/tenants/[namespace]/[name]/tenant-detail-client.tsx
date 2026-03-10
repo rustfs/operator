@@ -5,7 +5,14 @@ import Link from "next/link"
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
-import { RiArrowLeftLine, RiDeleteBinLine, RiAddLine, RiFileList3Line, RiRestartLine } from "@remixicon/react"
+import {
+  RiArrowLeftLine,
+  RiDeleteBinLine,
+  RiAddLine,
+  RiFileCopyLine,
+  RiFileList3Line,
+  RiRestartLine,
+} from "@remixicon/react"
 import { Page } from "@/components/page"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
@@ -31,6 +38,7 @@ interface TenantDetailClientProps {
   namespace: string
   name: string
   initialTab?: string | null
+  initialYamlEditable?: boolean
 }
 
 function normalizeTab(value?: string | null): Tab {
@@ -49,7 +57,7 @@ function normalizeTab(value?: string | null): Tab {
   }
 }
 
-export function TenantDetailClient({ namespace, name, initialTab }: TenantDetailClientProps) {
+export function TenantDetailClient({ namespace, name, initialTab, initialYamlEditable }: TenantDetailClientProps) {
   const router = useRouter()
   const { t } = useTranslation()
 
@@ -76,8 +84,10 @@ export function TenantDetailClient({ namespace, name, initialTab }: TenantDetail
   const [logsContent, setLogsContent] = useState("")
   const [logsLoading, setLogsLoading] = useState(false)
   const [tenantYaml, setTenantYaml] = useState("")
+  const [tenantYamlSnapshot, setTenantYamlSnapshot] = useState("")
   const [tenantYamlLoaded, setTenantYamlLoaded] = useState(false)
   const [tenantYamlLoading, setTenantYamlLoading] = useState(false)
+  const [isYamlEditable, setIsYamlEditable] = useState(!!initialYamlEditable)
   const [editLoading, setEditLoading] = useState(false)
 
   const loadTenant = async () => {
@@ -117,6 +127,7 @@ export function TenantDetailClient({ namespace, name, initialTab }: TenantDetail
     try {
       const res = await api.getTenantYaml(namespace, name)
       setTenantYaml(res.yaml)
+      setTenantYamlSnapshot(res.yaml)
     } catch (e) {
       const err = e as ApiError
       toast.error(err.message || t("Failed to load tenant YAML"))
@@ -132,12 +143,15 @@ export function TenantDetailClient({ namespace, name, initialTab }: TenantDetail
 
   useEffect(() => {
     setTenantYaml("")
+    setTenantYamlSnapshot("")
     setTenantYamlLoaded(false)
+    setIsYamlEditable(!!initialYamlEditable)
   }, [namespace, name])
 
   useEffect(() => {
     setTab(normalizeTab(initialTab))
-  }, [namespace, name, initialTab])
+    setIsYamlEditable(!!initialYamlEditable)
+  }, [namespace, name, initialTab, initialYamlEditable])
 
   useEffect(() => {
     if (tab !== "edit" || tenantYamlLoaded || tenantYamlLoading) return
@@ -250,6 +264,8 @@ export function TenantDetailClient({ namespace, name, initialTab }: TenantDetail
     try {
       const res = await api.updateTenantYaml(namespace, name, { yaml: tenantYaml })
       setTenantYaml(res.yaml)
+      setTenantYamlSnapshot(res.yaml)
+      setIsYamlEditable(false)
       toast.success(t("Tenant YAML updated"))
       loadTenant()
     } catch (e) {
@@ -257,6 +273,15 @@ export function TenantDetailClient({ namespace, name, initialTab }: TenantDetail
       toast.error(err.message || t("Update failed"))
     } finally {
       setEditLoading(false)
+    }
+  }
+
+  const handleCopyYaml = async () => {
+    try {
+      await navigator.clipboard.writeText(tenantYaml)
+      toast.success(t("YAML copied"))
+    } catch {
+      toast.error(t("Copy failed"))
     }
   }
 
@@ -385,26 +410,50 @@ export function TenantDetailClient({ namespace, name, initialTab }: TenantDetail
               </div>
             ) : (
               <form onSubmit={handleUpdateTenantYaml} className="space-y-4">
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={handleCopyYaml}>
+                    <RiFileCopyLine className="mr-1 size-4" />
+                    {t("Copy YAML")}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (isYamlEditable) {
+                        setTenantYaml(tenantYamlSnapshot)
+                      }
+                      setIsYamlEditable((v) => !v)
+                    }}
+                  >
+                    {isYamlEditable ? t("Cancel Edit") : t("Edit")}
+                  </Button>
+                </div>
                 <div className="space-y-2">
                   <Label htmlFor="tenant-yaml-editor">{t("YAML Content")}</Label>
                   <textarea
                     id="tenant-yaml-editor"
                     value={tenantYaml}
                     onChange={(e) => setTenantYaml(e.target.value)}
-                    className="dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 min-h-[460px] w-full rounded-none border bg-transparent px-2.5 py-2 font-mono text-xs transition-colors placeholder:text-muted-foreground focus-visible:ring-1 md:text-xs outline-none"
+                    readOnly={!isYamlEditable}
+                    className={`dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 min-h-[460px] w-full rounded-none border px-2.5 py-2 font-mono text-xs transition-colors placeholder:text-muted-foreground focus-visible:ring-1 md:text-xs outline-none ${
+                      isYamlEditable ? "bg-transparent" : "bg-muted/30 cursor-default"
+                    }`}
                     spellCheck={false}
                   />
                 </div>
-                <div className="flex gap-2">
-                  <Button type="submit" disabled={editLoading}>
-                    {editLoading && <Spinner className="mr-2 size-4" />}
-                    {editLoading ? t("Saving...") : t("Save")}
-                  </Button>
-                  <Button type="button" variant="outline" onClick={loadTenantYaml} disabled={tenantYamlLoading}>
-                    {tenantYamlLoading && <Spinner className="mr-2 size-4" />}
-                    {t("Reload YAML")}
-                  </Button>
-                </div>
+                {isYamlEditable && (
+                  <div className="flex gap-2">
+                    <Button type="submit" disabled={editLoading}>
+                      {editLoading && <Spinner className="mr-2 size-4" />}
+                      {editLoading ? t("Saving...") : t("Save")}
+                    </Button>
+                    <Button type="button" variant="outline" onClick={loadTenantYaml} disabled={tenantYamlLoading}>
+                      {tenantYamlLoading && <Spinner className="mr-2 size-4" />}
+                      {t("Reload YAML")}
+                    </Button>
+                  </div>
+                )}
               </form>
             )}
           </CardContent>

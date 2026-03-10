@@ -426,7 +426,9 @@ export default function TenantsListPage() {
                             {t("View Details")}
                           </DropdownMenuItem>
                           <DropdownMenuItem
-                            onSelect={() => router.push(`${routes.tenantDetail(tenant.namespace, tenant.name)}&tab=yaml`)}
+                            onSelect={() =>
+                              router.push(`${routes.tenantDetail(tenant.namespace, tenant.name)}&tab=yaml&editable=1`)
+                            }
                           >
                             <RiPencilLine className="size-4" />
                             {t("Edit")}
