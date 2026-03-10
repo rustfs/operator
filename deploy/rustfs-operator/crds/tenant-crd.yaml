@@ -45,6 +45,135 @@ spec:
                 required:
                 - name
                 type: object
+              encryption:
+                description: |-
+                  Encryption / KMS configuration for server-side encryption.
+                  When enabled, the operator injects KMS environment variables and mounts
+                  secrets into RustFS pods so the in-process `rustfs-kms` library is configured.
+                nullable: true
+                properties:
+                  backend:
+                    default: local
+                    description: 'KMS backend type: `local` or `vault`.'
+                    enum:
+                    - local
+                    - vault
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enable server-side encryption. When `false`, all other fields are ignored.
+                    type: boolean
+                  kmsSecret:
+                    description: |-
+                      Reference to a Secret containing sensitive KMS credentials
+                      (Vault token or AppRole credentials, TLS certificates).
+                    nullable: true
+                    properties:
+                      name:
+                        description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  local:
+                    description: 'Local file-based settings (optional when `backend: local`).'
+                    nullable: true
+                    properties:
+                      keyDirectory:
+                        description: 'Directory for key files inside the container (default: `/data/kms-keys`).'
+                        nullable: true
+                        type: string
+                      masterKeyId:
+                        description: 'Master key identifier (default: `default-master-key`).'
+                        nullable: true
+                        type: string
+                    type: object
+                  pingSeconds:
+                    description: |-
+                      Interval in seconds for KMS health-check pings (default: disabled).
+                      When set, the operator stores the value; the in-process KMS library
+                      picks it up from `RUSTFS_KMS_PING_SECONDS`.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  securityContext:
+                    description: |-
+                      Override Pod SecurityContext when encryption is enabled.
+                      If not set, the default RustFS Pod SecurityContext is used
+                      (runAsUser/runAsGroup/fsGroup = 10001).
+                    nullable: true
+                    properties:
+                      fsGroup:
+                        description: GID applied to all volumes mounted in the Pod.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      runAsGroup:
+                        description: GID to run the container process as.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      runAsNonRoot:
+                        description: 'Enforce non-root execution (default: true).'
+                        nullable: true
+                        type: boolean
+                      runAsUser:
+                        description: UID to run the container process as.
+                        format: int64
+                        nullable: true
+                        type: integer
+                    type: object
+                  vault:
+                    description: 'Vault-specific settings (required when `backend: vault`).'
+                    nullable: true
+                    properties:
+                      appRole:
+                        description: |-
+                          AppRole authentication settings. Only used when `authType: approle`.
+                          The actual `role_id` and `secret_id` values live in the KMS Secret
+                          under keys `vault-approle-id` and `vault-approle-secret`.
+                        nullable: true
+                        properties:
+                          engine:
+                            description: Engine mount path for AppRole auth (e.g. `approle`).
+                            nullable: true
+                            type: string
+                          retrySeconds:
+                            description: 'Retry interval in seconds for AppRole login attempts (default: 10).'
+                            format: int32
+                            nullable: true
+                            type: integer
+                        type: object
+                      authType:
+                        default: token
+                        description: |-
+                          Authentication method: `token` (default, implemented) or `approle`
+                          (type defined in rustfs-kms but backend not yet functional).
+                        nullable: true
+                        type: string
+                      endpoint:
+                        description: Vault server endpoint (e.g. `https://vault.example.com:8200`).
+                        type: string
+                      engine:
+                        description: 'Vault KV2 engine mount path (default: `kv`).'
+                        nullable: true
+                        type: string
+                      namespace:
+                        description: Vault namespace (Enterprise feature).
+                        nullable: true
+                        type: string
+                      prefix:
+                        description: Key prefix inside the engine.
+                        nullable: true
+                        type: string
+                      tlsSkipVerify:
+                        description: 'Enable TLS verification for Vault connection (default: true).'
+                        nullable: true
+                        type: boolean
+                    required:
+                    - endpoint
+                    type: object
+                type: object
               env:
                 items:
                   description: EnvVar represents an environment variable present in a Container.

@@ -20,6 +20,12 @@ import type {
   TenantYamlPayload,
   TenantLifecycleState,
   TenantStateCountsResponse,
+  EncryptionInfoResponse,
+  UpdateEncryptionRequest,
+  EncryptionUpdateResponse,
+  SecurityContextInfo,
+  UpdateSecurityContextRequest,
+  SecurityContextUpdateResponse,
 } from "@/types/api"
 import type { TopologyOverviewResponse } from "@/types/topology"
 
@@ -152,6 +158,36 @@ export async function getPodLogs(
   if (params?.timestamps) search.set("timestamps", "true")
   const q = search.toString()
   return apiClient.getText(`${pod(namespace, tenantName, podName)}/logs${q ? `?${q}` : ""}`)
+}
+
+// ----- Encryption -----
+const encryption = (namespace: string, name: string) => `${tenant(namespace, name)}/encryption`
+
+export async function getEncryption(namespace: string, name: string): Promise<EncryptionInfoResponse> {
+  return apiClient.get<EncryptionInfoResponse>(encryption(namespace, name))
+}
+
+export async function updateEncryption(
+  namespace: string,
+  name: string,
+  body: UpdateEncryptionRequest,
+): Promise<EncryptionUpdateResponse> {
+  return apiClient.put<EncryptionUpdateResponse>(encryption(namespace, name), body)
+}
+
+// ----- Security Context -----
+const securityContext = (namespace: string, name: string) => `${tenant(namespace, name)}/security-context`
+
+export async function getSecurityContext(namespace: string, name: string): Promise<SecurityContextInfo> {
+  return apiClient.get<SecurityContextInfo>(securityContext(namespace, name))
+}
+
+export async function updateSecurityContext(
+  namespace: string,
+  name: string,
+  body: UpdateSecurityContextRequest,
+): Promise<SecurityContextUpdateResponse> {
+  return apiClient.put<SecurityContextUpdateResponse>(securityContext(namespace, name), body)
 }
 
 // ----- Events -----

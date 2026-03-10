@@ -64,6 +64,22 @@ pub fn tenant_routes() -> Router<AppState> {
             "/namespaces/:namespace/tenants/:name/yaml",
             put(handlers::tenants::put_tenant_yaml),
         )
+        .route(
+            "/namespaces/:namespace/tenants/:name/encryption",
+            get(handlers::encryption::get_encryption),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/encryption",
+            put(handlers::encryption::update_encryption),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/security-context",
+            get(handlers::security_context::get_security_context),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/security-context",
+            put(handlers::security_context::update_security_context),
+        )
 }
 
 /// Pool 管理路由

@@ -73,6 +73,12 @@ export default function TenantCreatePage() {
   const [pools, setPools] = useState<CreatePoolRequest[]>([{ ...defaultPool }])
   const [image, setImage] = useState("")
   const [credsSecret, setCredsSecret] = useState("")
+  const [securityContext, setSecurityContext] = useState({
+    runAsUser: "",
+    runAsGroup: "",
+    fsGroup: "",
+    runAsNonRoot: true,
+  })
   const [yamlContent, setYamlContent] = useState(defaultTenantYaml)
   const [loading, setLoading] = useState(false)
 
@@ -144,6 +150,21 @@ export default function TenantCreatePage() {
       }
     })
 
+    const specSc = asRecord(spec?.securityContext ?? spec?.security_context)
+    const security_context = specSc
+      ? {
+          runAsUser: asPositiveInt(specSc.runAsUser ?? specSc.run_as_user),
+          runAsGroup: asPositiveInt(specSc.runAsGroup ?? specSc.run_as_group),
+          fsGroup: asPositiveInt(specSc.fsGroup ?? specSc.fs_group),
+          runAsNonRoot:
+            typeof specSc.runAsNonRoot === "boolean"
+              ? specSc.runAsNonRoot
+              : typeof specSc.run_as_non_root === "boolean"
+                ? specSc.run_as_non_root
+                : true,
+        }
+      : undefined
+
     return {
       name: parsedName,
       namespace: parsedNamespace,
@@ -151,6 +172,7 @@ export default function TenantCreatePage() {
       image: asString(spec?.image),
       mount_path: asString(spec?.mountPath ?? spec?.mount_path),
       creds_secret: asString(spec?.credsSecret ?? spec?.creds_secret),
+      security_context,
     }
   }
 
@@ -182,6 +204,12 @@ export default function TenantCreatePage() {
           })),
           image: image.trim() || undefined,
           creds_secret: credsSecret.trim() || undefined,
+          security_context: {
+            runAsUser: securityContext.runAsUser ? parseInt(securityContext.runAsUser, 10) : undefined,
+            runAsGroup: securityContext.runAsGroup ? parseInt(securityContext.runAsGroup, 10) : undefined,
+            fsGroup: securityContext.fsGroup ? parseInt(securityContext.fsGroup, 10) : undefined,
+            runAsNonRoot: securityContext.runAsNonRoot,
+          },
         }
       }
 
@@ -283,6 +311,58 @@ export default function TenantCreatePage() {
                     onChange={(e) => setCredsSecret(e.target.value)}
                     placeholder="secret-name"
                   />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t("SecurityContext")}</CardTitle>
+                <CardDescription>
+                  {t("Override Pod SecurityContext for RustFS pods (default: 10001/10001/10001). Optional.")}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="space-y-2">
+                    <Label>{t("Run As User")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={securityContext.runAsUser}
+                      onChange={(e) => setSecurityContext((s) => ({ ...s, runAsUser: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("Run As Group")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={securityContext.runAsGroup}
+                      onChange={(e) => setSecurityContext((s) => ({ ...s, runAsGroup: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("FsGroup")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={securityContext.fsGroup}
+                      onChange={(e) => setSecurityContext((s) => ({ ...s, fsGroup: e.target.value }))}
+                    />
+                  </div>
+                  <div className="flex items-end gap-3 pb-2">
+                    <label htmlFor="create-sec-nonroot" className="text-sm whitespace-nowrap">
+                      {t("Do not run as Root")}
+                    </label>
+                    <input
+                      id="create-sec-nonroot"
+                      type="checkbox"
+                      checked={securityContext.runAsNonRoot}
+                      onChange={(e) => setSecurityContext((s) => ({ ...s, runAsNonRoot: e.target.checked }))}
+                      className="h-4 w-4 rounded border-border"
+                    />
+                  </div>
                 </div>
               </CardContent>
             </Card>

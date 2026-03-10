@@ -66,6 +66,39 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         return Err(e.into());
     }
 
+    // Validate KMS Secret if encryption is configured
+    if let Some(ref enc) = latest_tenant.spec.encryption
+        && enc.enabled
+        && enc.kms_secret.is_some()
+        && let Err(e) = ctx.validate_kms_secret(&latest_tenant).await
+    {
+        let _ = ctx
+            .record(
+                &latest_tenant,
+                EventType::Warning,
+                "KmsSecretValidationFailed",
+                &format!("Failed to validate KMS secret: {}", e),
+            )
+            .await;
+        return Err(e.into());
+    }
+
+    // Warn if Local backend has a kmsSecret configured (not used for Local)
+    if let Some(ref enc) = latest_tenant.spec.encryption
+        && enc.enabled
+        && enc.backend == crate::types::v1alpha1::encryption::KmsBackendType::Local
+        && enc.kms_secret.as_ref().is_some_and(|s| !s.name.is_empty())
+    {
+        let _ = ctx
+            .record(
+                &latest_tenant,
+                EventType::Warning,
+                "KmsConfigWarning",
+                "Local KMS backend does not use kmsSecret; the Secret reference will be ignored",
+            )
+            .await;
+    }
+
     // 0. Optional: unblock StatefulSet pods stuck terminating when their node is down.
     // This is inspired by Longhorn's "Pod Deletion Policy When Node is Down".
     if let Some(policy) = latest_tenant
@@ -554,14 +587,15 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
     // - Transient errors (API, network): Shorter intervals for quick recovery
     match error {
         Error::Context { source } => match source {
-            // Credential validation errors - require user intervention
+            // Credential / KMS validation errors - require user intervention
             // Use 60-second requeue to reduce event/log spam while user fixes the issue
             context::Error::CredentialSecretNotFound { .. }
             | context::Error::CredentialSecretMissingKey { .. }
             | context::Error::CredentialSecretInvalidEncoding { .. }
-            | context::Error::CredentialSecretTooShort { .. } => {
-                Action::requeue(Duration::from_secs(60))
-            }
+            | context::Error::CredentialSecretTooShort { .. }
+            | context::Error::KmsSecretNotFound { .. }
+            | context::Error::KmsSecretMissingKey { .. }
+            | context::Error::KmsConfigInvalid { .. } => Action::requeue(Duration::from_secs(60)),
 
             // Kubernetes API errors - might be transient (network, API server issues)
             // Use shorter requeue for faster recovery

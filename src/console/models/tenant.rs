@@ -84,6 +84,16 @@ pub struct ServicePort {
     pub target_port: String,
 }
 
+/// SecurityContext for create/update (Pod runAsUser, runAsGroup, fsGroup, runAsNonRoot).
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSecurityContextRequest {
+    pub run_as_user: Option<i64>,
+    pub run_as_group: Option<i64>,
+    pub fs_group: Option<i64>,
+    pub run_as_non_root: Option<bool>,
+}
+
 /// 创建 Tenant 请求
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTenantRequest {
@@ -93,6 +103,8 @@ pub struct CreateTenantRequest {
     pub image: Option<String>,
     pub mount_path: Option<String>,
     pub creds_secret: Option<String>,
+    /// Optional Pod SecurityContext override (runAsUser, runAsGroup, fsGroup, runAsNonRoot).
+    pub security_context: Option<CreateSecurityContextRequest>,
 }
 
 /// 创建 Pool 请求

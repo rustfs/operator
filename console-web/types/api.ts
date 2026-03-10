@@ -65,6 +65,13 @@ export interface CreatePoolRequest {
   storage_class?: string
 }
 
+export interface CreateSecurityContextRequest {
+  runAsUser?: number
+  runAsGroup?: number
+  fsGroup?: number
+  runAsNonRoot?: boolean
+}
+
 export interface CreateTenantRequest {
   name: string
   namespace: string
@@ -72,6 +79,7 @@ export interface CreateTenantRequest {
   image?: string
   mount_path?: string
   creds_secret?: string
+  security_context?: CreateSecurityContextRequest
 }
 
 export interface UpdateTenantRequest {
@@ -248,6 +256,86 @@ export interface EventItem {
 
 export interface EventListResponse {
   events: EventItem[]
+}
+
+// ----- Encryption -----
+export interface AppRoleInfo {
+  engine: string | null
+  retrySeconds: number | null
+}
+
+export interface VaultInfo {
+  endpoint: string
+  engine: string | null
+  namespace: string | null
+  prefix: string | null
+  authType: string | null
+  appRole: AppRoleInfo | null
+  tlsSkipVerify: boolean | null
+  customCertificates: boolean | null
+}
+
+export interface LocalKmsInfo {
+  keyDirectory: string | null
+  masterKeyId: string | null
+}
+
+export interface SecurityContextInfo {
+  runAsUser: number | null
+  runAsGroup: number | null
+  fsGroup: number | null
+  runAsNonRoot: boolean | null
+}
+
+export interface EncryptionInfoResponse {
+  enabled: boolean
+  backend: string
+  vault: VaultInfo | null
+  local: LocalKmsInfo | null
+  kmsSecretName: string | null
+  pingSeconds: number | null
+  securityContext: SecurityContextInfo | null
+}
+
+export interface UpdateEncryptionRequest {
+  enabled: boolean
+  backend?: string
+  vault?: {
+    endpoint: string
+    engine?: string
+    namespace?: string
+    prefix?: string
+    authType?: string
+    appRole?: {
+      engine?: string
+      retrySeconds?: number
+    }
+    tlsSkipVerify?: boolean
+    customCertificates?: boolean
+  }
+  local?: {
+    keyDirectory?: string
+    masterKeyId?: string
+  }
+  kmsSecretName?: string
+  pingSeconds?: number
+}
+
+export interface EncryptionUpdateResponse {
+  success: boolean
+  message: string
+}
+
+export interface UpdateSecurityContextRequest {
+  runAsUser?: number
+  runAsGroup?: number
+  fsGroup?: number
+  runAsNonRoot?: boolean
+}
+
+export interface SecurityContextUpdateResponse {
+  success: boolean
+  message: string
 }
 
 // ----- Cluster -----
