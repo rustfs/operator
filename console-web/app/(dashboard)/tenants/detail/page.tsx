@@ -18,6 +18,7 @@ function TenantDetailContent() {
   const router = useRouter()
   const namespace = searchParams.get("namespace")
   const name = searchParams.get("name")
+  const tab = searchParams.get("tab")
 
   useEffect(() => {
     if (!namespace?.trim() || !name?.trim()) {
@@ -33,7 +34,7 @@ function TenantDetailContent() {
     )
   }
 
-  return <TenantDetailClient namespace={namespace.trim()} name={name.trim()} />
+  return <TenantDetailClient namespace={namespace.trim()} name={name.trim()} initialTab={tab} />
 }
 
 export default function TenantDetailPage() {

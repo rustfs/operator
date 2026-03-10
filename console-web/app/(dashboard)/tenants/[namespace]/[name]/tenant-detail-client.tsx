@@ -30,13 +30,30 @@ type Tab = "overview" | "edit" | "pools" | "pods" | "events"
 interface TenantDetailClientProps {
   namespace: string
   name: string
+  initialTab?: string | null
 }
 
-export function TenantDetailClient({ namespace, name }: TenantDetailClientProps) {
+function normalizeTab(value?: string | null): Tab {
+  switch ((value ?? "").toLowerCase()) {
+    case "edit":
+    case "yaml":
+      return "edit"
+    case "pools":
+      return "pools"
+    case "pods":
+      return "pods"
+    case "events":
+      return "events"
+    default:
+      return "overview"
+  }
+}
+
+export function TenantDetailClient({ namespace, name, initialTab }: TenantDetailClientProps) {
   const router = useRouter()
   const { t } = useTranslation()
 
-  const [tab, setTab] = useState<Tab>("overview")
+  const [tab, setTab] = useState<Tab>(() => normalizeTab(initialTab))
   const [tenant, setTenant] = useState<TenantDetailsResponse | null>(null)
   const [pools, setPools] = useState<PoolDetails[]>([])
   const [pods, setPods] = useState<PodListItem[]>([])
@@ -117,6 +134,10 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
     setTenantYaml("")
     setTenantYamlLoaded(false)
   }, [namespace, name])
+
+  useEffect(() => {
+    setTab(normalizeTab(initialTab))
+  }, [namespace, name, initialTab])
 
   useEffect(() => {
     if (tab !== "edit" || tenantYamlLoaded || tenantYamlLoading) return

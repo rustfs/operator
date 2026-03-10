@@ -1,13 +1,30 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
-import { RiAddLine, RiDeleteBinLine, RiEyeLine, RiSearchLine } from "@remixicon/react"
+import {
+  RiAddLine,
+  RiDeleteBinLine,
+  RiExternalLinkLine,
+  RiEyeLine,
+  RiFileCopyLine,
+  RiMore2Line,
+  RiPencilLine,
+  RiSearchLine,
+} from "@remixicon/react"
 import { Page } from "@/components/page"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -100,6 +117,7 @@ function statusBadgeClass(state: string): string {
 }
 
 export default function TenantsListPage() {
+  const router = useRouter()
   const { t } = useTranslation()
   const [tenants, setTenants] = useState<TenantListItem[]>([])
   const [tenantMeta, setTenantMeta] = useState<Record<string, TenantMeta>>({})
@@ -254,6 +272,23 @@ export default function TenantsListPage() {
     }
   }
 
+  const handleCopyTenantName = async (name: string) => {
+    try {
+      await navigator.clipboard.writeText(name)
+      toast.success(t("Name copied"))
+    } catch {
+      toast.error(t("Copy failed"))
+    }
+  }
+
+  const handleOpenConsole = (endpoint: string) => {
+    if (!endpoint || endpoint === "-") {
+      toast.warning(t("Endpoint is unavailable"))
+      return
+    }
+    window.open(endpoint, "_blank", "noopener,noreferrer")
+  }
+
   return (
     <Page>
       <PageHeader
@@ -345,7 +380,7 @@ export default function TenantsListPage() {
                 <TableHead>{t("Total Capacity")}</TableHead>
                 <TableHead>{t("Endpoint")}</TableHead>
                 <TableHead>{t("Created")}</TableHead>
-                <TableHead className="w-[120px]">{t("Actions")}</TableHead>
+                <TableHead className="w-[90px]">{t("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -379,26 +414,42 @@ export default function TenantsListPage() {
                       {tenant.created_at ? new Date(tenant.created_at).toLocaleDateString() : "-"}
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
-                        <Link
-                          href={routes.tenantDetail(tenant.namespace, tenant.name)}
-                          prefetch={false}
-                          title={t("View")}
-                          className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                        >
-                          <RiEyeLine className="size-4" />
-                        </Link>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="text-destructive hover:text-destructive"
-                          disabled={deleting === key}
-                          onClick={() => handleDelete(tenant.namespace, tenant.name)}
-                          title={t("Delete")}
-                        >
-                          {deleting === key ? <Spinner className="size-4" /> : <RiDeleteBinLine className="size-4" />}
-                        </Button>
-                      </div>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon-sm" aria-label={t("Actions")} disabled={deleting === key}>
+                            {deleting === key ? <Spinner className="size-4" /> : <RiMore2Line className="size-4" />}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-44">
+                          <DropdownMenuItem onSelect={() => router.push(routes.tenantDetail(tenant.namespace, tenant.name))}>
+                            <RiEyeLine className="size-4" />
+                            {t("View Details")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => router.push(`${routes.tenantDetail(tenant.namespace, tenant.name)}&tab=yaml`)}
+                          >
+                            <RiPencilLine className="size-4" />
+                            {t("Edit")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => handleCopyTenantName(tenant.name)}>
+                            <RiFileCopyLine className="size-4" />
+                            {t("Copy Name")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => handleOpenConsole(meta?.endpoint ?? "-")}>
+                            <RiExternalLinkLine className="size-4" />
+                            {t("Open Console")}
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => handleDelete(tenant.namespace, tenant.name)}
+                            disabled={deleting === key}
+                          >
+                            <RiDeleteBinLine className="size-4" />
+                            {t("Delete")}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 )
