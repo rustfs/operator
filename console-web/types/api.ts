@@ -19,6 +19,21 @@ export interface TenantListResponse {
   tenants: TenantListItem[]
 }
 
+export type TenantLifecycleState = "Ready" | "Updating" | "Degraded" | "NotReady" | "Unknown"
+
+export interface TenantStateCountItem {
+  state: string
+  count: number
+}
+
+export type TenantStateCountsResponse =
+  | TenantStateCountItem[]
+  | Record<string, number>
+  | {
+      state_counts?: TenantStateCountItem[]
+      counts?: TenantStateCountItem[]
+    }
+
 export interface ServicePort {
   name: string
   port: number

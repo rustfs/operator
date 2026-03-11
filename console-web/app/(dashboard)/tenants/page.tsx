@@ -31,9 +31,63 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import * as api from "@/lib/api"
 import { ApiError } from "@/lib/api-client"
 import { routes } from "@/lib/routes"
-import type { ServiceInfo, TenantListItem } from "@/types/api"
+import type {
+  ServiceInfo,
+  TenantLifecycleState,
+  TenantListItem,
+  TenantStateCountsResponse,
+} from "@/types/api"
 
 const ALL_NAMESPACES = "__all__"
+const TENANT_STATES: TenantLifecycleState[] = ["Ready", "Updating", "Degraded", "NotReady", "Unknown"]
+const EMPTY_STATE_COUNTS: Record<TenantLifecycleState, number> = {
+  Ready: 0,
+  Updating: 0,
+  Degraded: 0,
+  NotReady: 0,
+  Unknown: 0,
+}
+
+const STATE_THEME: Record<
+  TenantLifecycleState,
+  {
+    badge: string
+    dot: string
+    label: string
+    activeCard: string
+  }
+> = {
+  Ready: {
+    badge: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    dot: "bg-emerald-500",
+    label: "text-emerald-700",
+    activeCard: "border-emerald-300 ring-1 ring-emerald-200",
+  },
+  Updating: {
+    badge: "bg-blue-50 text-blue-700 border-blue-200",
+    dot: "bg-blue-500",
+    label: "text-blue-700",
+    activeCard: "border-blue-300 ring-1 ring-blue-200",
+  },
+  Degraded: {
+    badge: "bg-amber-50 text-amber-700 border-amber-200",
+    dot: "bg-amber-500",
+    label: "text-amber-700",
+    activeCard: "border-amber-300 ring-1 ring-amber-200",
+  },
+  NotReady: {
+    badge: "bg-red-50 text-red-700 border-red-200",
+    dot: "bg-red-500",
+    label: "text-red-700",
+    activeCard: "border-red-300 ring-1 ring-red-200",
+  },
+  Unknown: {
+    badge: "bg-zinc-100 text-zinc-700 border-zinc-200",
+    dot: "bg-zinc-500",
+    label: "text-zinc-700",
+    activeCard: "border-zinc-300 ring-1 ring-zinc-200",
+  },
+}
 
 interface TenantMeta {
   replicas: number | null
@@ -44,6 +98,73 @@ interface TenantMeta {
 
 function makeTenantKey(namespace: string, name: string): string {
   return `${namespace}/${name}`
+}
+
+function normalizeTenantState(state: string | null | undefined): TenantLifecycleState {
+  const normalized = (state ?? "").trim().toLowerCase().replace(/[\s_-]/g, "")
+  if (normalized === "ready" || normalized === "running") return "Ready"
+  if (normalized === "updating" || normalized.includes("provision")) return "Updating"
+  if (normalized === "degraded") return "Degraded"
+  if (normalized === "notready" || normalized === "error" || normalized.includes("fail")) return "NotReady"
+  if (normalized === "unknown" || normalized === "stopped") return "Unknown"
+  return "Unknown"
+}
+
+function parseStateCounts(payload: TenantStateCountsResponse): Record<TenantLifecycleState, number> {
+  const result: Record<TenantLifecycleState, number> = { ...EMPTY_STATE_COUNTS }
+  const append = (state: string, count: number) => {
+    if (!Number.isFinite(count) || count < 0) return
+    const normalizedState = normalizeTenantState(state)
+    result[normalizedState] += Math.trunc(count)
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      if (item && typeof item === "object" && typeof item.state === "string" && typeof item.count === "number") {
+        append(item.state, item.count)
+      }
+    }
+    return result
+  }
+
+  if (typeof payload === "object" && payload != null) {
+    const obj = payload as Record<string, unknown>
+    const countsMap =
+      obj.counts && typeof obj.counts === "object" && !Array.isArray(obj.counts)
+        ? (obj.counts as Record<string, unknown>)
+        : null
+    if (countsMap) {
+      for (const [state, value] of Object.entries(countsMap)) {
+        if (typeof value === "number") append(state, value)
+      }
+      return result
+    }
+
+    const listLike = Array.isArray(obj.state_counts)
+      ? obj.state_counts
+      : Array.isArray(obj.counts)
+        ? obj.counts
+        : null
+
+    if (listLike) {
+      for (const item of listLike) {
+        if (item && typeof item === "object") {
+          const row = item as Record<string, unknown>
+          if (typeof row.state === "string" && typeof row.count === "number") {
+            append(row.state, row.count)
+          }
+        }
+      }
+      return result
+    }
+
+    for (const [state, value] of Object.entries(obj)) {
+      if (state === "total") continue
+      if (typeof value === "number") append(state, value)
+    }
+  }
+
+  return result
 }
 
 function parseSizeToBytes(size: string | null): number | null {
@@ -107,27 +228,21 @@ function buildEndpoint(namespace: string, services: ServiceInfo[]): string {
   return `${protocol}://${service.name}.${namespace}.svc:${firstPort}`
 }
 
-function statusBadgeClass(state: string): string {
-  const normalized = state.toLowerCase()
-  if (normalized.includes("run")) return "bg-emerald-50 text-emerald-700 border-emerald-200"
-  if (normalized.includes("error") || normalized.includes("fail")) return "bg-red-50 text-red-700 border-red-200"
-  if (normalized.includes("stop")) return "bg-zinc-100 text-zinc-700 border-zinc-200"
-  if (normalized.includes("provision")) return "bg-blue-50 text-blue-700 border-blue-200"
-  return "bg-amber-50 text-amber-700 border-amber-200"
-}
-
 export default function TenantsListPage() {
   const router = useRouter()
   const { t } = useTranslation()
   const [tenants, setTenants] = useState<TenantListItem[]>([])
   const [tenantMeta, setTenantMeta] = useState<Record<string, TenantMeta>>({})
+  const [stateCounts, setStateCounts] = useState<Record<TenantLifecycleState, number>>({ ...EMPTY_STATE_COUNTS })
   const [namespaces, setNamespaces] = useState<string[]>([])
   const [selectedNamespace, setSelectedNamespace] = useState<string>(ALL_NAMESPACES)
+  const [selectedState, setSelectedState] = useState<TenantLifecycleState | null>(null)
   const [searchText, setSearchText] = useState("")
   const [loading, setLoading] = useState(true)
   const [metaLoading, setMetaLoading] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
   const loadSeq = useRef(0)
+  const countSeq = useRef(0)
 
   const loadNamespaces = async () => {
     try {
@@ -139,13 +254,33 @@ export default function TenantsListPage() {
     }
   }
 
-  const load = async (namespace: string) => {
+  const loadStateCounts = async (namespace: string) => {
+    const currentSeq = ++countSeq.current
+    try {
+      const res =
+        namespace === ALL_NAMESPACES
+          ? await api.listTenantStateCounts()
+          : await api.listTenantStateCountsByNamespace(namespace)
+      if (currentSeq !== countSeq.current) return
+      setStateCounts(parseStateCounts(res))
+    } catch (e) {
+      if (currentSeq !== countSeq.current) return
+      const err = e as ApiError
+      toast.error(err.message || t("Failed to load tenant state counts"))
+      setStateCounts({ ...EMPTY_STATE_COUNTS })
+    }
+  }
+
+  const load = async (namespace: string, state: TenantLifecycleState | null) => {
     setLoading(true)
     const currentSeq = ++loadSeq.current
 
     try {
+      const params = state ? { state } : undefined
       const res =
-        namespace === ALL_NAMESPACES ? await api.listTenants() : await api.listTenantsByNamespace(namespace)
+        namespace === ALL_NAMESPACES
+          ? await api.listTenants(params)
+          : await api.listTenantsByNamespace(namespace, params)
       if (currentSeq !== loadSeq.current) return
       setTenants(res.tenants)
 
@@ -156,10 +291,13 @@ export default function TenantsListPage() {
 
       setMetaLoading(true)
       const metaEntries = await Promise.all(
-        res.tenants.map(async (tnt) => {
-          const key = makeTenantKey(tnt.namespace, tnt.name)
+        res.tenants.map(async (tenant) => {
+          const key = makeTenantKey(tenant.namespace, tenant.name)
           try {
-            const [detailRes, poolRes] = await Promise.all([api.getTenant(tnt.namespace, tnt.name), api.listPools(tnt.namespace, tnt.name)])
+            const [detailRes, poolRes] = await Promise.all([
+              api.getTenant(tenant.namespace, tenant.name),
+              api.listPools(tenant.namespace, tenant.name),
+            ])
             const replicas = poolRes.pools.reduce((sum, pool) => sum + pool.replicas, 0)
             const capacityBytes = poolRes.pools.reduce((sum, pool) => {
               const oneVolume = parseSizeToBytes(pool.volume_size)
@@ -172,14 +310,14 @@ export default function TenantsListPage() {
                 replicas: replicas || null,
                 version: getVersionFromImage(detailRes.image),
                 capacity: capacityBytes > 0 ? formatBinaryBytes(capacityBytes) : "-",
-                endpoint: buildEndpoint(tnt.namespace, detailRes.services),
+                endpoint: buildEndpoint(tenant.namespace, detailRes.services),
               },
             ] as const
           } catch {
             return [
               key,
               {
-                replicas: tnt.pools.reduce((sum, pool) => sum + pool.servers, 0) || null,
+                replicas: tenant.pools.reduce((sum, pool) => sum + pool.servers, 0) || null,
                 version: "-",
                 capacity: "-",
                 endpoint: "-",
@@ -207,8 +345,12 @@ export default function TenantsListPage() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps -- run once on mount
 
   useEffect(() => {
-    load(selectedNamespace)
-  }, [selectedNamespace]) // eslint-disable-line react-hooks/exhaustive-deps -- reload when namespace filter changes
+    loadStateCounts(selectedNamespace)
+  }, [selectedNamespace]) // eslint-disable-line react-hooks/exhaustive-deps -- reload state counts when namespace changes
+
+  useEffect(() => {
+    load(selectedNamespace, selectedState)
+  }, [selectedNamespace, selectedState]) // eslint-disable-line react-hooks/exhaustive-deps -- reload when filters change
 
   const filteredTenants = useMemo(() => {
     const keyword = searchText.trim().toLowerCase()
@@ -220,7 +362,7 @@ export default function TenantsListPage() {
       return [
         tenant.name,
         tenant.namespace,
-        tenant.state,
+        normalizeTenantState(tenant.state),
         meta?.version ?? "",
         meta?.endpoint ?? "",
         meta?.capacity ?? "",
@@ -230,26 +372,6 @@ export default function TenantsListPage() {
         .includes(keyword)
     })
   }, [searchText, tenantMeta, tenants])
-
-  const summary = useMemo(() => {
-    let running = 0
-    let abnormal = 0
-    let stopped = 0
-
-    for (const item of filteredTenants) {
-      const state = item.state.toLowerCase()
-      if (state.includes("run")) running += 1
-      else if (state.includes("error") || state.includes("fail")) abnormal += 1
-      else if (state.includes("stop")) stopped += 1
-    }
-
-    return {
-      total: filteredTenants.length,
-      running,
-      abnormal,
-      stopped,
-    }
-  }, [filteredTenants])
 
   const namespaceOptions = useMemo(() => {
     const fromTenants = tenants.map((item) => item.namespace)
@@ -263,7 +385,8 @@ export default function TenantsListPage() {
     try {
       await api.deleteTenant(namespace, name)
       toast.success(t("Tenant deleted"))
-      load(selectedNamespace)
+      load(selectedNamespace, selectedState)
+      loadStateCounts(selectedNamespace)
     } catch (e) {
       const err = e as ApiError
       toast.error(err.message || t("Delete failed"))
@@ -305,22 +428,28 @@ export default function TenantsListPage() {
         <p className="text-sm text-muted-foreground">{t("Manage RustFS tenant instances.")}</p>
       </PageHeader>
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        <span className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-1 text-xs">
-          <span className="font-medium">{t("Total")}</span> {summary.total}
-        </span>
-        <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs text-emerald-700">
-          <span className="size-1.5 rounded-full bg-emerald-500" />
-          <span className="font-medium">{t("Running")}</span> {summary.running}
-        </span>
-        <span className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
-          <span className="size-1.5 rounded-full bg-red-500" />
-          <span className="font-medium">{t("Abnormal")}</span> {summary.abnormal}
-        </span>
-        <span className="inline-flex items-center gap-1 rounded border border-zinc-200 bg-zinc-100 px-2 py-1 text-xs text-zinc-700">
-          <span className="size-1.5 rounded-full bg-zinc-500" />
-          <span className="font-medium">{t("Stopped")}</span> {summary.stopped}
-        </span>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        {TENANT_STATES.map((state) => {
+          const theme = STATE_THEME[state]
+          const active = selectedState === state
+          return (
+            <button
+              key={state}
+              type="button"
+              onClick={() => setSelectedState((prev) => (prev === state ? null : state))}
+              className={`rounded-md border bg-background px-3 py-3 text-left transition ${
+                active ? theme.activeCard : "border-border hover:border-muted-foreground/40"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className={`text-xs font-medium ${theme.label}`}>{t(state)}</span>
+                <span className={`size-2 rounded-full ${theme.dot}`} />
+              </div>
+              <p className="mt-2 text-3xl leading-none font-semibold">{stateCounts[state]}</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">{active ? t("Filtered") : t("Click to filter")}</p>
+            </button>
+          )
+        })}
       </div>
 
       <div className="mt-4 flex flex-col gap-2 lg:flex-row lg:items-center">
@@ -345,6 +474,11 @@ export default function TenantsListPage() {
             </option>
           ))}
         </select>
+        {selectedState && (
+          <Button type="button" variant="outline" size="sm" onClick={() => setSelectedState(null)}>
+            {t("All States")}
+          </Button>
+        )}
         <Button asChild variant="outline" size="sm">
           <Link href={routes.cluster} prefetch={false}>
             {t("Manage Namespaces")}
@@ -358,7 +492,7 @@ export default function TenantsListPage() {
         </div>
       ) : filteredTenants.length === 0 ? (
         <div className="mt-4 rounded-lg border border-dashed border-border py-12 text-center text-sm text-muted-foreground">
-          {searchText ? t("No tenants match the current filters.") : t("No tenants yet. Create one to get started.")}
+          {searchText || selectedState ? t("No tenants match the current filters.") : t("No tenants yet. Create one to get started.")}
           <div className="mt-4">
             <Button asChild size="sm">
               <Link href={routes.tenantNew} prefetch={false}>
@@ -387,6 +521,7 @@ export default function TenantsListPage() {
               {filteredTenants.map((tenant) => {
                 const key = makeTenantKey(tenant.namespace, tenant.name)
                 const meta = tenantMeta[key]
+                const normalizedState = normalizeTenantState(tenant.state)
                 return (
                   <TableRow key={key}>
                     <TableCell className="font-medium">
@@ -400,8 +535,8 @@ export default function TenantsListPage() {
                     </TableCell>
                     <TableCell>{tenant.namespace}</TableCell>
                     <TableCell>
-                      <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${statusBadgeClass(tenant.state)}`}>
-                        {tenant.state}
+                      <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${STATE_THEME[normalizedState].badge}`}>
+                        {t(normalizedState)}
                       </span>
                     </TableCell>
                     <TableCell>{meta?.replicas ?? "-"}</TableCell>

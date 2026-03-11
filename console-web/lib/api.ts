@@ -18,6 +18,8 @@ import type {
   NamespaceListResponse,
   ClusterResourcesResponse,
   TenantYamlPayload,
+  TenantLifecycleState,
+  TenantStateCountsResponse,
 } from "@/types/api"
 
 const ns = (namespace: string) => `/namespaces/${encodeURIComponent(namespace)}`
@@ -31,14 +33,25 @@ const pod = (namespace: string, name: string, podName: string) =>
 const events = (namespace: string, tenantName: string) =>
   `${ns(namespace)}/tenants/${encodeURIComponent(tenantName)}/events`
 const tenantYaml = (namespace: string, name: string) => `${tenant(namespace, name)}/yaml`
+const tenantStateCounts = "/tenants/state-counts"
+const tenantStateCountsByNs = (namespace: string) => `${ns(namespace)}/tenants/state-counts`
 
 // ----- Tenants -----
-export async function listTenants(): Promise<TenantListResponse> {
-  return apiClient.get<TenantListResponse>("/tenants")
+export async function listTenants(params?: { state?: TenantLifecycleState }): Promise<TenantListResponse> {
+  const search = new URLSearchParams()
+  if (params?.state) search.set("state", params.state)
+  const q = search.toString()
+  return apiClient.get<TenantListResponse>(`/tenants${q ? `?${q}` : ""}`)
 }
 
-export async function listTenantsByNamespace(namespace: string): Promise<TenantListResponse> {
-  return apiClient.get<TenantListResponse>(`${ns(namespace)}/tenants`)
+export async function listTenantsByNamespace(
+  namespace: string,
+  params?: { state?: TenantLifecycleState },
+): Promise<TenantListResponse> {
+  const search = new URLSearchParams()
+  if (params?.state) search.set("state", params.state)
+  const q = search.toString()
+  return apiClient.get<TenantListResponse>(`${ns(namespace)}/tenants${q ? `?${q}` : ""}`)
 }
 
 export async function getTenant(namespace: string, name: string): Promise<TenantDetailsResponse> {
@@ -79,6 +92,14 @@ export async function updateTenantYaml(
   body: TenantYamlPayload,
 ): Promise<TenantYamlPayload> {
   return apiClient.put<TenantYamlPayload>(tenantYaml(namespace, name), body)
+}
+
+export async function listTenantStateCounts(): Promise<TenantStateCountsResponse> {
+  return apiClient.get<TenantStateCountsResponse>(tenantStateCounts)
+}
+
+export async function listTenantStateCountsByNamespace(namespace: string): Promise<TenantStateCountsResponse> {
+  return apiClient.get<TenantStateCountsResponse>(tenantStateCountsByNs(namespace))
 }
 
 // ----- Pools -----
