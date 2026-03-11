@@ -36,8 +36,9 @@ use crate::console::models::pool::{
 };
 use crate::console::models::tenant::{
     CreatePoolRequest, CreateTenantRequest, DeleteTenantResponse, EnvVar, LoggingConfig, PoolInfo,
-    ServiceInfo, ServicePort, TenantDetailsResponse, TenantListItem, TenantListResponse,
-    TenantYAML, UpdateTenantRequest, UpdateTenantResponse,
+    ServiceInfo, ServicePort, TenantDetailsResponse, TenantListItem, TenantListQuery,
+    TenantListResponse, TenantStateCountsResponse, TenantYAML, UpdateTenantRequest,
+    UpdateTenantResponse,
 };
 
 #[derive(OpenApi)]
@@ -47,8 +48,10 @@ use crate::console::models::tenant::{
         api_logout,
         api_session,
         api_list_tenants,
+        api_get_tenant_state_counts,
         api_create_tenant,
         api_list_tenants_by_ns,
+        api_get_tenant_state_counts_by_ns,
         api_get_tenant,
         api_update_tenant,
         api_delete_tenant,
@@ -74,6 +77,8 @@ use crate::console::models::tenant::{
         SessionResponse,
         TenantListItem,
         TenantListResponse,
+        TenantListQuery,
+        TenantStateCountsResponse,
         TenantDetailsResponse,
         CreateTenantRequest,
         CreatePoolRequest,
@@ -143,8 +148,19 @@ fn api_session() -> Json<SessionResponse> {
 }
 
 // --- Tenants ---
-#[utoipa::path(get, path = "/api/v1/tenants", responses((status = 200, body = TenantListResponse)), tag = "tenants")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/tenants",
+    params(("state" = Option<String>, Query, description = "Filter by tenant state (case-insensitive)")),
+    responses((status = 200, body = TenantListResponse)),
+    tag = "tenants"
+)]
 fn api_list_tenants() -> Json<TenantListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/tenants/state-counts", responses((status = 200, body = TenantStateCountsResponse)), tag = "tenants")]
+fn api_get_tenant_state_counts() -> Json<TenantStateCountsResponse> {
     unimplemented!("Documentation only")
 }
 
@@ -153,8 +169,22 @@ fn api_create_tenant(_body: Json<CreateTenantRequest>) -> Json<TenantListItem> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants", params(("namespace" = String, Path, description = "Namespace")), responses((status = 200, body = TenantListResponse)), tag = "tenants")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/namespaces/{namespace}/tenants",
+    params(
+        ("namespace" = String, Path, description = "Namespace"),
+        ("state" = Option<String>, Query, description = "Filter by tenant state (case-insensitive)")
+    ),
+    responses((status = 200, body = TenantListResponse)),
+    tag = "tenants"
+)]
 fn api_list_tenants_by_ns() -> Json<TenantListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/state-counts", params(("namespace" = String, Path, description = "Namespace")), responses((status = 200, body = TenantStateCountsResponse)), tag = "tenants")]
+fn api_get_tenant_state_counts_by_ns() -> Json<TenantStateCountsResponse> {
     unimplemented!("Documentation only")
 }
 

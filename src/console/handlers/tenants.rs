@@ -18,7 +18,10 @@ use crate::console::{
     state::Claims,
 };
 use crate::types::v1alpha1::{persistence::PersistenceConfig, pool::Pool, tenant::Tenant};
-use axum::{Extension, Json, extract::Path};
+use axum::{
+    Extension, Json,
+    extract::{Path, Query},
+};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, ResourceExt, api::ListParams};
 
@@ -29,6 +32,7 @@ use kube::{Api, Client, ResourceExt, api::ListParams};
 
 // curl -b cookies.txt http://localhost:9090/api/v1/tenants
 pub async fn list_all_tenants(
+    Query(query): Query<TenantListQuery>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<TenantListResponse>> {
     let client = create_client(&claims).await?;
@@ -39,30 +43,7 @@ pub async fn list_all_tenants(
         .await
         .map_err(|e| error::map_kube_error(e, "Tenants"))?;
 
-    let items: Vec<TenantListItem> = tenants
-        .items
-        .into_iter()
-        .map(|t| TenantListItem {
-            name: t.name_any(),
-            namespace: t.namespace().unwrap_or_default(),
-            pools: t
-                .spec
-                .pools
-                .iter()
-                .map(|p| PoolInfo {
-                    name: p.name.clone(),
-                    servers: p.servers,
-                    volumes_per_server: p.persistence.volumes_per_server,
-                })
-                .collect(),
-            state: t
-                .status
-                .as_ref()
-                .map(|s| s.current_state.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()),
-            created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
-        })
-        .collect();
+    let items = build_tenant_list_items(tenants.items, query.state.as_deref());
 
     Ok(Json(TenantListResponse { tenants: items }))
 }
@@ -70,6 +51,7 @@ pub async fn list_all_tenants(
 /// 按命名空间列出 Tenants
 pub async fn list_tenants_by_namespace(
     Path(namespace): Path<String>,
+    Query(query): Query<TenantListQuery>,
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<TenantListResponse>> {
     let client = create_client(&claims).await?;
@@ -80,32 +62,40 @@ pub async fn list_tenants_by_namespace(
         .await
         .map_err(|e| error::map_kube_error(e, "Tenants"))?;
 
-    let items: Vec<TenantListItem> = tenants
-        .items
-        .into_iter()
-        .map(|t| TenantListItem {
-            name: t.name_any(),
-            namespace: t.namespace().unwrap_or_default(),
-            pools: t
-                .spec
-                .pools
-                .iter()
-                .map(|p| PoolInfo {
-                    name: p.name.clone(),
-                    servers: p.servers,
-                    volumes_per_server: p.persistence.volumes_per_server,
-                })
-                .collect(),
-            state: t
-                .status
-                .as_ref()
-                .map(|s| s.current_state.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()),
-            created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
-        })
-        .collect();
+    let items = build_tenant_list_items(tenants.items, query.state.as_deref());
 
     Ok(Json(TenantListResponse { tenants: items }))
+}
+
+/// 统计所有命名空间中 Tenant 的状态数量
+pub async fn get_all_tenant_state_counts(
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<TenantStateCountsResponse>> {
+    let client = create_client(&claims).await?;
+    let api: Api<Tenant> = Api::all(client);
+
+    let tenants = api
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| error::map_kube_error(e, "Tenants"))?;
+
+    Ok(Json(summarize_tenant_states(&tenants.items)))
+}
+
+/// 统计指定命名空间中 Tenant 的状态数量
+pub async fn get_tenant_state_counts_by_namespace(
+    Path(namespace): Path<String>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<TenantStateCountsResponse>> {
+    let client = create_client(&claims).await?;
+    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+
+    let tenants = api
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| error::map_kube_error(e, "Tenants"))?;
+
+    Ok(Json(summarize_tenant_states(&tenants.items)))
 }
 
 /// 获取 Tenant 详情
@@ -593,4 +583,68 @@ async fn create_client(claims: &Claims) -> Result<Client> {
     Client::try_from(config).map_err(|e| Error::InternalServer {
         message: format!("Failed to create K8s client: {}", e),
     })
+}
+
+fn build_tenant_list_items(
+    tenants: Vec<Tenant>,
+    state_filter: Option<&str>,
+) -> Vec<TenantListItem> {
+    tenants
+        .into_iter()
+        .filter_map(|t| {
+            let item = tenant_to_list_item(t);
+            if state_matches_filter(&item.state, state_filter) {
+                Some(item)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn tenant_to_list_item(t: Tenant) -> TenantListItem {
+    let state = tenant_state(&t);
+    TenantListItem {
+        name: t.name_any(),
+        namespace: t.namespace().unwrap_or_default(),
+        pools: t
+            .spec
+            .pools
+            .iter()
+            .map(|p| PoolInfo {
+                name: p.name.clone(),
+                servers: p.servers,
+                volumes_per_server: p.persistence.volumes_per_server,
+            })
+            .collect(),
+        state,
+        created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
+    }
+}
+
+fn tenant_state(t: &Tenant) -> String {
+    t.status
+        .as_ref()
+        .map(|s| s.current_state.to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn state_matches_filter(state: &str, state_filter: Option<&str>) -> bool {
+    match state_filter {
+        Some(filter) => state.eq_ignore_ascii_case(filter),
+        None => true,
+    }
+}
+
+fn summarize_tenant_states(tenants: &[Tenant]) -> TenantStateCountsResponse {
+    let mut counts = std::collections::BTreeMap::new();
+    for tenant in tenants {
+        let state = tenant_state(tenant);
+        *counts.entry(state).or_insert(0) += 1;
+    }
+
+    TenantStateCountsResponse {
+        total: tenants.len() as u32,
+        counts,
+    }
 }

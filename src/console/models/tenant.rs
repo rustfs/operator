@@ -39,6 +39,22 @@ pub struct TenantListResponse {
     pub tenants: Vec<TenantListItem>,
 }
 
+/// Tenant 列表查询参数
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct TenantListQuery {
+    /// 按状态过滤（大小写不敏感）
+    pub state: Option<String>,
+}
+
+/// Tenant 状态统计响应
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TenantStateCountsResponse {
+    /// Tenant 总数
+    pub total: u32,
+    /// 各状态对应的数量，例如 Ready/Updating/Degraded/NotReady/Unknown
+    pub counts: std::collections::BTreeMap<String, u32>,
+}
+
 /// Tenant 详情响应
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TenantDetailsResponse {

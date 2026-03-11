@@ -31,10 +31,18 @@ pub fn auth_routes() -> Router<AppState> {
 pub fn tenant_routes() -> Router<AppState> {
     Router::new()
         .route("/tenants", get(handlers::tenants::list_all_tenants))
+        .route(
+            "/tenants/state-counts",
+            get(handlers::tenants::get_all_tenant_state_counts),
+        )
         .route("/tenants", post(handlers::tenants::create_tenant))
         .route(
             "/namespaces/:namespace/tenants",
             get(handlers::tenants::list_tenants_by_namespace),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/state-counts",
+            get(handlers::tenants::get_tenant_state_counts_by_namespace),
         )
         .route(
             "/namespaces/:namespace/tenants/:name",
