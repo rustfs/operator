@@ -167,6 +167,16 @@ function parseStateCounts(payload: TenantStateCountsResponse): Record<TenantLife
   return result
 }
 
+function extractTotal(payload: TenantStateCountsResponse): number {
+  if (typeof payload === "object" && payload != null) {
+    const obj = payload as Record<string, unknown>
+    if (typeof obj.total === "number" && obj.total >= 0) {
+      return Math.trunc(obj.total)
+    }
+  }
+  return 0
+}
+
 function parseSizeToBytes(size: string | null): number | null {
   if (!size) return null
   const match = size.trim().match(/^(\d+(?:\.\d+)?)\s*([kmgtpe]?i?b?)?$/i)
@@ -234,6 +244,7 @@ export default function TenantsListPage() {
   const [tenants, setTenants] = useState<TenantListItem[]>([])
   const [tenantMeta, setTenantMeta] = useState<Record<string, TenantMeta>>({})
   const [stateCounts, setStateCounts] = useState<Record<TenantLifecycleState, number>>({ ...EMPTY_STATE_COUNTS })
+  const [totalCount, setTotalCount] = useState(0)
   const [namespaces, setNamespaces] = useState<string[]>([])
   const [selectedNamespace, setSelectedNamespace] = useState<string>(ALL_NAMESPACES)
   const [selectedState, setSelectedState] = useState<TenantLifecycleState | null>(null)
@@ -263,11 +274,13 @@ export default function TenantsListPage() {
           : await api.listTenantStateCountsByNamespace(namespace)
       if (currentSeq !== countSeq.current) return
       setStateCounts(parseStateCounts(res))
+      setTotalCount(extractTotal(res))
     } catch (e) {
       if (currentSeq !== countSeq.current) return
       const err = e as ApiError
       toast.error(err.message || t("Failed to load tenant state counts"))
       setStateCounts({ ...EMPTY_STATE_COUNTS })
+      setTotalCount(0)
     }
   }
 
@@ -428,7 +441,21 @@ export default function TenantsListPage() {
         <p className="text-sm text-muted-foreground">{t("Manage RustFS tenant instances.")}</p>
       </PageHeader>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <button
+          type="button"
+          onClick={() => setSelectedState(null)}
+          className={`rounded-md border bg-background px-3 py-3 text-left transition ${
+            selectedState === null ? "border-slate-300 ring-1 ring-slate-200" : "border-border hover:border-muted-foreground/40"
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-700">{t("Total")}</span>
+            <span className="size-2 rounded-full bg-slate-500" />
+          </div>
+          <p className="mt-2 text-3xl leading-none font-semibold">{totalCount}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">{selectedState === null ? t("Filtered") : t("Click to filter")}</p>
+        </button>
         {TENANT_STATES.map((state) => {
           const theme = STATE_THEME[state]
           const active = selectedState === state
