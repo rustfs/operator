@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 }
 
 // Inline script: set <base href> to current origin (protocol + host + /) so relative URLs
-// (e.g. /tenants, /cluster) resolve to the same port as the page. Avoids prefetch/nav
+// (e.g. /tenants) resolve to the same port as the page. Avoids prefetch/nav
 // going to port 80 when the app is actually served on e.g. port 8080 (port-forward).
 const setBaseHrefInline = `(function(){var u=location;var b=document.createElement('base');b.href=u.protocol+'//'+u.host+'/';if(document.head.firstChild){document.head.insertBefore(b,document.head.firstChild);}else{document.head.appendChild(b);}})();`
 

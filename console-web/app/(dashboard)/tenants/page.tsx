@@ -507,7 +507,7 @@ export default function TenantsListPage() {
           </Button>
         )}
         <Button asChild variant="outline" size="sm">
-          <Link href={routes.cluster} prefetch={false}>
+          <Link href={`${routes.dashboard}#cluster`} prefetch={false}>
             {t("Manage Namespaces")}
           </Link>
         </Button>

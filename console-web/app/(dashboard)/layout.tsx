@@ -8,7 +8,6 @@ import {
   RiDashboardLine,
   RiServerLine,
   RiLogoutBoxLine,
-  RiNodeTree,
   RiQuestionLine,
   RiGithubLine,
   RiTwitterXLine,
@@ -27,7 +26,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 const navItems = [
   { href: routes.dashboard, icon: RiDashboardLine, labelKey: "Dashboard" },
   { href: routes.tenants, icon: RiServerLine, labelKey: "Tenants" },
-  { href: routes.cluster, icon: RiNodeTree, labelKey: "Cluster" },
 ]
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
