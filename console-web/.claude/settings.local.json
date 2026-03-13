@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx next:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(npx tsc:*)",
+      "WebFetch(domain:lh3.googleusercontent.com)",
+      "WebFetch(domain:lh3.google.com)",
+      "WebFetch(domain:gemini.google.com)",
+      "Bash(grep -l \"RiFolder\" node_modules/@remixicon/react/dist/*.mjs 2>/dev/null | head -3 || grep \"RiFolder\" node_modules/@remixicon/react/dist/index.d.ts 2>/dev/null | head -5 || echo \"try other path\"; find node_modules/@remixicon -name \"*.d.ts\" -maxdepth 3 2>/dev/null | head -3)"
+    ]
+  }
+}

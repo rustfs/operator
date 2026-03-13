@@ -1,4 +1,5 @@
 import { apiClient } from "@/lib/api-client"
+import { topologyOverviewMock } from "@/lib/mocks/topology"
 import type {
   TenantListResponse,
   TenantDetailsResponse,
@@ -21,6 +22,7 @@ import type {
   TenantLifecycleState,
   TenantStateCountsResponse,
 } from "@/types/api"
+import type { TopologyOverviewResponse } from "@/types/topology"
 
 const ns = (namespace: string) => `/namespaces/${encodeURIComponent(namespace)}`
 const tenant = (namespace: string, name: string) => `${ns(namespace)}/tenants/${encodeURIComponent(name)}`
@@ -173,4 +175,8 @@ export async function listNamespaces(): Promise<NamespaceListResponse> {
 
 export async function createNamespace(name: string): Promise<unknown> {
   return apiClient.post("/namespaces", { name })
+}
+
+export async function getTopologyOverview(): Promise<TopologyOverviewResponse> {
+  return topologyOverviewMock
 }
