@@ -159,6 +159,20 @@ export default function DashboardPage() {
   const tenantCount = topology?.namespaces.reduce((sum, ns) => sum + ns.tenants.length, 0) ?? 0
   const unhealthyCount = topology?.namespaces.reduce((sum, ns) => sum + ns.tenants.filter((t) => t.state !== "Ready").length, 0) ?? 0
 
+  const allPods = topology?.namespaces.flatMap((ns) => ns.tenants.flatMap((t) => t.pods ?? [])) ?? []
+  const podTotal = allPods.length
+  const podRunning = allPods.filter((p) => p.phase === "Running").length
+
+  const totalCapacityBytes = topology?.namespaces.reduce(
+    (sum, ns) => sum + ns.tenants.reduce((s, t) => s + (t.summary.capacity_bytes ?? 0), 0), 0,
+  ) ?? 0
+  const formatBytes = (bytes: number) => {
+    if (bytes === 0) return "0"
+    if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(1)} TiB`
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
+    return `${(bytes / 1024 ** 2).toFixed(0)} MiB`
+  }
+
   return (
     <Page>
       <PageHeader>
@@ -178,16 +192,24 @@ export default function DashboardPage() {
           </CardHeader>
           <CardContent className="grid gap-3 sm:grid-cols-3">
             <div className="rounded-md border border-border bg-background px-3 py-3">
-              <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("Namespaces")}</p>
-              <p className="mt-2 text-2xl font-semibold">{topologySummary?.namespaces ?? (topology?.namespaces.length ?? 0)}</p>
-            </div>
-            <div className="rounded-md border border-border bg-background px-3 py-3">
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("Tenants")}</p>
-              <p className="mt-2 text-2xl font-semibold">{topologySummary?.tenants ?? tenantCount}</p>
+              <div className="mt-2 flex items-baseline gap-2">
+                <span className="text-2xl font-semibold">{topologySummary?.tenants ?? tenantCount}</span>
+                {unhealthyCount > 0 && (
+                  <span className="text-sm font-medium text-destructive">{unhealthyCount} {t("unhealthy")}</span>
+                )}
+              </div>
             </div>
             <div className="rounded-md border border-border bg-background px-3 py-3">
-              <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("Unhealthy")}</p>
-              <p className="mt-2 text-2xl font-semibold">{topologySummary?.unhealthy_tenants ?? unhealthyCount}</p>
+              <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("Pods")}</p>
+              <div className="mt-2 flex items-baseline gap-2">
+                <span className="text-2xl font-semibold">{podTotal}</span>
+                <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">{podRunning} {t("running")}</span>
+              </div>
+            </div>
+            <div className="rounded-md border border-border bg-background px-3 py-3">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("Capacity")}</p>
+              <p className="mt-2 text-2xl font-semibold">{formatBytes(totalCapacityBytes)}</p>
             </div>
           </CardContent>
         </Card>
