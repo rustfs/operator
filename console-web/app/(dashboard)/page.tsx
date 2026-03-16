@@ -21,7 +21,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import * as api from "@/lib/api"
 import { ApiError } from "@/lib/api-client"
-import { cn } from "@/lib/utils"
+import { cn, formatBinaryBytes, formatK8sMemory } from "@/lib/utils"
 import type { ClusterResourcesResponse, NamespaceItem, NodeInfo } from "@/types/api"
 import type { TopologyOverviewResponse, TopologyTenantState } from "@/types/topology"
 
@@ -166,12 +166,6 @@ export default function DashboardPage() {
   const totalCapacityBytes = topology?.namespaces.reduce(
     (sum, ns) => sum + ns.tenants.reduce((s, t) => s + (t.summary.capacity_bytes ?? 0), 0), 0,
   ) ?? 0
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return "0"
-    if (bytes >= 1024 ** 4) return `${(bytes / 1024 ** 4).toFixed(1)} TiB`
-    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`
-    return `${(bytes / 1024 ** 2).toFixed(0)} MiB`
-  }
 
   return (
     <Page>
@@ -209,7 +203,7 @@ export default function DashboardPage() {
             </div>
             <div className="rounded-md border border-border bg-background px-3 py-3">
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("Capacity")}</p>
-              <p className="mt-2 text-2xl font-semibold">{formatBytes(totalCapacityBytes)}</p>
+              <p className="mt-2 text-2xl font-semibold">{formatBinaryBytes(totalCapacityBytes)}</p>
             </div>
           </CardContent>
         </Card>
@@ -416,9 +410,9 @@ export default function DashboardPage() {
                               <TableCell>{node.status}</TableCell>
                               <TableCell>{node.roles.join(", ") || "-"}</TableCell>
                               <TableCell>{node.cpu_capacity}</TableCell>
-                              <TableCell>{node.memory_capacity}</TableCell>
+                              <TableCell>{formatK8sMemory(node.memory_capacity)}</TableCell>
                               <TableCell>{node.cpu_allocatable}</TableCell>
-                              <TableCell>{node.memory_allocatable}</TableCell>
+                              <TableCell>{formatK8sMemory(node.memory_allocatable)}</TableCell>
                             </TableRow>
                           ))
                         )}
@@ -450,7 +444,7 @@ export default function DashboardPage() {
                         <CardTitle className="text-sm">{t("Total Memory")}</CardTitle>
                       </CardHeader>
                       <CardContent>
-                        <p className="text-2xl font-semibold">{resources.total_memory}</p>
+                        <p className="text-2xl font-semibold">{formatK8sMemory(resources.total_memory)}</p>
                       </CardContent>
                     </Card>
                     <Card>
@@ -459,7 +453,7 @@ export default function DashboardPage() {
                       </CardHeader>
                       <CardContent>
                         <p className="text-sm">CPU: {resources.allocatable_cpu}</p>
-                        <p className="text-sm">Memory: {resources.allocatable_memory}</p>
+                        <p className="text-sm">Memory: {formatK8sMemory(resources.allocatable_memory)}</p>
                       </CardContent>
                     </Card>
                   </div>

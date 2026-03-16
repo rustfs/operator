@@ -31,6 +31,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import * as api from "@/lib/api"
 import { ApiError } from "@/lib/api-client"
 import { routes } from "@/lib/routes"
+import { parseSizeToBytes, formatBinaryBytes } from "@/lib/utils"
 import type {
   ServiceInfo,
   TenantLifecycleState,
@@ -175,50 +176,6 @@ function extractTotal(payload: TenantStateCountsResponse): number {
     }
   }
   return 0
-}
-
-function parseSizeToBytes(size: string | null): number | null {
-  if (!size) return null
-  const match = size.trim().match(/^(\d+(?:\.\d+)?)\s*([kmgtpe]?i?b?)?$/i)
-  if (!match) return null
-
-  const value = Number.parseFloat(match[1] ?? "0")
-  if (!Number.isFinite(value) || value < 0) return null
-
-  const rawUnit = (match[2] ?? "").toUpperCase().replace(/B$/, "")
-  if (!rawUnit) return value
-
-  const binary = rawUnit.endsWith("I")
-  const unit = binary ? rawUnit.slice(0, -1) : rawUnit
-  const powers: Record<string, number> = {
-    "": 0,
-    K: 1,
-    M: 2,
-    G: 3,
-    T: 4,
-    P: 5,
-    E: 6,
-  }
-  const power = powers[unit]
-  if (power == null) return null
-  const base = binary ? 1024 : 1000
-  return value * base ** power
-}
-
-function formatBinaryBytes(bytes: number): string {
-  const tebibyte = 1024 ** 4
-  const gibibyte = 1024 ** 3
-  const mebibyte = 1024 ** 2
-
-  const format = (value: number) => {
-    if (Number.isInteger(value)) return String(value)
-    return value.toFixed(1).replace(/\.0$/, "")
-  }
-
-  if (bytes >= tebibyte) return `${format(bytes / tebibyte)} TiB`
-  if (bytes >= gibibyte) return `${format(bytes / gibibyte)} GiB`
-  if (bytes >= mebibyte) return `${format(bytes / mebibyte)} MiB`
-  return `${format(bytes)} B`
 }
 
 function getVersionFromImage(image: string | null): string {

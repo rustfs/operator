@@ -1,5 +1,4 @@
 import { apiClient } from "@/lib/api-client"
-import { topologyOverviewMock } from "@/lib/mocks/topology"
 import type {
   TenantListResponse,
   TenantDetailsResponse,
@@ -177,6 +176,7 @@ export async function createNamespace(name: string): Promise<unknown> {
   return apiClient.post("/namespaces", { name })
 }
 
+// ----- Topology -----
 export async function getTopologyOverview(): Promise<TopologyOverviewResponse> {
-  return topologyOverviewMock
+  return apiClient.get<TopologyOverviewResponse>("/topology/overview")
 }
