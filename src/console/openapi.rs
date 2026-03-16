@@ -40,6 +40,10 @@ use crate::console::models::tenant::{
     TenantListResponse, TenantStateCountsResponse, TenantYAML, UpdateTenantRequest,
     UpdateTenantResponse,
 };
+use crate::console::models::topology::{
+    TopologyCluster, TopologyClusterSummary, TopologyNamespace, TopologyNode,
+    TopologyOverviewResponse, TopologyPod, TopologyPool, TopologyTenant, TopologyTenantSummary,
+};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -70,6 +74,7 @@ use crate::console::models::tenant::{
         api_get_cluster_resources,
         api_list_namespaces,
         api_create_namespace,
+        api_get_topology_overview,
     ),
     components(schemas(
         LoginRequest,
@@ -116,6 +121,15 @@ use crate::console::models::tenant::{
         NamespaceItem,
         NamespaceListResponse,
         CreateNamespaceRequest,
+        TopologyOverviewResponse,
+        TopologyCluster,
+        TopologyClusterSummary,
+        TopologyNamespace,
+        TopologyTenant,
+        TopologyTenantSummary,
+        TopologyPool,
+        TopologyPod,
+        TopologyNode,
     )),
     tags(
         (name = "auth", description = "Authentication"),
@@ -124,6 +138,7 @@ use crate::console::models::tenant::{
         (name = "pods", description = "Pod management"),
         (name = "events", description = "Event management"),
         (name = "cluster", description = "Cluster resources"),
+        (name = "topology", description = "Cluster topology overview"),
     ),
     info(
         title = "RustFS Console API",
@@ -277,5 +292,11 @@ fn api_list_namespaces() -> Json<NamespaceListResponse> {
 
 #[utoipa::path(post, path = "/api/v1/namespaces", request_body = CreateNamespaceRequest, responses((status = 200, body = NamespaceItem)), tag = "cluster")]
 fn api_create_namespace(_body: Json<CreateNamespaceRequest>) -> Json<NamespaceItem> {
+    unimplemented!("Documentation only")
+}
+
+// --- Topology ---
+#[utoipa::path(get, path = "/api/v1/topology/overview", responses((status = 200, body = TopologyOverviewResponse)), tag = "topology")]
+fn api_get_topology_overview() -> Json<TopologyOverviewResponse> {
     unimplemented!("Documentation only")
 }

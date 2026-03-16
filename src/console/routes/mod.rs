@@ -127,3 +127,11 @@ pub fn cluster_routes() -> Router<AppState> {
         .route("/namespaces", get(handlers::cluster::list_namespaces))
         .route("/namespaces", post(handlers::cluster::create_namespace))
 }
+
+/// 拓扑总览路由
+pub fn topology_routes() -> Router<AppState> {
+    Router::new().route(
+        "/topology/overview",
+        get(handlers::topology::get_topology_overview),
+    )
+}

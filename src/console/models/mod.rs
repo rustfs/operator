@@ -18,3 +18,4 @@ pub mod event;
 pub mod pod;
 pub mod pool;
 pub mod tenant;
+pub mod topology;
