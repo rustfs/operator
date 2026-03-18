@@ -21,7 +21,10 @@ use crate::types::v1alpha1::{
     encryption::PodSecurityContextOverride, persistence::PersistenceConfig, pool::Pool,
     tenant::Tenant,
 };
-use axum::{Extension, Json, extract::{Path, Query}};
+use axum::{
+    Extension, Json,
+    extract::{Path, Query},
+};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, ResourceExt, api::ListParams};
 

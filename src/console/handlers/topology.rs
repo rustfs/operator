@@ -221,14 +221,11 @@ pub async fn get_topology_overview(
                         .pools
                         .iter()
                         .map(|spec_pool| {
-                            let pool_status = t
-                                .status
-                                .as_ref()
-                                .and_then(|s| {
-                                    s.pools.iter().find(|sp| {
-                                        sp.ss_name.contains(&spec_pool.name)
-                                    })
-                                });
+                            let pool_status = t.status.as_ref().and_then(|s| {
+                                s.pools
+                                    .iter()
+                                    .find(|sp| sp.ss_name.contains(&spec_pool.name))
+                            });
 
                             let pool_state = pool_status
                                 .map(|ps| map_pool_state(&ps.state))
@@ -238,9 +235,7 @@ pub async fn get_topology_overview(
                                 .and_then(|ps| ps.replicas)
                                 .unwrap_or(spec_pool.servers);
 
-                            let per_volume_bytes = get_per_volume_bytes(
-                                &spec_pool.persistence,
-                            );
+                            let per_volume_bytes = get_per_volume_bytes(&spec_pool.persistence);
                             let pool_capacity_bytes = (spec_pool.servers as i64)
                                 * (spec_pool.persistence.volumes_per_server as i64)
                                 * per_volume_bytes;
@@ -269,14 +264,9 @@ pub async fn get_topology_overview(
                         })
                         .sum();
 
-                    let endpoint = Some(format!(
-                        "http://{}-io.{}.svc:9000",
-                        name, namespace
-                    ));
-                    let console_endpoint = Some(format!(
-                        "http://{}-console.{}.svc:9001",
-                        name, namespace
-                    ));
+                    let endpoint = Some(format!("http://{}-io.{}.svc:9000", name, namespace));
+                    let console_endpoint =
+                        Some(format!("http://{}-console.{}.svc:9001", name, namespace));
 
                     // 匹配 pods
                     let key = (namespace.clone(), name.clone());
@@ -315,8 +305,7 @@ pub async fn get_topology_overview(
     // 集群信息
     let cluster = TopologyCluster {
         id: "rustfs-cluster".to_string(),
-        name: std::env::var("CLUSTER_NAME")
-            .unwrap_or_else(|_| "RustFS Cluster".to_string()),
+        name: std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "RustFS Cluster".to_string()),
         version: get_cluster_version(&client).await,
         summary: TopologyClusterSummary {
             nodes: nodes.len(),

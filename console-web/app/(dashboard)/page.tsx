@@ -3,14 +3,7 @@
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
-import {
-  RiAddLine,
-  RiArrowDownSLine,
-  RiFolderLine,
-  RiHardDrive2Line,
-  RiNodeTree,
-  RiServerLine,
-} from "@remixicon/react"
+import { RiAddLine, RiArrowDownSLine, RiFolderLine, RiHardDrive2Line, RiNodeTree, RiServerLine } from "@remixicon/react"
 import { Page } from "@/components/page"
 import { PageHeader } from "@/components/page-header"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -157,15 +150,18 @@ export default function DashboardPage() {
 
   const topologySummary = topology?.cluster.summary
   const tenantCount = topology?.namespaces.reduce((sum, ns) => sum + ns.tenants.length, 0) ?? 0
-  const unhealthyCount = topology?.namespaces.reduce((sum, ns) => sum + ns.tenants.filter((t) => t.state !== "Ready").length, 0) ?? 0
+  const unhealthyCount =
+    topology?.namespaces.reduce((sum, ns) => sum + ns.tenants.filter((t) => t.state !== "Ready").length, 0) ?? 0
 
   const allPods = topology?.namespaces.flatMap((ns) => ns.tenants.flatMap((t) => t.pods ?? [])) ?? []
   const podTotal = allPods.length
   const podRunning = allPods.filter((p) => p.phase === "Running").length
 
-  const totalCapacityBytes = topology?.namespaces.reduce(
-    (sum, ns) => sum + ns.tenants.reduce((s, t) => s + (t.summary.capacity_bytes ?? 0), 0), 0,
-  ) ?? 0
+  const totalCapacityBytes =
+    topology?.namespaces.reduce(
+      (sum, ns) => sum + ns.tenants.reduce((s, t) => s + (t.summary.capacity_bytes ?? 0), 0),
+      0,
+    ) ?? 0
 
   return (
     <Page>
@@ -190,7 +186,9 @@ export default function DashboardPage() {
               <div className="mt-2 flex items-baseline gap-2">
                 <span className="text-2xl font-semibold">{topologySummary?.tenants ?? tenantCount}</span>
                 {unhealthyCount > 0 && (
-                  <span className="text-sm font-medium text-destructive">{unhealthyCount} {t("unhealthy")}</span>
+                  <span className="text-sm font-medium text-destructive">
+                    {unhealthyCount} {t("unhealthy")}
+                  </span>
                 )}
               </div>
             </div>
@@ -198,7 +196,9 @@ export default function DashboardPage() {
               <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">{t("Pods")}</p>
               <div className="mt-2 flex items-baseline gap-2">
                 <span className="text-2xl font-semibold">{podTotal}</span>
-                <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">{podRunning} {t("running")}</span>
+                <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                  {podRunning} {t("running")}
+                </span>
               </div>
             </div>
             <div className="rounded-md border border-border bg-background px-3 py-3">
@@ -269,7 +269,9 @@ export default function DashboardPage() {
                                       <span className={cn("vtree-vstate", STATE_THEME[tenant.state].badge)}>
                                         {t(tenant.state)}
                                       </span>
-                                      <RiArrowDownSLine className={cn("vtree-vchevron", !isTreeExpanded(tenantId) && "rotate-180")} />
+                                      <RiArrowDownSLine
+                                        className={cn("vtree-vchevron", !isTreeExpanded(tenantId) && "rotate-180")}
+                                      />
                                     </button>
 
                                     {isTreeExpanded(tenantId) && pools.length > 0 && (
@@ -286,8 +288,15 @@ export default function DashboardPage() {
                                               >
                                                 <RiHardDrive2Line className="size-3.5" />
                                                 <span className="vtree-vbox-name">{pool.name}</span>
-                                                <span className="vtree-vmeta">{pool.servers}s&middot;{pool.volumes_per_server}v</span>
-                                                <RiArrowDownSLine className={cn("vtree-vchevron", !isTreeExpanded(poolId) && "rotate-180")} />
+                                                <span className="vtree-vmeta">
+                                                  {pool.servers}s&middot;{pool.volumes_per_server}v
+                                                </span>
+                                                <RiArrowDownSLine
+                                                  className={cn(
+                                                    "vtree-vchevron",
+                                                    !isTreeExpanded(poolId) && "rotate-180",
+                                                  )}
+                                                />
                                               </button>
 
                                               {isTreeExpanded(poolId) && poolPods.length > 0 && (
@@ -308,14 +317,18 @@ export default function DashboardPage() {
                                                         <p className="vtree-vtile-tip-name">{pod.name}</p>
                                                         <div className="vtree-vtile-tip-rows">
                                                           <span className="vtree-vtile-tip-label">{t("Phase")}</span>
-                                                          <span className={cn(
-                                                            "vtree-vtile-tip-val",
-                                                            pod.phase === "Running"
-                                                              ? "text-emerald-600 dark:text-emerald-400"
-                                                              : pod.phase === "Pending"
-                                                                ? "text-amber-600 dark:text-amber-400"
-                                                                : "text-red-600 dark:text-red-400",
-                                                          )}>{pod.phase}</span>
+                                                          <span
+                                                            className={cn(
+                                                              "vtree-vtile-tip-val",
+                                                              pod.phase === "Running"
+                                                                ? "text-emerald-600 dark:text-emerald-400"
+                                                                : pod.phase === "Pending"
+                                                                  ? "text-amber-600 dark:text-amber-400"
+                                                                  : "text-red-600 dark:text-red-400",
+                                                            )}
+                                                          >
+                                                            {pod.phase}
+                                                          </span>
                                                           <span className="vtree-vtile-tip-label">{t("Node")}</span>
                                                           <span className="vtree-vtile-tip-val">{pod.node ?? "-"}</span>
                                                           <span className="vtree-vtile-tip-label">{t("Ready")}</span>
@@ -354,9 +367,7 @@ export default function DashboardPage() {
               <RiNodeTree className="size-5" />
               <CardTitle className="text-base">{t("Cluster")}</CardTitle>
             </div>
-            <CardDescription className="text-sm">
-              {t("Cluster nodes, capacity and namespaces.")}
-            </CardDescription>
+            <CardDescription className="text-sm">{t("Cluster nodes, capacity and namespaces.")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex gap-2 border-b border-border">

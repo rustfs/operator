@@ -189,7 +189,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     setTenantYamlSnapshot("")
     setTenantYamlLoaded(false)
     setIsYamlEditable(!!initialYamlEditable)
-  }, [namespace, name])
+  }, [namespace, name, initialYamlEditable])
 
   useEffect(() => {
     setTab(normalizeTab(initialTab))

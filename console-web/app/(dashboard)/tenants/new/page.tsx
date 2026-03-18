@@ -249,18 +249,10 @@ export default function TenantCreatePage() {
           </CardHeader>
           <CardContent>
             <div className="flex gap-2">
-              <Button
-                type="button"
-                variant={mode === "form" ? "default" : "outline"}
-                onClick={() => setMode("form")}
-              >
+              <Button type="button" variant={mode === "form" ? "default" : "outline"} onClick={() => setMode("form")}>
                 {t("Form")}
               </Button>
-              <Button
-                type="button"
-                variant={mode === "yaml" ? "default" : "outline"}
-                onClick={() => setMode("yaml")}
-              >
+              <Button type="button" variant={mode === "yaml" ? "default" : "outline"} onClick={() => setMode("yaml")}>
                 {t("YAML")}
               </Button>
             </div>

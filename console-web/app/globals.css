@@ -187,7 +187,9 @@
     cursor: pointer;
     font-size: 13px;
     white-space: nowrap;
-    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+    transition:
+      box-shadow 0.15s ease,
+      border-color 0.15s ease;
   }
 
   .vtree-vbox:hover {
@@ -236,7 +238,9 @@
     height: 14px;
     flex-shrink: 0;
     opacity: 0.4;
-    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s;
+    transition:
+      transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+      opacity 0.15s;
   }
 
   .vtree-vbox:hover .vtree-vchevron {
@@ -392,7 +396,9 @@
     border-radius: 0.25rem;
     position: relative;
     cursor: default;
-    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    transition:
+      transform 0.12s ease,
+      box-shadow 0.12s ease;
   }
 
   .vtree-vtile:hover {
@@ -416,28 +422,40 @@
   }
 
   .vtree-vtile:hover.vtree-vtile--ok {
-    box-shadow: 0 0 10px 2px oklch(0.72 0.17 155 / 50%), inset 0 1px 0 oklch(0.82 0.12 155 / 40%);
+    box-shadow:
+      0 0 10px 2px oklch(0.72 0.17 155 / 50%),
+      inset 0 1px 0 oklch(0.82 0.12 155 / 40%);
   }
 
   .vtree-vtile:hover.vtree-vtile--warn {
-    box-shadow: 0 0 10px 2px oklch(0.78 0.16 80 / 50%), inset 0 1px 0 oklch(0.88 0.1 80 / 40%);
+    box-shadow:
+      0 0 10px 2px oklch(0.78 0.16 80 / 50%),
+      inset 0 1px 0 oklch(0.88 0.1 80 / 40%);
   }
 
   .vtree-vtile:hover.vtree-vtile--error {
-    box-shadow: 0 0 10px 2px oklch(0.58 0.22 27 / 50%), inset 0 1px 0 oklch(0.7 0.15 27 / 40%);
+    box-shadow:
+      0 0 10px 2px oklch(0.58 0.22 27 / 50%),
+      inset 0 1px 0 oklch(0.7 0.15 27 / 40%);
   }
 
   /* Dark mode: brighter glow on dark background */
   .dark .vtree-vtile:hover.vtree-vtile--ok {
-    box-shadow: 0 0 14px 3px oklch(0.72 0.17 155 / 60%), inset 0 1px 0 oklch(0.82 0.12 155 / 40%);
+    box-shadow:
+      0 0 14px 3px oklch(0.72 0.17 155 / 60%),
+      inset 0 1px 0 oklch(0.82 0.12 155 / 40%);
   }
 
   .dark .vtree-vtile:hover.vtree-vtile--warn {
-    box-shadow: 0 0 14px 3px oklch(0.78 0.16 80 / 60%), inset 0 1px 0 oklch(0.88 0.1 80 / 40%);
+    box-shadow:
+      0 0 14px 3px oklch(0.78 0.16 80 / 60%),
+      inset 0 1px 0 oklch(0.88 0.1 80 / 40%);
   }
 
   .dark .vtree-vtile:hover.vtree-vtile--error {
-    box-shadow: 0 0 14px 3px oklch(0.58 0.22 27 / 60%), inset 0 1px 0 oklch(0.7 0.15 27 / 40%);
+    box-shadow:
+      0 0 14px 3px oklch(0.58 0.22 27 / 60%),
+      inset 0 1px 0 oklch(0.7 0.15 27 / 40%);
   }
 
   /* ---- Tooltip popover ---- */
@@ -527,7 +545,6 @@
     box-shadow: 0 2px 8px color-mix(in oklab, white 4%, transparent);
     border-color: color-mix(in oklab, var(--border) 40%, white 60%);
   }
-
 }
 
 @keyframes fadeInWord {
