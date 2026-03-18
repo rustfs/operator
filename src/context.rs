@@ -62,6 +62,15 @@ pub enum Error {
         length: usize,
     },
 
+    #[snafu(display("KMS secret '{}' not found", name))]
+    KmsSecretNotFound { name: String },
+
+    #[snafu(display("KMS secret '{}' missing required key '{}'", secret_name, key))]
+    KmsSecretMissingKey { secret_name: String, key: String },
+
+    #[snafu(display("KMS configuration invalid: {}", message))]
+    KmsConfigInvalid { message: String },
+
     #[snafu(transparent)]
     Serde { source: serde_json::Error },
 }
@@ -282,6 +291,93 @@ impl Context {
                     return CredentialSecretMissingKeySnafu {
                         secret_name: cfg.name.clone(),
                         key: secret_key,
+                    }
+                    .fail();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates encryption configuration and the KMS Secret.
+    ///
+    /// Checks:
+    /// 1. Vault endpoint is non-empty when backend is Vault.
+    /// 2. KMS Secret exists and contains the correct keys for the auth type.
+    pub async fn validate_kms_secret(&self, tenant: &Tenant) -> Result<(), Error> {
+        use crate::types::v1alpha1::encryption::{KmsBackendType, VaultAuthType};
+
+        let Some(ref enc) = tenant.spec.encryption else {
+            return Ok(());
+        };
+        if !enc.enabled {
+            return Ok(());
+        }
+
+        // Validate Vault endpoint is non-empty and kms_secret is required for Vault
+        if enc.backend == KmsBackendType::Vault {
+            let endpoint_empty = enc
+                .vault
+                .as_ref()
+                .map(|v| v.endpoint.is_empty())
+                .unwrap_or(true);
+            if endpoint_empty {
+                return Err(Error::KmsConfigInvalid {
+                    message: "Vault endpoint must not be empty".to_string(),
+                });
+            }
+            // Vault backend requires credentials (token or AppRole) from a Secret
+            let secret_missing = enc
+                .kms_secret
+                .as_ref()
+                .map(|s| s.name.is_empty())
+                .unwrap_or(true);
+            if secret_missing {
+                return Err(Error::KmsConfigInvalid {
+                    message: "Vault backend requires kmsSecret with vault-token or vault-approle-id/vault-approle-secret".to_string(),
+                });
+            }
+        }
+
+        let Some(ref secret_ref) = enc.kms_secret else {
+            return Ok(());
+        };
+        if secret_ref.name.is_empty() {
+            return Ok(());
+        }
+
+        let secret: Secret = self
+            .get(&secret_ref.name, &tenant.namespace()?)
+            .await
+            .map_err(|_| Error::KmsSecretNotFound {
+                name: secret_ref.name.clone(),
+            })?;
+
+        if enc.backend == KmsBackendType::Vault {
+            let is_approle = enc.vault.as_ref().and_then(|v| v.auth_type.as_ref())
+                == Some(&VaultAuthType::Approle);
+
+            if is_approle {
+                for key in ["vault-approle-id", "vault-approle-secret"] {
+                    let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(key));
+                    if !has_key {
+                        return KmsSecretMissingKeySnafu {
+                            secret_name: secret_ref.name.clone(),
+                            key: key.to_string(),
+                        }
+                        .fail();
+                    }
+                }
+            } else {
+                let has_token = secret
+                    .data
+                    .as_ref()
+                    .is_some_and(|d| d.contains_key("vault-token"));
+                if !has_token {
+                    return KmsSecretMissingKeySnafu {
+                        secret_name: secret_ref.name.clone(),
+                        key: "vault-token".to_string(),
                     }
                     .fail();
                 }

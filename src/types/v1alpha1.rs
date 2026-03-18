@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod encryption;
 pub mod k8s;
 pub mod logging;
 pub mod persistence;

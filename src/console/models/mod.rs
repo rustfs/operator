@@ -14,6 +14,7 @@
 
 pub mod auth;
 pub mod cluster;
+pub mod encryption;
 pub mod event;
 pub mod pod;
 pub mod pool;

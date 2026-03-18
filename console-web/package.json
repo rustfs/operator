@@ -3,18 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 22) { console.error('Node.js >= 22 is required. Please run: nvm use v22'); process.exit(1); }\"",
-    "predev": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 22) { console.error('Node.js >= 22 is required. Please run: nvm use v22'); process.exit(1); }\"",
-    "prebuild": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 22) { console.error('Node.js >= 22 is required. Please run: nvm use v22'); process.exit(1); }\"",
-    "prestart": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 22) { console.error('Node.js >= 22 is required. Please run: nvm use v22'); process.exit(1); }\"",
-    "prelint": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 22) { console.error('Node.js >= 22 is required. Please run: nvm use v22'); process.exit(1); }\"",
+    "check:node": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 20) { console.error('Node.js >= 20 is required.'); process.exit(1); }\"",
+    "predev": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 20) { console.error('Node.js >= 20 is required.'); process.exit(1); }\"",
+    "prebuild": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 20) { console.error('Node.js >= 20 is required.'); process.exit(1); }\"",
+    "prestart": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 20) { console.error('Node.js >= 20 is required.'); process.exit(1); }\"",
+    "prelint": "node -e \"const major = Number(process.versions.node.split('.')[0]); if (!Number.isFinite(major) || major < 20) { console.error('Node.js >= 20 is required.'); process.exit(1); }\"",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "dependencies": {
     "@remixicon/react": "^4.9.0",

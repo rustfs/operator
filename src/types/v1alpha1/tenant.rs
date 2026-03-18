@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::types::v1alpha1::encryption::{EncryptionConfig, PodSecurityContextOverride};
 use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::logging::LoggingConfig;
 use crate::types::v1alpha1::pool::Pool;
@@ -140,6 +141,17 @@ pub struct TenantSpec {
     /// For production use, always configure credentials via Secret or environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creds_secret: Option<corev1::LocalObjectReference>,
+
+    /// Encryption / KMS configuration for server-side encryption.
+    /// When enabled, the operator injects KMS environment variables and mounts
+    /// secrets into RustFS pods so the in-process `rustfs-kms` library is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionConfig>,
+
+    /// Override the default Pod SecurityContext (runAsUser/runAsGroup/fsGroup = 10001).
+    /// Applies to all RustFS pods in this Tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<PodSecurityContextOverride>,
 }
 
 impl Tenant {

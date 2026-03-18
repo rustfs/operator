@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: pre-commit fmt fmt-check clippy test build help console-lint console-fmt console-fmt-check
+.PHONY: pre-commit fmt fmt-check clippy test build docker-build-operator docker-build-console-web docker-build-all help console-lint console-fmt console-fmt-check
 
 # 默认目标
 help:
@@ -25,6 +25,9 @@ help:
 	@echo "  make clippy           - 运行 clippy 检查"
 	@echo "  make test             - 运行 Rust 测试"
 	@echo "  make build            - 构建项目"
+	@echo "  make docker-build-operator  - 构建 operator 镜像 (IMAGE_REPO?=rustfs/operator IMAGE_TAG?=dev)"
+	@echo "  make docker-build-console-web - 构建 console-web 前端镜像 (CONSOLE_WEB_IMAGE_REPO?=rustfs/console-web CONSOLE_WEB_IMAGE_TAG?=dev)"
+	@echo "  make docker-build-all       - 构建 operator + console-web 两个镜像"
 	@echo "  make console-lint     - 前端 ESLint 检查 (console-web)"
 	@echo "  make console-fmt     - 前端 Prettier 自动格式化 (console-web)"
 	@echo "  make console-fmt-check - 前端 Prettier 格式检查 (console-web)"
@@ -64,3 +67,16 @@ console-fmt-check:
 # 构建
 build:
 	cargo build --release
+
+# 构建 Docker 镜像（operator：含 controller + console API；console-web：前端静态资源）
+IMAGE_REPO ?= rustfs/operator
+IMAGE_TAG  ?= dev
+docker-build-operator:
+	docker build -t $(IMAGE_REPO):$(IMAGE_TAG) .
+
+CONSOLE_WEB_IMAGE_REPO ?= rustfs/console-web
+CONSOLE_WEB_IMAGE_TAG  ?= dev
+docker-build-console-web:
+	docker build -t $(CONSOLE_WEB_IMAGE_REPO):$(CONSOLE_WEB_IMAGE_TAG) -f console-web/Dockerfile console-web
+
+docker-build-all: docker-build-operator docker-build-console-web

@@ -32,12 +32,7 @@ import * as api from "@/lib/api"
 import { ApiError } from "@/lib/api-client"
 import { routes } from "@/lib/routes"
 import { parseSizeToBytes, formatBinaryBytes } from "@/lib/utils"
-import type {
-  ServiceInfo,
-  TenantLifecycleState,
-  TenantListItem,
-  TenantStateCountsResponse,
-} from "@/types/api"
+import type { ServiceInfo, TenantLifecycleState, TenantListItem, TenantStateCountsResponse } from "@/types/api"
 
 const ALL_NAMESPACES = "__all__"
 const TENANT_STATES: TenantLifecycleState[] = ["Ready", "Updating", "Degraded", "NotReady", "Unknown"]
@@ -102,7 +97,10 @@ function makeTenantKey(namespace: string, name: string): string {
 }
 
 function normalizeTenantState(state: string | null | undefined): TenantLifecycleState {
-  const normalized = (state ?? "").trim().toLowerCase().replace(/[\s_-]/g, "")
+  const normalized = (state ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]/g, "")
   if (normalized === "ready" || normalized === "running") return "Ready"
   if (normalized === "updating" || normalized.includes("provision")) return "Updating"
   if (normalized === "degraded") return "Degraded"
@@ -141,11 +139,7 @@ function parseStateCounts(payload: TenantStateCountsResponse): Record<TenantLife
       return result
     }
 
-    const listLike = Array.isArray(obj.state_counts)
-      ? obj.state_counts
-      : Array.isArray(obj.counts)
-        ? obj.counts
-        : null
+    const listLike = Array.isArray(obj.state_counts) ? obj.state_counts : Array.isArray(obj.counts) ? obj.counts : null
 
     if (listLike) {
       for (const item of listLike) {
@@ -403,7 +397,9 @@ export default function TenantsListPage() {
           type="button"
           onClick={() => setSelectedState(null)}
           className={`rounded-md border bg-background px-3 py-3 text-left transition ${
-            selectedState === null ? "border-slate-300 ring-1 ring-slate-200" : "border-border hover:border-muted-foreground/40"
+            selectedState === null
+              ? "border-slate-300 ring-1 ring-slate-200"
+              : "border-border hover:border-muted-foreground/40"
           }`}
         >
           <div className="flex items-center justify-between">
@@ -411,7 +407,9 @@ export default function TenantsListPage() {
             <span className="size-2 rounded-full bg-slate-500" />
           </div>
           <p className="mt-2 text-3xl leading-none font-semibold">{totalCount}</p>
-          <p className="mt-1 text-[11px] text-muted-foreground">{selectedState === null ? t("Filtered") : t("Click to filter")}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {selectedState === null ? t("Filtered") : t("Click to filter")}
+          </p>
         </button>
         {TENANT_STATES.map((state) => {
           const theme = STATE_THEME[state]
@@ -476,7 +474,9 @@ export default function TenantsListPage() {
         </div>
       ) : filteredTenants.length === 0 ? (
         <div className="mt-4 rounded-lg border border-dashed border-border py-12 text-center text-sm text-muted-foreground">
-          {searchText || selectedState ? t("No tenants match the current filters.") : t("No tenants yet. Create one to get started.")}
+          {searchText || selectedState
+            ? t("No tenants match the current filters.")
+            : t("No tenants yet. Create one to get started.")}
           <div className="mt-4">
             <Button asChild size="sm">
               <Link href={routes.tenantNew} prefetch={false}>
@@ -519,7 +519,9 @@ export default function TenantsListPage() {
                     </TableCell>
                     <TableCell>{tenant.namespace}</TableCell>
                     <TableCell>
-                      <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${STATE_THEME[normalizedState].badge}`}>
+                      <span
+                        className={`inline-flex rounded border px-2 py-0.5 text-xs ${STATE_THEME[normalizedState].badge}`}
+                      >
                         {t(normalizedState)}
                       </span>
                     </TableCell>
@@ -540,7 +542,9 @@ export default function TenantsListPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-44">
-                          <DropdownMenuItem onSelect={() => router.push(routes.tenantDetail(tenant.namespace, tenant.name))}>
+                          <DropdownMenuItem
+                            onSelect={() => router.push(routes.tenantDetail(tenant.namespace, tenant.name))}
+                          >
                             <RiEyeLine className="size-4" />
                             {t("View Details")}
                           </DropdownMenuItem>

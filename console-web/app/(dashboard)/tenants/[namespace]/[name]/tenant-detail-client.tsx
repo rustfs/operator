@@ -29,10 +29,12 @@ import type {
   PodListItem,
   EventItem,
   AddPoolRequest,
+  EncryptionInfoResponse,
+  UpdateEncryptionRequest,
 } from "@/types/api"
 import { ApiError } from "@/lib/api-client"
 
-type Tab = "overview" | "edit" | "pools" | "pods" | "events"
+type Tab = "overview" | "edit" | "pools" | "pods" | "events" | "encryption" | "security"
 
 interface TenantDetailClientProps {
   namespace: string
@@ -52,6 +54,10 @@ function normalizeTab(value?: string | null): Tab {
       return "pods"
     case "events":
       return "events"
+    case "encryption":
+      return "encryption"
+    case "security":
+      return "security"
     default:
       return "overview"
   }
@@ -89,6 +95,43 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   const [tenantYamlLoading, setTenantYamlLoading] = useState(false)
   const [isYamlEditable, setIsYamlEditable] = useState(!!initialYamlEditable)
   const [editLoading, setEditLoading] = useState(false)
+
+  // Encryption tab state
+  const [encLoaded, setEncLoaded] = useState(false)
+  const [encLoading, setEncLoading] = useState(false)
+  const [encSaving, setEncSaving] = useState(false)
+  const [encEnabled, setEncEnabled] = useState(false)
+  const [encBackend, setEncBackend] = useState<"local" | "vault">("local")
+  const [encVault, setEncVault] = useState({
+    endpoint: "",
+    engine: "",
+    namespace: "",
+    prefix: "",
+    authType: "token",
+    tlsSkipVerify: false,
+    customCertificates: false,
+  })
+  const [encAppRole, setEncAppRole] = useState({
+    engine: "",
+    retrySeconds: "",
+  })
+  const [encLocal, setEncLocal] = useState({
+    keyDirectory: "",
+    masterKeyId: "",
+  })
+  const [encKmsSecretName, setEncKmsSecretName] = useState("")
+  const [encPingSeconds, setEncPingSeconds] = useState("")
+
+  // Security tab state
+  const [secCtxLoaded, setSecCtxLoaded] = useState(false)
+  const [secCtxLoading, setSecCtxLoading] = useState(false)
+  const [secCtxSaving, setSecCtxSaving] = useState(false)
+  const [secCtx, setSecCtx] = useState({
+    runAsUser: "",
+    runAsGroup: "",
+    fsGroup: "",
+    runAsNonRoot: true,
+  })
 
   const loadTenant = async () => {
     const [detailResult, poolResult, podResult, eventResult] = await Promise.allSettled([
@@ -146,7 +189,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     setTenantYamlSnapshot("")
     setTenantYamlLoaded(false)
     setIsYamlEditable(!!initialYamlEditable)
-  }, [namespace, name])
+  }, [namespace, name, initialYamlEditable])
 
   useEffect(() => {
     setTab(normalizeTab(initialTab))
@@ -157,6 +200,54 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     if (tab !== "edit" || tenantYamlLoaded || tenantYamlLoading) return
     loadTenantYaml()
   }, [tab, tenantYamlLoaded, tenantYamlLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
+
+  useEffect(() => {
+    if (tab !== "encryption" || encLoaded || encLoading) return
+    loadEncryption()
+  }, [tab, encLoaded, encLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
+
+  useEffect(() => {
+    if (tab !== "security" || secCtxLoaded || secCtxLoading) return
+    loadSecurityContext()
+  }, [tab, secCtxLoaded, secCtxLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
+
+  const loadSecurityContext = async () => {
+    setSecCtxLoading(true)
+    try {
+      const data = await api.getSecurityContext(namespace, name)
+      setSecCtx({
+        runAsUser: data.runAsUser?.toString() ?? "",
+        runAsGroup: data.runAsGroup?.toString() ?? "",
+        fsGroup: data.fsGroup?.toString() ?? "",
+        runAsNonRoot: data.runAsNonRoot ?? true,
+      })
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Failed to load security context"))
+    } finally {
+      setSecCtxLoaded(true)
+      setSecCtxLoading(false)
+    }
+  }
+
+  const handleSaveSecurityContext = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSecCtxSaving(true)
+    try {
+      await api.updateSecurityContext(namespace, name, {
+        runAsUser: secCtx.runAsUser ? parseInt(secCtx.runAsUser, 10) : undefined,
+        runAsGroup: secCtx.runAsGroup ? parseInt(secCtx.runAsGroup, 10) : undefined,
+        fsGroup: secCtx.fsGroup ? parseInt(secCtx.fsGroup, 10) : undefined,
+        runAsNonRoot: secCtx.runAsNonRoot,
+      })
+      toast.success(t("SecurityContext updated"))
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Update failed"))
+    } finally {
+      setSecCtxSaving(false)
+    }
+  }
 
   const handleDeleteTenant = async () => {
     if (!confirm(t("Delete this tenant? This cannot be undone."))) return
@@ -276,6 +367,92 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     }
   }
 
+  const loadEncryption = async () => {
+    setEncLoading(true)
+    try {
+      const data = await api.getEncryption(namespace, name)
+      setEncEnabled(data.enabled)
+      setEncBackend((data.backend === "vault" ? "vault" : "local") as "local" | "vault")
+      if (data.vault) {
+        setEncVault({
+          endpoint: data.vault.endpoint || "",
+          engine: data.vault.engine || "",
+          namespace: data.vault.namespace || "",
+          prefix: data.vault.prefix || "",
+          authType: data.vault.authType || "token",
+          tlsSkipVerify: data.vault.tlsSkipVerify || false,
+          customCertificates: data.vault.customCertificates || false,
+        })
+        if (data.vault.appRole) {
+          setEncAppRole({
+            engine: data.vault.appRole.engine || "",
+            retrySeconds: data.vault.appRole.retrySeconds?.toString() || "",
+          })
+        }
+      }
+      if (data.local) {
+        setEncLocal({
+          keyDirectory: data.local.keyDirectory || "",
+          masterKeyId: data.local.masterKeyId || "",
+        })
+      }
+      setEncKmsSecretName(data.kmsSecretName || "")
+      setEncPingSeconds(data.pingSeconds?.toString() || "")
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Failed to load encryption config"))
+    } finally {
+      setEncLoaded(true)
+      setEncLoading(false)
+    }
+  }
+
+  const handleSaveEncryption = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (encEnabled && encBackend === "vault" && !encVault.endpoint.trim()) {
+      toast.warning(t("Vault endpoint is required"))
+      return
+    }
+    setEncSaving(true)
+    try {
+      const body: UpdateEncryptionRequest = {
+        enabled: encEnabled,
+        backend: encBackend,
+        kmsSecretName: encKmsSecretName || undefined,
+        pingSeconds: encPingSeconds ? parseInt(encPingSeconds, 10) : undefined,
+      }
+      if (encBackend === "vault") {
+        body.vault = {
+          endpoint: encVault.endpoint,
+          engine: encVault.engine || undefined,
+          namespace: encVault.namespace || undefined,
+          prefix: encVault.prefix || undefined,
+          authType: encVault.authType || undefined,
+          tlsSkipVerify: encVault.tlsSkipVerify || undefined,
+          customCertificates: encVault.customCertificates || undefined,
+        }
+        if (encVault.authType === "approle") {
+          body.vault.appRole = {
+            engine: encAppRole.engine || undefined,
+            retrySeconds: encAppRole.retrySeconds ? parseInt(encAppRole.retrySeconds, 10) : undefined,
+          }
+        }
+      } else {
+        body.local = {
+          keyDirectory: encLocal.keyDirectory || undefined,
+          masterKeyId: encLocal.masterKeyId || undefined,
+        }
+      }
+      const res = await api.updateEncryption(namespace, name, body)
+      toast.success(res.message || t("Encryption config updated"))
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Update failed"))
+    } finally {
+      setEncSaving(false)
+    }
+  }
+
   const handleCopyYaml = async () => {
     try {
       await navigator.clipboard.writeText(tenantYaml)
@@ -298,6 +475,8 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     { id: "pools", labelKey: "Pools" },
     { id: "pods", labelKey: "Pods" },
     { id: "events", labelKey: "Events" },
+    { id: "encryption", labelKey: "Encryption" },
+    { id: "security", labelKey: "Security" },
     { id: "edit", labelKey: "YAML" },
   ]
 
@@ -672,6 +851,359 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
             </Card>
           )}
         </div>
+      )}
+
+      {tab === "encryption" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t("Encryption")}</CardTitle>
+            <CardDescription>
+              {t("Configure server-side encryption (SSE) with a KMS backend. RustFS supports Local and Vault.")}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {encLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Spinner className="size-4" />
+                {t("Loading encryption config...")}
+              </div>
+            ) : (
+              <form onSubmit={handleSaveEncryption} className="space-y-6">
+                {/* Enable / Disable toggle */}
+                <div className="flex items-center gap-3">
+                  <label htmlFor="enc-toggle" className="text-sm font-medium">
+                    {t("Enable Encryption")}
+                  </label>
+                  <input
+                    id="enc-toggle"
+                    type="checkbox"
+                    checked={encEnabled}
+                    onChange={(e) => setEncEnabled(e.target.checked)}
+                    className="h-4 w-4 rounded border-border"
+                  />
+                </div>
+
+                {encEnabled && (
+                  <div className="space-y-6">
+                    {/* Backend selector */}
+                    <div className="space-y-2">
+                      <Label>{t("KMS Backend")}</Label>
+                      <div className="flex gap-4">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="enc-backend"
+                            value="vault"
+                            checked={encBackend === "vault"}
+                            onChange={() => setEncBackend("vault")}
+                          />
+                          Vault
+                        </label>
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="enc-backend"
+                            value="local"
+                            checked={encBackend === "local"}
+                            onChange={() => setEncBackend("local")}
+                          />
+                          Local
+                        </label>
+                      </div>
+                    </div>
+
+                    {/* Vault configuration */}
+                    {encBackend === "vault" && (
+                      <div className="space-y-4 rounded-md border border-border p-4">
+                        <h4 className="text-sm font-semibold">{t("Vault Configuration")}</h4>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>{t("Endpoint")}*</Label>
+                            <Input
+                              required
+                              placeholder="https://vault.example.com:8200"
+                              value={encVault.endpoint}
+                              onChange={(e) => setEncVault((v) => ({ ...v, endpoint: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Engine")}</Label>
+                            <Input
+                              placeholder="kv"
+                              value={encVault.engine}
+                              onChange={(e) => setEncVault((v) => ({ ...v, engine: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Namespace")}</Label>
+                            <Input
+                              placeholder={`${t("Optional")} – Vault Enterprise`}
+                              value={encVault.namespace}
+                              onChange={(e) => setEncVault((v) => ({ ...v, namespace: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Prefix")}</Label>
+                            <Input
+                              placeholder={t("Optional")}
+                              value={encVault.prefix}
+                              onChange={(e) => setEncVault((v) => ({ ...v, prefix: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-6">
+                          <div className="flex items-center gap-3">
+                            <label htmlFor="vault-tls-skip" className="text-sm">
+                              {t("Skip TLS Verification")}
+                            </label>
+                            <input
+                              id="vault-tls-skip"
+                              type="checkbox"
+                              checked={encVault.tlsSkipVerify}
+                              onChange={(e) => setEncVault((v) => ({ ...v, tlsSkipVerify: e.target.checked }))}
+                              className="h-4 w-4 rounded border-border"
+                            />
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <label htmlFor="vault-custom-certs" className="text-sm">
+                              {t("Custom Certificates")}
+                            </label>
+                            <input
+                              id="vault-custom-certs"
+                              type="checkbox"
+                              checked={encVault.customCertificates}
+                              onChange={(e) => setEncVault((v) => ({ ...v, customCertificates: e.target.checked }))}
+                              className="h-4 w-4 rounded border-border"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Auth type selector */}
+                        <div className="space-y-2 pt-2">
+                          <Label>{t("Auth Type")}</Label>
+                          <div className="flex gap-4">
+                            <label className="flex items-center gap-2 text-sm">
+                              <input
+                                type="radio"
+                                name="vault-auth"
+                                value="token"
+                                checked={encVault.authType !== "approle"}
+                                onChange={() => setEncVault((v) => ({ ...v, authType: "token" }))}
+                              />
+                              Token
+                            </label>
+                            <label className="flex items-center gap-2 text-sm">
+                              <input
+                                type="radio"
+                                name="vault-auth"
+                                value="approle"
+                                checked={encVault.authType === "approle"}
+                                onChange={() => setEncVault((v) => ({ ...v, authType: "approle" }))}
+                              />
+                              AppRole
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* AppRole section */}
+                        {encVault.authType === "approle" && (
+                          <div className="space-y-4 rounded-md border border-dashed border-border p-4">
+                            <div className="flex items-center gap-2">
+                              <h5 className="text-sm font-semibold">App Role</h5>
+                              <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300">
+                                {t("Not yet implemented in backend")}
+                              </span>
+                            </div>
+                            <div className="grid gap-4 sm:grid-cols-2">
+                              <div className="space-y-2">
+                                <Label>{t("Engine")}</Label>
+                                <Input
+                                  placeholder="approle"
+                                  value={encAppRole.engine}
+                                  onChange={(e) => setEncAppRole((a) => ({ ...a, engine: e.target.value }))}
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label>{t("Retry (Seconds)")}</Label>
+                                <Input
+                                  type="number"
+                                  placeholder="10"
+                                  value={encAppRole.retrySeconds}
+                                  onChange={(e) => setEncAppRole((a) => ({ ...a, retrySeconds: e.target.value }))}
+                                />
+                              </div>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              {t(
+                                "AppRole ID and Secret are stored in the KMS Secret (keys: vault-approle-id, vault-approle-secret).",
+                              )}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Local configuration */}
+                    {encBackend === "local" && (
+                      <div className="space-y-4 rounded-md border border-border p-4">
+                        <h4 className="text-sm font-semibold">{t("Local KMS Configuration")}</h4>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>{t("Key Directory")}</Label>
+                            <Input
+                              placeholder="/data/kms-keys"
+                              value={encLocal.keyDirectory}
+                              onChange={(e) => setEncLocal((l) => ({ ...l, keyDirectory: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Master Key ID")}</Label>
+                            <Input
+                              placeholder="default-master-key"
+                              value={encLocal.masterKeyId}
+                              onChange={(e) => setEncLocal((l) => ({ ...l, masterKeyId: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Status — Ping is mainly useful for remote backends (Vault) */}
+                    {encBackend === "vault" && (
+                      <div className="space-y-4 rounded-md border border-border p-4">
+                        <h4 className="text-sm font-semibold">{t("Status")}</h4>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>{t("Ping (Seconds)")}</Label>
+                            <Input
+                              type="number"
+                              placeholder={t("Optional")}
+                              value={encPingSeconds}
+                              onChange={(e) => setEncPingSeconds(e.target.value)}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              {t("Health check interval for KMS connectivity.")}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* KMS Secret name */}
+                    <div className="space-y-2">
+                      <Label>{t("KMS Secret Name")}</Label>
+                      <Input
+                        placeholder={`${t("Optional")} – ${t("Secret containing vault-token and TLS certs")}`}
+                        value={encKmsSecretName}
+                        onChange={(e) => setEncKmsSecretName(e.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {encBackend === "vault"
+                          ? encVault.authType === "approle"
+                            ? t("Secret must contain 'vault-approle-id' and 'vault-approle-secret'.") +
+                              (encVault.customCertificates
+                                ? " " + t("Plus TLS certs: vault-ca-cert, vault-client-cert, vault-client-key.")
+                                : "")
+                            : t("Secret must contain key 'vault-token'.") +
+                              (encVault.customCertificates
+                                ? " " + t("Plus TLS certs: vault-ca-cert, vault-client-cert, vault-client-key.")
+                                : "")
+                          : t("Not required for Local backend.")}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Save button */}
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={encSaving}>
+                    {encSaving && <Spinner className="mr-2 size-4" />}
+                    {encSaving ? t("Saving...") : t("Save")}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={encLoading} onClick={loadEncryption}>
+                    {encLoading && <Spinner className="mr-2 size-4" />}
+                    {t("Reload")}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab === "security" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t("SecurityContext")}</CardTitle>
+            <CardDescription>
+              {t(
+                "Override Pod SecurityContext for RustFS pods (runAsUser, runAsGroup, fsGroup). Changes apply after Pods are recreated.",
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {secCtxLoading ? (
+              <div className="flex gap-2 text-sm text-muted-foreground">
+                <Spinner className="size-4" />
+                {t("Loading...")}
+              </div>
+            ) : (
+              <form onSubmit={handleSaveSecurityContext} className="space-y-6">
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="space-y-2">
+                    <Label>{t("Run As User")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={secCtx.runAsUser}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsUser: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("Run As Group")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={secCtx.runAsGroup}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsGroup: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("FsGroup")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={secCtx.fsGroup}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, fsGroup: e.target.value }))}
+                    />
+                  </div>
+                  <div className="flex items-end gap-3 pb-2">
+                    <label htmlFor="sec-nonroot" className="text-sm whitespace-nowrap">
+                      {t("Do not run as Root")}
+                    </label>
+                    <input
+                      id="sec-nonroot"
+                      type="checkbox"
+                      checked={secCtx.runAsNonRoot}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsNonRoot: e.target.checked }))}
+                      className="h-4 w-4 rounded border-border"
+                    />
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={secCtxSaving}>
+                    {secCtxSaving && <Spinner className="mr-2 size-4" />}
+                    {secCtxSaving ? t("Saving...") : t("Save")}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={secCtxLoading} onClick={loadSecurityContext}>
+                    {secCtxLoading && <Spinner className="mr-2 size-4" />}
+                    {t("Reload")}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {tab === "events" && (

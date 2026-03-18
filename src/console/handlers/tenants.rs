@@ -17,7 +17,10 @@ use crate::console::{
     models::tenant::*,
     state::Claims,
 };
-use crate::types::v1alpha1::{persistence::PersistenceConfig, pool::Pool, tenant::Tenant};
+use crate::types::v1alpha1::{
+    encryption::PodSecurityContextOverride, persistence::PersistenceConfig, pool::Pool,
+    tenant::Tenant,
+};
 use axum::{
     Extension, Json,
     extract::{Path, Query},
@@ -246,6 +249,16 @@ pub async fn create_tenant(
         })
         .collect();
 
+    let security_context = req
+        .security_context
+        .as_ref()
+        .map(|sc| PodSecurityContextOverride {
+            run_as_user: sc.run_as_user,
+            run_as_group: sc.run_as_group,
+            fs_group: sc.fs_group,
+            run_as_non_root: sc.run_as_non_root,
+        });
+
     let tenant = Tenant {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(req.name.clone()),
@@ -259,6 +272,7 @@ pub async fn create_tenant(
             creds_secret: req
                 .creds_secret
                 .map(|name| corev1::LocalObjectReference { name }),
+            security_context,
             ..Default::default()
         },
         status: None,
