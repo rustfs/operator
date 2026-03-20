@@ -9,27 +9,15 @@ import {
   RiArrowLeftLine,
   RiDeleteBinLine,
   RiAddLine,
+  RiFileCopyLine,
   RiFileList3Line,
   RiRestartLine,
 } from "@remixicon/react"
 import { Page } from "@/components/page"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
@@ -41,22 +29,45 @@ import type {
   PodListItem,
   EventItem,
   AddPoolRequest,
-  UpdateTenantRequest,
+  EncryptionInfoResponse,
+  UpdateEncryptionRequest,
 } from "@/types/api"
 import { ApiError } from "@/lib/api-client"
 
-type Tab = "overview" | "edit" | "pools" | "pods" | "events"
+type Tab = "overview" | "edit" | "pools" | "pods" | "events" | "encryption" | "security"
 
 interface TenantDetailClientProps {
   namespace: string
   name: string
+  initialTab?: string | null
+  initialYamlEditable?: boolean
 }
 
-export function TenantDetailClient({ namespace, name }: TenantDetailClientProps) {
+function normalizeTab(value?: string | null): Tab {
+  switch ((value ?? "").toLowerCase()) {
+    case "edit":
+    case "yaml":
+      return "edit"
+    case "pools":
+      return "pools"
+    case "pods":
+      return "pods"
+    case "events":
+      return "events"
+    case "encryption":
+      return "encryption"
+    case "security":
+      return "security"
+    default:
+      return "overview"
+  }
+}
+
+export function TenantDetailClient({ namespace, name, initialTab, initialYamlEditable }: TenantDetailClientProps) {
   const router = useRouter()
   const { t } = useTranslation()
 
-  const [tab, setTab] = useState<Tab>("overview")
+  const [tab, setTab] = useState<Tab>(() => normalizeTab(initialTab))
   const [tenant, setTenant] = useState<TenantDetailsResponse | null>(null)
   const [pools, setPools] = useState<PoolDetails[]>([])
   const [pods, setPods] = useState<PodListItem[]>([])
@@ -78,8 +89,49 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
   const [logsPod, setLogsPod] = useState<string | null>(null)
   const [logsContent, setLogsContent] = useState("")
   const [logsLoading, setLogsLoading] = useState(false)
-  const [editForm, setEditForm] = useState<UpdateTenantRequest>({})
+  const [tenantYaml, setTenantYaml] = useState("")
+  const [tenantYamlSnapshot, setTenantYamlSnapshot] = useState("")
+  const [tenantYamlLoaded, setTenantYamlLoaded] = useState(false)
+  const [tenantYamlLoading, setTenantYamlLoading] = useState(false)
+  const [isYamlEditable, setIsYamlEditable] = useState(!!initialYamlEditable)
   const [editLoading, setEditLoading] = useState(false)
+
+  // Encryption tab state
+  const [encLoaded, setEncLoaded] = useState(false)
+  const [encLoading, setEncLoading] = useState(false)
+  const [encSaving, setEncSaving] = useState(false)
+  const [encEnabled, setEncEnabled] = useState(false)
+  const [encBackend, setEncBackend] = useState<"local" | "vault">("local")
+  const [encVault, setEncVault] = useState({
+    endpoint: "",
+    engine: "",
+    namespace: "",
+    prefix: "",
+    authType: "token",
+    tlsSkipVerify: false,
+    customCertificates: false,
+  })
+  const [encAppRole, setEncAppRole] = useState({
+    engine: "",
+    retrySeconds: "",
+  })
+  const [encLocal, setEncLocal] = useState({
+    keyDirectory: "",
+    masterKeyId: "",
+  })
+  const [encKmsSecretName, setEncKmsSecretName] = useState("")
+  const [encPingSeconds, setEncPingSeconds] = useState("")
+
+  // Security tab state
+  const [secCtxLoaded, setSecCtxLoaded] = useState(false)
+  const [secCtxLoading, setSecCtxLoading] = useState(false)
+  const [secCtxSaving, setSecCtxSaving] = useState(false)
+  const [secCtx, setSecCtx] = useState({
+    runAsUser: "",
+    runAsGroup: "",
+    fsGroup: "",
+    runAsNonRoot: true,
+  })
 
   const loadTenant = async () => {
     const [detailResult, poolResult, podResult, eventResult] = await Promise.allSettled([
@@ -113,9 +165,89 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
     setLoading(false)
   }
 
+  const loadTenantYaml = async () => {
+    setTenantYamlLoading(true)
+    try {
+      const res = await api.getTenantYaml(namespace, name)
+      setTenantYaml(res.yaml)
+      setTenantYamlSnapshot(res.yaml)
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Failed to load tenant YAML"))
+    } finally {
+      setTenantYamlLoaded(true)
+      setTenantYamlLoading(false)
+    }
+  }
+
   useEffect(() => {
     loadTenant()
   }, [namespace, name]) // eslint-disable-line react-hooks/exhaustive-deps -- reload when route params change
+
+  useEffect(() => {
+    setTenantYaml("")
+    setTenantYamlSnapshot("")
+    setTenantYamlLoaded(false)
+    setIsYamlEditable(!!initialYamlEditable)
+  }, [namespace, name, initialYamlEditable])
+
+  useEffect(() => {
+    setTab(normalizeTab(initialTab))
+    setIsYamlEditable(!!initialYamlEditable)
+  }, [namespace, name, initialTab, initialYamlEditable])
+
+  useEffect(() => {
+    if (tab !== "edit" || tenantYamlLoaded || tenantYamlLoading) return
+    loadTenantYaml()
+  }, [tab, tenantYamlLoaded, tenantYamlLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
+
+  useEffect(() => {
+    if (tab !== "encryption" || encLoaded || encLoading) return
+    loadEncryption()
+  }, [tab, encLoaded, encLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
+
+  useEffect(() => {
+    if (tab !== "security" || secCtxLoaded || secCtxLoading) return
+    loadSecurityContext()
+  }, [tab, secCtxLoaded, secCtxLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
+
+  const loadSecurityContext = async () => {
+    setSecCtxLoading(true)
+    try {
+      const data = await api.getSecurityContext(namespace, name)
+      setSecCtx({
+        runAsUser: data.runAsUser?.toString() ?? "",
+        runAsGroup: data.runAsGroup?.toString() ?? "",
+        fsGroup: data.fsGroup?.toString() ?? "",
+        runAsNonRoot: data.runAsNonRoot ?? true,
+      })
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Failed to load security context"))
+    } finally {
+      setSecCtxLoaded(true)
+      setSecCtxLoading(false)
+    }
+  }
+
+  const handleSaveSecurityContext = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSecCtxSaving(true)
+    try {
+      await api.updateSecurityContext(namespace, name, {
+        runAsUser: secCtx.runAsUser ? parseInt(secCtx.runAsUser, 10) : undefined,
+        runAsGroup: secCtx.runAsGroup ? parseInt(secCtx.runAsGroup, 10) : undefined,
+        fsGroup: secCtx.fsGroup ? parseInt(secCtx.fsGroup, 10) : undefined,
+        runAsNonRoot: secCtx.runAsNonRoot,
+      })
+      toast.success(t("SecurityContext updated"))
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Update failed"))
+    } finally {
+      setSecCtxSaving(false)
+    }
+  }
 
   const handleDeleteTenant = async () => {
     if (!confirm(t("Delete this tenant? This cannot be undone."))) return
@@ -152,7 +284,7 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
   }
 
   const handleDeletePool = async (poolName: string) => {
-    if (!confirm(t("Delete pool \"{{name}}\"?", { name: poolName }))) return
+    if (!confirm(t('Delete pool "{{name}}"?', { name: poolName }))) return
     setDeletingPool(poolName)
     try {
       await api.deletePool(namespace, name, poolName)
@@ -181,7 +313,7 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
   }
 
   const handleDeletePod = async (podName: string) => {
-    if (!confirm(t("Delete pod \"{{name}}\"?", { name: podName }))) return
+    if (!confirm(t('Delete pod "{{name}}"?', { name: podName }))) return
     setDeletingPod(podName)
     try {
       await api.deletePod(namespace, name, podName)
@@ -213,27 +345,120 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
     }
   }
 
-  const handleUpdateTenant = async (e: React.FormEvent) => {
+  const handleUpdateTenantYaml = async (e: React.FormEvent) => {
     e.preventDefault()
-    const body: UpdateTenantRequest = {}
-    if (editForm.image !== undefined) body.image = editForm.image || undefined
-    if (editForm.mount_path !== undefined) body.mount_path = editForm.mount_path || undefined
-    if (editForm.creds_secret !== undefined) body.creds_secret = editForm.creds_secret || undefined
-    if (Object.keys(body).length === 0) {
-      toast.warning(t("No changes to save"))
+    if (!tenantYaml.trim()) {
+      toast.warning(t("YAML content is required"))
       return
     }
     setEditLoading(true)
     try {
-      await api.updateTenant(namespace, name, body)
-      toast.success(t("Tenant updated"))
+      const res = await api.updateTenantYaml(namespace, name, { yaml: tenantYaml })
+      setTenantYaml(res.yaml)
+      setTenantYamlSnapshot(res.yaml)
+      setIsYamlEditable(false)
+      toast.success(t("Tenant YAML updated"))
       loadTenant()
-      setEditForm({})
     } catch (e) {
       const err = e as ApiError
       toast.error(err.message || t("Update failed"))
     } finally {
       setEditLoading(false)
+    }
+  }
+
+  const loadEncryption = async () => {
+    setEncLoading(true)
+    try {
+      const data = await api.getEncryption(namespace, name)
+      setEncEnabled(data.enabled)
+      setEncBackend((data.backend === "vault" ? "vault" : "local") as "local" | "vault")
+      if (data.vault) {
+        setEncVault({
+          endpoint: data.vault.endpoint || "",
+          engine: data.vault.engine || "",
+          namespace: data.vault.namespace || "",
+          prefix: data.vault.prefix || "",
+          authType: data.vault.authType || "token",
+          tlsSkipVerify: data.vault.tlsSkipVerify || false,
+          customCertificates: data.vault.customCertificates || false,
+        })
+        if (data.vault.appRole) {
+          setEncAppRole({
+            engine: data.vault.appRole.engine || "",
+            retrySeconds: data.vault.appRole.retrySeconds?.toString() || "",
+          })
+        }
+      }
+      if (data.local) {
+        setEncLocal({
+          keyDirectory: data.local.keyDirectory || "",
+          masterKeyId: data.local.masterKeyId || "",
+        })
+      }
+      setEncKmsSecretName(data.kmsSecretName || "")
+      setEncPingSeconds(data.pingSeconds?.toString() || "")
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Failed to load encryption config"))
+    } finally {
+      setEncLoaded(true)
+      setEncLoading(false)
+    }
+  }
+
+  const handleSaveEncryption = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (encEnabled && encBackend === "vault" && !encVault.endpoint.trim()) {
+      toast.warning(t("Vault endpoint is required"))
+      return
+    }
+    setEncSaving(true)
+    try {
+      const body: UpdateEncryptionRequest = {
+        enabled: encEnabled,
+        backend: encBackend,
+        kmsSecretName: encKmsSecretName || undefined,
+        pingSeconds: encPingSeconds ? parseInt(encPingSeconds, 10) : undefined,
+      }
+      if (encBackend === "vault") {
+        body.vault = {
+          endpoint: encVault.endpoint,
+          engine: encVault.engine || undefined,
+          namespace: encVault.namespace || undefined,
+          prefix: encVault.prefix || undefined,
+          authType: encVault.authType || undefined,
+          tlsSkipVerify: encVault.tlsSkipVerify || undefined,
+          customCertificates: encVault.customCertificates || undefined,
+        }
+        if (encVault.authType === "approle") {
+          body.vault.appRole = {
+            engine: encAppRole.engine || undefined,
+            retrySeconds: encAppRole.retrySeconds ? parseInt(encAppRole.retrySeconds, 10) : undefined,
+          }
+        }
+      } else {
+        body.local = {
+          keyDirectory: encLocal.keyDirectory || undefined,
+          masterKeyId: encLocal.masterKeyId || undefined,
+        }
+      }
+      const res = await api.updateEncryption(namespace, name, body)
+      toast.success(res.message || t("Encryption config updated"))
+    } catch (e) {
+      const err = e as ApiError
+      toast.error(err.message || t("Update failed"))
+    } finally {
+      setEncSaving(false)
+    }
+  }
+
+  const handleCopyYaml = async () => {
+    try {
+      await navigator.clipboard.writeText(tenantYaml)
+      toast.success(t("YAML copied"))
+    } catch {
+      toast.error(t("Copy failed"))
     }
   }
 
@@ -247,10 +472,12 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
 
   const tabs: { id: Tab; labelKey: string }[] = [
     { id: "overview", labelKey: "Overview" },
-    { id: "edit", labelKey: "Edit" },
     { id: "pools", labelKey: "Pools" },
     { id: "pods", labelKey: "Pods" },
     { id: "events", labelKey: "Events" },
+    { id: "encryption", labelKey: "Encryption" },
+    { id: "security", labelKey: "Security" },
+    { id: "edit", labelKey: "YAML" },
   ]
 
   return (
@@ -264,12 +491,7 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
                 {t("Back")}
               </Link>
             </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              disabled={deleting}
-              onClick={handleDeleteTenant}
-            >
+            <Button variant="destructive" size="sm" disabled={deleting} onClick={handleDeleteTenant}>
               {deleting ? <Spinner className="mr-1 size-4" /> : <RiDeleteBinLine className="mr-1 size-4" />}
               {t("Delete Tenant")}
             </Button>
@@ -279,7 +501,9 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
         <h1 className="text-lg font-semibold">
           {tenant.name} <span className="text-muted-foreground">/ {tenant.namespace}</span>
         </h1>
-        <p className="text-sm text-muted-foreground">{t("State")}: {tenant.state}</p>
+        <p className="text-sm text-muted-foreground">
+          {t("State")}: {tenant.state}
+        </p>
       </PageHeader>
 
       <div className="flex gap-2 border-b border-border mb-4">
@@ -306,9 +530,14 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
               <CardTitle className="text-base">{t("Details")}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
-              <p><span className="text-muted-foreground">{t("Image")}:</span> {tenant.image || "-"}</p>
-              <p><span className="text-muted-foreground">{t("Mount Path")}:</span> {tenant.mount_path || "-"}</p>
-              <p><span className="text-muted-foreground">{t("Created")}:</span>{" "}
+              <p>
+                <span className="text-muted-foreground">{t("Image")}:</span> {tenant.image || "-"}
+              </p>
+              <p>
+                <span className="text-muted-foreground">{t("Mount Path")}:</span> {tenant.mount_path || "-"}
+              </p>
+              <p>
+                <span className="text-muted-foreground">{t("Created")}:</span>{" "}
                 {tenant.created_at ? new Date(tenant.created_at).toLocaleString() : "-"}
               </p>
             </CardContent>
@@ -335,9 +564,7 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
                       <TableRow key={svc.name}>
                         <TableCell>{svc.name}</TableCell>
                         <TableCell>{svc.service_type}</TableCell>
-                        <TableCell>
-                          {svc.ports.map((p) => `${p.name}:${p.port}`).join(", ")}
-                        </TableCell>
+                        <TableCell>{svc.ports.map((p) => `${p.name}:${p.port}`).join(", ")}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -352,42 +579,62 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
         <Card>
           <CardHeader>
             <CardTitle className="text-base">{t("Edit Tenant")}</CardTitle>
-            <CardDescription>{t("Update tenant image, mount path or credentials secret.")}</CardDescription>
+            <CardDescription>{t("Update tenant by editing YAML directly.")}</CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleUpdateTenant} className="space-y-4 max-w-md">
-              <div className="space-y-2">
-                <Label htmlFor="edit-image">{t("Image")}</Label>
-                <Input
-                  id="edit-image"
-                  value={editForm.image ?? tenant.image ?? ""}
-                  onChange={(e) => setEditForm((f) => ({ ...f, image: e.target.value }))}
-                  placeholder="rustfs/rustfs:latest"
-                />
+            {tenantYamlLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Spinner className="size-4" />
+                {t("Loading tenant YAML...")}
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="edit-mount">{t("Mount Path")}</Label>
-                <Input
-                  id="edit-mount"
-                  value={editForm.mount_path ?? tenant.mount_path ?? ""}
-                  onChange={(e) => setEditForm((f) => ({ ...f, mount_path: e.target.value }))}
-                  placeholder="/data/rustfs"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="edit-creds">{t("Credentials Secret")}</Label>
-                <Input
-                  id="edit-creds"
-                  value={editForm.creds_secret ?? ""}
-                  onChange={(e) => setEditForm((f) => ({ ...f, creds_secret: e.target.value }))}
-                  placeholder=""
-                />
-              </div>
-              <Button type="submit" disabled={editLoading}>
-                {editLoading && <Spinner className="mr-2 size-4" />}
-                {editLoading ? t("Saving...") : t("Save")}
-              </Button>
-            </form>
+            ) : (
+              <form onSubmit={handleUpdateTenantYaml} className="space-y-4">
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={handleCopyYaml}>
+                    <RiFileCopyLine className="mr-1 size-4" />
+                    {t("Copy YAML")}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (isYamlEditable) {
+                        setTenantYaml(tenantYamlSnapshot)
+                      }
+                      setIsYamlEditable((v) => !v)
+                    }}
+                  >
+                    {isYamlEditable ? t("Cancel Edit") : t("Edit")}
+                  </Button>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="tenant-yaml-editor">{t("YAML Content")}</Label>
+                  <textarea
+                    id="tenant-yaml-editor"
+                    value={tenantYaml}
+                    onChange={(e) => setTenantYaml(e.target.value)}
+                    readOnly={!isYamlEditable}
+                    className={`dark:bg-input/30 border-input focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 min-h-[460px] w-full rounded-none border px-2.5 py-2 font-mono text-xs transition-colors placeholder:text-muted-foreground focus-visible:ring-1 md:text-xs outline-none ${
+                      isYamlEditable ? "bg-transparent" : "bg-muted/30 cursor-default"
+                    }`}
+                    spellCheck={false}
+                  />
+                </div>
+                {isYamlEditable && (
+                  <div className="flex gap-2">
+                    <Button type="submit" disabled={editLoading}>
+                      {editLoading && <Spinner className="mr-2 size-4" />}
+                      {editLoading ? t("Saving...") : t("Save")}
+                    </Button>
+                    <Button type="button" variant="outline" onClick={loadTenantYaml} disabled={tenantYamlLoading}>
+                      {tenantYamlLoading && <Spinner className="mr-2 size-4" />}
+                      {t("Reload YAML")}
+                    </Button>
+                  </div>
+                )}
+              </form>
+            )}
           </CardContent>
         </Card>
       )}
@@ -397,7 +644,9 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
           <Card>
             <CardHeader className="pb-2">
               <CardDescription>
-                {t("All pools in this tenant form one unified cluster. Data is distributed across all pools (erasure-coded); every pool is in use. To see disk usage per pool, use RustFS Console (S3 API port 9001) or check PVC usage in the cluster (e.g. kubectl).")}
+                {t(
+                  "All pools in this tenant form one unified cluster. Data is distributed across all pools (erasure-coded); every pool is in use. To see disk usage per pool, use RustFS Console (S3 API port 9001) or check PVC usage in the cluster (e.g. kubectl).",
+                )}
               </CardDescription>
             </CardHeader>
           </Card>
@@ -429,9 +678,7 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
                         type="number"
                         min={1}
                         value={addPoolForm.servers}
-                        onChange={(e) =>
-                          setAddPoolForm((f) => ({ ...f, servers: parseInt(e.target.value, 10) || 0 }))
-                        }
+                        onChange={(e) => setAddPoolForm((f) => ({ ...f, servers: parseInt(e.target.value, 10) || 0 }))}
                       />
                     </div>
                     <div className="space-y-2">
@@ -495,7 +742,9 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
                     <TableCell>{p.servers}</TableCell>
                     <TableCell>{p.volumes_per_server}</TableCell>
                     <TableCell>{p.state}</TableCell>
-                    <TableCell>{p.ready_replicas}/{p.replicas}</TableCell>
+                    <TableCell>
+                      {p.ready_replicas}/{p.replicas}
+                    </TableCell>
                     <TableCell>
                       <Button
                         variant="ghost"
@@ -504,7 +753,11 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
                         disabled={deletingPool === p.name}
                         onClick={() => handleDeletePool(p.name)}
                       >
-                        {deletingPool === p.name ? <Spinner className="size-4" /> : <RiDeleteBinLine className="size-4" />}
+                        {deletingPool === p.name ? (
+                          <Spinner className="size-4" />
+                        ) : (
+                          <RiDeleteBinLine className="size-4" />
+                        )}
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -539,12 +792,7 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
                     <TableCell>{p.age}</TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          title={t("Logs")}
-                          onClick={() => loadLogs(p.name)}
-                        >
+                        <Button variant="ghost" size="icon-xs" title={t("Logs")} onClick={() => loadLogs(p.name)}>
                           <RiFileList3Line className="size-4" />
                         </Button>
                         <Button
@@ -584,7 +832,9 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
           {logsPod && (
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
-                <CardTitle className="text-base">{t("Logs")}: {logsPod}</CardTitle>
+                <CardTitle className="text-base">
+                  {t("Logs")}: {logsPod}
+                </CardTitle>
                 <Button variant="ghost" size="sm" onClick={() => setLogsPod(null)}>
                   {t("Close")}
                 </Button>
@@ -601,6 +851,359 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
             </Card>
           )}
         </div>
+      )}
+
+      {tab === "encryption" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t("Encryption")}</CardTitle>
+            <CardDescription>
+              {t("Configure server-side encryption (SSE) with a KMS backend. RustFS supports Local and Vault.")}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {encLoading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Spinner className="size-4" />
+                {t("Loading encryption config...")}
+              </div>
+            ) : (
+              <form onSubmit={handleSaveEncryption} className="space-y-6">
+                {/* Enable / Disable toggle */}
+                <div className="flex items-center gap-3">
+                  <label htmlFor="enc-toggle" className="text-sm font-medium">
+                    {t("Enable Encryption")}
+                  </label>
+                  <input
+                    id="enc-toggle"
+                    type="checkbox"
+                    checked={encEnabled}
+                    onChange={(e) => setEncEnabled(e.target.checked)}
+                    className="h-4 w-4 rounded border-border"
+                  />
+                </div>
+
+                {encEnabled && (
+                  <div className="space-y-6">
+                    {/* Backend selector */}
+                    <div className="space-y-2">
+                      <Label>{t("KMS Backend")}</Label>
+                      <div className="flex gap-4">
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="enc-backend"
+                            value="vault"
+                            checked={encBackend === "vault"}
+                            onChange={() => setEncBackend("vault")}
+                          />
+                          Vault
+                        </label>
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="enc-backend"
+                            value="local"
+                            checked={encBackend === "local"}
+                            onChange={() => setEncBackend("local")}
+                          />
+                          Local
+                        </label>
+                      </div>
+                    </div>
+
+                    {/* Vault configuration */}
+                    {encBackend === "vault" && (
+                      <div className="space-y-4 rounded-md border border-border p-4">
+                        <h4 className="text-sm font-semibold">{t("Vault Configuration")}</h4>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>{t("Endpoint")}*</Label>
+                            <Input
+                              required
+                              placeholder="https://vault.example.com:8200"
+                              value={encVault.endpoint}
+                              onChange={(e) => setEncVault((v) => ({ ...v, endpoint: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Engine")}</Label>
+                            <Input
+                              placeholder="kv"
+                              value={encVault.engine}
+                              onChange={(e) => setEncVault((v) => ({ ...v, engine: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Namespace")}</Label>
+                            <Input
+                              placeholder={`${t("Optional")} – Vault Enterprise`}
+                              value={encVault.namespace}
+                              onChange={(e) => setEncVault((v) => ({ ...v, namespace: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Prefix")}</Label>
+                            <Input
+                              placeholder={t("Optional")}
+                              value={encVault.prefix}
+                              onChange={(e) => setEncVault((v) => ({ ...v, prefix: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-6">
+                          <div className="flex items-center gap-3">
+                            <label htmlFor="vault-tls-skip" className="text-sm">
+                              {t("Skip TLS Verification")}
+                            </label>
+                            <input
+                              id="vault-tls-skip"
+                              type="checkbox"
+                              checked={encVault.tlsSkipVerify}
+                              onChange={(e) => setEncVault((v) => ({ ...v, tlsSkipVerify: e.target.checked }))}
+                              className="h-4 w-4 rounded border-border"
+                            />
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <label htmlFor="vault-custom-certs" className="text-sm">
+                              {t("Custom Certificates")}
+                            </label>
+                            <input
+                              id="vault-custom-certs"
+                              type="checkbox"
+                              checked={encVault.customCertificates}
+                              onChange={(e) => setEncVault((v) => ({ ...v, customCertificates: e.target.checked }))}
+                              className="h-4 w-4 rounded border-border"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Auth type selector */}
+                        <div className="space-y-2 pt-2">
+                          <Label>{t("Auth Type")}</Label>
+                          <div className="flex gap-4">
+                            <label className="flex items-center gap-2 text-sm">
+                              <input
+                                type="radio"
+                                name="vault-auth"
+                                value="token"
+                                checked={encVault.authType !== "approle"}
+                                onChange={() => setEncVault((v) => ({ ...v, authType: "token" }))}
+                              />
+                              Token
+                            </label>
+                            <label className="flex items-center gap-2 text-sm">
+                              <input
+                                type="radio"
+                                name="vault-auth"
+                                value="approle"
+                                checked={encVault.authType === "approle"}
+                                onChange={() => setEncVault((v) => ({ ...v, authType: "approle" }))}
+                              />
+                              AppRole
+                            </label>
+                          </div>
+                        </div>
+
+                        {/* AppRole section */}
+                        {encVault.authType === "approle" && (
+                          <div className="space-y-4 rounded-md border border-dashed border-border p-4">
+                            <div className="flex items-center gap-2">
+                              <h5 className="text-sm font-semibold">App Role</h5>
+                              <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300">
+                                {t("Not yet implemented in backend")}
+                              </span>
+                            </div>
+                            <div className="grid gap-4 sm:grid-cols-2">
+                              <div className="space-y-2">
+                                <Label>{t("Engine")}</Label>
+                                <Input
+                                  placeholder="approle"
+                                  value={encAppRole.engine}
+                                  onChange={(e) => setEncAppRole((a) => ({ ...a, engine: e.target.value }))}
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label>{t("Retry (Seconds)")}</Label>
+                                <Input
+                                  type="number"
+                                  placeholder="10"
+                                  value={encAppRole.retrySeconds}
+                                  onChange={(e) => setEncAppRole((a) => ({ ...a, retrySeconds: e.target.value }))}
+                                />
+                              </div>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              {t(
+                                "AppRole ID and Secret are stored in the KMS Secret (keys: vault-approle-id, vault-approle-secret).",
+                              )}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Local configuration */}
+                    {encBackend === "local" && (
+                      <div className="space-y-4 rounded-md border border-border p-4">
+                        <h4 className="text-sm font-semibold">{t("Local KMS Configuration")}</h4>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>{t("Key Directory")}</Label>
+                            <Input
+                              placeholder="/data/kms-keys"
+                              value={encLocal.keyDirectory}
+                              onChange={(e) => setEncLocal((l) => ({ ...l, keyDirectory: e.target.value }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Master Key ID")}</Label>
+                            <Input
+                              placeholder="default-master-key"
+                              value={encLocal.masterKeyId}
+                              onChange={(e) => setEncLocal((l) => ({ ...l, masterKeyId: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Status — Ping is mainly useful for remote backends (Vault) */}
+                    {encBackend === "vault" && (
+                      <div className="space-y-4 rounded-md border border-border p-4">
+                        <h4 className="text-sm font-semibold">{t("Status")}</h4>
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label>{t("Ping (Seconds)")}</Label>
+                            <Input
+                              type="number"
+                              placeholder={t("Optional")}
+                              value={encPingSeconds}
+                              onChange={(e) => setEncPingSeconds(e.target.value)}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              {t("Health check interval for KMS connectivity.")}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* KMS Secret name */}
+                    <div className="space-y-2">
+                      <Label>{t("KMS Secret Name")}</Label>
+                      <Input
+                        placeholder={`${t("Optional")} – ${t("Secret containing vault-token and TLS certs")}`}
+                        value={encKmsSecretName}
+                        onChange={(e) => setEncKmsSecretName(e.target.value)}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {encBackend === "vault"
+                          ? encVault.authType === "approle"
+                            ? t("Secret must contain 'vault-approle-id' and 'vault-approle-secret'.") +
+                              (encVault.customCertificates
+                                ? " " + t("Plus TLS certs: vault-ca-cert, vault-client-cert, vault-client-key.")
+                                : "")
+                            : t("Secret must contain key 'vault-token'.") +
+                              (encVault.customCertificates
+                                ? " " + t("Plus TLS certs: vault-ca-cert, vault-client-cert, vault-client-key.")
+                                : "")
+                          : t("Not required for Local backend.")}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Save button */}
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={encSaving}>
+                    {encSaving && <Spinner className="mr-2 size-4" />}
+                    {encSaving ? t("Saving...") : t("Save")}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={encLoading} onClick={loadEncryption}>
+                    {encLoading && <Spinner className="mr-2 size-4" />}
+                    {t("Reload")}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {tab === "security" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{t("SecurityContext")}</CardTitle>
+            <CardDescription>
+              {t(
+                "Override Pod SecurityContext for RustFS pods (runAsUser, runAsGroup, fsGroup). Changes apply after Pods are recreated.",
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {secCtxLoading ? (
+              <div className="flex gap-2 text-sm text-muted-foreground">
+                <Spinner className="size-4" />
+                {t("Loading...")}
+              </div>
+            ) : (
+              <form onSubmit={handleSaveSecurityContext} className="space-y-6">
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="space-y-2">
+                    <Label>{t("Run As User")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={secCtx.runAsUser}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsUser: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("Run As Group")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={secCtx.runAsGroup}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsGroup: e.target.value }))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t("FsGroup")}</Label>
+                    <Input
+                      type="number"
+                      placeholder="10001"
+                      value={secCtx.fsGroup}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, fsGroup: e.target.value }))}
+                    />
+                  </div>
+                  <div className="flex items-end gap-3 pb-2">
+                    <label htmlFor="sec-nonroot" className="text-sm whitespace-nowrap">
+                      {t("Do not run as Root")}
+                    </label>
+                    <input
+                      id="sec-nonroot"
+                      type="checkbox"
+                      checked={secCtx.runAsNonRoot}
+                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsNonRoot: e.target.checked }))}
+                      className="h-4 w-4 rounded border-border"
+                    />
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={secCtxSaving}>
+                    {secCtxSaving && <Spinner className="mr-2 size-4" />}
+                    {secCtxSaving ? t("Saving...") : t("Save")}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={secCtxLoading} onClick={loadSecurityContext}>
+                    {secCtxLoading && <Spinner className="mr-2 size-4" />}
+                    {t("Reload")}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {tab === "events" && (
@@ -629,9 +1232,7 @@ export function TenantDetailClient({ namespace, name }: TenantDetailClientProps)
                     <TableCell>{ev.reason}</TableCell>
                     <TableCell className="max-w-md truncate">{ev.message}</TableCell>
                     <TableCell>{ev.involved_object}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {ev.last_timestamp || "-"}
-                    </TableCell>
+                    <TableCell className="text-muted-foreground">{ev.last_timestamp || "-"}</TableCell>
                   </TableRow>
                 ))
               )}

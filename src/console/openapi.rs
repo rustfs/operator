@@ -36,8 +36,13 @@ use crate::console::models::pool::{
 };
 use crate::console::models::tenant::{
     CreatePoolRequest, CreateTenantRequest, DeleteTenantResponse, EnvVar, LoggingConfig, PoolInfo,
-    ServiceInfo, ServicePort, TenantDetailsResponse, TenantListItem, TenantListResponse,
-    UpdateTenantRequest, UpdateTenantResponse,
+    ServiceInfo, ServicePort, TenantDetailsResponse, TenantListItem, TenantListQuery,
+    TenantListResponse, TenantStateCountsResponse, TenantYAML, UpdateTenantRequest,
+    UpdateTenantResponse,
+};
+use crate::console::models::topology::{
+    TopologyCluster, TopologyClusterSummary, TopologyNamespace, TopologyNode,
+    TopologyOverviewResponse, TopologyPod, TopologyPool, TopologyTenant, TopologyTenantSummary,
 };
 
 #[derive(OpenApi)]
@@ -47,11 +52,15 @@ use crate::console::models::tenant::{
         api_logout,
         api_session,
         api_list_tenants,
+        api_get_tenant_state_counts,
         api_create_tenant,
         api_list_tenants_by_ns,
+        api_get_tenant_state_counts_by_ns,
         api_get_tenant,
         api_update_tenant,
         api_delete_tenant,
+        api_get_tenant_yaml,
+        api_put_tenant_yaml,
         api_list_pools,
         api_add_pool,
         api_delete_pool,
@@ -65,6 +74,7 @@ use crate::console::models::tenant::{
         api_get_cluster_resources,
         api_list_namespaces,
         api_create_namespace,
+        api_get_topology_overview,
     ),
     components(schemas(
         LoginRequest,
@@ -72,6 +82,8 @@ use crate::console::models::tenant::{
         SessionResponse,
         TenantListItem,
         TenantListResponse,
+        TenantListQuery,
+        TenantStateCountsResponse,
         TenantDetailsResponse,
         CreateTenantRequest,
         CreatePoolRequest,
@@ -83,6 +95,7 @@ use crate::console::models::tenant::{
         UpdateTenantRequest,
         UpdateTenantResponse,
         DeleteTenantResponse,
+        TenantYAML,
         PoolDetails,
         PoolListResponse,
         AddPoolRequest,
@@ -108,6 +121,15 @@ use crate::console::models::tenant::{
         NamespaceItem,
         NamespaceListResponse,
         CreateNamespaceRequest,
+        TopologyOverviewResponse,
+        TopologyCluster,
+        TopologyClusterSummary,
+        TopologyNamespace,
+        TopologyTenant,
+        TopologyTenantSummary,
+        TopologyPool,
+        TopologyPod,
+        TopologyNode,
     )),
     tags(
         (name = "auth", description = "Authentication"),
@@ -116,6 +138,7 @@ use crate::console::models::tenant::{
         (name = "pods", description = "Pod management"),
         (name = "events", description = "Event management"),
         (name = "cluster", description = "Cluster resources"),
+        (name = "topology", description = "Cluster topology overview"),
     ),
     info(
         title = "RustFS Console API",
@@ -140,8 +163,19 @@ fn api_session() -> Json<SessionResponse> {
 }
 
 // --- Tenants ---
-#[utoipa::path(get, path = "/api/v1/tenants", responses((status = 200, body = TenantListResponse)), tag = "tenants")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/tenants",
+    params(("state" = Option<String>, Query, description = "Filter by tenant state (case-insensitive)")),
+    responses((status = 200, body = TenantListResponse)),
+    tag = "tenants"
+)]
 fn api_list_tenants() -> Json<TenantListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/tenants/state-counts", responses((status = 200, body = TenantStateCountsResponse)), tag = "tenants")]
+fn api_get_tenant_state_counts() -> Json<TenantStateCountsResponse> {
     unimplemented!("Documentation only")
 }
 
@@ -150,8 +184,22 @@ fn api_create_tenant(_body: Json<CreateTenantRequest>) -> Json<TenantListItem> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants", params(("namespace" = String, Path, description = "Namespace")), responses((status = 200, body = TenantListResponse)), tag = "tenants")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/namespaces/{namespace}/tenants",
+    params(
+        ("namespace" = String, Path, description = "Namespace"),
+        ("state" = Option<String>, Query, description = "Filter by tenant state (case-insensitive)")
+    ),
+    responses((status = 200, body = TenantListResponse)),
+    tag = "tenants"
+)]
 fn api_list_tenants_by_ns() -> Json<TenantListResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/state-counts", params(("namespace" = String, Path, description = "Namespace")), responses((status = 200, body = TenantStateCountsResponse)), tag = "tenants")]
+fn api_get_tenant_state_counts_by_ns() -> Json<TenantStateCountsResponse> {
     unimplemented!("Documentation only")
 }
 
@@ -167,6 +215,16 @@ fn api_update_tenant(_body: Json<UpdateTenantRequest>) -> Json<UpdateTenantRespo
 
 #[utoipa::path(delete, path = "/api/v1/namespaces/{namespace}/tenants/{name}", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = DeleteTenantResponse)), tag = "tenants")]
 fn api_delete_tenant() -> Json<DeleteTenantResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}/yaml", params(("namespace" = String, Path), ("name" = String, Path)), responses((status = 200, body = TenantYAML)), tag = "tenants")]
+fn api_get_tenant_yaml() -> Json<TenantYAML> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(put, path = "/api/v1/namespaces/{namespace}/tenants/{name}/yaml", params(("namespace" = String, Path), ("name" = String, Path)), request_body = TenantYAML, responses((status = 200, body = TenantYAML)), tag = "tenants")]
+fn api_put_tenant_yaml(_body: Json<TenantYAML>) -> Json<TenantYAML> {
     unimplemented!("Documentation only")
 }
 
@@ -234,5 +292,11 @@ fn api_list_namespaces() -> Json<NamespaceListResponse> {
 
 #[utoipa::path(post, path = "/api/v1/namespaces", request_body = CreateNamespaceRequest, responses((status = 200, body = NamespaceItem)), tag = "cluster")]
 fn api_create_namespace(_body: Json<CreateNamespaceRequest>) -> Json<NamespaceItem> {
+    unimplemented!("Documentation only")
+}
+
+// --- Topology ---
+#[utoipa::path(get, path = "/api/v1/topology/overview", responses((status = 200, body = TopologyOverviewResponse)), tag = "topology")]
+fn api_get_topology_overview() -> Json<TopologyOverviewResponse> {
     unimplemented!("Documentation only")
 }

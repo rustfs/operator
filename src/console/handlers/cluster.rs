@@ -250,7 +250,7 @@ pub async fn get_cluster_resources(
 
 /// 将 Kubernetes CPU Quantity 解析为毫核 (millicores)。
 /// 支持 "1"（核）、"1000m"、"500m" 等格式。
-fn parse_cpu_to_millicores(s: &str) -> i64 {
+pub(crate) fn parse_cpu_to_millicores(s: &str) -> i64 {
     let s = s.trim();
     if s.is_empty() {
         return 0;
@@ -277,7 +277,7 @@ fn parse_cpu_to_millicores(s: &str) -> i64 {
 }
 
 /// 将毫核格式化为 CPU 字符串（如 "8" 或 "500m"）。
-fn format_cpu_from_millicores(m: i64) -> String {
+pub(crate) fn format_cpu_from_millicores(m: i64) -> String {
     if m == 0 {
         return "0".to_string();
     }
@@ -290,7 +290,7 @@ fn format_cpu_from_millicores(m: i64) -> String {
 
 /// 将 Kubernetes Memory Quantity 解析为字节。
 /// 支持 "1Gi"、"1G"、"1024Mi"、"1Ki" 等格式。
-fn parse_memory_to_bytes(s: &str) -> i64 {
+pub(crate) fn parse_memory_to_bytes(s: &str) -> i64 {
     let s = s.trim();
     if s.is_empty() {
         return 0;
@@ -327,7 +327,7 @@ fn parse_memory_to_bytes(s: &str) -> i64 {
 }
 
 /// 将字节格式化为可读内存字符串（优先 Gi）。
-fn format_memory_from_bytes(b: i64) -> String {
+pub(crate) fn format_memory_from_bytes(b: i64) -> String {
     const GIB: i64 = 1024 * 1024 * 1024;
     const MIB: i64 = 1024 * 1024;
     const KIB: i64 = 1024;

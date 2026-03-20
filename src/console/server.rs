@@ -116,6 +116,7 @@ fn api_routes() -> Router<AppState> {
         .merge(routes::pod_routes())
         .merge(routes::event_routes())
         .merge(routes::cluster_routes())
+        .merge(routes::topology_routes())
 }
 
 /// 健康检查

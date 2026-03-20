@@ -31,10 +31,18 @@ pub fn auth_routes() -> Router<AppState> {
 pub fn tenant_routes() -> Router<AppState> {
     Router::new()
         .route("/tenants", get(handlers::tenants::list_all_tenants))
+        .route(
+            "/tenants/state-counts",
+            get(handlers::tenants::get_all_tenant_state_counts),
+        )
         .route("/tenants", post(handlers::tenants::create_tenant))
         .route(
             "/namespaces/:namespace/tenants",
             get(handlers::tenants::list_tenants_by_namespace),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/state-counts",
+            get(handlers::tenants::get_tenant_state_counts_by_namespace),
         )
         .route(
             "/namespaces/:namespace/tenants/:name",
@@ -47,6 +55,30 @@ pub fn tenant_routes() -> Router<AppState> {
         .route(
             "/namespaces/:namespace/tenants/:name",
             delete(handlers::tenants::delete_tenant),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/yaml",
+            get(handlers::tenants::get_tenant_yaml),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/yaml",
+            put(handlers::tenants::put_tenant_yaml),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/encryption",
+            get(handlers::encryption::get_encryption),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/encryption",
+            put(handlers::encryption::update_encryption),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/security-context",
+            get(handlers::security_context::get_security_context),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/security-context",
+            put(handlers::security_context::update_security_context),
         )
 }
 
@@ -110,4 +142,12 @@ pub fn cluster_routes() -> Router<AppState> {
         )
         .route("/namespaces", get(handlers::cluster::list_namespaces))
         .route("/namespaces", post(handlers::cluster::create_namespace))
+}
+
+/// 拓扑总览路由
+pub fn topology_routes() -> Router<AppState> {
+    Router::new().route(
+        "/topology/overview",
+        get(handlers::topology::get_topology_overview),
+    )
 }

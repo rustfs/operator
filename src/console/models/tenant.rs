@@ -39,6 +39,22 @@ pub struct TenantListResponse {
     pub tenants: Vec<TenantListItem>,
 }
 
+/// Tenant 列表查询参数
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct TenantListQuery {
+    /// 按状态过滤（大小写不敏感）
+    pub state: Option<String>,
+}
+
+/// Tenant 状态统计响应
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TenantStateCountsResponse {
+    /// Tenant 总数
+    pub total: u32,
+    /// 各状态对应的数量，例如 Ready/Updating/Degraded/NotReady/Unknown
+    pub counts: std::collections::BTreeMap<String, u32>,
+}
+
 /// Tenant 详情响应
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TenantDetailsResponse {
@@ -68,6 +84,16 @@ pub struct ServicePort {
     pub target_port: String,
 }
 
+/// SecurityContext for create/update (Pod runAsUser, runAsGroup, fsGroup, runAsNonRoot).
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSecurityContextRequest {
+    pub run_as_user: Option<i64>,
+    pub run_as_group: Option<i64>,
+    pub fs_group: Option<i64>,
+    pub run_as_non_root: Option<bool>,
+}
+
 /// 创建 Tenant 请求
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTenantRequest {
@@ -77,6 +103,8 @@ pub struct CreateTenantRequest {
     pub image: Option<String>,
     pub mount_path: Option<String>,
     pub creds_secret: Option<String>,
+    /// Optional Pod SecurityContext override (runAsUser, runAsGroup, fsGroup, runAsNonRoot).
+    pub security_context: Option<CreateSecurityContextRequest>,
 }
 
 /// 创建 Pool 请求
@@ -144,4 +172,10 @@ pub struct UpdateTenantResponse {
     pub success: bool,
     pub message: String,
     pub tenant: TenantListItem,
+}
+
+/// Tenant YAML 请求/响应
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct TenantYAML {
+    pub yaml: String,
 }
