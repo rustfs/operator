@@ -51,7 +51,7 @@ pub async fn list_all_tenants(
     Ok(Json(TenantListResponse { tenants: items }))
 }
 
-/// 按命名空间列出 Tenants
+/// List tenants in one namespace.
 pub async fn list_tenants_by_namespace(
     Path(namespace): Path<String>,
     Query(query): Query<TenantListQuery>,
@@ -70,7 +70,7 @@ pub async fn list_tenants_by_namespace(
     Ok(Json(TenantListResponse { tenants: items }))
 }
 
-/// 统计所有命名空间中 Tenant 的状态数量
+/// Count tenants by state across all namespaces.
 pub async fn get_all_tenant_state_counts(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<TenantStateCountsResponse>> {
@@ -85,7 +85,7 @@ pub async fn get_all_tenant_state_counts(
     Ok(Json(summarize_tenant_states(&tenants.items)))
 }
 
-/// 统计指定命名空间中 Tenant 的状态数量
+/// Count tenants by state in one namespace.
 pub async fn get_tenant_state_counts_by_namespace(
     Path(namespace): Path<String>,
     Extension(claims): Extension<Claims>,
@@ -101,7 +101,7 @@ pub async fn get_tenant_state_counts_by_namespace(
     Ok(Json(summarize_tenant_states(&tenants.items)))
 }
 
-/// 获取 Tenant 详情
+/// Full tenant detail including Services.
 pub async fn get_tenant_details(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -114,7 +114,7 @@ pub async fn get_tenant_details(
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
-    // 获取 Services
+    // List tenant-scoped Services
     let svc_api: Api<corev1::Service> = Api::namespaced(client, &namespace);
     let services = svc_api
         .list(&ListParams::default().labels(&format!("rustfs.tenant={}", name)))
@@ -188,18 +188,18 @@ pub async fn get_tenant_details(
     }))
 }
 
-/// 创建 Tenant
+/// Create a Tenant CR (and namespace if missing).
 pub async fn create_tenant(
     Extension(claims): Extension<Claims>,
     Json(req): Json<CreateTenantRequest>,
 ) -> Result<Json<TenantListItem>> {
     let client = create_client(&claims).await?;
 
-    // 检查 Namespace 是否存在
+    // Ensure namespace exists
     let ns_api: Api<corev1::Namespace> = Api::all(client.clone());
     let ns_exists = ns_api.get(&req.namespace).await.is_ok();
 
-    // 如果不存在则创建
+    // Create when absent
     if !ns_exists {
         let ns = corev1::Namespace {
             metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -214,7 +214,7 @@ pub async fn create_tenant(
             .map_err(|e| error::map_kube_error(e, format!("Namespace '{}'", req.namespace)))?;
     }
 
-    // 构造 Tenant CRD
+    // Build Tenant object
     let pools: Vec<Pool> = req
         .pools
         .into_iter()
@@ -305,7 +305,7 @@ pub async fn create_tenant(
     }))
 }
 
-/// 删除 Tenant
+/// Delete a Tenant CR.
 pub async fn delete_tenant(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -323,7 +323,7 @@ pub async fn delete_tenant(
     }))
 }
 
-/// 更新 Tenant
+/// Patch selected spec fields on a Tenant.
 pub async fn update_tenant(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -332,13 +332,13 @@ pub async fn update_tenant(
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::namespaced(client, &namespace);
 
-    // 获取当前 Tenant
+    // Load current object
     let mut tenant = api
         .get(&name)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
-    // 应用更新（仅更新提供的字段）
+    // Merge only provided fields
     let mut updated_fields = Vec::new();
 
     if let Some(image) = req.image {
@@ -442,7 +442,7 @@ pub async fn update_tenant(
         });
     }
 
-    // 提交更新
+    // Replace status-safe fields
     let updated_tenant = api
         .replace(&name, &Default::default(), &tenant)
         .await
@@ -477,7 +477,7 @@ pub async fn update_tenant(
     }))
 }
 
-/// 获取 Tenant YAML
+/// Return serialized Tenant manifest.
 pub async fn get_tenant_yaml(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -500,7 +500,7 @@ pub async fn get_tenant_yaml(
     Ok(Json(TenantYAML { yaml: yaml_str }))
 }
 
-/// 更新 Tenant YAML
+/// Apply raw YAML for a Tenant (server-side apply or replace).
 pub async fn put_tenant_yaml(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -584,7 +584,7 @@ pub async fn put_tenant_yaml(
     Ok(Json(TenantYAML { yaml: yaml_str }))
 }
 
-/// 创建 Kubernetes 客户端
+/// Build a client using the session bearer token.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

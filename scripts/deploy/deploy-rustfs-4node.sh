@@ -14,33 +14,33 @@
 # limitations under the License.
 
 ################################################################################
-# RustFS Operator 4-node 一键部署脚本
+# One-shot deploy: RustFS Operator on a 4-node Kind cluster
 #
-# 架构: Kind 多节点 (1 control-plane + 3 workers) + 4 节点 Tenant + 双 Console
-# 与 MinIO deploy-minio-v5.sh 架构一致
+# Topology: multi-node Kind (1 control-plane + 3 workers) + 4-node Tenant + dual Console
+# (Inspired by a similar MinIO multi-node demo layout.)
 #
-# 功能:
-#   - 创建 Kind 集群 (kind-rustfs-cluster.yaml)
-#   - 创建 StorageClass 和 12 个 PersistentVolumes
-#   - 部署 RustFS Operator + Operator Console (API + Web)
-#   - 部署 4 节点 RustFS Tenant
-#   - 获取并显示访问信息
+# Steps:
+#   - Create Kind cluster (kind-rustfs-cluster.yaml)
+#   - Create StorageClass and 12 PersistentVolumes
+#   - Deploy RustFS Operator + Operator Console (API + Web)
+#   - Deploy 4-node RustFS Tenant
+#   - Print access information
 #
-# 使用:
-#   ./deploy-rustfs-4node.sh
+# Usage:
+#   ./scripts/deploy/deploy-rustfs-4node.sh
 #
 ################################################################################
 
 set -e
 set -o pipefail
 
-# 保证从项目根目录执行（可从任意位置调用本脚本）
+# Always run from project root (script cds here; safe to invoke from any cwd)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 ################################################################################
-# 颜色定义
+# Colors
 ################################################################################
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -50,7 +50,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 ################################################################################
-# 配置变量
+# Configuration
 ################################################################################
 CLUSTER_NAME="rustfs-cluster"
 OPERATOR_NAMESPACE="rustfs-system"
@@ -61,7 +61,7 @@ WORKER_NODES=("${CLUSTER_NAME}-worker" "${CLUSTER_NAME}-worker2" "${CLUSTER_NAME
 RUSTFS_RUN_AS_UID=10001
 
 ################################################################################
-# 日志函数
+# Logging
 ################################################################################
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -88,25 +88,25 @@ log_header() {
 
 log_step() {
     echo ""
-    log_info "步骤 $1: $2"
+    log_info "Step $1: $2"
 }
 
 ################################################################################
-# 错误处理
+# Error handling
 ################################################################################
 trap 'error_handler $? $LINENO' ERR
 
 error_handler() {
-    log_error "脚本在第 $2 行失败，退出码: $1"
-    log_warning "部署失败，可运行 ./scripts/cleanup/cleanup-rustfs-4node.sh 清理环境"
+    log_error "Script failed at line $2 with exit code $1"
+    log_warning "Run ./scripts/cleanup/cleanup-rustfs-4node.sh to tear down"
     exit 1
 }
 
 ################################################################################
-# 检查依赖工具
+# Dependencies
 ################################################################################
 check_dependencies() {
-    log_step "0/12" "检查必要工具"
+    log_step "0/12" "Checking required tools"
 
     local missing_tools=()
     for cmd in kubectl kind docker cargo; do
@@ -116,46 +116,46 @@ check_dependencies() {
     done
 
     if [ ${#missing_tools[@]} -ne 0 ]; then
-        log_error "缺少必要工具: ${missing_tools[*]}"
-        log_info "请先安装: kubectl, kind, docker, cargo (Rust)"
+        log_error "Missing tools: ${missing_tools[*]}"
+        log_info "Install: kubectl, kind, docker, cargo (Rust)"
         exit 1
     fi
 
-    log_success "所有必要工具已安装"
+    log_success "All required tools are present"
 }
 
 ################################################################################
-# 修复 inotify 限制 (Kind 多节点常见问题)
+# Fix inotify limits (common with Kind multi-node)
 ################################################################################
 fix_inotify_limits() {
     if sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null 2>&1 \
         && sudo sysctl -w fs.inotify.max_user_instances=512 >/dev/null 2>&1; then
-        log_info "已应用 inotify 限制"
+        log_info "Applied inotify limits"
     else
-        log_warning "无法设置 inotify 限制 (可能需要 root)。若出现 'too many open files' 错误:"
+        log_warning "Could not set inotify limits (may need root). If you see 'too many open files':"
         echo "  sudo sysctl fs.inotify.max_user_watches=524288"
         echo "  sudo sysctl fs.inotify.max_user_instances=512"
     fi
 }
 
 ################################################################################
-# 创建 Kind 集群
+# Kind cluster
 ################################################################################
 create_kind_cluster() {
-    log_step "1/12" "创建 Kind 集群"
+    log_step "1/12" "Creating Kind cluster"
 
     fix_inotify_limits
 
     if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
-        log_warning "集群 ${CLUSTER_NAME} 已存在"
-        read -p "是否删除并重建? (y/n) " -n 1 -r
+        log_warning "Cluster ${CLUSTER_NAME} already exists"
+        read -p "Delete and recreate? (y/n) " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "删除现有集群..."
+            log_info "Deleting existing cluster..."
             kind delete cluster --name ${CLUSTER_NAME}
-            log_success "现有集群已删除"
+            log_success "Existing cluster removed"
         else
-            log_info "使用现有集群"
+            log_info "Using existing cluster"
             kubectl config use-context kind-${CLUSTER_NAME} >/dev/null
             return 0
         fi
@@ -163,48 +163,48 @@ create_kind_cluster() {
 
     local kind_config="${PROJECT_ROOT}/deploy/kind/kind-rustfs-cluster.yaml"
     if [ ! -f "$kind_config" ]; then
-        log_error "配置文件不存在: $kind_config"
+        log_error "Config file not found: $kind_config"
         exit 1
     fi
 
-    log_info "创建新集群 (1 control-plane + 3 workers，约需几分钟)..."
+    log_info "Creating cluster (1 control-plane + 3 workers; may take a few minutes)..."
     kind create cluster --config "$kind_config"
 
     kubectl config use-context kind-${CLUSTER_NAME} >/dev/null
-    log_success "Kind 集群已创建"
+    log_success "Kind cluster created"
 }
 
 ################################################################################
-# 等待集群就绪
+# Wait for nodes
 ################################################################################
 wait_cluster_ready() {
-    log_step "2/12" "等待集群节点就绪"
+    log_step "2/12" "Waiting for nodes to be Ready"
 
-    log_info "等待所有节点就绪 (超时 5 分钟)..."
+    log_info "Waiting for all nodes (timeout 5m)..."
     kubectl wait --for=condition=Ready nodes --all --timeout=300s
 
-    # 允许在 control-plane 上调度 (可选，4 个 Pod 分布在 3 个 worker 上即可)
+    # Optional: allow scheduling on control-plane (4 pods can run on 3 workers)
     kubectl taint nodes ${CLUSTER_NAME}-control-plane node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true
 
-    log_success "所有节点已就绪"
+    log_success "All nodes are Ready"
     kubectl get nodes -o wide
 }
 
 ################################################################################
-# 创建存储目录
+# Storage dirs on host
 ################################################################################
 create_storage_dirs() {
-    log_step "3/12" "创建本地存储目录"
+    log_step "3/12" "Creating local storage directories"
 
     mkdir -p /tmp/rustfs-storage-{1,2,3}
-    log_success "本地存储目录已创建"
+    log_success "Local storage directories created"
 }
 
 ################################################################################
-# 创建 StorageClass
+# StorageClass
 ################################################################################
 create_storage_class() {
-    log_step "4/12" "创建 StorageClass"
+    log_step "4/12" "Creating StorageClass"
 
     cat <<EOF | kubectl apply -f -
 apiVersion: storage.k8s.io/v1
@@ -215,16 +215,16 @@ provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: WaitForFirstConsumer
 EOF
 
-    log_success "StorageClass 已创建"
+    log_success "StorageClass created"
 }
 
 ################################################################################
-# 创建 PersistentVolumes
+# PersistentVolumes
 ################################################################################
 create_persistent_volumes() {
-    log_step "5/12" "创建 PersistentVolumes"
+    log_step "5/12" "Creating PersistentVolumes"
 
-    log_info "创建 ${PV_COUNT} 个 PersistentVolumes..."
+    log_info "Creating ${PV_COUNT} PersistentVolumes..."
 
     for i in $(seq 1 ${PV_COUNT}); do
         worker_num=$(( (i-1) % 3 + 1 ))
@@ -254,109 +254,109 @@ spec:
 EOF
     done
 
-    log_success "${PV_COUNT} 个 PersistentVolumes 已创建"
+    log_success "${PV_COUNT} PersistentVolumes created"
     kubectl get pv
 }
 
 ################################################################################
-# 在 Worker 节点中创建卷目录
+# Volume directories inside worker nodes
 ################################################################################
 create_volume_dirs_in_nodes() {
-    log_step "6/12" "在 Worker 节点中创建卷目录"
+    log_step "6/12" "Creating volume directories on workers"
 
     for node in "${WORKER_NODES[@]}"; do
-        log_info "在节点 ${node} 创建卷目录..."
+        log_info "Creating volume dirs on node ${node}..."
         for i in $(seq 1 ${PV_COUNT}); do
             docker exec ${node} mkdir -p /mnt/data/vol${i} 2>/dev/null || true
             docker exec ${node} chown -R ${RUSTFS_RUN_AS_UID}:${RUSTFS_RUN_AS_UID} /mnt/data/vol${i} 2>/dev/null || true
         done
     done
 
-    log_success "所有卷目录已创建并设置权限"
+    log_success "Volume directories created with permissions"
 }
 
 ################################################################################
-# 生成并部署 CRD
+# CRD
 ################################################################################
 deploy_crd() {
-    log_step "7/12" "部署 Tenant CRD"
+    log_step "7/12" "Deploying Tenant CRD"
 
     local crd_dir="deploy/rustfs-operator/crds"
     local crd_file="${crd_dir}/tenant-crd.yaml"
     mkdir -p "$crd_dir"
 
-    log_info "生成 CRD..."
+    log_info "Generating CRD..."
     cargo run --release -- crd -f "$crd_file"
 
-    log_info "应用 CRD..."
+    log_info "Applying CRD..."
     kubectl apply -f "$crd_file"
 
-    log_info "等待 CRD 就绪..."
+    log_info "Waiting for CRD to be established..."
     kubectl wait --for condition=established --timeout=60s crd/tenants.rustfs.com
 
-    log_success "CRD 已部署"
+    log_success "CRD deployed"
 }
 
 ################################################################################
-# 创建命名空间
+# Namespace
 ################################################################################
 create_namespace() {
-    log_step "8/12" "创建命名空间"
+    log_step "8/12" "Creating namespace"
 
     if kubectl get namespace ${OPERATOR_NAMESPACE} &>/dev/null; then
-        log_warning "命名空间 ${OPERATOR_NAMESPACE} 已存在"
+        log_warning "Namespace ${OPERATOR_NAMESPACE} already exists"
     else
         kubectl create namespace ${OPERATOR_NAMESPACE}
-        log_success "命名空间已创建"
+        log_success "Namespace created"
     fi
 }
 
 ################################################################################
-# 构建并部署 Operator + Console
+# Build and deploy Operator + Console
 ################################################################################
 deploy_operator_and_console() {
-    log_step "9/12" "构建并部署 Operator + Console"
+    log_step "9/12" "Building and deploying Operator + Console"
 
     local image_name="rustfs/operator:dev"
     local console_web_image="rustfs/console-web:dev"
 
-    log_info "构建 Operator (release)..."
+    log_info "Building Operator (release)..."
     cargo build --release
 
-    log_info "构建 Operator Docker 镜像..."
+    log_info "Building Operator container image..."
     docker build --network=host --no-cache -t "$image_name" . || {
-        log_error "Operator 镜像构建失败"
+        log_error "Operator image build failed"
         exit 1
     }
 
-    log_info "构建 Console Web 镜像..."
+    log_info "Building Console Web image..."
     docker build --network=host --no-cache \
         -t "$console_web_image" \
         -f console-web/Dockerfile \
         console-web/ || {
-        log_error "Console Web 镜像构建失败"
+        log_error "Console Web image build failed"
         exit 1
     }
 
-    log_info "加载镜像到 Kind 集群..."
+    log_info "Loading images into Kind..."
     kind load docker-image "$image_name" --name ${CLUSTER_NAME} || {
-        log_error "加载 Operator 镜像失败"
+        log_error "Failed to load Operator image into Kind"
         exit 1
     }
     kind load docker-image "$console_web_image" --name ${CLUSTER_NAME} || {
-        log_error "加载 Console Web 镜像失败"
+        log_error "Failed to load Console Web image into Kind"
         exit 1
     }
 
-    # 若存在 rustfs 服务端镜像，一并加载
+    # Load RustFS server image if present locally
     if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q '^rustfs/rustfs:latest$'; then
-        log_info "加载 RustFS 服务端镜像..."
-        kind load docker-image rustfs/rustfs:latest --name ${CLUSTER_NAME} 2>/dev/null || log_warning "rustfs/rustfs:latest 加载失败，Tenant 可能需从 registry 拉取"
+        log_info "Loading RustFS server image..."
+        kind load docker-image rustfs/rustfs:latest --name ${CLUSTER_NAME} 2>/dev/null || log_warning "Failed to load rustfs/rustfs:latest; Tenant may pull from registry"
     else
-        log_warning "未找到 rustfs/rustfs:latest 本地镜像，Tenant 将尝试从 registry 拉取"
+        log_warning "rustfs/rustfs:latest not found locally; Tenant will try to pull from registry"
     fi
 
-    log_info "创建 Console JWT Secret..."
+    log_info "Creating Console JWT Secret..."
     local jwt_secret
     jwt_secret=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
     kubectl create secret generic rustfs-operator-console-secret \
@@ -364,7 +364,7 @@ deploy_operator_and_console() {
         --from-literal=jwt-secret="$jwt_secret" \
         --dry-run=client -o yaml | kubectl apply -f -
 
-    log_info "部署 Operator、Console API、Console Web..."
+    log_info "Deploying Operator, Console API, Console Web..."
     kubectl apply -f deploy/k8s-dev/operator-rbac.yaml
     kubectl apply -f deploy/k8s-dev/console-rbac.yaml
     kubectl apply -f deploy/k8s-dev/operator-deployment.yaml
@@ -373,38 +373,38 @@ deploy_operator_and_console() {
     kubectl apply -f deploy/k8s-dev/console-frontend-deployment.yaml
     kubectl apply -f deploy/k8s-dev/console-frontend-service.yaml
 
-    log_info "等待 Operator 就绪 (超时 5 分钟)..."
+    log_info "Waiting for Operator (timeout 5m)..."
     kubectl wait --for=condition=available --timeout=300s \
         deployment/rustfs-operator -n ${OPERATOR_NAMESPACE}
 
-    log_info "等待 Operator Console 就绪..."
+    log_info "Waiting for Operator Console..."
     kubectl wait --for=condition=available --timeout=300s \
         deployment/rustfs-operator-console -n ${OPERATOR_NAMESPACE}
 
-    log_info "等待 Console Web 就绪..."
+    log_info "Waiting for Console Web..."
     kubectl wait --for=condition=available --timeout=300s \
         deployment/rustfs-operator-console-frontend -n ${OPERATOR_NAMESPACE}
 
-    log_success "Operator 和 Console 已部署"
+    log_success "Operator and Console deployed"
     kubectl get pods -n ${OPERATOR_NAMESPACE}
 }
 
 ################################################################################
-# 部署 Tenant (4 节点)
+# Tenant (4 nodes)
 ################################################################################
 deploy_tenant() {
-    log_step "10/12" "部署 RustFS Tenant (4 节点)"
+    log_step "10/12" "Deploying RustFS Tenant (4 nodes)"
 
     if [ ! -f "examples/tenant-4nodes.yaml" ]; then
-        log_error "配置文件 examples/tenant-4nodes.yaml 不存在"
+        log_error "File not found: examples/tenant-4nodes.yaml"
         exit 1
     fi
 
     kubectl apply -f examples/tenant-4nodes.yaml
 
-    log_success "Tenant 已提交"
+    log_success "Tenant applied"
 
-    log_info "等待 Tenant Pods 启动 (约需几分钟)..."
+    log_info "Waiting for Tenant pods (may take a few minutes)..."
     sleep 15
 
     local max_attempts=60
@@ -420,17 +420,17 @@ deploy_tenant() {
             --no-headers 2>/dev/null | wc -l | tr -d ' ')
 
         if [ "$ready_pods" -ge "$expected_pods" ]; then
-            log_success "Tenant Pods 已启动 ($ready_pods/$expected_pods Running)"
+            log_success "Tenant pods running ($ready_pods/$expected_pods Running)"
             break
         fi
 
-        log_info "等待 Pods 启动... ($ready_pods/$expected_pods ready)"
+        log_info "Waiting for pods... ($ready_pods/$expected_pods ready)"
         sleep 5
         attempt=$((attempt + 1))
     done
 
     if [ "$ready_pods" -lt "$expected_pods" ]; then
-        log_warning "部分 Pods 可能还在启动中 ($ready_pods/$expected_pods)"
+        log_warning "Some pods may still be starting ($ready_pods/$expected_pods)"
     fi
 
     kubectl get pods -n ${OPERATOR_NAMESPACE} -l rustfs.tenant=${TENANT_NAME}
@@ -438,110 +438,108 @@ deploy_tenant() {
 }
 
 ################################################################################
-# 获取访问信息
+# Access info
 ################################################################################
 get_access_info() {
-    log_step "11/12" "获取访问信息"
+    log_step "11/12" "Gathering access information"
 
-    # Operator Console Token
-    log_info "获取 Operator Console Token..."
+    log_info "Fetching Operator Console token..."
     if kubectl get secret rustfs-operator-console-secret -n ${OPERATOR_NAMESPACE} &>/dev/null; then
         OPERATOR_TOKEN=$(kubectl create token rustfs-operator -n ${OPERATOR_NAMESPACE} --duration=24h 2>/dev/null || echo "")
         if [ -n "$OPERATOR_TOKEN" ]; then
             echo "$OPERATOR_TOKEN" > /tmp/rustfs-operator-console-token.txt
-            log_success "Token 已保存到 /tmp/rustfs-operator-console-token.txt"
+            log_success "Token saved to /tmp/rustfs-operator-console-token.txt"
         fi
     fi
 
-    # Tenant 状态
     if kubectl get tenant ${TENANT_NAME} -n ${OPERATOR_NAMESPACE} &>/dev/null; then
         TENANT_STATE=$(kubectl get tenant ${TENANT_NAME} -n ${OPERATOR_NAMESPACE} \
             -o jsonpath='{.status.currentState}' 2>/dev/null || echo "Unknown")
-        log_info "Tenant 状态: ${TENANT_STATE}"
+        log_info "Tenant status: ${TENANT_STATE}"
     fi
 }
 
 ################################################################################
-# 显示部署摘要
+# Summary
 ################################################################################
 show_summary() {
-    log_step "12/12" "部署摘要"
+    log_step "12/12" "Deployment summary"
 
-    log_header "部署完成"
+    log_header "Deployment complete"
 
     echo ""
-    echo -e "${BLUE}📊 集群信息${NC}"
-    echo "  集群名称: ${CLUSTER_NAME}"
-    echo "  节点数量: 4 (1 control-plane + 3 workers)"
+    echo -e "${BLUE}📊 Cluster${NC}"
+    echo "  Name: ${CLUSTER_NAME}"
+    echo "  Nodes: 4 (1 control-plane + 3 workers)"
     echo ""
 
-    echo -e "${BLUE}📦 已部署组件${NC}"
+    echo -e "${BLUE}📦 Deployed${NC}"
     echo "  Operator + Console API + Console Web"
     echo "  Tenant: ${TENANT_NAME} (4 servers, 2 volumes each)"
     echo ""
 
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}🚀 访问信息${NC}"
+    echo -e "${GREEN}🚀 Access${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
 
-    echo -e "${YELLOW}1. Operator Console Web (管理 Tenant)${NC}"
-    echo "   用途: 创建/删除/管理 Tenant"
-    echo -e "   访问: ${CYAN}http://localhost:8080${NC}"
-    echo "   认证: K8s Token (见下方)"
+    echo -e "${YELLOW}1. Operator Console Web (manage Tenants)${NC}"
+    echo "   Use: create / delete / manage Tenants"
+    echo -e "   URL: ${CYAN}http://localhost:8080${NC}"
+    echo "   Auth: Kubernetes token (see below)"
     echo ""
-    echo "   启动端口转发:"
+    echo "   Port-forward:"
     echo -e "   ${BLUE}kubectl port-forward svc/rustfs-operator-console-frontend -n ${OPERATOR_NAMESPACE} 8080:80${NC}"
     echo ""
-    echo "   获取 Token:"
+    echo "   Get token:"
     echo -e "   ${BLUE}kubectl create token rustfs-operator -n ${OPERATOR_NAMESPACE} --duration=24h${NC}"
     echo ""
 
-    echo -e "${YELLOW}2. Tenant Console (管理数据)${NC}"
-    echo "   用途: 上传/下载文件，管理 Buckets"
-    echo -e "   访问: ${CYAN}http://localhost:9001${NC}"
-    echo -e "   用户名: ${GREEN}admin123${NC}"
-    echo -e "   密码: ${GREEN}admin12345${NC}"
+    echo -e "${YELLOW}2. Tenant Console (RustFS UI)${NC}"
+    echo "   Use: upload/download, buckets"
+    echo -e "   URL: ${CYAN}http://localhost:9001${NC}"
+    echo -e "   Username: ${GREEN}admin123${NC}"
+    echo -e "   Password: ${GREEN}admin12345${NC}"
     echo ""
-    echo "   启动端口转发:"
+    echo "   Port-forward:"
     echo -e "   ${BLUE}kubectl port-forward svc/${TENANT_NAME}-console -n ${OPERATOR_NAMESPACE} 9001:9001${NC}"
     echo ""
 
     echo -e "${YELLOW}3. RustFS S3 API${NC}"
-    echo -e "   访问: ${CYAN}http://localhost:9000${NC}"
+    echo -e "   URL: ${CYAN}http://localhost:9000${NC}"
     echo -e "   Access Key: ${GREEN}admin123${NC}"
     echo -e "   Secret Key: ${GREEN}admin12345${NC}"
     echo ""
-    echo "   启动端口转发:"
+    echo "   Port-forward:"
     echo -e "   ${BLUE}kubectl port-forward svc/${TENANT_NAME}-io -n ${OPERATOR_NAMESPACE} 9000:9000${NC}"
     echo ""
 
     echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}📝 常用命令${NC}"
+    echo -e "${GREEN}📝 Useful commands${NC}"
     echo -e "${GREEN}======================================${NC}"
     echo ""
-    echo "查看资源:"
+    echo "Resources:"
     echo -e "  ${BLUE}kubectl get all -n ${OPERATOR_NAMESPACE}${NC}"
     echo -e "  ${BLUE}kubectl get tenant -n ${OPERATOR_NAMESPACE}${NC}"
     echo ""
-    echo "查看日志:"
+    echo "Logs:"
     echo -e "  ${BLUE}kubectl logs -f deployment/rustfs-operator -n ${OPERATOR_NAMESPACE}${NC}"
     echo -e "  ${BLUE}kubectl logs -f ${TENANT_NAME}-primary-0 -n ${OPERATOR_NAMESPACE}${NC}"
     echo ""
-    echo "销毁环境:"
+    echo "Tear down:"
     echo -e "  ${RED}./scripts/cleanup/cleanup-rustfs-4node.sh${NC}"
     echo ""
 
-    log_success "部署完成，可访问 Operator Console 和 Tenant Console"
+    log_success "Done. Use Operator Console and Tenant Console as above."
     echo ""
 }
 
 ################################################################################
-# 主函数
+# Main
 ################################################################################
 main() {
-    log_header "RustFS Operator 4-node 一键部署"
-    log_info "架构: Kind 多节点 + 4 节点 Tenant + 双 Console"
+    log_header "RustFS Operator 4-node deploy"
+    log_info "Topology: Kind multi-node + 4-node Tenant + dual Console"
     echo ""
 
     check_dependencies
@@ -559,16 +557,15 @@ main() {
     show_summary
 }
 
-# 解析参数
 case "${1:-}" in
     -h|--help)
         echo "Usage: $0"
         echo ""
-        echo "RustFS Operator 4-node 一键部署 (Kind 多节点 + 4 节点 Tenant + 双 Console)"
+        echo "RustFS Operator 4-node demo (Kind multi-node + 4-node Tenant + dual Console)"
         echo ""
-        echo "依赖: kubectl, kind, docker, cargo (Rust)"
+        echo "Requires: kubectl, kind, docker, cargo (Rust)"
         echo ""
-        echo "清理: ./scripts/cleanup/cleanup-rustfs-4node.sh"
+        echo "Cleanup: ./scripts/cleanup/cleanup-rustfs-4node.sh"
         exit 0
         ;;
 esac

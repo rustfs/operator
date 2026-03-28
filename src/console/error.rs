@@ -20,7 +20,7 @@ use axum::{
 use serde::Serialize;
 use snafu::Snafu;
 
-/// Console API 错误类型
+/// Console HTTP API error type
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -52,7 +52,7 @@ pub enum Error {
     Json { source: serde_json::Error },
 }
 
-/// 将 kube::Error 映射为合适的 Console Error（404 -> NotFound, 409 -> Conflict）
+/// Map `kube::Error` to a console error (404 -> NotFound, 409 -> Conflict).
 pub fn map_kube_error(e: kube::Error, not_found_resource: impl Into<String>) -> Error {
     match &e {
         kube::Error::Api(ae) if ae.code == 404 => Error::NotFound {
@@ -65,7 +65,7 @@ pub fn map_kube_error(e: kube::Error, not_found_resource: impl Into<String>) -> 
     }
 }
 
-/// API 错误响应格式
+/// JSON body shape for API errors
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,

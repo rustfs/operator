@@ -28,7 +28,7 @@ use crate::types::v1alpha1::{
     tenant::Tenant,
 };
 
-/// Kubernetes 资源名称校验（RFC 1123 子域名：小写字母数字、连字符，1-63 字符）
+/// Validate a Kubernetes resource name (RFC 1123 subdomain: lowercase alphanumeric + hyphen, 1–63).
 fn is_valid_k8s_name(s: &str) -> bool {
     if s.is_empty() || s.len() > 63 {
         return false;
@@ -48,7 +48,7 @@ fn is_valid_k8s_name(s: &str) -> bool {
     s.chars().last().is_some_and(|c| c != '-')
 }
 
-/// Kubernetes Quantity 格式校验（如 10Gi、100M、1）
+/// Loose validation for a Kubernetes resource quantity (e.g. `10Gi`, `100M`, `1`).
 fn is_valid_k8s_quantity(s: &str) -> bool {
     if s.is_empty() || s.len() > 32 {
         return false;
@@ -57,7 +57,7 @@ fn is_valid_k8s_quantity(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    // 允许：纯数字、数字+小数、数字+后缀(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)
+    // Allow: integer, decimal, or decimal + SI/binary suffix
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() && (bytes[i] == b'.' || (bytes[i] as char).is_ascii_digit()) {
@@ -69,8 +69,8 @@ fn is_valid_k8s_quantity(s: &str) -> bool {
     if i < bytes.len() {
         let suffix = std::str::from_utf8(&bytes[i..]).unwrap_or("");
         const VALID: &[&str] = &[
-            "Ei", "Pi", "Ti", "Gi", "Mi", "Ki", // 二进制后缀优先
-            "E", "P", "T", "G", "M", "K", // 十进制后缀
+            "Ei", "Pi", "Ti", "Gi", "Mi", "Ki", // binary SI
+            "E", "P", "T", "G", "M", "K", // decimal SI
         ];
         if !VALID.contains(&suffix) {
             return false;
@@ -79,7 +79,7 @@ fn is_valid_k8s_quantity(s: &str) -> bool {
     true
 }
 
-/// 校验 Pool 卷数（与 CRD 一致：2 server 至少 4 卷，3 server 至少 6 卷，其余至少 4 卷）
+/// Validate pool volume count (same rules as CRD: 2 servers => min 4 vols, 3 servers => min 6, else min 4).
 fn validate_pool_volumes(servers: i32, volumes_per_server: i32) -> Result<i32> {
     let total = servers * volumes_per_server;
     if servers <= 0 || volumes_per_server <= 0 {
@@ -108,7 +108,7 @@ fn validate_pool_volumes(servers: i32, volumes_per_server: i32) -> Result<i32> {
     Ok(total)
 }
 
-/// 列出 Tenant 的所有 Pools
+/// List pools for a tenant (from spec + StatefulSet status).
 pub async fn list_pools(
     Path((namespace, tenant_name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -116,13 +116,13 @@ pub async fn list_pools(
     let client = create_client(&claims).await?;
     let tenant_api: Api<Tenant> = Api::namespaced(client.clone(), &namespace);
 
-    // 获取 Tenant
+    // Load Tenant
     let tenant = tenant_api
         .get(&tenant_name)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", tenant_name)))?;
 
-    // 获取所有 StatefulSets
+    // List StatefulSets in namespace
     let ss_api: Api<appsv1::StatefulSet> = Api::namespaced(client, &namespace);
     let statefulsets = ss_api
         .list(&ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)))
@@ -136,7 +136,7 @@ pub async fn list_pools(
     for pool in &tenant.spec.pools {
         let ss_name = format!("{}-{}", tenant_name, pool.name);
 
-        // 查找对应的 StatefulSet
+        // Match StatefulSet for this pool name
         let ss = statefulsets
             .items
             .iter()
@@ -173,7 +173,7 @@ pub async fn list_pools(
                 (0, 0, 0, None, None, "NotCreated".to_string())
             };
 
-        // 获取存储配置
+        // PVC template / storage size
         let storage_class = pool
             .persistence
             .volume_claim_template
@@ -219,7 +219,7 @@ pub async fn list_pools(
     }))
 }
 
-/// 添加新的 Pool 到 Tenant（乐观锁重试）
+/// Append a pool to `Tenant.spec.pools` with optimistic-lock retries.
 pub async fn add_pool(
     Path((namespace, tenant_name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -228,7 +228,7 @@ pub async fn add_pool(
     let client = create_client(&claims).await?;
     let tenant_api: Api<Tenant> = Api::namespaced(client, &namespace);
 
-    // 输入校验（pool name 需符合 K8s 资源命名）
+    // Validate pool name and quantities
     let pool_name = req.name.trim();
     if !is_valid_k8s_name(pool_name) {
         return Err(Error::BadRequest {
@@ -248,7 +248,7 @@ pub async fn add_pool(
     }
     let total_volumes = validate_pool_volumes(req.servers, req.volumes_per_server)?;
 
-    // 构建新的 Pool
+    // Build Pool spec
     let new_pool = Pool {
         name: pool_name.to_string(),
         servers: req.servers,
@@ -320,7 +320,7 @@ pub async fn add_pool(
         },
     };
 
-    // 乐观锁重试：get -> 校验 -> push -> replace，409 时重试
+    // Optimistic loop: get -> validate -> push -> replace; retry on 409
     const MAX_RETRIES: u32 = 3;
     let mut last_conflict = None;
     for _ in 0..MAX_RETRIES {
@@ -376,7 +376,7 @@ pub async fn add_pool(
     }))
 }
 
-/// 删除 Pool（乐观锁重试）
+/// Remove a pool from the tenant with optimistic-lock retries.
 pub async fn delete_pool(
     Path((namespace, tenant_name, pool_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
@@ -440,7 +440,7 @@ pub async fn delete_pool(
     }))
 }
 
-/// 创建 Kubernetes 客户端
+/// Build a client using the session bearer token.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

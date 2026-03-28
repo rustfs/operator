@@ -26,7 +26,8 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 
 **Important Notes:**
 - RustFS S3 API runs on port **9000**
-- RustFS Console UI runs on port **9001**
+- RustFS Console UI (per Tenant Service `{tenant}-console`) runs on port **9001**
+- **Operator HTTP Console** (`cargo run -- console`, default **9090**) is the operator’s own management API—**not** the same as the RustFS Console UI Service above
 - **Credentials**: Use Secrets for production (see `secret-credentials-tenant.yaml`)
 - Default dev credentials: `rustfsadmin` / `rustfsadmin` ⚠️ **Change for production!**
 - Operator automatically sets: `RUSTFS_VOLUMES`, `RUSTFS_ADDRESS`, `RUSTFS_CONSOLE_ADDRESS`, `RUSTFS_CONSOLE_ENABLE`
@@ -440,9 +441,11 @@ When you apply a Tenant, the operator creates:
    - RoleBinding
 
 2. **Services**
-   - IO Service: `rustfs` (port 90→9000)
-   - Console Service: `{tenant}-console` (port 9090)
-   - Headless Service: `{tenant}-hl` (for StatefulSet DNS)
+   - IO Service: `rustfs` (S3 API, port **9000**)
+   - Console Service: `{tenant}-console` (RustFS web UI, port **9001**)
+   - Headless Service: `{tenant}-hl` (for StatefulSet DNS, port **9000**)
+
+   **Note:** The operator process also exposes an optional **Operator HTTP Console** for cluster management (default **9090** when using `cargo run -- console` or the chart’s console Deployment). That is separate from the Tenant’s `{tenant}-console` Service (**9001**).
 
 3. **StatefulSets** (one per pool)
    - Volume Claim Templates: `vol-0`, `vol-1`, ...

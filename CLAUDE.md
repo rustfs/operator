@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a Kubernetes operator for RustFS, written in Rust using the `kube-rs` library. The operator manages a custom resource `Tenant` (CRD) that provisions and manages RustFS storage clusters in Kubernetes.
 
 **Current Status**: v0.1.0 (pre-release) - Early development, not yet production-ready
-**Test Coverage**: 25 tests, all passing ✅
+**Test Coverage**: 47 library unit tests, all passing ✅ (run `cargo test --all` for current count)
 
 ## Build and Development Commands
 
@@ -31,8 +31,11 @@ cargo run -- crd
 # Generate CRD YAML to file
 cargo run -- crd -f tenant-crd.yaml
 
-# Run the controller (requires Kubernetes cluster access)
+# Run the Kubernetes controller (requires cluster access)
 cargo run -- server
+
+# Run the operator HTTP console API (default port 9090; used by console-web)
+cargo run -- console
 ```
 
 ### Docker
@@ -41,7 +44,7 @@ cargo run -- server
 docker build -t operator .
 ```
 
-Note: The Dockerfile uses a multi-stage build with Rust 1.91-alpine.
+Note: The Dockerfile uses a multi-stage build (`rust:bookworm`, cargo-chef); the final image defaults to `debian:bookworm-slim`.
 
 ### Scripts (deploy / cleanup / check)
 Shell scripts are under `scripts/` and grouped by purpose. Run from project root (scripts will `cd` to project root automatically):
@@ -85,7 +88,7 @@ See `docs/architecture-decisions.md` for detailed ADRs.
 ### Reconciliation Loop
 
 The operator follows the standard Kubernetes controller pattern:
-- **Entry Point**: `src/main.rs` - CLI with two subcommands: `crd` and `server`
+- **Entry Point**: `src/main.rs` - CLI subcommands: `crd`, `server` (controller), `console` (management API)
 - **Controller**: `src/lib.rs:run()` - Sets up the controller that watches `Tenant` resources and owned resources (ConfigMaps, Secrets, ServiceAccounts, Pods, StatefulSets)
 - **Reconciliation Logic**: `src/reconcile.rs:reconcile_rustfs()` - Main reconciliation function that creates/updates Kubernetes resources for a Tenant
 - **Error Handling**: `src/reconcile.rs:error_policy()` - Intelligent retry intervals based on error type:
@@ -170,8 +173,9 @@ The `Tenant` type in `src/types/v1alpha1/tenant.rs` has factory methods for crea
 ### Status Management
 
 - **Status Types**: `src/types/v1alpha1/status/` - Status structures including state, pool status, and certificate status
-- The status is updated via the Kubernetes status subresource
-- **TODO at `reconcile.rs:92`**: Implement comprehensive status condition updates on errors (Ready, Progressing, Degraded)
+- The status is updated via the Kubernetes status subresource (`Context::update_status`, with a single retry on conflict)
+- **Implemented (successful reconcile path)**: Aggregates per-pool StatefulSet status, sets `Ready` / `Progressing` / `Degraded` conditions, overall `current_state`, and pool entries—see `reconcile_rustfs()` in `src/reconcile.rs`
+- **Remaining (Issue #42 follow-up)**: When reconcile returns early with `Err` (e.g. credential/KMS validation, immutable field violations), status is not always updated to reflect that failure; consider setting conditions or state before returning
 
 ### Utilities
 
@@ -188,7 +192,7 @@ The `Tenant` type in `src/types/v1alpha1/tenant.rs` has factory methods for crea
 
 ## Code Structure Notes
 
-- Uses `kube-rs` with specific git revisions for `k8s-openapi` and `kube` crates
+- Uses `kube` and `k8s-openapi` from crates.io (see `Cargo.toml` for versions)
 - Kubernetes version target: v1.30
 - Error handling uses the `snafu` crate for structured error types
 - All files include Apache 2.0 license headers
@@ -196,21 +200,21 @@ The `Tenant` type in `src/types/v1alpha1/tenant.rs` has factory methods for crea
 
 ## Important Dependencies
 
-- **kube** and **k8s-openapi**: Pinned to specific git revisions (not crates.io versions)
-  - TODO: Evaluate migration to crates.io versions
+- **kube** / **k8s-openapi**: Versions pinned in `Cargo.toml` (crates.io)
 - Uses Rust edition 2024
-- Build script (`build.rs`) generates build metadata using the `built` crate
+- Build script (`build.rs`) generates build metadata using the `shadow-rs` crate
 
 ## Known Issues and TODOs
 
 ### High Priority
 - [x] ~~**Secret-based credential management**~~ ✅ **COMPLETED** (2025-11-15, Issue #41)
-- [ ] **Status condition management** (`src/reconcile.rs:92`, Issue #42)
-- [ ] **StatefulSet reconciliation** (`reconcile.rs`) - Creation works, updates need refinement (Issue #43)
-- [ ] **Integration tests** - Only unit tests currently exist
+- [x] ~~**Tenant status conditions on successful reconcile**~~ — `Ready` / `Progressing` / `Degraded`, pool-level status (see `reconcile.rs`)
+- [ ] **Status on reconciliation failures** — Early error returns may not patch Tenant status (Issue #42 follow-up)
+- [ ] **StatefulSet advanced rollout** — Safe updates and validation exist; rollback, richer strategies, and Issue #43 polish remain
+- [ ] **Integration tests** — Only unit tests in-repo today
 
 ### Medium Priority
-- [ ] Status subresource update retry logic improvements
+- [ ] Status subresource update retry beyond single conflict retry (`context.rs`)
 - [ ] TLS certificate rotation automation
 - [ ] Configuration validation enhancements (storage class existence, node selector validity)
 
@@ -220,7 +224,7 @@ The `Tenant` type in `src/types/v1alpha1/tenant.rs` has factory methods for crea
 - **ROADMAP.md** - Development roadmap organized by focus areas (Core Stability, Advanced Features, Enterprise Features, Production Ready)
 - **docs/architecture-decisions.md** - ADRs documenting key architectural decisions
 - **docs/multi-pool-use-cases.md** - Comprehensive guide for multi-pool scenarios
-- **docs/DEVELOPMENT-NOTES.md** - Development workflow and contribution guidelines
+- **docs/DEVELOPMENT-NOTES.md** - Historical analysis and design notes (not the primary dev guide; see `docs/DEVELOPMENT.md` and `CONTRIBUTING.md`)
 
 ## Examples
 
@@ -251,10 +255,8 @@ See `examples/README.md` for comprehensive usage guide.
 ## Development Priorities (from ROADMAP.md)
 
 ### Core Stability (Highest Priority)
-- Secret-based credential management
-- Status condition management (Ready, Progressing, Degraded)
-- StatefulSet update and rollout management
-- Improved error handling and observability
+- Status on failed reconcile paths and stronger status retry
+- StatefulSet rollout polish (rollback, strategies) and observability (metrics)
 - Integration test suite
 
 ### Advanced Features

@@ -13,7 +13,7 @@ Open [http://localhost:3000](http://localhost:3000). The app calls the console A
 
 ### Local dev with backend
 
-Run the operator console backend (e.g. `cargo run -- server` or another port). Then either:
+Run the operator console HTTP API (e.g. `cargo run -- console`, default port **9090**). Then either:
 
 - Use same-origin: e.g. put frontend and backend behind one dev server that proxies `/api/v1` to the backend, and run the frontend with `NEXT_PUBLIC_API_BASE_URL=` (empty or `/api/v1`), or
 - Use different ports: run frontend on 3000, backend on 9090, and set `NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1`. The backend allows `http://localhost:3000` by default (CORS).

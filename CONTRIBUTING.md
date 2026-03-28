@@ -1,5 +1,13 @@
 # RustFS Development Guide
 
+## Documentation map
+
+- **This file (`CONTRIBUTING.md`)** — Authoritative for **code quality**, commit workflow, formatting, and alignment with `make pre-commit` and CI. When instructions conflict, prefer this file plus [`Makefile`](Makefile) and [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+- **[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)** — Local environment setup (Kubernetes, kind, optional tools), IDE hints, and longer workflows. It **does not** redefine the quality gates above; run `make pre-commit` as the single local bar before pushing.
+
+- **[`docs/DEVELOPMENT-NOTES.md`](docs/DEVELOPMENT-NOTES.md)** — Historical design notes and analysis sessions (not a normative spec). For current behavior, use the source tree, [`CHANGELOG.md`](CHANGELOG.md), and [`CLAUDE.md`](CLAUDE.md).
+
 ## 📋 Code Quality Requirements
 
 ### 🔧 Code Formatting Rules
@@ -8,9 +16,9 @@
 
 #### Pre-commit Requirements
 
-Before every commit, you **MUST**:
+Before every commit, you **MUST** pass the same checks as `make pre-commit` (see below). In practice, the steps are:
 
-1. **Format your code**:
+1. **Format your code** (or rely on `make fmt-check` to fail if not formatted):
 
    ```bash
    cargo fmt --all
@@ -25,63 +33,56 @@ Before every commit, you **MUST**:
 3. **Pass clippy checks**:
 
    ```bash
-   cargo clippy --all-targets --all-features -- -D warnings
+   cargo clippy --all-features -- -D warnings
    ```
 
-4. **Ensure compilation**:
+4. **Run tests**:
 
    ```bash
-   cargo check --all-targets
+   cargo test --all
+   ```
+
+5. **Console (frontend)** — from repo root:
+
+   ```bash
+   cd console-web && npm run lint
+   cd console-web && npx prettier --check "**/*.{ts,tsx,js,jsx,json,css,md}"
    ```
 
 #### Quick Commands
 
-We provide convenient Makefile targets for common tasks:
+Targets are defined in [`Makefile`](Makefile). Use these from the **repository root**:
 
 ```bash
-# Format all code
+# Format all Rust code
 make fmt
 
-# Check if code is properly formatted
+# Check Rust formatting (no writes)
 make fmt-check
 
-# Run clippy checks
+# Clippy (Rust)
 make clippy
 
-# Run compilation check
-make check
-
-# Run tests
+# Rust tests
 make test
 
-# Run all pre-commit checks (format + clippy + check + test)
+# Frontend: ESLint + Prettier check (requires npm install in console-web/)
+make console-lint
+make console-fmt-check
+
+# Full gate before push (Rust + console-web): same as project / AGENTS.md rules
 make pre-commit
-
-# Setup git hooks (one-time setup)
-make setup-hooks
 ```
 
-### 🔒 Automated Pre-commit Hooks
-
-This project includes a pre-commit hook that automatically runs before each commit to ensure:
-
-- ✅ Code is properly formatted (`cargo fmt --all --check`)
-- ✅ No clippy warnings (`cargo clippy --all-targets --all-features -- -D warnings`)
-- ✅ Code compiles successfully (`cargo check --all-targets`)
-
-#### Setting Up Pre-commit Hooks
-
-Run this command once after cloning the repository:
+Optional quick compile (not a separate `make` target):
 
 ```bash
-make setup-hooks
+cargo check --all-targets
 ```
 
-Or manually:
+### 🔒 Git hooks (optional)
 
-```bash
-chmod +x .git/hooks/pre-commit
-```
+The repository does **not** ship a `make setup-hooks` target. To run checks automatically on `git commit`, add your own `.git/hooks/pre-commit` that invokes `make pre-commit` (or the individual commands above).
 
 ### 📝 Formatting Configuration
 
@@ -95,11 +96,7 @@ single_line_let_else_max_width = 100
 
 ### 🚫 Commit Prevention
 
-If your code doesn't meet the formatting requirements, the pre-commit hook will:
-
-1. **Block the commit** and show clear error messages
-2. **Provide exact commands** to fix the issues
-3. **Guide you through** the resolution process
+If your code doesn't meet the formatting requirements, CI or local checks will fail with clear messages.
 
 Example output when formatting fails:
 
@@ -148,21 +145,11 @@ Configure your IDE to:
 ### ❗ Important Notes
 
 - **Never bypass formatting checks** - they are there for a reason
-- **All CI/CD pipelines** will also enforce these same checks
-- **Pull requests** will be automatically rejected if formatting checks fail
+- **CI and `make pre-commit`** should stay aligned; see [`Makefile`](Makefile) and [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+- **Pull requests** may be rejected if checks fail
 - **Consistent formatting** improves code readability and reduces merge conflicts
 
 ### 🆘 Troubleshooting
-
-#### Pre-commit hook not running?
-
-```bash
-# Check if hook is executable
-ls -la .git/hooks/pre-commit
-
-# Make it executable if needed
-chmod +x .git/hooks/pre-commit
-```
 
 #### Formatting issues?
 

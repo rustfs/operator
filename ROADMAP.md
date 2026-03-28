@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for the RustFS Kubernetes Operator. The roadmap is organized by release versions and includes features, improvements, and technical debt items.
 
-**Last Updated**: 2025-11-15
+**Last Updated**: 2026-03-28
 **Current Version**: 0.1.0 (pre-release)
 
 ---
@@ -23,14 +23,17 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 - [x] Certificate and TLS utilities (RSA, ECDSA, Ed25519)
 - [x] Kubernetes events for reconciliation actions
 - [x] Test infrastructure with helper utilities
+- [x] Tenant status: conditions (`Ready`, `Progressing`, `Degraded`), overall state, per-pool status from StatefulSets (successful reconcile path)
+- [x] StatefulSet create/update with safe update validation and apply when spec changes
+- [x] Operator HTTP console API and `console` CLI subcommand; `console-web` management UI
 
 ### 🔧 Known Issues
 
-- [ ] StatefulSet reconciliation incomplete (creation works, updates need refinement)
-- [ ] Status subresource updates need retry logic improvements
-- [ ] No integration tests yet (only unit tests)
-- [ ] Error policy needs status condition updates
+- [ ] No integration or E2E tests in-repo (unit tests only)
+- [ ] Tenant status not always updated when reconcile returns early with an error (e.g. credential/KMS validation)
+- [ ] Status subresource patch: only one conflict retry; stronger backoff optional
 - [ ] TLS certificate rotation not automated
+- [ ] Advanced StatefulSet rollout (rollback, extra strategy options) still open
 
 ---
 
@@ -54,23 +57,14 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
   - ✅ Production-ready examples and documentation
   - See: `examples/secret-credentials-tenant.yaml`, Issue #41
 
-- [ ] **Status condition management** (`src/reconcile.rs:92`)
-  - Update Tenant status on reconciliation errors
-  - Implement standard Kubernetes condition types (Ready, Progressing, Degraded)
-  - Pool-level status tracking
-  - Health check integration
-
-- [ ] **StatefulSet update and rollout management**
-  - Safe StatefulSet updates with revision tracking
-  - Rolling update support with configurable strategies
-  - Rollback capabilities
-  - Update status reporting
-
+- [x] **Status conditions (happy path)** ✅ — `Ready` / `Progressing` / `Degraded`, pool-level status; see `src/reconcile.rs`
+- [ ] **Status on reconciliation errors** — Surface failing state when reconcile exits early (credentials, validation, etc.); related to Issue #42
+- [x] **StatefulSet update (core)** ✅ — Validate immutable fields, apply when `statefulset_needs_update`; per-pool status from STS
+- [ ] **StatefulSet rollout extras** — Rollback, configurable strategies, richer revision tracking (beyond current behavior)
 - [ ] **Improved error handling and observability**
-  - Structured logging with tracing levels
   - Prometheus metrics (reconciliation duration, error rates, pool health)
-  - Event recording for all lifecycle events
-  - Error categorization (transient vs permanent)
+  - Broader event coverage if gaps remain
+  - Note: structured logging (`tracing`) and `error_policy` requeue tiers exist today
 
 ### Medium Priority
 
@@ -257,7 +251,7 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 ### Medium Priority
 
 - [ ] Consider using `kube-runtime` finalizers API
-- [ ] Evaluate using `k8s-openapi` from crates.io instead of git
+- [x] ~~**k8s-openapi / kube from crates.io**~~ — Using crates.io versions (see `Cargo.toml`); keep pinned upgrades deliberate
 - [ ] Performance profiling and optimization
 - [ ] Memory usage analysis and optimization
 - [ ] Reduce binary size (investigate dependencies)
@@ -275,11 +269,11 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 
 ### Community Building
 
-- [ ] Establish contributor guidelines (CONTRIBUTING.md)
-- [ ] Set up issue templates and PR templates
-- [ ] Create good-first-issue labels and documentation
+- [x] **CONTRIBUTING.md** and contributor workflow (`make pre-commit`)
+- [x] **Pull request template** (`.github/pull_request_template.md`)
+- [ ] GitHub issue templates and `good-first-issue` labels
 - [ ] Regular community meetings (monthly)
-- [ ] Developer documentation for architecture
+- [x] **Core developer docs** (`docs/DEVELOPMENT.md`, `CLAUDE.md`, `docs/architecture-decisions.md`) — expand as needed
 
 ### Ecosystem Partnerships
 
@@ -298,7 +292,7 @@ This document outlines the development roadmap for the RustFS Kubernetes Operato
 - **Kubernetes**: v1.27+ (current target: v1.30)
 - **Rust**: 1.91+ (edition 2024)
 - **RustFS**: Version compatibility matrix TBD
-- **kube-rs**: Git revision (evaluate crates.io migration)
+- **kube** / **k8s-openapi**: crates.io versions in `Cargo.toml`
 
 ### Optional Dependencies
 

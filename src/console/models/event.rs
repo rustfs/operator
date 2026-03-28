@@ -15,7 +15,7 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// Event 列表项
+/// Single Kubernetes event row for the UI
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EventItem {
     pub event_type: String,
@@ -27,7 +27,7 @@ pub struct EventItem {
     pub count: i32,
 }
 
-/// Event 列表响应
+/// Response listing events
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EventListResponse {
     pub events: Vec<EventItem>,

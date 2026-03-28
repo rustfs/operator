@@ -15,7 +15,7 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// 节点信息
+/// Node summary for the cluster API
 #[derive(Debug, Serialize, ToSchema)]
 pub struct NodeInfo {
     pub name: String,
@@ -27,13 +27,13 @@ pub struct NodeInfo {
     pub memory_allocatable: String,
 }
 
-/// 节点列表响应
+/// Response listing cluster nodes
 #[derive(Debug, Serialize, ToSchema)]
 pub struct NodeListResponse {
     pub nodes: Vec<NodeInfo>,
 }
 
-/// Namespace 列表项
+/// Single namespace row in a list
 #[derive(Debug, Serialize, ToSchema)]
 pub struct NamespaceItem {
     pub name: String,
@@ -41,19 +41,19 @@ pub struct NamespaceItem {
     pub created_at: Option<String>,
 }
 
-/// Namespace 列表响应
+/// Response listing namespaces
 #[derive(Debug, Serialize, ToSchema)]
 pub struct NamespaceListResponse {
     pub namespaces: Vec<NamespaceItem>,
 }
 
-/// 创建 Namespace 请求
+/// Request body to create a namespace
 #[derive(Debug, serde::Deserialize, ToSchema)]
 pub struct CreateNamespaceRequest {
     pub name: String,
 }
 
-/// 集群资源响应
+/// Aggregated cluster capacity / allocatable resources
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ClusterResourcesResponse {
     pub total_nodes: usize,

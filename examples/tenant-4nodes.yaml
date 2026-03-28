@@ -61,8 +61,8 @@ spec:
       value: info
 
 ---
-# Credentials Secret for RustFS (至少 8 字符)
-# 用户名: admin123, 密码: admin12345
+# Credentials Secret for RustFS (keys must be at least 8 characters)
+# Example: accesskey admin123, secretkey admin12345 (dev only)
 apiVersion: v1
 kind: Secret
 metadata:

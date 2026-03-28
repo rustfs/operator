@@ -19,7 +19,7 @@ use axum::{
 
 use crate::console::{handlers, state::AppState};
 
-/// 认证路由
+/// Login / session routes (partially unauthenticated)
 pub fn auth_routes() -> Router<AppState> {
     Router::new()
         .route("/login", post(handlers::auth::login))
@@ -27,7 +27,7 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/session", get(handlers::auth::session_check))
 }
 
-/// Tenant 管理路由
+/// Tenant CRUD, YAML, encryption, security context
 pub fn tenant_routes() -> Router<AppState> {
     Router::new()
         .route("/tenants", get(handlers::tenants::list_all_tenants))
@@ -82,7 +82,7 @@ pub fn tenant_routes() -> Router<AppState> {
         )
 }
 
-/// Pool 管理路由
+/// Pool list / add / delete under a tenant
 pub fn pool_routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -99,7 +99,7 @@ pub fn pool_routes() -> Router<AppState> {
         )
 }
 
-/// Pod 管理路由
+/// Pod list, detail, delete, restart, logs
 pub fn pod_routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -124,7 +124,7 @@ pub fn pod_routes() -> Router<AppState> {
         )
 }
 
-/// 事件管理路由
+/// Kubernetes events for a tenant
 pub fn event_routes() -> Router<AppState> {
     Router::new().route(
         "/namespaces/:namespace/tenants/:tenant/events",
@@ -132,7 +132,7 @@ pub fn event_routes() -> Router<AppState> {
     )
 }
 
-/// 集群资源路由
+/// Nodes, cluster capacity, namespaces
 pub fn cluster_routes() -> Router<AppState> {
     Router::new()
         .route("/cluster/nodes", get(handlers::cluster::list_nodes))
@@ -144,7 +144,7 @@ pub fn cluster_routes() -> Router<AppState> {
         .route("/namespaces", post(handlers::cluster::create_namespace))
 }
 
-/// 拓扑总览路由
+/// Topology overview for the dashboard
 pub fn topology_routes() -> Router<AppState> {
     Router::new().route(
         "/topology/overview",

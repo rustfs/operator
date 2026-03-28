@@ -15,21 +15,21 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// 登录请求
+/// Login request body
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
     /// Kubernetes ServiceAccount Token
     pub token: String,
 }
 
-/// 登录响应
+/// Login response
 #[derive(Debug, Serialize, ToSchema)]
 pub struct LoginResponse {
     pub success: bool,
     pub message: String,
 }
 
-/// 会话检查响应
+/// Session check response
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SessionResponse {
     pub valid: bool,
