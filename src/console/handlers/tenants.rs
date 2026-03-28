@@ -193,6 +193,13 @@ pub async fn create_tenant(
     Extension(claims): Extension<Claims>,
     Json(req): Json<CreateTenantRequest>,
 ) -> Result<Json<TenantListItem>> {
+    // Validate tenant name is DNS-1035 compliant before hitting the K8s API
+    if let Err(e) = crate::types::v1alpha1::tenant::validate_dns1035_label(&req.name) {
+        return Err(Error::BadRequest {
+            message: format!("{}", e),
+        });
+    }
+
     let client = create_client(&claims).await?;
 
     // Ensure namespace exists

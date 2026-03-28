@@ -24,7 +24,7 @@ use crate::console::{
 };
 use crate::types::v1alpha1::{
     persistence::PersistenceConfig,
-    pool::{Pool, SchedulingConfig},
+    pool::{Pool, SchedulingConfig, validate_pool_total_volumes},
     tenant::Tenant,
 };
 
@@ -79,33 +79,10 @@ fn is_valid_k8s_quantity(s: &str) -> bool {
     true
 }
 
-/// Validate pool volume count (same rules as CRD: 2 servers => min 4 vols, 3 servers => min 6, else min 4).
+/// Validate pool volume count (same rules as CRD CEL on [`Pool`] and [`validate_pool_total_volumes`]).
 fn validate_pool_volumes(servers: i32, volumes_per_server: i32) -> Result<i32> {
-    let total = servers * volumes_per_server;
-    if servers <= 0 || volumes_per_server <= 0 {
-        return Err(Error::BadRequest {
-            message: "servers and volumes_per_server must be positive".to_string(),
-        });
-    }
-    if servers == 2 && total < 4 {
-        return Err(Error::BadRequest {
-            message: "Pool with 2 servers must have at least 4 volumes in total".to_string(),
-        });
-    }
-    if servers == 3 && total < 6 {
-        return Err(Error::BadRequest {
-            message: "Pool with 3 servers must have at least 6 volumes in total".to_string(),
-        });
-    }
-    if total < 4 {
-        return Err(Error::BadRequest {
-            message: format!(
-                "Pool must have at least 4 total volumes (got {} servers × {} volumes = {})",
-                servers, volumes_per_server, total
-            ),
-        });
-    }
-    Ok(total)
+    validate_pool_total_volumes(servers, volumes_per_server)
+        .map_err(|message| Error::BadRequest { message })
 }
 
 /// List pools for a tenant (from spec + StatefulSet status).

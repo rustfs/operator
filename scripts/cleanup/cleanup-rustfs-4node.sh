@@ -192,11 +192,21 @@ delete_kind_cluster() {
 
 cleanup_storage_dirs() {
     log_info "Cleaning host storage directories..."
+    log_info "Kind bind mounts are often root-owned on the host; sudo may be required."
 
     for dir in /tmp/rustfs-storage-1 /tmp/rustfs-storage-2 /tmp/rustfs-storage-3; do
-        if [ -d "$dir" ]; then
+        if [ ! -d "$dir" ]; then
+            continue
+        fi
+        if [ "$(id -u)" -eq 0 ]; then
             rm -rf "$dir"
             log_info "Removed $dir"
+        elif command -v sudo >/dev/null 2>&1 && sudo rm -rf "$dir"; then
+            log_info "Removed $dir"
+        elif rm -rf "$dir" 2>/dev/null; then
+            log_info "Removed $dir"
+        else
+            log_warning "Could not remove $dir (permission denied). Run: sudo rm -rf $dir"
         fi
     done
 
@@ -239,7 +249,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  -f, --force           Skip confirmation"
-            echo "  -s, --clean-storage   Also remove host dirs /tmp/rustfs-storage-{1,2,3}"
+            echo "  -s, --clean-storage   Also remove host dirs /tmp/rustfs-storage-{1,2,3} (uses sudo if needed)"
             echo "  -h, --help            Show this help"
             exit 0
             ;;

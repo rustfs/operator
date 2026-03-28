@@ -45,6 +45,117 @@ spec:
                 required:
                 - name
                 type: object
+              encryption:
+                description: |-
+                  Encryption / KMS configuration for server-side encryption.
+                  When enabled, the operator injects KMS environment variables and mounts
+                  secrets into RustFS pods so the in-process `rustfs-kms` library is configured.
+                nullable: true
+                properties:
+                  backend:
+                    default: local
+                    description: 'KMS backend type: `local` or `vault`.'
+                    enum:
+                    - local
+                    - vault
+                    type: string
+                  enabled:
+                    default: false
+                    description: Enable server-side encryption. When `false`, all other fields are ignored.
+                    type: boolean
+                  kmsSecret:
+                    description: |-
+                      Reference to a Secret containing sensitive KMS credentials
+                      (Vault token or AppRole credentials, TLS certificates).
+                    nullable: true
+                    properties:
+                      name:
+                        description: 'Name of the referent. This field is effectively required, but due to backwards compatibility is allowed to be empty. Instances of this type with an empty value here are almost certainly wrong. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  local:
+                    description: 'Local file-based settings (optional when `backend: local`).'
+                    nullable: true
+                    properties:
+                      keyDirectory:
+                        description: 'Directory for key files inside the container (default: `/data/kms-keys`).'
+                        nullable: true
+                        type: string
+                      masterKeyId:
+                        description: 'Master key identifier (default: `default-master-key`).'
+                        nullable: true
+                        type: string
+                    type: object
+                  pingSeconds:
+                    description: |-
+                      Interval in seconds for KMS health-check pings (default: disabled).
+                      When set, the operator stores the value; the in-process KMS library
+                      picks it up from `RUSTFS_KMS_PING_SECONDS`.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  vault:
+                    description: 'Vault-specific settings (required when `backend: vault`).'
+                    nullable: true
+                    properties:
+                      appRole:
+                        description: |-
+                          AppRole authentication settings. Only used when `authType: approle`.
+                          The actual `role_id` and `secret_id` values live in the KMS Secret
+                          under keys `vault-approle-id` and `vault-approle-secret`.
+                        nullable: true
+                        properties:
+                          engine:
+                            description: Engine mount path for AppRole auth (e.g. `approle`).
+                            nullable: true
+                            type: string
+                          retrySeconds:
+                            description: 'Retry interval in seconds for AppRole login attempts (default: 10).'
+                            format: int32
+                            nullable: true
+                            type: integer
+                        type: object
+                      authType:
+                        description: Authentication method. Defaults to `token` when not set.
+                        enum:
+                        - token
+                        - approle
+                        - null
+                        nullable: true
+                        type: string
+                      customCertificates:
+                        description: |-
+                          Enable custom TLS certificates for the Vault connection.
+                          When `true`, the operator mounts TLS certificate files from the KMS Secret
+                          and configures the corresponding environment variables.
+                          The Secret must contain: `vault-ca-cert`, `vault-client-cert`, `vault-client-key`.
+                        nullable: true
+                        type: boolean
+                      endpoint:
+                        description: Vault server endpoint (e.g. `https://vault.example.com:8200`).
+                        type: string
+                      engine:
+                        description: 'Vault KV2 engine mount path (default: `kv`).'
+                        nullable: true
+                        type: string
+                      namespace:
+                        description: Vault namespace (Enterprise feature).
+                        nullable: true
+                        type: string
+                      prefix:
+                        description: Key prefix inside the engine.
+                        nullable: true
+                        type: string
+                      tlsSkipVerify:
+                        description: Skip TLS certificate verification for Vault connection.
+                        nullable: true
+                        type: boolean
+                    required:
+                    - endpoint
+                    type: object
+                type: object
               env:
                 items:
                   description: EnvVar represents an environment variable present in a Container.
@@ -94,7 +205,7 @@ spec:
                               type: string
                             divisor:
                               description: Specifies the output format of the exposed resources, defaults to "1"
-                              type: string
+                              x-kubernetes-int-or-string: true
                             resource:
                               description: 'Required: resource to select'
                               type: string
@@ -293,8 +404,67 @@ spec:
                         type: object
                     type: object
                 type: object
+              logging:
+                description: |-
+                  Logging configuration for RustFS
+
+                  Controls how RustFS outputs logs. Defaults to stdout (cloud-native best practice).
+                  Can also configure emptyDir (temporary) or persistent (PVC-backed) logging.
+                nullable: true
+                properties:
+                  mode:
+                    default: stdout
+                    description: |-
+                      Logging mode: stdout, emptyDir, or persistent
+
+                      - stdout: Output logs to stdout/stderr (default, recommended for cloud-native)
+                      - emptyDir: Write logs to an emptyDir volume (temporary, lost on Pod restart)
+                      - persistent: Write logs to a PersistentVolumeClaim (persisted across restarts)
+                    enum:
+                    - stdout
+                    - emptydir
+                    - persistent
+                    type: string
+                  mountPath:
+                    description: |-
+                      Custom mount path for log directory
+                      Defaults to /logs if not specified
+                    nullable: true
+                    type: string
+                  storageClass:
+                    description: |-
+                      Storage class for persistent logs (only used when mode=persistent)
+                      If not specified, uses the cluster's default StorageClass
+                    nullable: true
+                    type: string
+                  storageSize:
+                    description: |-
+                      Storage size for persistent logs (only used when mode=persistent)
+                      Defaults to 5Gi if not specified
+                    nullable: true
+                    type: string
+                type: object
               mountPath:
                 default: /data
+                nullable: true
+                type: string
+              podDeletionPolicyWhenNodeIsDown:
+                description: |-
+                  Controls how the operator handles Pods when the node hosting them is down (NotReady/Unknown).
+
+                  Typical use-case: a StatefulSet Pod gets stuck in Terminating when the node goes down.
+                  Setting this to `ForceDelete` allows the operator to force delete the Pod object so the
+                  StatefulSet controller can recreate it elsewhere.
+
+                  Values: DoNothing | Delete | ForceDelete
+                enum:
+                - DoNothing
+                - Delete
+                - ForceDelete
+                - DeleteStatefulSetPod
+                - DeleteDeploymentPod
+                - DeleteBothStatefulSetAndDeploymentPod
+                - null
                 nullable: true
                 type: string
               podManagementPolicy:
@@ -308,25 +478,6 @@ spec:
                 enum:
                 - OrderedReady
                 - Parallel
-                - null
-                nullable: true
-                type: string
-              podDeletionPolicyWhenNodeIsDown:
-                description: |-
-                  Controls how the operator handles Pods when the node hosting them is down (NotReady/Unknown).
-
-                  Typical use-case: a StatefulSet Pod gets stuck in Terminating when the node goes down.
-                  Setting this to ForceDelete allows the operator to force delete the Pod object so the
-                  StatefulSet controller can recreate it elsewhere.
-
-                  Values: DoNothing | Delete | ForceDelete
-                enum:
-                - DoNothing
-                - Delete
-                - ForceDelete
-                - DeleteStatefulSetPod
-                - DeleteDeploymentPod
-                - DeleteBothStatefulSetAndDeploymentPod
                 - null
                 nullable: true
                 type: string
@@ -926,13 +1077,13 @@ spec:
                                 limits:
                                   additionalProperties:
                                     description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                                    type: string
+                                    x-kubernetes-int-or-string: true
                                   description: 'Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                   type: object
                                 requests:
                                   additionalProperties:
                                     description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                                    type: string
+                                    x-kubernetes-int-or-string: true
                                   description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                                   type: object
                               type: object
@@ -1016,13 +1167,13 @@ spec:
                         limits:
                           additionalProperties:
                             description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                            type: string
+                            x-kubernetes-int-or-string: true
                           description: 'Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                           type: object
                         requests:
                           additionalProperties:
                             description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
-                            type: string
+                            x-kubernetes-int-or-string: true
                           description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                           type: object
                       type: object
@@ -1030,7 +1181,7 @@ spec:
                       format: int32
                       type: integer
                       x-kubernetes-validations:
-                      - message: servers must be gather than 0
+                      - message: servers must be greater than 0
                         rule: self > 0
                     tolerations:
                       description: Tolerations allow pods to schedule onto nodes with matching taints.
@@ -1145,12 +1296,12 @@ spec:
                   - servers
                   type: object
                   x-kubernetes-validations:
-                  - messageExpression: '"pool " + self.name + " with 2 servers must have at least 4 volumes in total"'
+                  - messageExpression: '"pool " + self.name + " must have at least 4 total volumes (servers × volumesPerServer)"'
                     reason: FieldValueInvalid
-                    rule: '!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 2)'
+                    rule: self.servers * self.persistence.volumesPerServer >= 4
                   - messageExpression: '"pool " + self.name + " with 3 servers must have at least 6 volumes in total"'
                     reason: FieldValueInvalid
-                    rule: '!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 3)'
+                    rule: self.servers != 3 || self.servers * self.persistence.volumesPerServer >= 6
                 type: array
                 x-kubernetes-validations:
                 - message: pools must be configured
@@ -1161,6 +1312,32 @@ spec:
               scheduler:
                 nullable: true
                 type: string
+              securityContext:
+                description: |-
+                  Override the default Pod SecurityContext (runAsUser/runAsGroup/fsGroup = 10001).
+                  Applies to all RustFS pods in this Tenant.
+                nullable: true
+                properties:
+                  fsGroup:
+                    description: GID applied to all volumes mounted in the Pod.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  runAsGroup:
+                    description: GID to run the container process as.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  runAsNonRoot:
+                    description: 'Enforce non-root execution (default: true).'
+                    nullable: true
+                    type: boolean
+                  runAsUser:
+                    description: UID to run the container process as.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
               serviceAccountName:
                 nullable: true
                 type: string

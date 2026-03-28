@@ -360,21 +360,26 @@ spec:
 
 ### Pool Requirements
 
-- **Minimum volumes**: `servers * volumesPerServer >= 4` (RustFS erasure coding requirement)
+- **Minimum total volumes**: `servers * volumesPerServer >= 4` (RustFS erasure coding requirement)
+- **Three-server pools**: `servers * volumesPerServer >= 6` (stricter than the general minimum)
 - **Server count**: Must be > 0
 - **Volumes per server**: Must be > 0
 - **Pool name**: Must not be empty
+
+These rules are enforced by the Tenant CRD (CEL) and the operator console API.
 
 ### Valid Examples
 
 ✅ `servers: 4, volumesPerServer: 1` → 4 total volumes
 ✅ `servers: 2, volumesPerServer: 2` → 4 total volumes
+✅ `servers: 3, volumesPerServer: 2` → 6 total volumes (minimum for 3 servers)
 ✅ `servers: 4, volumesPerServer: 4` → 16 total volumes
 
 ### Invalid Examples
 
 ❌ `servers: 2, volumesPerServer: 1` → 2 total volumes (< 4)
 ❌ `servers: 1, volumesPerServer: 1` → 1 total volume (< 4)
+❌ `servers: 3, volumesPerServer: 1` → 3 total volumes (< 6 for 3 servers)
 ❌ `servers: 0, volumesPerServer: 4` → Server count must be > 0
 
 ## Common Configurations

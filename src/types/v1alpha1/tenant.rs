@@ -163,6 +163,14 @@ impl Tenant {
         ResourceExt::name_any(self)
     }
 
+    /// Validate the tenant name conforms to DNS-1035 label rules.
+    /// Kubernetes Services derived from the tenant name (e.g. `{name}-io`)
+    /// require DNS-1035 compliance: lowercase alphanumeric or '-',
+    /// must start with a letter, end with an alphanumeric, max 63 chars.
+    pub fn validate_name(&self) -> Result<(), types::error::Error> {
+        validate_dns1035_label(&self.name())
+    }
+
     /// a new owner reference for tenant
     pub fn new_owner_ref(&self) -> metav1::OwnerReference {
         metav1::OwnerReference {
@@ -296,6 +304,58 @@ impl Tenant {
             last_update_time,
         }
     }
+}
+
+/// Validate a name conforms to DNS-1035 label rules:
+/// `[a-z]([-a-z0-9]*[a-z0-9])?`, max 63 characters.
+pub fn validate_dns1035_label(name: &str) -> Result<(), types::error::Error> {
+    if name.is_empty() {
+        return Err(types::error::Error::InvalidTenantName {
+            name: name.to_string(),
+            reason: "name must not be empty".to_string(),
+        });
+    }
+
+    // Longest derived DNS label is "{name}-console" (+8). RFC 1123 labels max 63 chars ⇒ |name| ≤ 55.
+    if name.len() > 55 {
+        return Err(types::error::Error::InvalidTenantName {
+            name: name.to_string(),
+            reason: format!(
+                "name must be at most 55 characters (longest derived name is {{name}}-console), got {}",
+                name.len()
+            ),
+        });
+    }
+
+    let bytes = name.as_bytes();
+
+    if !bytes[0].is_ascii_lowercase() {
+        return Err(types::error::Error::InvalidTenantName {
+            name: name.to_string(),
+            reason: "must start with a lowercase letter (a-z), not a digit or symbol".to_string(),
+        });
+    }
+
+    if !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit() {
+        return Err(types::error::Error::InvalidTenantName {
+            name: name.to_string(),
+            reason: "must end with a lowercase alphanumeric character (a-z, 0-9)".to_string(),
+        });
+    }
+
+    for &b in bytes {
+        if !b.is_ascii_lowercase() && !b.is_ascii_digit() && b != b'-' {
+            return Err(types::error::Error::InvalidTenantName {
+                name: name.to_string(),
+                reason: format!(
+                    "contains invalid character '{}'; only lowercase alphanumeric and '-' are allowed",
+                    b as char
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -436,5 +496,80 @@ mod tests {
             2,
             "Pool selector should have tenant + pool labels"
         );
+    }
+
+    // Test 8: DNS-1035 validation - valid names
+    #[test]
+    fn test_validate_dns1035_valid_names() {
+        use super::validate_dns1035_label;
+
+        assert!(validate_dns1035_label("my-tenant").is_ok());
+        assert!(validate_dns1035_label("a").is_ok());
+        assert!(validate_dns1035_label("abc-123").is_ok());
+        assert!(validate_dns1035_label("example-tenant").is_ok());
+        assert!(validate_dns1035_label("a1").is_ok());
+    }
+
+    // Test 9: DNS-1035 validation - name starting with digit rejected
+    #[test]
+    fn test_validate_dns1035_digit_start() {
+        use super::validate_dns1035_label;
+
+        let err = validate_dns1035_label("111").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must start with a lowercase letter"),
+            "Error should mention starting with a letter, got: {}",
+            err
+        );
+    }
+
+    // Test 10: DNS-1035 validation - empty name rejected
+    #[test]
+    fn test_validate_dns1035_empty() {
+        use super::validate_dns1035_label;
+
+        let err = validate_dns1035_label("").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    // Test 11: DNS-1035 validation - uppercase rejected
+    #[test]
+    fn test_validate_dns1035_uppercase() {
+        use super::validate_dns1035_label;
+
+        let err = validate_dns1035_label("MyTenant").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("must start with a lowercase letter")
+        );
+    }
+
+    // Test 12: DNS-1035 validation - trailing hyphen rejected
+    #[test]
+    fn test_validate_dns1035_trailing_hyphen() {
+        use super::validate_dns1035_label;
+
+        let err = validate_dns1035_label("my-tenant-").unwrap_err();
+        assert!(err.to_string().contains("must end with"));
+    }
+
+    // Test 13: DNS-1035 validation - too long rejected
+    #[test]
+    fn test_validate_dns1035_too_long() {
+        use super::validate_dns1035_label;
+
+        let long_name = format!("a{}", "b".repeat(55));
+        let err = validate_dns1035_label(&long_name).unwrap_err();
+        assert!(err.to_string().contains("at most 55 characters"));
+    }
+
+    // Test 14: DNS-1035 validation - underscore rejected
+    #[test]
+    fn test_validate_dns1035_underscore() {
+        use super::validate_dns1035_label;
+
+        let err = validate_dns1035_label("my_tenant").unwrap_err();
+        assert!(err.to_string().contains("invalid character"));
     }
 }

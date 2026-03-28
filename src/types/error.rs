@@ -30,6 +30,9 @@ pub enum Error {
         message: String,
     },
 
+    #[snafu(display("invalid tenant name '{}': {}", name, reason))]
+    InvalidTenantName { name: String, reason: String },
+
     #[snafu(display("serde_json error: {}", source))]
     SerdeJson { source: serde_json::Error },
 }

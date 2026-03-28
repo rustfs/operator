@@ -96,33 +96,6 @@ spec:
                     format: int32
                     nullable: true
                     type: integer
-                  securityContext:
-                    description: |-
-                      Override Pod SecurityContext when encryption is enabled.
-                      If not set, the default RustFS Pod SecurityContext is used
-                      (runAsUser/runAsGroup/fsGroup = 10001).
-                    nullable: true
-                    properties:
-                      fsGroup:
-                        description: GID applied to all volumes mounted in the Pod.
-                        format: int64
-                        nullable: true
-                        type: integer
-                      runAsGroup:
-                        description: GID to run the container process as.
-                        format: int64
-                        nullable: true
-                        type: integer
-                      runAsNonRoot:
-                        description: 'Enforce non-root execution (default: true).'
-                        nullable: true
-                        type: boolean
-                      runAsUser:
-                        description: UID to run the container process as.
-                        format: int64
-                        nullable: true
-                        type: integer
-                    type: object
                   vault:
                     description: 'Vault-specific settings (required when `backend: vault`).'
                     nullable: true
@@ -145,12 +118,21 @@ spec:
                             type: integer
                         type: object
                       authType:
-                        default: token
-                        description: |-
-                          Authentication method: `token` (default, implemented) or `approle`
-                          (type defined in rustfs-kms but backend not yet functional).
+                        description: Authentication method. Defaults to `token` when not set.
+                        enum:
+                        - token
+                        - approle
+                        - null
                         nullable: true
                         type: string
+                      customCertificates:
+                        description: |-
+                          Enable custom TLS certificates for the Vault connection.
+                          When `true`, the operator mounts TLS certificate files from the KMS Secret
+                          and configures the corresponding environment variables.
+                          The Secret must contain: `vault-ca-cert`, `vault-client-cert`, `vault-client-key`.
+                        nullable: true
+                        type: boolean
                       endpoint:
                         description: Vault server endpoint (e.g. `https://vault.example.com:8200`).
                         type: string
@@ -167,7 +149,7 @@ spec:
                         nullable: true
                         type: string
                       tlsSkipVerify:
-                        description: 'Enable TLS verification for Vault connection (default: true).'
+                        description: Skip TLS certificate verification for Vault connection.
                         nullable: true
                         type: boolean
                     required:
@@ -1199,7 +1181,7 @@ spec:
                       format: int32
                       type: integer
                       x-kubernetes-validations:
-                      - message: servers must be gather than 0
+                      - message: servers must be greater than 0
                         rule: self > 0
                     tolerations:
                       description: Tolerations allow pods to schedule onto nodes with matching taints.
@@ -1314,12 +1296,12 @@ spec:
                   - servers
                   type: object
                   x-kubernetes-validations:
-                  - messageExpression: '"pool " + self.name + " with 2 servers must have at least 4 volumes in total"'
+                  - messageExpression: '"pool " + self.name + " must have at least 4 total volumes (servers × volumesPerServer)"'
                     reason: FieldValueInvalid
-                    rule: '!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 2)'
+                    rule: self.servers * self.persistence.volumesPerServer >= 4
                   - messageExpression: '"pool " + self.name + " with 3 servers must have at least 6 volumes in total"'
                     reason: FieldValueInvalid
-                    rule: '!(self.servers * self.persistence.volumesPerServer < 4 && self.servers == 3)'
+                    rule: self.servers != 3 || self.servers * self.persistence.volumesPerServer >= 6
                 type: array
                 x-kubernetes-validations:
                 - message: pools must be configured
@@ -1330,6 +1312,32 @@ spec:
               scheduler:
                 nullable: true
                 type: string
+              securityContext:
+                description: |-
+                  Override the default Pod SecurityContext (runAsUser/runAsGroup/fsGroup = 10001).
+                  Applies to all RustFS pods in this Tenant.
+                nullable: true
+                properties:
+                  fsGroup:
+                    description: GID applied to all volumes mounted in the Pod.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  runAsGroup:
+                    description: GID to run the container process as.
+                    format: int64
+                    nullable: true
+                    type: integer
+                  runAsNonRoot:
+                    description: 'Enforce non-root execution (default: true).'
+                    nullable: true
+                    type: boolean
+                  runAsUser:
+                    description: UID to run the container process as.
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
               serviceAccountName:
                 nullable: true
                 type: string
