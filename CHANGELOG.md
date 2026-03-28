@@ -24,7 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Tenant name length**: [`validate_dns1035_label`](src/types/v1alpha1/tenant.rs) now caps `metadata.name` at **55** characters so derived names like `{name}-console` remain valid Kubernetes DNS labels (≤ 63).
 
+- **Encryption validation on reconcile**: [`validate_kms_secret`](src/context.rs) now runs whenever `spec.encryption.enabled` is true (previously skipped when `kmsSecret` was unset).
+
 ### Changed
+
+- **Tenant `spec.encryption.vault`**: Removed `tlsSkipVerify` and `customCertificates` (they were never wired to `rustfs-kms`). Vault TLS should rely on system-trusted CAs or TLS upstream. The project is still pre-production; if you have old YAML with these keys, remove them before apply.
+
+- **KMS pod environment** ([`tenant/workloads.rs`](src/types/v1alpha1/tenant/workloads.rs)): Align variable names with the RustFS server and `rustfs-kms` (`RUSTFS_KMS_ENABLE`, `RUSTFS_KMS_VAULT_ADDRESS`, KV mount and key prefix, local `RUSTFS_KMS_KEY_DIR` / `RUSTFS_KMS_DEFAULT_KEY_ID`, etc.); remove Vault TLS certificate volume mounts; `ping_seconds` remains documented as reserved (not injected).
+
+- **Local KMS** ([`context.rs`](src/context.rs)): Validate absolute `keyDirectory` and require a single server replica across pools (multi-replica tenants need Vault or shared storage).
 
 - **Deploy scripts** ([`scripts/deploy/deploy-rustfs.sh`](scripts/deploy/deploy-rustfs.sh), [`deploy-rustfs-4node.sh`](scripts/deploy/deploy-rustfs-4node.sh)): Docker builds use **layer cache by default** (`docker_build_cached`); set `RUSTFS_DOCKER_NO_CACHE=true` for a full rebuild. Documented in [`scripts/README.md`](scripts/README.md).
 - **4-node deploy**: Help text moved to an early heredoc (avoids trailing `case`/parse issues); see script header.

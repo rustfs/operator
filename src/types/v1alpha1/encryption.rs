@@ -65,7 +65,7 @@ impl std::fmt::Display for VaultAuthType {
 /// Vault-specific KMS configuration.
 ///
 /// Maps to `VaultConfig` in the `rustfs-kms` crate.
-/// Sensitive fields (token, TLS keys) are stored in the Secret referenced
+/// Sensitive fields (Vault token or AppRole credentials) are stored in the Secret referenced
 /// by `EncryptionConfig::kms_secret`.
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +73,7 @@ pub struct VaultKmsConfig {
     /// Vault server endpoint (e.g. `https://vault.example.com:8200`).
     pub endpoint: String,
 
-    /// Vault KV2 engine mount path (default: `kv`).
+    /// KV secrets engine mount path (maps to `RUSTFS_KMS_VAULT_KV_MOUNT` in rustfs-kms; e.g. `secret`, `kv`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<String>,
 
@@ -81,7 +81,7 @@ pub struct VaultKmsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
 
-    /// Key prefix inside the engine.
+    /// Key prefix inside the KV engine (maps to `RUSTFS_KMS_VAULT_KEY_PREFIX`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
 
@@ -94,17 +94,6 @@ pub struct VaultKmsConfig {
     /// under keys `vault-approle-id` and `vault-approle-secret`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_role: Option<VaultAppRoleConfig>,
-
-    /// Skip TLS certificate verification for Vault connection.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_skip_verify: Option<bool>,
-
-    /// Enable custom TLS certificates for the Vault connection.
-    /// When `true`, the operator mounts TLS certificate files from the KMS Secret
-    /// and configures the corresponding environment variables.
-    /// The Secret must contain: `vault-ca-cert`, `vault-client-cert`, `vault-client-key`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_certificates: Option<bool>,
 }
 
 /// Vault AppRole authentication settings.
@@ -132,23 +121,28 @@ pub struct VaultAppRoleConfig {
 ///
 /// Maps to `LocalConfig` in the `rustfs-kms` crate.
 /// Keys are stored as JSON files in the specified directory.
+///
+/// **RustFS binary alignment**: `key_directory` is injected as `RUSTFS_KMS_KEY_DIR` (required by
+/// `rustfs` server startup). `master_key_id` maps to `RUSTFS_KMS_DEFAULT_KEY_ID` (default SSE key id),
+/// not to a "master encryption passphrase" (`RUSTFS_KMS_LOCAL_MASTER_KEY` is separate in rustfs-kms).
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalKmsConfig {
-    /// Directory for key files inside the container (default: `/data/kms-keys`).
+    /// Absolute directory for KMS key files inside the container (default: `/data/kms-keys`).
+    /// Must be absolute; RustFS validates this for the local backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_directory: Option<String>,
 
-    /// Master key identifier (default: `default-master-key`).
+    /// Default KMS key id for SSE (maps to `RUSTFS_KMS_DEFAULT_KEY_ID` in the RustFS binary).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub master_key_id: Option<String>,
 }
 
 /// Encryption / KMS configuration for a Tenant.
 ///
-/// When enabled, the operator injects KMS environment variables and mounts
-/// the referenced Secret into all RustFS pods so that the in-process
-/// `rustfs-kms` library picks them up on startup.
+/// When enabled, the operator injects environment variables matching the **RustFS server**
+/// (`rustfs` CLI / `init_kms_system`) and `rustfs_kms::KmsConfig::from_env()` where applicable.
+/// See `Tenant::configure_kms` in `tenant/workloads.rs` for the exact variable names.
 ///
 /// Example YAML:
 /// ```yaml
@@ -161,7 +155,6 @@ pub struct LocalKmsConfig {
 ///       engine: "kv"
 ///       namespace: "tenant1"
 ///       prefix: "rustfs"
-///       customCertificates: true
 ///     kmsSecret:
 ///       name: "my-tenant-kms-secret"
 /// ```
@@ -174,11 +167,6 @@ pub struct LocalKmsConfig {
 /// **Vault backend (AppRole auth):**
 /// - `vault-approle-id` (required): AppRole role ID
 /// - `vault-approle-secret` (required): AppRole secret ID
-///
-/// **Vault TLS (when `customCertificates: true`):**
-/// - `vault-ca-cert`: PEM-encoded CA certificate
-/// - `vault-client-cert`: PEM-encoded client certificate for mTLS
-/// - `vault-client-key`: PEM-encoded client private key for mTLS
 ///
 /// **Local backend:**
 /// No secret keys required (keys are stored on disk).
@@ -202,13 +190,12 @@ pub struct EncryptionConfig {
     pub local: Option<LocalKmsConfig>,
 
     /// Reference to a Secret containing sensitive KMS credentials
-    /// (Vault token or AppRole credentials, TLS certificates).
+    /// (Vault token or AppRole credentials).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kms_secret: Option<corev1::LocalObjectReference>,
 
-    /// Interval in seconds for KMS health-check pings (default: disabled).
-    /// When set, the operator stores the value; the in-process KMS library
-    /// picks it up from `RUSTFS_KMS_PING_SECONDS`.
+    /// Reserved for future KMS health-check tuning. Not injected into pods: the current RustFS
+    /// release does not read `RUSTFS_KMS_PING_SECONDS` in the server startup path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ping_seconds: Option<i32>,
 }

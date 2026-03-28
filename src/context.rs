@@ -75,6 +75,31 @@ pub enum Error {
     Serde { source: serde_json::Error },
 }
 
+/// Validates Local KMS: absolute `keyDirectory` and at most one server replica across pools.
+fn validate_local_kms_tenant(
+    local: Option<&types::v1alpha1::encryption::LocalKmsConfig>,
+    pools: &[types::v1alpha1::pool::Pool],
+) -> Result<(), Error> {
+    let key_dir = local
+        .and_then(|l| l.key_directory.as_deref())
+        .unwrap_or("/data/kms-keys");
+    if !key_dir.starts_with('/') {
+        return Err(Error::KmsConfigInvalid {
+            message: format!(
+                "Local KMS keyDirectory must be an absolute path (got \"{}\")",
+                key_dir
+            ),
+        });
+    }
+    let total_servers: i32 = pools.iter().map(|p| p.servers).sum();
+    if total_servers > 1 {
+        return Err(Error::KmsConfigInvalid {
+            message: "Local KMS is only supported when the tenant has a single RustFS server replica (sum of pool servers must be 1). For multiple servers use Vault KMS, or use a single-server pool.".to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub struct Context {
     pub(crate) client: kube::Client,
     pub(crate) recorder: Recorder,
@@ -303,8 +328,9 @@ impl Context {
     /// Validates encryption configuration and the KMS Secret.
     ///
     /// Checks:
-    /// 1. Vault endpoint is non-empty when backend is Vault.
-    /// 2. KMS Secret exists and contains the correct keys for the auth type.
+    /// 1. Local KMS: absolute key directory and single replica (sum of pool servers).
+    /// 2. Vault endpoint is non-empty when backend is Vault.
+    /// 3. KMS Secret exists and contains the correct keys for the auth type.
     pub async fn validate_kms_secret(&self, tenant: &Tenant) -> Result<(), Error> {
         use crate::types::v1alpha1::encryption::{KmsBackendType, VaultAuthType};
 
@@ -313,6 +339,12 @@ impl Context {
         };
         if !enc.enabled {
             return Ok(());
+        }
+
+        // Local KMS: RustFS requires an absolute key directory; multi-replica tenants need Vault
+        // (or a shared filesystem) because each Pod would otherwise have its own key files.
+        if enc.backend == KmsBackendType::Local {
+            validate_local_kms_tenant(enc.local.as_ref(), &tenant.spec.pools)?;
         }
 
         // Validate Vault endpoint is non-empty and kms_secret is required for Vault
@@ -466,5 +498,48 @@ impl Context {
         let status = self.get_statefulset_status(name, namespace).await?;
 
         Ok((status.current_revision, status.update_revision))
+    }
+}
+
+#[cfg(test)]
+mod validate_local_kms_tests {
+    use super::Error;
+    use super::validate_local_kms_tenant;
+    use crate::types::v1alpha1::encryption::LocalKmsConfig;
+    use crate::types::v1alpha1::persistence::PersistenceConfig;
+    use crate::types::v1alpha1::pool::Pool;
+
+    fn pool(servers: i32) -> Pool {
+        Pool {
+            name: "p".to_string(),
+            servers,
+            persistence: PersistenceConfig {
+                volumes_per_server: 4,
+                ..Default::default()
+            },
+            scheduling: Default::default(),
+        }
+    }
+
+    #[test]
+    fn local_kms_default_key_dir_ok_single_replica() {
+        validate_local_kms_tenant(None, &[pool(1)]).unwrap();
+    }
+
+    #[test]
+    fn local_kms_rejects_relative_key_dir() {
+        let local = LocalKmsConfig {
+            key_directory: Some("data/kms".to_string()),
+            ..Default::default()
+        };
+        let err = validate_local_kms_tenant(Some(&local), &[pool(1)]).unwrap_err();
+        assert!(matches!(err, Error::KmsConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn local_kms_rejects_multi_pool_multi_replica() {
+        let local = LocalKmsConfig::default();
+        let err = validate_local_kms_tenant(Some(&local), &[pool(2), pool(2)]).unwrap_err();
+        assert!(matches!(err, Error::KmsConfigInvalid { .. }));
     }
 }
