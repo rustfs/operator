@@ -47,6 +47,19 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         return Ok(Action::await_change());
     }
 
+    // Validate tenant name is DNS-1035 compliant (required for derived Service names)
+    if let Err(e) = latest_tenant.validate_name() {
+        let _ = ctx
+            .record(
+                &latest_tenant,
+                EventType::Warning,
+                "InvalidTenantName",
+                &format!("{}", e),
+            )
+            .await;
+        return Err(e.into());
+    }
+
     // Validate credential Secret if configured
     // This only validates the Secret exists and has required keys.
     // Actual credential injection happens via secretKeyRef in the StatefulSet.
@@ -609,9 +622,10 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
 
         // Type errors - validation issues, use moderate requeue
         Error::Types { source } => match source {
-            // Immutable field modification errors - require user intervention
+            // Immutable field / invalid name errors - require user intervention
             // Use 60-second requeue to reduce event/log spam while user fixes the issue
-            types::error::Error::ImmutableFieldModified { .. } => {
+            types::error::Error::ImmutableFieldModified { .. }
+            | types::error::Error::InvalidTenantName { .. } => {
                 Action::requeue(Duration::from_secs(60))
             }
 

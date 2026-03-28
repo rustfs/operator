@@ -47,6 +47,15 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Docker build: layer cache enabled by default (much faster). Set RUSTFS_DOCKER_NO_CACHE=true for a clean rebuild.
+docker_build_cached() {
+    if [ "${RUSTFS_DOCKER_NO_CACHE:-}" = "true" ]; then
+        docker build --network=host --no-cache "$@"
+    else
+        docker build --network=host "$@"
+    fi
+}
+
 # Check required tools
 check_prerequisites() {
     log_info "Checking required tools..."
@@ -169,7 +178,7 @@ build_operator() {
 build_console_web_image() {
     log_info "Building Console Web Docker image (default /api/v1, no build-arg)..."
 
-    if ! docker build --network=host --no-cache \
+    if ! docker_build_cached \
         -t rustfs/console-web:dev \
         -f console-web/Dockerfile \
         console-web/; then
@@ -189,7 +198,7 @@ deploy_operator_and_console() {
     log_info "Building Operator Docker image..."
 
     # Use host network so build container can reach crates.io when host DNS is used (e.g. systemd-resolved)
-    if ! docker build --network=host --no-cache -t "$image_name" .; then
+    if ! docker_build_cached -t "$image_name" .; then
         log_error "Docker build failed"
         exit 1
     fi
@@ -366,7 +375,8 @@ show_access_info() {
 
     echo "⚠️  If pods show 'ImagePullBackOff' or 'image not present':"
     echo "  docker build --network=host -t rustfs/operator:dev ."
-    echo "  docker build --network=host --no-cache -t rustfs/console-web:dev -f console-web/Dockerfile console-web/"
+    echo "  docker build --network=host -t rustfs/console-web:dev -f console-web/Dockerfile console-web/"
+    echo "  (optional clean rebuild: RUSTFS_DOCKER_NO_CACHE=true ... same docker build lines with --no-cache)"
     echo "  kind load docker-image rustfs/operator:dev --name rustfs-dev"
     echo "  kind load docker-image rustfs/console-web:dev --name rustfs-dev"
     echo "  kubectl rollout restart deployment -n rustfs-system"

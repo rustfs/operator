@@ -21,4 +21,4 @@ pub mod status;
 pub mod tenant;
 
 // Re-export commonly used types
-pub use pool::SchedulingConfig;
+pub use pool::{SchedulingConfig, validate_pool_total_volumes};

@@ -3,7 +3,10 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm to package.json "packageManager" (avoid corepack fetching pnpm@latest from npm;
+# that fetch can fail behind proxies / flaky TLS during docker build).
+ARG PNPM_VERSION=10.28.1
+RUN npm install -g pnpm@${PNPM_VERSION}
 
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
 RUN pnpm install --frozen-lockfile

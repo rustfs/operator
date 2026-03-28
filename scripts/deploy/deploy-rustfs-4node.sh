@@ -39,6 +39,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Help first (here-doc avoids any `(` / `|` parsing quirks; do not use `sh` — see bash arrays below).
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+    cat <<EOF
+Usage: $0
+
+RustFS Operator 4-node demo (Kind multi-node + 4-node Tenant + dual Console)
+
+Requires: kubectl, kind, docker, cargo (Rust)
+
+Tear down:
+  ./scripts/cleanup/cleanup-rustfs-4node.sh
+EOF
+    exit 0
+fi
+
 ################################################################################
 # Colors
 ################################################################################
@@ -89,6 +104,15 @@ log_header() {
 log_step() {
     echo ""
     log_info "Step $1: $2"
+}
+
+# Docker build: layer cache enabled by default (much faster). Set RUSTFS_DOCKER_NO_CACHE=true for a clean rebuild.
+docker_build_cached() {
+    if [ "${RUSTFS_DOCKER_NO_CACHE:-}" = "true" ]; then
+        docker build --network=host --no-cache "$@"
+    else
+        docker build --network=host "$@"
+    fi
 }
 
 ################################################################################
@@ -324,13 +348,13 @@ deploy_operator_and_console() {
     cargo build --release
 
     log_info "Building Operator container image..."
-    docker build --network=host --no-cache -t "$image_name" . || {
+    docker_build_cached -t "$image_name" . || {
         log_error "Operator image build failed"
         exit 1
     }
 
     log_info "Building Console Web image..."
-    docker build --network=host --no-cache \
+    docker_build_cached \
         -t "$console_web_image" \
         -f console-web/Dockerfile \
         console-web/ || {
@@ -556,18 +580,5 @@ main() {
     get_access_info
     show_summary
 }
-
-case "${1:-}" in
-    -h|--help)
-        echo "Usage: $0"
-        echo ""
-        echo "RustFS Operator 4-node demo (Kind multi-node + 4-node Tenant + dual Console)"
-        echo ""
-        echo "Requires: kubectl, kind, docker, cargo (Rust)"
-        echo ""
-        echo "Cleanup: ./scripts/cleanup/cleanup-rustfs-4node.sh"
-        exit 0
-        ;;
-esac
 
 main "$@"

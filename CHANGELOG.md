@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Expanded root [`README.md`](README.md) with overview, quick start, development commands, CI vs `make pre-commit`, and documentation index.
 - Aligned [`CLAUDE.md`](CLAUDE.md) and [`ROADMAP.md`](ROADMAP.md) with current code: Tenant status conditions and StatefulSet updates on the successful reconcile path are documented as implemented; remaining work (status on early errors, integration tests, rollout extras) is listed explicitly.
 - Clarified the documentation map: [`CONTRIBUTING.md`](CONTRIBUTING.md) (quality gates and CI alignment), [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) (environment setup), [`docs/DEVELOPMENT-NOTES.md`](docs/DEVELOPMENT-NOTES.md) (historical notes, not normative).
 - Updated [`examples/README.md`](examples/README.md): Tenant Services document S3 **9000** and RustFS Console **9001**; distinguished the Operator HTTP Console (default **9090**, `cargo run -- console`) from the Tenant `{tenant}-console` Service.
@@ -19,7 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`console-web` / `make pre-commit`**: `npm run lint` now runs `eslint .` (bare `eslint` only printed CLI help). Added `format` / `format:check` scripts; [`Makefile`](Makefile) `console-fmt` and `console-fmt-check` call them so Prettier resolves from `node_modules` after `npm install` in `console-web/`.
 
+- **Tenant `Pool` CRD validation (CEL)**: Match the operator console API — require `servers × volumesPerServer >= 4` for every pool, and `>= 6` total volumes when `servers == 3` (fixes the previous 3-server rule using `< 4` in CEL). Regenerated [`deploy/rustfs-operator/crds/tenant-crd.yaml`](deploy/rustfs-operator/crds/tenant-crd.yaml) and [`tenant.yaml`](deploy/rustfs-operator/crds/tenant.yaml). Added [`validate_pool_total_volumes`](src/types/v1alpha1/pool.rs) as the shared Rust implementation used by [`src/console/handlers/pools.rs`](src/console/handlers/pools.rs).
+
+- **Tenant name length**: [`validate_dns1035_label`](src/types/v1alpha1/tenant.rs) now caps `metadata.name` at **55** characters so derived names like `{name}-console` remain valid Kubernetes DNS labels (≤ 63).
+
+### Changed
+
+- **Deploy scripts** ([`scripts/deploy/deploy-rustfs.sh`](scripts/deploy/deploy-rustfs.sh), [`deploy-rustfs-4node.sh`](scripts/deploy/deploy-rustfs-4node.sh)): Docker builds use **layer cache by default** (`docker_build_cached`); set `RUSTFS_DOCKER_NO_CACHE=true` for a full rebuild. Documented in [`scripts/README.md`](scripts/README.md).
+- **4-node deploy**: Help text moved to an early heredoc (avoids trailing `case`/parse issues); see script header.
+- **4-node cleanup** ([`cleanup-rustfs-4node.sh`](scripts/cleanup/cleanup-rustfs-4node.sh)): Host storage dirs under `/tmp/rustfs-storage-*` may require `sudo rm -rf` after Kind (root-owned bind mounts).
+- **Dockerfile** (operator and [`console-web/Dockerfile`](console-web/Dockerfile)): Build caching and reproducibility tweaks (cargo-chef pin, pnpm in frontend image as applicable).
+
 ### Added
+
+- Cursor Agent skill [`.cursor/skills/rustfs-operator-contribute/SKILL.md`](.cursor/skills/rustfs-operator-contribute/SKILL.md) for `make pre-commit`, commit, push to fork `my`, and opening PRs to `rustfs/operator` with the project template.
 
 #### **StatefulSet Reconciliation Improvements** (2025-12-03, Issue #43)
 
