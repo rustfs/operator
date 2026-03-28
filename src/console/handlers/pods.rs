@@ -30,7 +30,7 @@ use kube::{
     api::{DeleteParams, ListParams, LogParams},
 };
 
-/// 校验 Pod 是否属于指定 Tenant（通过 rustfs.tenant 标签）
+/// Ensure the pod has `rustfs.tenant=<tenant>` label.
 fn ensure_pod_belongs_to_tenant(
     pod: &corev1::Pod,
     tenant_name: &str,
@@ -49,7 +49,7 @@ fn ensure_pod_belongs_to_tenant(
     Ok(())
 }
 
-/// 列出 Tenant 的所有 Pods
+/// List pods labeled for this tenant.
 pub async fn list_pods(
     Path((namespace, tenant_name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -57,7 +57,7 @@ pub async fn list_pods(
     let client = create_client(&claims).await?;
     let api: Api<corev1::Pod> = Api::namespaced(client, &namespace);
 
-    // 查询带有 Tenant 标签的 Pods
+    // List pods with tenant label
     let pods = api
         .list(&ListParams::default().labels(&format!("rustfs.tenant={}", tenant_name)))
         .await
@@ -70,7 +70,7 @@ pub async fn list_pods(
         let status = pod.status.as_ref();
         let spec = pod.spec.as_ref();
 
-        // 提取 Pool 名称（从 Pod 名称中解析）
+        // Derive pool name from pod name prefix
         let pool = pod
             .metadata
             .labels
@@ -79,12 +79,12 @@ pub async fn list_pods(
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Pod 阶段
+        // Phase
         let phase = status
             .and_then(|s| s.phase.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
-        // 整体状态
+        // Aggregate status string
         let pod_status = if let Some(status) = status {
             if let Some(conditions) = &status.conditions {
                 if conditions
@@ -102,10 +102,10 @@ pub async fn list_pods(
             "Unknown"
         };
 
-        // 节点名称
+        // Node
         let node = spec.and_then(|s| s.node_name.clone());
 
-        // 容器就绪状态
+        // Ready count x/y
         let (ready_count, total_count) = if let Some(status) = status {
             let total = status
                 .container_statuses
@@ -122,13 +122,13 @@ pub async fn list_pods(
             (0, 0)
         };
 
-        // 重启次数
+        // Restart count
         let restarts = status
             .and_then(|s| s.container_statuses.as_ref())
             .map(|containers| containers.iter().map(|c| c.restart_count).sum::<i32>())
             .unwrap_or(0);
 
-        // 创建时间和 Age
+        // Created timestamp and age
         let created_at = pod
             .metadata
             .creation_timestamp
@@ -161,7 +161,7 @@ pub async fn list_pods(
     Ok(Json(PodListResponse { pods: pod_list }))
 }
 
-/// 删除 Pod
+/// Delete a pod (evict).
 pub async fn delete_pod(
     Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
@@ -188,7 +188,7 @@ pub async fn delete_pod(
     }))
 }
 
-/// 重启 Pod（通过删除实现）
+/// Restart by deleting the pod (StatefulSet recreates it).
 pub async fn restart_pod(
     Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
@@ -203,7 +203,7 @@ pub async fn restart_pod(
         .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
     ensure_pod_belongs_to_tenant(&pod, &tenant_name, &pod_name)?;
 
-    // 删除 Pod，StatefulSet 控制器会自动重建
+    // Delete; StatefulSet controller recreates the pod
     let delete_params = if req.force {
         DeleteParams {
             grace_period_seconds: Some(0),
@@ -226,7 +226,7 @@ pub async fn restart_pod(
     }))
 }
 
-/// 获取 Pod 详情
+/// Full pod detail for the UI.
 pub async fn get_pod_details(
     Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
@@ -240,7 +240,7 @@ pub async fn get_pod_details(
         .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
     ensure_pod_belongs_to_tenant(&pod, &tenant_name, &pod_name)?;
 
-    // 提取详细信息
+    // Map Kubernetes pod to DTO
     let pool = pod
         .metadata
         .labels
@@ -252,7 +252,7 @@ pub async fn get_pod_details(
     let status_info = pod.status.as_ref();
     let spec = pod.spec.as_ref();
 
-    // 构建状态
+    // Phase + conditions
     let status = PodStatus {
         phase: status_info
             .and_then(|s| s.phase.clone())
@@ -282,7 +282,7 @@ pub async fn get_pod_details(
             .map(|t| t.0.to_rfc3339()),
     };
 
-    // 容器信息
+    // Container statuses
     let containers = if let Some(container_statuses) =
         status_info.and_then(|s| s.container_statuses.as_ref())
     {
@@ -328,7 +328,7 @@ pub async fn get_pod_details(
         Vec::new()
     };
 
-    // Volume 信息
+    // Volume mounts
     let volumes = spec
         .and_then(|s| s.volumes.as_ref())
         .map(|vols| {
@@ -374,7 +374,7 @@ pub async fn get_pod_details(
     }))
 }
 
-/// 获取 Pod 日志（流式传输）
+/// Stream pod logs (`follow` supported).
 pub async fn get_pod_logs(
     Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Query(query): Query<LogsQuery>,
@@ -389,7 +389,7 @@ pub async fn get_pod_logs(
         .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
     ensure_pod_belongs_to_tenant(&pod, &tenant_name, &pod_name)?;
 
-    // 构建日志参数
+    // Build `LogParams`
     let mut log_params = LogParams {
         container: query.container,
         follow: query.follow,
@@ -398,7 +398,7 @@ pub async fn get_pod_logs(
         ..Default::default()
     };
 
-    // since_time 校验：仅当时间不晚于当前时间时使用
+    // Only honor `since_time` when not in the future
     if let Some(since_time) = &query.since_time
         && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(since_time)
     {
@@ -408,28 +408,27 @@ pub async fn get_pod_logs(
         if duration.num_seconds() >= 0 {
             log_params.since_seconds = Some(duration.num_seconds());
         }
-        // 若 since_time 在未来，忽略该参数（不设置 since_seconds）
+        // Future timestamps are ignored (no since_seconds)
     }
 
-    // 获取日志流
+    // Start log stream
     let log_stream = api
         .log_stream(&pod_name, &log_params)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Pod '{}'", pod_name)))?;
 
-    // 将字节流转换为可用的 Body
-    // kube-rs 返回的是 impl AsyncBufRead，我们需要逐行读取并转换为字节流
+    // Turn kube-rs `AsyncBufRead` log stream into an HTTP body
     use futures::io::AsyncBufReadExt;
     let lines = log_stream.lines();
 
-    // 转换为字节流
+    // AsyncRead -> Body stream
     let byte_stream = lines.map_ok(|line| format!("{}\n", line).into_bytes());
 
-    // 返回流式响应
+    // Chunked streaming response
     Ok(Body::from_stream(byte_stream).into_response())
 }
 
-/// 创建 Kubernetes 客户端
+/// Build a client using the session bearer token.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await
@@ -444,7 +443,7 @@ async fn create_client(claims: &Claims) -> Result<Client> {
     })
 }
 
-/// 格式化时间间隔
+/// Human-readable age since `created_at`.
 fn format_duration(duration: chrono::Duration) -> String {
     let days = duration.num_days();
     let hours = duration.num_hours() % 24;

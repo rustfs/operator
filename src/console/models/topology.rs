@@ -15,7 +15,7 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// 拓扑总览响应
+/// Topology overview: cluster, namespaces, nodes
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyOverviewResponse {
     pub cluster: TopologyCluster,
@@ -23,7 +23,7 @@ pub struct TopologyOverviewResponse {
     pub nodes: Vec<TopologyNode>,
 }
 
-/// 集群信息
+/// Cluster identity and version
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyCluster {
     pub id: String,
@@ -32,7 +32,7 @@ pub struct TopologyCluster {
     pub summary: TopologyClusterSummary,
 }
 
-/// 集群摘要
+/// Rolled-up capacity and tenant health counts
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyClusterSummary {
     pub nodes: usize,
@@ -45,7 +45,7 @@ pub struct TopologyClusterSummary {
     pub allocatable_memory: String,
 }
 
-/// 命名空间拓扑
+/// Namespace with nested tenants
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyNamespace {
     pub name: String,
@@ -54,7 +54,7 @@ pub struct TopologyNamespace {
     pub tenants: Vec<TopologyTenant>,
 }
 
-/// Tenant 拓扑
+/// Tenant node in the topology tree
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyTenant {
     pub name: String,
@@ -68,7 +68,7 @@ pub struct TopologyTenant {
     pub pods: Option<Vec<TopologyPod>>,
 }
 
-/// Tenant 摘要
+/// Short tenant stats for topology cards
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyTenantSummary {
     pub pool_count: usize,
@@ -79,7 +79,7 @@ pub struct TopologyTenantSummary {
     pub console_endpoint: Option<String>,
 }
 
-/// Pool 拓扑
+/// Pool row under a tenant
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyPool {
     pub name: String,
@@ -90,7 +90,7 @@ pub struct TopologyPool {
     pub capacity: String,
 }
 
-/// Pod 拓扑
+/// Pod row under a tenant
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyPod {
     pub name: String,
@@ -100,7 +100,7 @@ pub struct TopologyPod {
     pub node: Option<String>,
 }
 
-/// 节点信息
+/// Node row for topology sidebar
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TopologyNode {
     pub name: String,

@@ -19,12 +19,14 @@ Applies to `.github/` and repository pull-request operations.
 
 ## CI Alignment
 
-When changing CI-sensitive behavior, keep local validation aligned with `.github/workflows/ci.yml`.
+When changing CI-sensitive behavior, keep local validation aligned with [`Makefile`](Makefile) at the repo root.
 
-Current `test-and-lint` gate includes:
+**Local bar before push (authoritative for contributors):** `make pre-commit` — runs Rust `fmt-check`, `clippy`, `test`, plus `console-web` lint and Prettier check (see `Makefile`).
 
+**CI workflow** [`.github/workflows/ci.yml`](workflows/ci.yml) `test-and-lint` job currently runs:
+
+- `cargo nextest run --all --no-tests pass` and `cargo test --all --doc`
 - `cargo fmt --all --check`
 - `cargo clippy --all-features -- -D warnings`
-- `cargo test --all`
-- `cd console-web && npm run lint`
-- `cd console-web && npx prettier --check "**/*.{ts,tsx,js,jsx,json,css,md}"`
+
+It does **not** run `console-web` checks; still run **`make pre-commit` locally** before opening a PR so frontend changes are validated.

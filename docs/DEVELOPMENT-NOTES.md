@@ -1,13 +1,21 @@
 # Development Notes
 
+> **Scope**: This file records **historical analysis sessions and design notes**. It is **not** the canonical development guide. For setup and quality gates, use [`DEVELOPMENT.md`](./DEVELOPMENT.md) and [`CONTRIBUTING.md`](../CONTRIBUTING.md). For current ports and operator behavior, see [`CLAUDE.md`](../CLAUDE.md) and the source tree.
+
+**Port terminology (do not confuse):**
+
+- **RustFS inside a Tenant** (Services created by the operator): S3 API **9000**, RustFS Console UI **9001** (see `src/types/v1alpha1/tenant/services.rs`).
+- **Operator HTTP Console** (`cargo run -- console`, default **9090**): separate management API for the operator itself, not the same as the Tenant’s `{tenant}-console` Service.
+
 ## Analysis Sessions
 
 ### Initial Bug Analysis (2025-11-05)
 
 See [CHANGELOG.md](../CHANGELOG.md) for complete list of bugs found and fixed.
 
-**Key Discovery**: Through comprehensive analysis of RustFS source code, found 5 critical bugs:
-- Wrong ports (console: 9090, IO: 90)
+**Key Discovery** (historical—**since fixed** in this repo): Through analysis of RustFS source and early operator output, several mismatches were found versus RustFS defaults, including:
+
+- Wrong **RustFS** service ports in older operator revisions (e.g. IO **90** instead of **9000**, console **9090** instead of **9001** for the in-cluster RustFS Console Service)
 - Missing environment variables
 - Non-standard volume paths
 
@@ -119,7 +127,7 @@ All implementation decisions verified against official RustFS source code, not a
 - Test resource structure creation
 - Test field propagation (scheduling, RBAC, etc.)
 - Test edge cases (None values, overrides)
-- Currently: 25 tests, all passing
+- Currently: 47 library unit tests (run `cargo test --all` for the exact count), all passing
 
 ### Integration Tests (Future)
 
@@ -219,6 +227,4 @@ Always set in operator (users don't need to):
 
 ---
 
-**Last Updated**: 2025-11-08
-
-[[Index|← Back to Index]]
+**Last Updated**: 2026-03-28

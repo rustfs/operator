@@ -21,7 +21,7 @@ use axum::{Extension, Json};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, ResourceExt, api::ListParams};
 
-/// 列出所有节点
+/// List all nodes with capacity/allocatable strings.
 pub async fn list_nodes(Extension(claims): Extension<Claims>) -> Result<Json<NodeListResponse>> {
     let client = create_client(&claims).await?;
     let api: Api<corev1::Node> = Api::all(client);
@@ -114,7 +114,7 @@ pub async fn list_nodes(Extension(claims): Extension<Claims>) -> Result<Json<Nod
     Ok(Json(NodeListResponse { nodes: items }))
 }
 
-/// 列出所有 Namespaces
+/// List all namespaces.
 pub async fn list_namespaces(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<NamespaceListResponse>> {
@@ -143,7 +143,7 @@ pub async fn list_namespaces(
     Ok(Json(NamespaceListResponse { namespaces: items }))
 }
 
-/// 创建 Namespace
+/// Create a namespace by name.
 pub async fn create_namespace(
     Extension(claims): Extension<Claims>,
     Json(req): Json<CreateNamespaceRequest>,
@@ -178,7 +178,7 @@ pub async fn create_namespace(
     }))
 }
 
-/// 获取集群资源摘要
+/// Sum CPU/memory across all nodes (capacity vs allocatable).
 pub async fn get_cluster_resources(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<ClusterResourcesResponse>> {
@@ -192,7 +192,7 @@ pub async fn get_cluster_resources(
 
     let total_nodes = nodes.items.len();
 
-    // 累加所有节点的 capacity 与 allocatable（数值累加后格式化）
+    // Sum each node's capacity/allocatable, then format
     let (total_cpu_millicores, total_memory_bytes, alloc_cpu_millicores, alloc_memory_bytes) =
         nodes.items.iter().fold(
             (0i64, 0i64, 0i64, 0i64),
@@ -248,8 +248,8 @@ pub async fn get_cluster_resources(
     }))
 }
 
-/// 将 Kubernetes CPU Quantity 解析为毫核 (millicores)。
-/// 支持 "1"（核）、"1000m"、"500m" 等格式。
+/// Parse a Kubernetes CPU quantity to millicores.
+/// Accepts whole cores (`1`), millicores (`500m`, `1000m`), nano (`n`), micro (`u`).
 pub(crate) fn parse_cpu_to_millicores(s: &str) -> i64 {
     let s = s.trim();
     if s.is_empty() {
@@ -276,7 +276,7 @@ pub(crate) fn parse_cpu_to_millicores(s: &str) -> i64 {
     0
 }
 
-/// 将毫核格式化为 CPU 字符串（如 "8" 或 "500m"）。
+/// Format millicores as a Kubernetes-style CPU string (e.g. `8` or `500m`).
 pub(crate) fn format_cpu_from_millicores(m: i64) -> String {
     if m == 0 {
         return "0".to_string();
@@ -288,8 +288,8 @@ pub(crate) fn format_cpu_from_millicores(m: i64) -> String {
     }
 }
 
-/// 将 Kubernetes Memory Quantity 解析为字节。
-/// 支持 "1Gi"、"1G"、"1024Mi"、"1Ki" 等格式。
+/// Parse a Kubernetes memory quantity to bytes.
+/// Supports binary (Gi, Mi, Ki, …) and decimal (G, M, k, …) suffixes.
 pub(crate) fn parse_memory_to_bytes(s: &str) -> i64 {
     let s = s.trim();
     if s.is_empty() {
@@ -326,7 +326,7 @@ pub(crate) fn parse_memory_to_bytes(s: &str) -> i64 {
     (n * multiplier as f64) as i64
 }
 
-/// 将字节格式化为可读内存字符串（优先 Gi）。
+/// Format bytes as a compact memory string (prefer Gi).
 pub(crate) fn format_memory_from_bytes(b: i64) -> String {
     const GIB: i64 = 1024 * 1024 * 1024;
     const MIB: i64 = 1024 * 1024;
@@ -349,7 +349,7 @@ pub(crate) fn format_memory_from_bytes(b: i64) -> String {
     }
 }
 
-/// 创建 Kubernetes 客户端
+/// Build a client using the session bearer token.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

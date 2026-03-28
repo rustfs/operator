@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Tenant 列表项
+/// Single tenant row in a list view
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TenantListItem {
     pub name: String,
@@ -25,7 +25,7 @@ pub struct TenantListItem {
     pub created_at: Option<String>,
 }
 
-/// Pool 信息
+/// Pool summary embedded in tenant list/detail
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PoolInfo {
     pub name: String,
@@ -33,29 +33,29 @@ pub struct PoolInfo {
     pub volumes_per_server: i32,
 }
 
-/// Tenant 列表响应
+/// Response listing tenants
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TenantListResponse {
     pub tenants: Vec<TenantListItem>,
 }
 
-/// Tenant 列表查询参数
+/// Query parameters for listing tenants
 #[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct TenantListQuery {
-    /// 按状态过滤（大小写不敏感）
+    /// Filter by tenant state (case-insensitive)
     pub state: Option<String>,
 }
 
-/// Tenant 状态统计响应
+/// Per-state tenant counts
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TenantStateCountsResponse {
-    /// Tenant 总数
+    /// Total number of tenants
     pub total: u32,
-    /// 各状态对应的数量，例如 Ready/Updating/Degraded/NotReady/Unknown
+    /// Counts keyed by state, e.g. Ready/Updating/Degraded/NotReady/Unknown
     pub counts: std::collections::BTreeMap<String, u32>,
 }
 
-/// Tenant 详情响应
+/// Full tenant detail for the UI
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TenantDetailsResponse {
     pub name: String,
@@ -68,7 +68,7 @@ pub struct TenantDetailsResponse {
     pub services: Vec<ServiceInfo>,
 }
 
-/// Service 信息
+/// Exposed Service summary
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceInfo {
     pub name: String,
@@ -76,7 +76,7 @@ pub struct ServiceInfo {
     pub ports: Vec<ServicePort>,
 }
 
-/// Service 端口信息
+/// Port mapping for a Service
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServicePort {
     pub name: String,
@@ -94,7 +94,7 @@ pub struct CreateSecurityContextRequest {
     pub run_as_non_root: Option<bool>,
 }
 
-/// 创建 Tenant 请求
+/// Request body to create a tenant
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateTenantRequest {
     pub name: String,
@@ -107,7 +107,7 @@ pub struct CreateTenantRequest {
     pub security_context: Option<CreateSecurityContextRequest>,
 }
 
-/// 创建 Pool 请求
+/// Pool spec embedded in create-tenant request
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePoolRequest {
     pub name: String,
@@ -117,47 +117,47 @@ pub struct CreatePoolRequest {
     pub storage_class: Option<String>,
 }
 
-/// 删除 Tenant 响应
+/// Response after deleting a tenant
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteTenantResponse {
     pub success: bool,
     pub message: String,
 }
 
-/// 更新 Tenant 请求
+/// Partial update payload for a tenant
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTenantRequest {
-    /// 更新镜像版本
+    /// New container image
     pub image: Option<String>,
 
-    /// 更新挂载路径
+    /// New volume mount path
     pub mount_path: Option<String>,
 
-    /// 更新环境变量
+    /// Replace env vars
     pub env: Option<Vec<EnvVar>>,
 
-    /// 更新凭证 Secret
+    /// Reference to credentials Secret
     pub creds_secret: Option<String>,
 
-    /// 更新 Pod 管理策略
+    /// Pod management policy
     pub pod_management_policy: Option<String>,
 
-    /// 更新镜像拉取策略
+    /// Image pull policy
     pub image_pull_policy: Option<String>,
 
-    /// 更新日志配置
+    /// Logging sidecar / volume settings
     pub logging: Option<LoggingConfig>,
 }
 
-/// 环境变量
+/// Key/value environment variable
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct EnvVar {
     pub name: String,
     pub value: Option<String>,
 }
 
-/// 日志配置
+/// Tenant logging configuration
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LoggingConfig {
@@ -166,7 +166,7 @@ pub struct LoggingConfig {
     pub storage_class: Option<String>,
 }
 
-/// 更新 Tenant 响应
+/// Response after updating a tenant
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UpdateTenantResponse {
     pub success: bool,
@@ -174,7 +174,7 @@ pub struct UpdateTenantResponse {
     pub tenant: TenantListItem,
 }
 
-/// Tenant YAML 请求/响应
+/// Raw Tenant manifest get/update payload
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct TenantYAML {
     pub yaml: String,

@@ -22,19 +22,19 @@ use jsonwebtoken::{DecodingKey, Validation, decode};
 
 use crate::console::state::{AppState, Claims};
 
-/// JWT 认证中间件
+/// JWT session middleware.
 ///
-/// 从 Cookie 中提取 JWT Token,验证后将 Claims 注入到请求扩展中
+/// Reads the `session` cookie, validates the JWT, and inserts `Claims` into request extensions.
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // 跳过 OPTIONS（CORS 预检），避免 401 导致浏览器报 CORS 错误
+    // Allow CORS preflight without 401 (browser would treat as CORS failure)
     if request.method() == Method::OPTIONS {
         return Ok(next.run(request).await);
     }
-    // 跳过公开路径
+    // Unauthenticated paths
     let path = request.uri().path();
     if path == "/healthz"
         || path == "/readyz"
@@ -45,7 +45,7 @@ pub async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // 从 Cookie 中提取 Token
+    // Parse session cookie
     let cookies = request
         .headers()
         .get(header::COOKIE)
@@ -54,7 +54,7 @@ pub async fn auth_middleware(
 
     let token = parse_session_cookie(cookies).ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // 验证 JWT
+    // Verify JWT signature and claims
     let claims = decode::<Claims>(
         &token,
         &DecodingKey::from_secret(state.jwt_secret.as_bytes()),
@@ -66,20 +66,20 @@ pub async fn auth_middleware(
     })?
     .claims;
 
-    // 检查过期时间
+    // Reject expired tokens
     let now = chrono::Utc::now().timestamp() as usize;
     if claims.exp < now {
         tracing::warn!("Token expired");
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // 将 Claims 注入请求扩展
+    // Stash claims for handlers
     request.extensions_mut().insert(claims);
 
     Ok(next.run(request).await)
 }
 
-/// 从 Cookie 字符串中解析 session token
+/// Extract `session=<jwt>` from a raw `Cookie` header value
 fn parse_session_cookie(cookies: &str) -> Option<String> {
     cookies.split(';').find_map(|cookie| {
         let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();

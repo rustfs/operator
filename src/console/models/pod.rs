@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Pod 列表项
+/// Single pod row in a tenant pod list
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PodListItem {
     pub name: String,
@@ -29,13 +29,13 @@ pub struct PodListItem {
     pub created_at: Option<String>,
 }
 
-/// Pod 列表响应
+/// Response listing pods
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PodListResponse {
     pub pods: Vec<PodListItem>,
 }
 
-/// Pod 详情
+/// Full pod detail for the UI
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PodDetails {
     pub name: String,
@@ -51,7 +51,7 @@ pub struct PodDetails {
     pub created_at: Option<String>,
 }
 
-/// Pod 状态
+/// Phase, conditions, and networking summary
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PodStatus {
     pub phase: String,
@@ -61,7 +61,7 @@ pub struct PodStatus {
     pub start_time: Option<String>,
 }
 
-/// Pod 条件
+/// One Kubernetes pod condition
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PodCondition {
     #[serde(rename = "type")]
@@ -72,7 +72,7 @@ pub struct PodCondition {
     pub last_transition_time: Option<String>,
 }
 
-/// 容器信息
+/// Container status summary
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ContainerInfo {
     pub name: String,
@@ -82,7 +82,7 @@ pub struct ContainerInfo {
     pub state: ContainerState,
 }
 
-/// 容器状态
+/// Container lifecycle state
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(tag = "status")]
 pub enum ContainerState {
@@ -100,7 +100,7 @@ pub enum ContainerState {
     },
 }
 
-/// Volume 信息
+/// Volume mount / PVC reference
 #[derive(Debug, Serialize, ToSchema)]
 pub struct VolumeInfo {
     pub name: String,
@@ -108,35 +108,35 @@ pub struct VolumeInfo {
     pub claim_name: Option<String>,
 }
 
-/// 删除 Pod 响应
+/// Response after deleting a pod
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeletePodResponse {
     pub success: bool,
     pub message: String,
 }
 
-/// 重启 Pod 请求
+/// Optional flags when restarting a pod (delete/recreate)
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RestartPodRequest {
     #[serde(default)]
     pub force: bool,
 }
 
-/// Pod 日志请求参数
+/// Query parameters for pod log streaming
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct LogsQuery {
-    /// 容器名称
+    /// Container name (if multi-container)
     pub container: Option<String>,
-    /// 尾部行数
+    /// Number of lines from the end of the log
     #[serde(default = "default_tail_lines")]
     pub tail_lines: i64,
-    /// 是否跟随
+    /// Stream new lines (follow)
     #[serde(default)]
     pub follow: bool,
-    /// 显示时间戳
+    /// Prefix each line with a timestamp
     #[serde(default)]
     pub timestamps: bool,
-    /// 从指定时间开始（RFC3339 格式）
+    /// Only log lines after this instant (RFC3339)
     pub since_time: Option<String>,
 }
 

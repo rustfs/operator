@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Pool 信息（扩展版）
+/// Extended pool details for list/detail views
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PoolDetails {
     pub name: String,
@@ -33,13 +33,13 @@ pub struct PoolDetails {
     pub created_at: Option<String>,
 }
 
-/// Pool 列表响应
+/// Response listing pools for a tenant
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PoolListResponse {
     pub pools: Vec<PoolDetails>,
 }
 
-/// 添加 Pool 请求
+/// Request body to add a pool to a tenant
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AddPoolRequest {
@@ -49,26 +49,26 @@ pub struct AddPoolRequest {
     pub storage_size: String,
     pub storage_class: Option<String>,
 
-    // 可选的调度配置
+    // Optional scheduling overrides
     pub node_selector: Option<std::collections::BTreeMap<String, String>>,
     pub resources: Option<ResourceRequirements>,
 }
 
-/// 资源需求
+/// CPU/memory requests and limits
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ResourceRequirements {
     pub requests: Option<ResourceList>,
     pub limits: Option<ResourceList>,
 }
 
-/// 资源列表
+/// Named resource quantities (e.g. cpu, memory)
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct ResourceList {
     pub cpu: Option<String>,
     pub memory: Option<String>,
 }
 
-/// 删除 Pool 响应
+/// Response after deleting a pool
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeletePoolResponse {
     pub success: bool,
@@ -76,7 +76,7 @@ pub struct DeletePoolResponse {
     pub warning: Option<String>,
 }
 
-/// Pool 添加响应
+/// Response after adding a pool
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AddPoolResponse {
     pub success: bool,

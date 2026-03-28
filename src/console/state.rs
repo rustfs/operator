@@ -14,17 +14,17 @@
 
 use std::sync::Arc;
 
-/// Console 应用状态
+/// Shared Axum application state.
 ///
-/// 包含 JWT 密钥等全局配置
+/// Holds global config such as the JWT signing secret.
 #[derive(Clone)]
 pub struct AppState {
-    /// JWT 签名密钥
+    /// Symmetric key for signing session JWTs
     pub jwt_secret: Arc<String>,
 }
 
 impl AppState {
-    /// 创建新的应用状态
+    /// Build state with the given JWT secret
     pub fn new(jwt_secret: String) -> Self {
         Self {
             jwt_secret: Arc::new(jwt_secret),
@@ -37,14 +37,14 @@ impl AppState {
 pub struct Claims {
     /// Kubernetes ServiceAccount Token
     pub k8s_token: String,
-    /// Token 过期时间 (Unix timestamp)
+    /// Expiry time (Unix seconds)
     pub exp: usize,
-    /// Token 签发时间
+    /// Issued-at time (Unix seconds)
     pub iat: usize,
 }
 
 impl Claims {
-    /// 创建新的 Claims (12 小时有效期)
+    /// New claims with a 12-hour lifetime
     pub fn new(k8s_token: String) -> Self {
         let now = chrono::Utc::now().timestamp() as usize;
         Self {

@@ -21,8 +21,10 @@ use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, api::ListParams};
 
-/// 列出 Tenant 相关的 Events。
-/// 若 K8s API 失败（权限、field selector 等），返回空列表并打日志，避免 500 导致详情页整页失败。
+/// List Kubernetes events for objects named like the tenant.
+///
+/// On list failure (RBAC, field selector, etc.) returns an empty list and logs a warning so the
+/// tenant detail page does not 500.
 pub async fn list_tenant_events(
     Path((namespace, tenant)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -71,7 +73,7 @@ pub async fn list_tenant_events(
     Ok(Json(EventListResponse { events: items }))
 }
 
-/// 创建 Kubernetes 客户端
+/// Build a client impersonating the session token.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

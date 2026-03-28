@@ -24,7 +24,7 @@ use crate::console::{
 };
 use crate::types::v1alpha1::tenant::Tenant;
 
-/// 登录处理
+/// Exchange a Kubernetes bearer token for a session cookie.
 // TOKEN=$(kubectl create token rustfs-operator -n rustfs-system --duration=24h)
 // curl -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \
@@ -35,10 +35,10 @@ pub async fn login(
 ) -> Result<impl IntoResponse> {
     tracing::info!("Login attempt");
 
-    // 验证 K8s Token (尝试创建客户端并测试权限)
+    // Validate the bearer token by building a client
     let client = create_k8s_client(&req.token).await?;
 
-    // 测试权限 - 尝试列出 Tenant (limit 1)
+    // Permission smoke test: list Tenant CRs (limit 1)
     let api: kube::Api<Tenant> = kube::Api::all(client);
     api.list(&kube::api::ListParams::default().limit(1))
         .await
@@ -49,7 +49,7 @@ pub async fn login(
             }
         })?;
 
-    // 生成 JWT
+    // Issue signed session JWT
     let claims = Claims::new(req.token);
     let token = encode(
         &Header::default(),
@@ -58,7 +58,7 @@ pub async fn login(
     )
     .context(error::JwtSnafu)?;
 
-    // 设置 HttpOnly Cookie
+    // HttpOnly session cookie
     let cookie = format!(
         "session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
         token,
@@ -76,9 +76,9 @@ pub async fn login(
     ))
 }
 
-/// 登出处理
+/// Clear the session cookie.
 pub async fn logout() -> impl IntoResponse {
-    // 清除 Cookie
+    // Expire the session cookie
     let cookie = "session=; Path=/; HttpOnly; Max-Age=0";
     let headers = [(header::SET_COOKIE, cookie)];
 
@@ -91,7 +91,7 @@ pub async fn logout() -> impl IntoResponse {
     )
 }
 
-/// 检查会话
+/// Return session validity and expiry from JWT claims.
 pub async fn session_check(Extension(claims): Extension<Claims>) -> Json<SessionResponse> {
     let expires_at =
         chrono::DateTime::from_timestamp(claims.exp as i64, 0).map(|dt| dt.to_rfc3339());
@@ -102,16 +102,16 @@ pub async fn session_check(Extension(claims): Extension<Claims>) -> Json<Session
     })
 }
 
-/// 创建 Kubernetes 客户端 (使用 Token)
+/// Build a `kube::Client` using the login bearer token.
 async fn create_k8s_client(token: &str) -> Result<Client> {
-    // 使用默认配置加载
+    // Default kubeconfig (in-cluster or KUBECONFIG)
     let mut config = kube::Config::infer()
         .await
         .map_err(|e| Error::InternalServer {
             message: format!("Failed to load kubeconfig: {}", e),
         })?;
 
-    // 覆盖 token
+    // Replace auth with the user's token
     config.auth_info.token = Some(token.to_string().into());
 
     Client::try_from(config).map_err(|e| Error::InternalServer {

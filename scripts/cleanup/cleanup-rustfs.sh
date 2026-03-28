@@ -18,7 +18,7 @@
 
 set -e
 
-# 保证从项目根目录执行（可从任意位置调用本脚本）
+# Always run from project root (script cds here; safe to invoke from any cwd)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -376,5 +376,5 @@ done
 # Catch Ctrl+C
 trap 'log_error "Cleanup interrupted"; exit 1' INT
 
-# 执行主流程
+# Main entry
 main "$@"

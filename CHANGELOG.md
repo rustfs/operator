@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Aligned [`CLAUDE.md`](CLAUDE.md) and [`ROADMAP.md`](ROADMAP.md) with current code: Tenant status conditions and StatefulSet updates on the successful reconcile path are documented as implemented; remaining work (status on early errors, integration tests, rollout extras) is listed explicitly.
+- Clarified the documentation map: [`CONTRIBUTING.md`](CONTRIBUTING.md) (quality gates and CI alignment), [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) (environment setup), [`docs/DEVELOPMENT-NOTES.md`](docs/DEVELOPMENT-NOTES.md) (historical notes, not normative).
+- Updated [`examples/README.md`](examples/README.md): Tenant Services document S3 **9000** and RustFS Console **9001**; distinguished the Operator HTTP Console (default **9090**, `cargo run -- console`) from the Tenant `{tenant}-console` Service.
+- Standardized [`README.md`](README.md), [`scripts/README.md`](scripts/README.md), and shell scripts under `scripts/` to English for consistency with architecture and development docs.
+- Translated Rust doc and line comments in [`src/console/`](src/console/) to English (no behavior change).
+
+### Fixed
+
+- **`console-web` / `make pre-commit`**: `npm run lint` now runs `eslint .` (bare `eslint` only printed CLI help). Added `format` / `format:check` scripts; [`Makefile`](Makefile) `console-fmt` and `console-fmt-check` call them so Prettier resolves from `node_modules` after `npm install` in `console-web/`.
+
 ### Added
 
 #### **StatefulSet Reconciliation Improvements** (2025-12-03, Issue #43)

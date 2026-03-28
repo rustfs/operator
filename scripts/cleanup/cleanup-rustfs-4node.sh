@@ -14,16 +14,16 @@
 # limitations under the License.
 
 ################################################################################
-# RustFS 4-node 部署环境清理脚本
+# Cleanup script for the RustFS 4-node demo environment
 #
-# 清理: Tenants, Namespace, RBAC, CRD, Kind 集群, 本地存储目录
-# 与 deploy-rustfs-4node.sh 配套使用
+# Removes: Tenants, Namespace, RBAC, CRD, Kind cluster, local storage dirs
+# Pair with: deploy-rustfs-4node.sh
 #
 ################################################################################
 
 set -e
 
-# 保证从项目根目录执行（可从任意位置调用本脚本）
+# Always run from project root (script cds here; safe to invoke from any cwd)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -31,7 +31,7 @@ cd "$PROJECT_ROOT"
 CLUSTER_NAME="rustfs-cluster"
 OPERATOR_NAMESPACE="rustfs-system"
 
-# 颜色
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -46,42 +46,42 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 confirm_cleanup() {
     if [ "$FORCE" != "true" ]; then
         echo ""
-        log_warning "将删除以下资源:"
-        echo "  - 所有 Tenants"
-        echo "  - 命名空间: ${OPERATOR_NAMESPACE}"
+        log_warning "The following will be deleted:"
+        echo "  - All Tenants"
+        echo "  - Namespace: ${OPERATOR_NAMESPACE}"
         echo "  - ClusterRole / ClusterRoleBinding: rustfs-operator, rustfs-operator-console"
         echo "  - CRD: tenants.rustfs.com"
-        echo "  - Kind 集群: ${CLUSTER_NAME}"
+        echo "  - Kind cluster: ${CLUSTER_NAME}"
         if [ "$CLEAN_STORAGE" = "true" ]; then
-            echo "  - 主机存储目录: /tmp/rustfs-storage-{1,2,3}"
+            echo "  - Host storage dirs: /tmp/rustfs-storage-{1,2,3}"
         fi
         echo ""
-        read -p "确认删除? (yes/no): " confirm
+        read -p "Confirm deletion? (yes/no): " confirm
         if [ "$confirm" != "yes" ]; then
-            log_info "已取消"
+            log_info "Cancelled"
             exit 0
         fi
     fi
 }
 
 delete_all_tenants() {
-    log_info "删除所有 Tenants..."
+    log_info "Deleting all Tenants..."
 
     if ! kubectl get crd tenants.rustfs.com >/dev/null 2>&1; then
-        log_info "CRD 不存在，跳过"
+        log_info "CRD not found, skipping"
         return 0
     fi
 
     local tenants
     tenants=$(kubectl get tenants --all-namespaces -o name 2>/dev/null) || true
     if [ -z "$tenants" ]; then
-        log_info "无 Tenant，跳过"
+        log_info "No Tenants, skipping"
         return 0
     fi
 
     echo "$tenants" | while read -r line; do
         [ -z "$line" ] && continue
-        log_info "删除 $line..."
+        log_info "Deleting $line..."
         kubectl delete "$line" --timeout=60s 2>/dev/null || kubectl delete "$line" --force --grace-period=0 2>/dev/null || true
     done
 
@@ -92,56 +92,56 @@ delete_all_tenants() {
         count=$(kubectl get tenants --all-namespaces -o name 2>/dev/null | wc -l)
         count=$((count + 0))
         if [ "$count" -eq 0 ]; then
-            log_success "Tenants 已删除"
+            log_success "Tenants deleted"
             return 0
         fi
         sleep 3
         elapsed=$((elapsed + 3))
     done
-    log_warning "部分 Tenant 可能仍在终止中"
+    log_warning "Some Tenants may still be terminating"
 }
 
 delete_namespace() {
-    log_info "删除命名空间 ${OPERATOR_NAMESPACE}..."
+    log_info "Deleting namespace ${OPERATOR_NAMESPACE}..."
 
     if kubectl get namespace ${OPERATOR_NAMESPACE} >/dev/null 2>&1; then
         kubectl delete namespace ${OPERATOR_NAMESPACE} --timeout=120s
 
-        log_info "等待命名空间完全删除..."
+        log_info "Waiting for namespace to be fully removed..."
         local timeout=120
         local elapsed=0
         while kubectl get namespace ${OPERATOR_NAMESPACE} >/dev/null 2>&1; do
             if [ $elapsed -ge $timeout ]; then
-                log_warning "等待超时"
+                log_warning "Wait timed out"
                 kubectl get namespace ${OPERATOR_NAMESPACE} -o json 2>/dev/null | \
                     jq '.spec.finalizers = []' 2>/dev/null | \
                     kubectl replace --raw /api/v1/namespaces/${OPERATOR_NAMESPACE}/finalize -f - 2>/dev/null || true
                 break
             fi
-            echo -ne "${BLUE}[INFO]${NC} 等待命名空间删除... ${elapsed}s\r"
+            echo -ne "${BLUE}[INFO]${NC} Waiting for namespace deletion... ${elapsed}s\r"
             sleep 5
             elapsed=$((elapsed + 5))
         done
         echo ""
-        log_success "命名空间已删除"
+        log_success "Namespace removed"
     else
-        log_info "命名空间不存在，跳过"
+        log_info "Namespace does not exist, skipping"
     fi
 }
 
 delete_cluster_rbac() {
-    log_info "删除 ClusterRoleBinding 和 ClusterRole..."
+    log_info "Deleting ClusterRoleBinding and ClusterRole..."
 
     for name in rustfs-operator rustfs-operator-console; do
         kubectl delete clusterrolebinding "$name" --timeout=30s 2>/dev/null || true
         kubectl delete clusterrole "$name" --timeout=30s 2>/dev/null || true
     done
 
-    log_success "RBAC 已清理"
+    log_success "RBAC cleaned up"
 }
 
 delete_pv_and_storageclass() {
-    log_info "删除 PersistentVolumes 和 StorageClass..."
+    log_info "Deleting PersistentVolumes and StorageClass..."
 
     for i in $(seq 1 12); do
         kubectl delete pv rustfs-pv-${i} --timeout=30s 2>/dev/null || true
@@ -149,11 +149,11 @@ delete_pv_and_storageclass() {
 
     kubectl delete storageclass local-storage --timeout=30s 2>/dev/null || true
 
-    log_success "PV 和 StorageClass 已清理"
+    log_success "PVs and StorageClass removed"
 }
 
 delete_crd() {
-    log_info "删除 CRD tenants.rustfs.com..."
+    log_info "Deleting CRD tenants.rustfs.com..."
 
     if kubectl get crd tenants.rustfs.com >/dev/null 2>&1; then
         kubectl delete crd tenants.rustfs.com --timeout=60s
@@ -168,60 +168,60 @@ delete_crd() {
             sleep 2
             elapsed=$((elapsed + 2))
         done
-        log_success "CRD 已删除"
+        log_success "CRD deleted"
     else
-        log_info "CRD 不存在，跳过"
+        log_info "CRD not found, skipping"
     fi
 }
 
 delete_kind_cluster() {
-    log_info "删除 Kind 集群 ${CLUSTER_NAME}..."
+    log_info "Deleting Kind cluster ${CLUSTER_NAME}..."
 
     if ! command -v kind >/dev/null 2>&1; then
-        log_warning "未找到 kind，跳过"
+        log_warning "kind not found, skipping"
         return 0
     fi
 
     if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
         kind delete cluster --name ${CLUSTER_NAME}
-        log_success "Kind 集群已删除"
+        log_success "Kind cluster deleted"
     else
-        log_info "Kind 集群不存在，跳过"
+        log_info "Kind cluster does not exist, skipping"
     fi
 }
 
 cleanup_storage_dirs() {
-    log_info "清理主机存储目录..."
+    log_info "Cleaning host storage directories..."
 
     for dir in /tmp/rustfs-storage-1 /tmp/rustfs-storage-2 /tmp/rustfs-storage-3; do
         if [ -d "$dir" ]; then
             rm -rf "$dir"
-            log_info "已删除 $dir"
+            log_info "Removed $dir"
         fi
     done
 
-    log_success "存储目录已清理"
+    log_success "Storage directories cleaned"
 }
 
 cleanup_local_files() {
-    log_info "清理本地生成文件..."
+    log_info "Cleaning generated local files..."
 
     if [ -f "deploy/rustfs-operator/crds/tenant-crd.yaml" ]; then
         rm -f deploy/rustfs-operator/crds/tenant-crd.yaml
-        log_info "已删除 tenant-crd.yaml"
+        log_info "Removed tenant-crd.yaml"
     fi
 
-    log_success "本地文件已清理"
+    log_success "Local files cleaned"
 }
 
 show_next_steps() {
     echo ""
-    log_info "重新部署:"
+    log_info "Redeploy with:"
     echo "  ./scripts/deploy/deploy-rustfs-4node.sh"
     echo ""
 }
 
-# 解析参数
+# Parse arguments
 FORCE="false"
 CLEAN_STORAGE="false"
 while [[ $# -gt 0 ]]; do
@@ -238,31 +238,31 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [-f|--force] [-s|--clean-storage]"
             echo ""
             echo "Options:"
-            echo "  -f, --force        跳过确认"
-            echo "  -s, --clean-storage 同时删除主机目录 /tmp/rustfs-storage-{1,2,3}"
-            echo "  -h, --help         显示帮助"
+            echo "  -f, --force           Skip confirmation"
+            echo "  -s, --clean-storage   Also remove host dirs /tmp/rustfs-storage-{1,2,3}"
+            echo "  -h, --help            Show this help"
             exit 0
             ;;
         *)
-            log_error "未知参数: $1"
+            log_error "Unknown argument: $1"
             exit 1
             ;;
     esac
 done
 
-trap 'log_error "清理被中断"; exit 1' INT
+trap 'log_error "Cleanup interrupted"; exit 1' INT
 
 log_info "=========================================="
-log_info "  RustFS 4-node 环境清理"
+log_info "  RustFS 4-node environment cleanup"
 log_info "=========================================="
 
 confirm_cleanup
 
 echo ""
-log_info "开始清理..."
+log_info "Starting cleanup..."
 echo ""
 
-# 若集群存在且可连接，先清理 K8s 资源
+# If the cluster exists and is reachable, clean Kubernetes resources first
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
     kubectl config use-context kind-${CLUSTER_NAME} 2>/dev/null || true
     if kubectl cluster-info >/dev/null 2>&1; then
@@ -273,7 +273,7 @@ if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
         delete_crd
     fi
 else
-    log_info "Kind 集群 ${CLUSTER_NAME} 不存在，跳过 K8s 资源清理"
+    log_info "Kind cluster ${CLUSTER_NAME} not found, skipping Kubernetes cleanup"
 fi
 
 cleanup_local_files
@@ -287,5 +287,5 @@ echo ""
 show_next_steps
 
 log_success "=========================================="
-log_success "  清理完成"
+log_success "  Cleanup finished"
 log_success "=========================================="

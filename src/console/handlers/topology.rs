@@ -27,13 +27,13 @@ use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, ResourceExt, api::ListParams};
 use std::collections::BTreeMap;
 
-/// 获取集群拓扑总览
+/// Aggregated topology for the dashboard (nodes, namespaces, tenants, pods).
 pub async fn get_topology_overview(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<TopologyOverviewResponse>> {
     let client = create_client(&claims).await?;
 
-    // 并行获取 nodes, tenants, pods
+    // Fetch nodes, tenants, and labeled pods concurrently
     let node_api: Api<corev1::Node> = Api::all(client.clone());
     let tenant_api: Api<Tenant> = Api::all(client.clone());
     let pod_api: Api<corev1::Pod> = Api::all(client.clone());
@@ -52,7 +52,7 @@ pub async fn get_topology_overview(
     let k8s_tenants = tenants_result.map_err(|e| error::map_kube_error(e, "Tenants"))?;
     let k8s_pods = pods_result.map_err(|e| error::map_kube_error(e, "Pods"))?;
 
-    // 构建节点列表 + 集群资源汇总
+    // Build node list and sum cluster capacity
     let mut total_cpu_m: i64 = 0;
     let mut total_mem_b: i64 = 0;
     let mut alloc_cpu_m: i64 = 0;
@@ -123,7 +123,7 @@ pub async fn get_topology_overview(
                 })
                 .unwrap_or_default();
 
-            // 累加集群资源
+            // Sum cluster-wide CPU/memory
             total_cpu_m += parse_cpu_to_millicores(&cpu_cap);
             total_mem_b += parse_memory_to_bytes(&mem_cap);
             alloc_cpu_m += parse_cpu_to_millicores(&cpu_alloc);
@@ -141,7 +141,7 @@ pub async fn get_topology_overview(
         })
         .collect();
 
-    // 按 (namespace, tenant_name) 索引 pods
+    // Index pods by (namespace, tenant name)
     let mut pod_index: BTreeMap<(String, String), Vec<TopologyPod>> = BTreeMap::new();
     for pod in &k8s_pods.items {
         let labels = pod.metadata.labels.as_ref();
@@ -180,7 +180,7 @@ pub async fn get_topology_overview(
         });
     }
 
-    // 按 namespace 分组 tenants
+    // Group tenants by namespace
     let mut ns_map: BTreeMap<String, Vec<&Tenant>> = BTreeMap::new();
     for t in &k8s_tenants.items {
         let ns = t.namespace().unwrap_or_default();
@@ -215,7 +215,7 @@ pub async fn get_topology_overview(
                         .as_ref()
                         .map(|ts| ts.0.to_rfc3339());
 
-                    // Pool 信息
+                    // Per-pool rows from spec + status
                     let pools: Vec<TopologyPool> = t
                         .spec
                         .pools
@@ -251,7 +251,7 @@ pub async fn get_topology_overview(
                         })
                         .collect();
 
-                    // Tenant 摘要
+                    // Tenant card summary
                     let pool_count = pools.len();
                     let total_replicas: i32 = pools.iter().map(|p| p.replicas).sum();
                     let total_capacity_bytes: i64 = t
@@ -268,7 +268,7 @@ pub async fn get_topology_overview(
                     let console_endpoint =
                         Some(format!("http://{}-console.{}.svc:9001", name, namespace));
 
-                    // 匹配 pods
+                    // Attach pods collected earlier
                     let key = (namespace.clone(), name.clone());
                     let tenant_pods = pod_index.remove(&key);
 
@@ -302,7 +302,7 @@ pub async fn get_topology_overview(
         })
         .collect();
 
-    // 集群信息
+    // Cluster header + rolled-up stats
     let cluster = TopologyCluster {
         id: "rustfs-cluster".to_string(),
         name: std::env::var("CLUSTER_NAME").unwrap_or_else(|_| "RustFS Cluster".to_string()),
@@ -326,12 +326,12 @@ pub async fn get_topology_overview(
     }))
 }
 
-/// 判断 Tenant 状态是否健康
+/// Whether the tenant aggregate state counts as healthy for the UI.
 fn is_healthy_state(state: &str) -> bool {
     matches!(state, "Ready" | "Initialized")
 }
 
-/// 将 PoolState 映射到前端状态字符串
+/// Map operator `PoolState` to a short UI label.
 fn map_pool_state(state: &PoolState) -> String {
     match state {
         PoolState::Created | PoolState::Initialized | PoolState::RolloutComplete => {
@@ -343,7 +343,7 @@ fn map_pool_state(state: &PoolState) -> String {
     }
 }
 
-/// 从 PersistenceConfig 获取每个 volume 的字节数
+/// Bytes per PVC volume from `PersistenceConfig` (default 10Gi).
 fn get_per_volume_bytes(
     persistence: &crate::types::v1alpha1::persistence::PersistenceConfig,
 ) -> i64 {
@@ -359,7 +359,7 @@ fn get_per_volume_bytes(
         .unwrap_or(DEFAULT_BYTES)
 }
 
-/// 将字节数格式化为可读存储字符串（优先 TiB, GiB）
+/// Human-readable storage size (prefer TiB/GiB).
 fn format_storage_bytes(b: i64) -> String {
     const TIB: i64 = 1024 * 1024 * 1024 * 1024;
     const GIB: i64 = 1024 * 1024 * 1024;
@@ -383,7 +383,7 @@ fn format_storage_bytes(b: i64) -> String {
     }
 }
 
-/// 获取 Kubernetes 集群版本
+/// Kubernetes apiserver version (major.minor).
 async fn get_cluster_version(client: &Client) -> String {
     match client.apiserver_version().await {
         Ok(info) => format!("v{}.{}", info.major, info.minor),
@@ -391,7 +391,7 @@ async fn get_cluster_version(client: &Client) -> String {
     }
 }
 
-/// 创建 Kubernetes 客户端
+/// Build a client using the session bearer token.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

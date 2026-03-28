@@ -56,13 +56,13 @@ test:
 console-lint:
 	cd console-web && npm run lint
 
-# 前端 Prettier 自动格式化
+# 前端 Prettier 自动格式化（需先在 console-web 下 npm install）
 console-fmt:
-	cd console-web && npx prettier --write "**/*.{ts,tsx,js,jsx,json,css,md}"
+	cd console-web && npm run format
 
 # 前端 Prettier 格式检查（仅检查不修改）
 console-fmt-check:
-	cd console-web && npx prettier --check "**/*.{ts,tsx,js,jsx,json,css,md}"
+	cd console-web && npm run format:check
 
 # 构建
 build:

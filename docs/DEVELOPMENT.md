@@ -2,6 +2,16 @@
 
 This guide will help you set up a local development environment for the RustFS Kubernetes Operator.
 
+## Documentation map
+
+- **Code quality and PR gates** (format, clippy, tests, console lint) are defined in [`CONTRIBUTING.md`](../CONTRIBUTING.md) and enforced by [`Makefile`](../Makefile). Run **`make pre-commit`** from the repo root before opening a PR.
+
+- **`just` vs `make`**: The [`Justfile`](../Justfile) provides optional tasks (`just pre-commit` runs `fmt` + clippy + `cargo check` + `cargo nextest`; it does **not** run `console-web` checks). For parity with [`CONTRIBUTING.md`](../CONTRIBUTING.md) and [`Makefile`](../Makefile), prefer **`make pre-commit`**.
+
+- **This guide** focuses on toolchain setup, clusters, and day-to-day workflows—not on duplicating the full command matrix from CONTRIBUTING.
+
+- **[`DEVELOPMENT-NOTES.md`](./DEVELOPMENT-NOTES.md)** records past analysis sessions; it is **not** a substitute for CONTRIBUTING or this file.
+
 ---
 
 ## 📋 Prerequisites
@@ -146,8 +156,8 @@ You can run it directly:
 # Format code before building
 just fmt && just build
 
-# Run all checks before building
-just pre-commit && just build MODE=release
+# Run all checks before building (use make for full gate including console-web)
+make pre-commit && just build MODE=release
 
 # Clean and rebuild
 cargo clean && cargo build --release
@@ -412,7 +422,7 @@ kubectl get nodes
 ```bash
 # Set log level (optional)
 export RUST_LOG=debug
-export RUST_LOG=rustfs_operator=debug,kube=info
+export RUST_LOG=operator=debug,kube=info
 
 # Run operator in debug mode
 cargo run -- server
@@ -483,7 +493,7 @@ kubectl get pvc -l rustfs.tenant=dev-minimal
 ```bash
 # Set detailed log levels
 export RUST_LOG=debug
-export RUST_LOG=rustfs_operator=debug,kube=info,tracing=debug
+export RUST_LOG=operator=debug,kube=info,tracing=debug
 
 # Run operator
 cargo run -- server
@@ -596,17 +606,17 @@ The operator uses the `tracing` crate for structured logging. Log levels:
 export RUST_LOG=debug
 
 # Set per-module log levels
-export RUST_LOG=rustfs_operator=debug,kube=info,tracing=warn
+export RUST_LOG=operator=debug,kube=info,tracing=warn
 
 # Common configurations:
 # Development
-export RUST_LOG=rustfs_operator=debug,kube=info
+export RUST_LOG=operator=debug,kube=info
 
 # Production
-export RUST_LOG=rustfs_operator=info,kube=warn
+export RUST_LOG=operator=info,kube=warn
 
 # Troubleshooting
-export RUST_LOG=rustfs_operator=trace,kube=debug
+export RUST_LOG=operator=trace,kube=debug
 ```
 
 #### Log Location
@@ -742,12 +752,8 @@ cargo test -- --test-threads=1
 
 4. **Run checks**
    ```bash
-   just pre-commit
-   # This runs:
-   # - fmt-check
-   # - clippy
-   # - check
-   # - test
+   make pre-commit
+   # For optional Just tasks instead, see "Documentation map" — `just pre-commit` differs (no console-web).
    ```
 
 5. **Run tests**
@@ -778,14 +784,14 @@ cargo test -- --test-threads=1
 The project enforces strict code quality standards:
 
 ```bash
-# Run all checks
-just pre-commit
+# Run all checks (Rust + console-web; matches CONTRIBUTING / Makefile)
+make pre-commit
 
-# Run individual checks
+# Optional: Justfile tasks (no console-web in `just pre-commit`)
 just fmt-check      # Check formatting
 just clippy         # Code linting
 just check          # Compilation check
-just test           # Tests
+just test           # Tests (cargo nextest)
 ```
 
 **Note**: The project has `deny`-level clippy rules:
@@ -840,7 +846,7 @@ cargo clean && cargo build
 **Solution**:
 ```bash
 # Navigate to project directory, rustup will auto-install correct toolchain
-cd /Users/hongwei/my/operator
+cd /path/to/operator
 rustup show
 ```
 

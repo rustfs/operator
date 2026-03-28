@@ -48,11 +48,11 @@ fn cors_allowed_origins() -> Vec<HeaderValue> {
     if parsed.is_empty() { default } else { parsed }
 }
 
-/// 启动 Console HTTP Server
+/// Start the Console HTTP server (Axum).
 pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting RustFS Operator Console on port {}", port);
 
-    // 生成 JWT 密钥 (实际生产应从环境变量读取)
+    // JWT signing secret (set JWT_SECRET in production)
     let jwt_secret = std::env::var("JWT_SECRET")
         .unwrap_or_else(|_| "rustfs-console-secret-change-me-in-production".to_string());
 
@@ -60,18 +60,18 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     let cors_origins = cors_allowed_origins();
 
-    // 构建应用。CorsLayer 放在最外层，使 OPTIONS 预检由 CORS 直接响应，避免被 auth 或路由影响。
+    // CorsLayer is outermost so OPTIONS preflight is answered by CORS before auth/routing.
     let app = Router::new()
-        // 健康检查 (无需认证)
+        // Liveness (unauthenticated)
         .route("/healthz", get(health_check))
         .route("/readyz", get(ready_check))
-        // Swagger UI (无需认证)
+        // OpenAPI / Swagger (unauthenticated)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        // API v1 路由
+        // REST API v1
         .nest("/api/v1", api_routes())
-        // 应用状态
+        // Shared state
         .with_state(state.clone())
-        // 中间件：最后添加的最先执行，故请求顺序为 Trace -> Compression -> Cors -> auth
+        // Middleware runs in reverse order: Trace -> Compression -> Cors -> auth
         .layer(middleware::from_fn_with_state(
             state.clone(),
             crate::console::middleware::auth::auth_middleware,
@@ -92,7 +92,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http());
 
-    // 启动服务器
+    // Bind and serve
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -107,7 +107,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// API 路由组合
+/// Merge all `/api/v1` route trees.
 fn api_routes() -> Router<AppState> {
     Router::new()
         .merge(routes::auth_routes())
@@ -119,7 +119,7 @@ fn api_routes() -> Router<AppState> {
         .merge(routes::topology_routes())
 }
 
-/// 健康检查
+/// Liveness probe: always OK if process runs.
 async fn health_check() -> impl IntoResponse {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -127,7 +127,7 @@ async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, format!("OK: {}", since_epoch.as_secs()))
 }
 
-/// 就绪检查：验证 K8s API 可连通
+/// Readiness: Kubernetes API reachable.
 async fn ready_check() -> impl IntoResponse {
     match check_k8s_connectivity().await {
         Ok(()) => (StatusCode::OK, "Ready".to_string()),
@@ -138,7 +138,7 @@ async fn ready_check() -> impl IntoResponse {
     }
 }
 
-/// 验证 K8s 连接：加载配置、创建客户端、执行轻量级 API 调用
+/// Load kubeconfig, build client, list namespaces (limit 1).
 async fn check_k8s_connectivity() -> Result<(), String> {
     let config = kube::Config::infer()
         .await

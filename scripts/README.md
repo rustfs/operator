@@ -1,49 +1,48 @@
-# Scripts 脚本目录
+# Scripts
 
-本目录包含 RustFS Operator 的部署、清理与检查脚本，按用途归类。
+Shell scripts for deploying, cleaning up, and checking RustFS Operator resources, grouped by purpose.
 
-## 目录结构
+## Layout
 
 ```
 scripts/
-├── README.md           # 本说明
-├── deploy/             # 部署脚本
-│   ├── deploy-rustfs.sh        # Kind 单节点 + 简单 Tenant 一键部署
-│   └── deploy-rustfs-4node.sh  # Kind 4 节点 + 4 节点 Tenant 部署
-├── cleanup/            # 清理脚本
-│   ├── cleanup-rustfs.sh      # 清理 deploy-rustfs.sh 创建的资源
-│   └── cleanup-rustfs-4node.sh # 清理 deploy-rustfs-4node.sh 创建的资源
-├── check/              # 检查脚本
-│   └── check-rustfs.sh        # 集群/Tenant 状态与访问信息
-└── test/               # 脚本自检
-    └── script-test.sh         # 校验各脚本语法
+├── README.md           # This file
+├── deploy/             # Deploy scripts
+│   ├── deploy-rustfs.sh        # Kind single-node + simple Tenant
+│   └── deploy-rustfs-4node.sh  # Kind 4-node + 4-node Tenant
+├── cleanup/            # Cleanup scripts
+│   ├── cleanup-rustfs.sh      # Undo resources created by deploy-rustfs.sh
+│   └── cleanup-rustfs-4node.sh # Undo resources created by deploy-rustfs-4node.sh
+├── check/              # Check scripts
+│   └── check-rustfs.sh        # Cluster / Tenant status and access hints
+└── test/               # Script self-check
+    └── script-test.sh         # Shell syntax check for all scripts
 ```
 
-## 使用方式
+## Usage
 
-**建议在项目根目录执行**（脚本内部会自动 `cd` 到项目根，因此从任意目录执行也可）：
+**Run from the repository root** (recommended). Scripts `cd` to the project root internally, so they also work if invoked from another working directory:
 
 ```bash
-# 从项目根执行
 ./scripts/deploy/deploy-rustfs.sh
 ./scripts/cleanup/cleanup-rustfs.sh
 ./scripts/check/check-rustfs.sh
 
-# 4 节点部署与清理
+# 4-node deploy and cleanup
 ./scripts/deploy/deploy-rustfs-4node.sh
 ./scripts/cleanup/cleanup-rustfs-4node.sh
 
-# 校验所有脚本语法
+# Validate shell syntax for all scripts
 ./scripts/test/script-test.sh
 ```
 
-## 依赖的路径约定
+## Path conventions
 
-- 脚本依赖项目根目录下的 `deploy/`、`examples/`、`console-web/` 等路径。
-- Kind 4 节点配置：`deploy/kind/kind-rustfs-cluster.yaml`。
-- 脚本会先 `cd` 到项目根再执行，因此可从任意当前目录调用。
+- Scripts expect paths under the repo root: `deploy/`, `examples/`, `console-web/`, etc.
+- Kind 4-node config: `deploy/kind/kind-rustfs-cluster.yaml`.
+- Each script switches to the project root before running.
 
-## 相关文档
+## Related docs
 
-- 部署说明：[deploy/README.md](../deploy/README.md)
-- Tenant 示例：[examples/README.md](../examples/README.md)
+- Deployment: [deploy/README.md](../deploy/README.md)
+- Tenant examples: [examples/README.md](../examples/README.md)

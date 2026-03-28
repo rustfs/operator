@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Console 模块
+//! Console HTTP API module.
 //!
-//! RustFS Operator Console - Web 管理界面
+//! RustFS Operator web management API (Axum).
 
 pub mod error;
 pub mod handlers;
