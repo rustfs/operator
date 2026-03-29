@@ -25,3 +25,4 @@ pub mod openapi;
 pub mod routes;
 pub mod server;
 pub mod state;
+pub mod tenant_event_scope;

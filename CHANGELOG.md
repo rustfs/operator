@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Console Tenant Events (breaking)**: Removed `GET /api/v1/namespaces/{namespace}/tenants/{tenant}/events`. Events are delivered via **SSE** `GET .../tenants/{tenant}/events/stream` (`text/event-stream`; each `data:` line is JSON `EventListResponse`). The tenant detail **Events** tab uses `EventSource` with the same session cookie as other API calls. Aggregates `core/v1` Events for the Tenant CR, Pods, StatefulSets, and PVCs scoped with `rustfs.tenant` / pool naming (see PRD); Tenant rows require `involvedObject.kind=Tenant` and matching name.
+
 - **Tenant `spec.encryption.vault`**: Removed `tlsSkipVerify` and `customCertificates` (they were never wired to `rustfs-kms`). Vault TLS should rely on system-trusted CAs or TLS upstream. The project is still pre-production; if you have old YAML with these keys, remove them before apply.
 
 - **KMS pod environment** ([`tenant/workloads.rs`](src/types/v1alpha1/tenant/workloads.rs)): Align variable names with the RustFS server and `rustfs-kms` (`RUSTFS_KMS_ENABLE`, `RUSTFS_KMS_VAULT_ADDRESS`, KV mount and key prefix, local `RUSTFS_KMS_KEY_DIR` / `RUSTFS_KMS_DEFAULT_KEY_ID`, etc.); remove Vault TLS certificate volume mounts; `ping_seconds` remains documented as reserved (not injected).

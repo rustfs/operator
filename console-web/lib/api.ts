@@ -13,7 +13,6 @@ import type {
   PodListResponse,
   PodDetails,
   DeletePodResponse,
-  EventListResponse,
   NodeListResponse,
   NamespaceListResponse,
   ClusterResourcesResponse,
@@ -28,6 +27,7 @@ import type {
   SecurityContextUpdateResponse,
 } from "@/types/api"
 import type { TopologyOverviewResponse } from "@/types/topology"
+import { getApiBaseUrl } from "@/lib/config"
 
 const ns = (namespace: string) => `/namespaces/${encodeURIComponent(namespace)}`
 const tenant = (namespace: string, name: string) => `${ns(namespace)}/tenants/${encodeURIComponent(name)}`
@@ -37,8 +37,6 @@ const pool = (namespace: string, name: string, poolName: string) =>
 const pods = (namespace: string, name: string) => `${tenant(namespace, name)}/pods`
 const pod = (namespace: string, name: string, podName: string) =>
   `${pods(namespace, name)}/${encodeURIComponent(podName)}`
-const events = (namespace: string, tenantName: string) =>
-  `${ns(namespace)}/tenants/${encodeURIComponent(tenantName)}/events`
 const tenantYaml = (namespace: string, name: string) => `${tenant(namespace, name)}/yaml`
 const tenantStateCounts = "/tenants/state-counts"
 const tenantStateCountsByNs = (namespace: string) => `${ns(namespace)}/tenants/state-counts`
@@ -190,9 +188,19 @@ export async function updateSecurityContext(
   return apiClient.put<SecurityContextUpdateResponse>(securityContext(namespace, name), body)
 }
 
-// ----- Events -----
-export async function listTenantEvents(namespace: string, tenantName: string): Promise<EventListResponse> {
-  return apiClient.get<EventListResponse>(events(namespace, tenantName))
+// ----- Events (SSE) -----
+/** Absolute URL for `EventSource` (cookie session + `withCredentials`). */
+export function getTenantEventsStreamUrl(namespace: string, tenantName: string): string {
+  const path = `${ns(namespace)}/tenants/${encodeURIComponent(tenantName)}/events/stream`
+  if (typeof window === "undefined") {
+    return path
+  }
+  const base = getApiBaseUrl()
+  if (base.startsWith("http://") || base.startsWith("https://")) {
+    return `${base.replace(/\/$/, "")}${path}`
+  }
+  const baseNorm = base.startsWith("/") ? base : `/${base}`
+  return `${window.location.origin}${baseNorm}${path}`
 }
 
 // ----- Cluster -----

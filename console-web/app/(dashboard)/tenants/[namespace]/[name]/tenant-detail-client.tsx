@@ -28,6 +28,7 @@ import type {
   PoolDetails,
   PodListItem,
   EventItem,
+  EventListResponse,
   AddPoolRequest,
   EncryptionInfoResponse,
   UpdateEncryptionRequest,
@@ -72,6 +73,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   const [pools, setPools] = useState<PoolDetails[]>([])
   const [pods, setPods] = useState<PodListItem[]>([])
   const [events, setEvents] = useState<EventItem[]>([])
+  const [eventsLoading, setEventsLoading] = useState(false)
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState(false)
   const [addPoolOpen, setAddPoolOpen] = useState(false)
@@ -132,26 +134,20 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   })
 
   const loadTenant = async () => {
-    const [detailResult, poolResult, podResult, eventResult] = await Promise.allSettled([
+    const [detailResult, poolResult, podResult] = await Promise.allSettled([
       api.getTenant(namespace, name),
       api.listPools(namespace, name),
       api.listPods(namespace, name),
-      api.listTenantEvents(namespace, name),
     ])
 
     const detailOk = detailResult.status === "fulfilled"
     const poolOk = poolResult.status === "fulfilled"
     const podOk = podResult.status === "fulfilled"
-    const eventOk = eventResult.status === "fulfilled"
 
     if (detailOk && poolOk && podOk) {
       setTenant(detailResult.value)
       setPools(poolResult.value.pools)
       setPods(podResult.value.pods)
-      setEvents(eventOk ? eventResult.value.events : [])
-      if (!eventOk) {
-        toast.error(t("Events could not be loaded"))
-      }
     } else {
       const err = !detailOk
         ? (detailResult as PromiseRejectedResult).reason
@@ -181,6 +177,36 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   useEffect(() => {
     loadTenant()
   }, [namespace, name]) // eslint-disable-line react-hooks/exhaustive-deps -- reload when route params change
+
+  useEffect(() => {
+    setEvents([])
+  }, [namespace, name])
+
+  useEffect(() => {
+    if (tab !== "events") return
+    setEventsLoading(true)
+    let cleaned = false
+    const url = api.getTenantEventsStreamUrl(namespace, name)
+    const es = new EventSource(url, { withCredentials: true })
+    es.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as EventListResponse
+        setEvents(data.events ?? [])
+      } catch {
+        /* ignore malformed chunk */
+      }
+      setEventsLoading(false)
+    }
+    es.onerror = () => {
+      if (cleaned) return
+      toast.error(t("Events stream could not be loaded"))
+      setEventsLoading(false)
+    }
+    return () => {
+      cleaned = true
+      es.close()
+    }
+  }, [tab, namespace, name, t])
 
   useEffect(() => {
     setTenantYaml("")
@@ -1181,7 +1207,13 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
               </TableRow>
             </TableHeader>
             <TableBody>
-              {events.length === 0 ? (
+              {eventsLoading && events.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
+                    <Spinner className="inline size-4" />
+                  </TableCell>
+                </TableRow>
+              ) : events.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
                     {t("No events")}
