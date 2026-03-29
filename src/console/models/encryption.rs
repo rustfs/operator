@@ -38,8 +38,6 @@ pub struct VaultInfo {
     pub prefix: Option<String>,
     pub auth_type: Option<String>,
     pub app_role: Option<AppRoleInfo>,
-    pub tls_skip_verify: Option<bool>,
-    pub custom_certificates: Option<bool>,
 }
 
 /// AppRole non-sensitive fields.
@@ -90,8 +88,6 @@ pub struct UpdateVaultRequest {
     pub prefix: Option<String>,
     pub auth_type: Option<String>,
     pub app_role: Option<UpdateAppRoleRequest>,
-    pub tls_skip_verify: Option<bool>,
-    pub custom_certificates: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

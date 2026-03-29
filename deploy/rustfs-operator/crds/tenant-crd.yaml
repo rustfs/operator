@@ -66,7 +66,7 @@ spec:
                   kmsSecret:
                     description: |-
                       Reference to a Secret containing sensitive KMS credentials
-                      (Vault token or AppRole credentials, TLS certificates).
+                      (Vault token or AppRole credentials).
                     nullable: true
                     properties:
                       name:
@@ -80,19 +80,20 @@ spec:
                     nullable: true
                     properties:
                       keyDirectory:
-                        description: 'Directory for key files inside the container (default: `/data/kms-keys`).'
+                        description: |-
+                          Absolute directory for KMS key files inside the container (default: `/data/kms-keys`).
+                          Must be absolute; RustFS validates this for the local backend.
                         nullable: true
                         type: string
                       masterKeyId:
-                        description: 'Master key identifier (default: `default-master-key`).'
+                        description: Default KMS key id for SSE (maps to `RUSTFS_KMS_DEFAULT_KEY_ID` in the RustFS binary).
                         nullable: true
                         type: string
                     type: object
                   pingSeconds:
                     description: |-
-                      Interval in seconds for KMS health-check pings (default: disabled).
-                      When set, the operator stores the value; the in-process KMS library
-                      picks it up from `RUSTFS_KMS_PING_SECONDS`.
+                      Reserved for future KMS health-check tuning. Not injected into pods: the current RustFS
+                      release does not read `RUSTFS_KMS_PING_SECONDS` in the server startup path.
                     format: int32
                     nullable: true
                     type: integer
@@ -125,19 +126,11 @@ spec:
                         - null
                         nullable: true
                         type: string
-                      customCertificates:
-                        description: |-
-                          Enable custom TLS certificates for the Vault connection.
-                          When `true`, the operator mounts TLS certificate files from the KMS Secret
-                          and configures the corresponding environment variables.
-                          The Secret must contain: `vault-ca-cert`, `vault-client-cert`, `vault-client-key`.
-                        nullable: true
-                        type: boolean
                       endpoint:
                         description: Vault server endpoint (e.g. `https://vault.example.com:8200`).
                         type: string
                       engine:
-                        description: 'Vault KV2 engine mount path (default: `kv`).'
+                        description: KV secrets engine mount path (maps to `RUSTFS_KMS_VAULT_KV_MOUNT` in rustfs-kms; e.g. `secret`, `kv`).
                         nullable: true
                         type: string
                       namespace:
@@ -145,13 +138,9 @@ spec:
                         nullable: true
                         type: string
                       prefix:
-                        description: Key prefix inside the engine.
+                        description: Key prefix inside the KV engine (maps to `RUSTFS_KMS_VAULT_KEY_PREFIX`).
                         nullable: true
                         type: string
-                      tlsSkipVerify:
-                        description: Skip TLS certificate verification for Vault connection.
-                        nullable: true
-                        type: boolean
                     required:
                     - endpoint
                     type: object

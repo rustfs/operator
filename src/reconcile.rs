@@ -79,10 +79,11 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         return Err(e.into());
     }
 
-    // Validate KMS Secret if encryption is configured
+    // Validate encryption / KMS: Vault requires endpoint + kmsSecret (and correct keys);
+    // must run whenever encryption is enabled — not only when kmsSecret is set, or Vault
+    // without a Secret reference would skip validation entirely.
     if let Some(ref enc) = latest_tenant.spec.encryption
         && enc.enabled
-        && enc.kms_secret.is_some()
         && let Err(e) = ctx.validate_kms_secret(&latest_tenant).await
     {
         let _ = ctx

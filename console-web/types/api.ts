@@ -271,8 +271,6 @@ export interface VaultInfo {
   prefix: string | null
   authType: string | null
   appRole: AppRoleInfo | null
-  tlsSkipVerify: boolean | null
-  customCertificates: boolean | null
 }
 
 export interface LocalKmsInfo {
@@ -310,8 +308,6 @@ export interface UpdateEncryptionRequest {
       engine?: string
       retrySeconds?: number
     }
-    tlsSkipVerify?: boolean
-    customCertificates?: boolean
   }
   local?: {
     keyDirectory?: string

@@ -55,8 +55,6 @@ pub async fn get_encryption(
                         engine: ar.engine.clone(),
                         retry_seconds: ar.retry_seconds,
                     }),
-                    tls_skip_verify: v.tls_skip_verify,
-                    custom_certificates: v.custom_certificates,
                 }),
                 local: enc.local.as_ref().map(|l| LocalInfo {
                     key_directory: l.key_directory.clone(),
@@ -152,8 +150,6 @@ pub async fn update_encryption(
                     engine: ar.engine,
                     retry_seconds: ar.retry_seconds,
                 }),
-                tls_skip_verify: v.tls_skip_verify,
-                custom_certificates: v.custom_certificates,
             })
         } else {
             None

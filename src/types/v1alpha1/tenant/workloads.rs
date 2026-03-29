@@ -25,9 +25,6 @@ const DEFAULT_RUN_AS_USER: i64 = 10001;
 const DEFAULT_RUN_AS_GROUP: i64 = 10001;
 const DEFAULT_FS_GROUP: i64 = 10001;
 
-const KMS_CERT_VOLUME_NAME: &str = "kms-tls";
-const KMS_CERT_MOUNT_PATH: &str = "/etc/rustfs/kms/tls";
-
 fn volume_claim_template_name(shard: i32) -> String {
     format!("{VOLUME_CLAIM_TEMPLATE_PREFIX}-{shard}")
 }
@@ -222,6 +219,11 @@ impl Tenant {
     /// Build KMS-related environment variables, pod volumes and container volume mounts
     /// based on `spec.encryption`.
     ///
+    /// Names align with the RustFS server (`rustfs/src/init.rs`, `rustfs/src/config/cli.rs`) and
+    /// `rustfs_kms::KmsConfig::from_env()` (`rustfs/crates/kms/src/config.rs`) for forward compatibility.
+    /// The server currently reads `RUSTFS_KMS_ENABLE`, `RUSTFS_KMS_BACKEND`, `RUSTFS_KMS_KEY_DIR`,
+    /// `RUSTFS_KMS_DEFAULT_KEY_ID`, `RUSTFS_KMS_VAULT_ADDRESS`, and `RUSTFS_KMS_VAULT_TOKEN` on startup.
+    ///
     /// Returns `(env_vars, pod_volumes, volume_mounts)`.
     fn configure_kms(
         &self,
@@ -238,17 +240,17 @@ impl Tenant {
         }
 
         let mut env = Vec::new();
-        let mut volumes = Vec::new();
-        let mut mounts = Vec::new();
+        let volumes: Vec<corev1::Volume> = vec![];
+        let mounts: Vec<corev1::VolumeMount> = vec![];
 
         env.push(corev1::EnvVar {
-            name: "RUSTFS_KMS_BACKEND".to_owned(),
-            value: Some(enc.backend.to_string()),
+            name: "RUSTFS_KMS_ENABLE".to_owned(),
+            value: Some("true".to_owned()),
             ..Default::default()
         });
         env.push(corev1::EnvVar {
-            name: "RUSTFS_KMS_AUTO_START".to_owned(),
-            value: Some("true".to_owned()),
+            name: "RUSTFS_KMS_BACKEND".to_owned(),
+            value: Some(enc.backend.to_string()),
             ..Default::default()
         });
 
@@ -256,17 +258,10 @@ impl Tenant {
             KmsBackendType::Vault => {
                 if let Some(ref vault) = enc.vault {
                     env.push(corev1::EnvVar {
-                        name: "RUSTFS_KMS_VAULT_ENDPOINT".to_owned(),
+                        name: "RUSTFS_KMS_VAULT_ADDRESS".to_owned(),
                         value: Some(vault.endpoint.clone()),
                         ..Default::default()
                     });
-                    if let Some(ref engine) = vault.engine {
-                        env.push(corev1::EnvVar {
-                            name: "RUSTFS_KMS_VAULT_ENGINE".to_owned(),
-                            value: Some(engine.clone()),
-                            ..Default::default()
-                        });
-                    }
                     if let Some(ref ns) = vault.namespace {
                         env.push(corev1::EnvVar {
                             name: "RUSTFS_KMS_VAULT_NAMESPACE".to_owned(),
@@ -274,17 +269,23 @@ impl Tenant {
                             ..Default::default()
                         });
                     }
-                    if let Some(ref prefix) = vault.prefix {
+                    // Transit secrets engine mount (rustfs-kms default: `transit`).
+                    env.push(corev1::EnvVar {
+                        name: "RUSTFS_KMS_VAULT_MOUNT_PATH".to_owned(),
+                        value: Some("transit".to_owned()),
+                        ..Default::default()
+                    });
+                    if let Some(ref kv_mount) = vault.engine {
                         env.push(corev1::EnvVar {
-                            name: "RUSTFS_KMS_VAULT_PREFIX".to_owned(),
-                            value: Some(prefix.clone()),
+                            name: "RUSTFS_KMS_VAULT_KV_MOUNT".to_owned(),
+                            value: Some(kv_mount.clone()),
                             ..Default::default()
                         });
                     }
-                    if vault.tls_skip_verify == Some(true) {
+                    if let Some(ref prefix) = vault.prefix {
                         env.push(corev1::EnvVar {
-                            name: "RUSTFS_KMS_VAULT_TLS_SKIP_VERIFY".to_owned(),
-                            value: Some("true".to_owned()),
+                            name: "RUSTFS_KMS_VAULT_KEY_PREFIX".to_owned(),
+                            value: Some(prefix.clone()),
                             ..Default::default()
                         });
                     }
@@ -306,10 +307,10 @@ impl Tenant {
                     });
 
                     if let Some(ar) = enc.vault.as_ref().and_then(|v| v.app_role.as_ref()) {
-                        if let Some(ref engine) = ar.engine {
+                        if let Some(ref approle_engine) = ar.engine {
                             env.push(corev1::EnvVar {
                                 name: "RUSTFS_KMS_VAULT_APPROLE_ENGINE".to_owned(),
-                                value: Some(engine.clone()),
+                                value: Some(approle_engine.clone()),
                                 ..Default::default()
                             });
                         }
@@ -365,64 +366,6 @@ impl Tenant {
                             ..Default::default()
                         });
                     }
-
-                    // Only mount TLS certificates when explicitly enabled
-                    let custom_certs = enc
-                        .vault
-                        .as_ref()
-                        .and_then(|v| v.custom_certificates)
-                        .unwrap_or(false);
-
-                    if custom_certs {
-                        volumes.push(corev1::Volume {
-                            name: KMS_CERT_VOLUME_NAME.to_string(),
-                            secret: Some(corev1::SecretVolumeSource {
-                                secret_name: Some(secret_ref.name.clone()),
-                                items: Some(vec![
-                                    corev1::KeyToPath {
-                                        key: "vault-ca-cert".to_string(),
-                                        path: "ca.crt".to_string(),
-                                        ..Default::default()
-                                    },
-                                    corev1::KeyToPath {
-                                        key: "vault-client-cert".to_string(),
-                                        path: "client.crt".to_string(),
-                                        ..Default::default()
-                                    },
-                                    corev1::KeyToPath {
-                                        key: "vault-client-key".to_string(),
-                                        path: "client.key".to_string(),
-                                        ..Default::default()
-                                    },
-                                ]),
-                                optional: Some(true),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        });
-                        mounts.push(corev1::VolumeMount {
-                            name: KMS_CERT_VOLUME_NAME.to_string(),
-                            mount_path: KMS_CERT_MOUNT_PATH.to_string(),
-                            read_only: Some(true),
-                            ..Default::default()
-                        });
-
-                        env.push(corev1::EnvVar {
-                            name: "RUSTFS_KMS_VAULT_TLS_CA".to_owned(),
-                            value: Some(format!("{KMS_CERT_MOUNT_PATH}/ca.crt")),
-                            ..Default::default()
-                        });
-                        env.push(corev1::EnvVar {
-                            name: "RUSTFS_KMS_VAULT_TLS_CERT".to_owned(),
-                            value: Some(format!("{KMS_CERT_MOUNT_PATH}/client.crt")),
-                            ..Default::default()
-                        });
-                        env.push(corev1::EnvVar {
-                            name: "RUSTFS_KMS_VAULT_TLS_KEY".to_owned(),
-                            value: Some(format!("{KMS_CERT_MOUNT_PATH}/client.key")),
-                            ..Default::default()
-                        });
-                    }
                 }
             }
             KmsBackendType::Local => {
@@ -430,29 +373,28 @@ impl Tenant {
                 let key_dir = local_cfg
                     .and_then(|l| l.key_directory.as_deref())
                     .unwrap_or("/data/kms-keys");
-                let master_key_id = local_cfg
+                let default_key_id = local_cfg
                     .and_then(|l| l.master_key_id.as_deref())
                     .unwrap_or("default-master-key");
 
+                // `rustfs` server reads `RUSTFS_KMS_KEY_DIR` (see `build_local_kms_config`).
+                env.push(corev1::EnvVar {
+                    name: "RUSTFS_KMS_KEY_DIR".to_owned(),
+                    value: Some(key_dir.to_string()),
+                    ..Default::default()
+                });
+                // Duplicate for `rustfs_kms::KmsConfig::from_env()` which uses `RUSTFS_KMS_LOCAL_KEY_DIR`.
                 env.push(corev1::EnvVar {
                     name: "RUSTFS_KMS_LOCAL_KEY_DIR".to_owned(),
                     value: Some(key_dir.to_string()),
                     ..Default::default()
                 });
                 env.push(corev1::EnvVar {
-                    name: "RUSTFS_KMS_LOCAL_MASTER_KEY_ID".to_owned(),
-                    value: Some(master_key_id.to_string()),
+                    name: "RUSTFS_KMS_DEFAULT_KEY_ID".to_owned(),
+                    value: Some(default_key_id.to_string()),
                     ..Default::default()
                 });
             }
-        }
-
-        if let Some(ping) = enc.ping_seconds {
-            env.push(corev1::EnvVar {
-                name: "RUSTFS_KMS_PING_SECONDS".to_owned(),
-                value: Some(ping.to_string()),
-                ..Default::default()
-            });
         }
 
         (env, volumes, mounts)

@@ -108,8 +108,6 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     namespace: "",
     prefix: "",
     authType: "token",
-    tlsSkipVerify: false,
-    customCertificates: false,
   })
   const [encAppRole, setEncAppRole] = useState({
     engine: "",
@@ -380,8 +378,6 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
           namespace: data.vault.namespace || "",
           prefix: data.vault.prefix || "",
           authType: data.vault.authType || "token",
-          tlsSkipVerify: data.vault.tlsSkipVerify || false,
-          customCertificates: data.vault.customCertificates || false,
         })
         if (data.vault.appRole) {
           setEncAppRole({
@@ -428,8 +424,6 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
           namespace: encVault.namespace || undefined,
           prefix: encVault.prefix || undefined,
           authType: encVault.authType || undefined,
-          tlsSkipVerify: encVault.tlsSkipVerify || undefined,
-          customCertificates: encVault.customCertificates || undefined,
         }
         if (encVault.authType === "approle") {
           body.vault.appRole = {
@@ -951,32 +945,6 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                             />
                           </div>
                         </div>
-                        <div className="flex items-center gap-6">
-                          <div className="flex items-center gap-3">
-                            <label htmlFor="vault-tls-skip" className="text-sm">
-                              {t("Skip TLS Verification")}
-                            </label>
-                            <input
-                              id="vault-tls-skip"
-                              type="checkbox"
-                              checked={encVault.tlsSkipVerify}
-                              onChange={(e) => setEncVault((v) => ({ ...v, tlsSkipVerify: e.target.checked }))}
-                              className="h-4 w-4 rounded border-border"
-                            />
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <label htmlFor="vault-custom-certs" className="text-sm">
-                              {t("Custom Certificates")}
-                            </label>
-                            <input
-                              id="vault-custom-certs"
-                              type="checkbox"
-                              checked={encVault.customCertificates}
-                              onChange={(e) => setEncVault((v) => ({ ...v, customCertificates: e.target.checked }))}
-                              className="h-4 w-4 rounded border-border"
-                            />
-                          </div>
-                        </div>
 
                         {/* Auth type selector */}
                         <div className="space-y-2 pt-2">
@@ -1093,21 +1061,15 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                     <div className="space-y-2">
                       <Label>{t("KMS Secret Name")}</Label>
                       <Input
-                        placeholder={`${t("Optional")} – ${t("Secret containing vault-token and TLS certs")}`}
+                        placeholder={`${t("Optional")} – ${t("Secret containing vault-token")}`}
                         value={encKmsSecretName}
                         onChange={(e) => setEncKmsSecretName(e.target.value)}
                       />
                       <p className="text-xs text-muted-foreground">
                         {encBackend === "vault"
                           ? encVault.authType === "approle"
-                            ? t("Secret must contain 'vault-approle-id' and 'vault-approle-secret'.") +
-                              (encVault.customCertificates
-                                ? " " + t("Plus TLS certs: vault-ca-cert, vault-client-cert, vault-client-key.")
-                                : "")
-                            : t("Secret must contain key 'vault-token'.") +
-                              (encVault.customCertificates
-                                ? " " + t("Plus TLS certs: vault-ca-cert, vault-client-cert, vault-client-key.")
-                                : "")
+                            ? t("Secret must contain 'vault-approle-id' and 'vault-approle-secret'.")
+                            : t("Secret must contain key 'vault-token'.")
                           : t("Not required for Local backend.")}
                       </p>
                     </div>
