@@ -269,7 +269,7 @@ fn api_restart_pod(_body: Json<RestartPodRequest>) -> Json<DeletePodResponse> {
 fn api_get_pod_logs() {}
 
 // --- Events (SSE) ---
-#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{tenant}/events/stream", params(("namespace" = String, Path), ("tenant" = String, Path)), responses((status = 200, description = "text/event-stream; each `data:` payload is JSON EventListResponse", body = EventListResponse, content_type = "application/json")), tag = "events")]
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{tenant}/events/stream", params(("namespace" = String, Path), ("tenant" = String, Path)), responses((status = 200, description = "text/event-stream; `event: snapshot` + JSON EventListResponse; `event: stream_error` + JSON { message }", body = EventListResponse, content_type = "application/json")), tag = "events")]
 fn api_stream_tenant_events() {
     unimplemented!("Documentation only")
 }

@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import {
@@ -74,6 +74,8 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   const [pods, setPods] = useState<PodListItem[]>([])
   const [events, setEvents] = useState<EventItem[]>([])
   const [eventsLoading, setEventsLoading] = useState(false)
+  /** Suppress repeated EventSource `error` toasts until a successful reconnect (`onopen`). */
+  const eventsStreamTransportErrorToastRef = useRef(false)
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState(false)
   const [addPoolOpen, setAddPoolOpen] = useState(false)
@@ -106,21 +108,12 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   const [encBackend, setEncBackend] = useState<"local" | "vault">("local")
   const [encVault, setEncVault] = useState({
     endpoint: "",
-    engine: "",
-    namespace: "",
-    prefix: "",
-    authType: "token",
-  })
-  const [encAppRole, setEncAppRole] = useState({
-    engine: "",
-    retrySeconds: "",
   })
   const [encLocal, setEncLocal] = useState({
     keyDirectory: "",
-    masterKeyId: "",
   })
+  const [encDefaultKeyId, setEncDefaultKeyId] = useState("")
   const [encKmsSecretName, setEncKmsSecretName] = useState("")
-  const [encPingSeconds, setEncPingSeconds] = useState("")
 
   // Security tab state
   const [secCtxLoaded, setSecCtxLoaded] = useState(false)
@@ -185,20 +178,35 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   useEffect(() => {
     if (tab !== "events") return
     setEventsLoading(true)
+    eventsStreamTransportErrorToastRef.current = false
     let cleaned = false
     const url = api.getTenantEventsStreamUrl(namespace, name)
     const es = new EventSource(url, { withCredentials: true })
-    es.onmessage = (ev) => {
+    es.onopen = () => {
+      eventsStreamTransportErrorToastRef.current = false
+    }
+    es.addEventListener("snapshot", (ev: MessageEvent) => {
       try {
         const data = JSON.parse(ev.data) as EventListResponse
         setEvents(data.events ?? [])
       } catch {
-        /* ignore malformed chunk */
+        toast.error(t("Events data could not be parsed"))
       }
       setEventsLoading(false)
-    }
+    })
+    es.addEventListener("stream_error", (ev: MessageEvent) => {
+      try {
+        const j = JSON.parse(ev.data) as { message?: string }
+        toast.error(j.message?.trim() || t("Events stream error"))
+      } catch {
+        toast.error(t("Events stream error"))
+      }
+      setEventsLoading(false)
+    })
     es.onerror = () => {
       if (cleaned) return
+      if (eventsStreamTransportErrorToastRef.current) return
+      eventsStreamTransportErrorToastRef.current = true
       toast.error(t("Events stream could not be loaded"))
       setEventsLoading(false)
     }
@@ -400,26 +408,15 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
       if (data.vault) {
         setEncVault({
           endpoint: data.vault.endpoint || "",
-          engine: data.vault.engine || "",
-          namespace: data.vault.namespace || "",
-          prefix: data.vault.prefix || "",
-          authType: data.vault.authType || "token",
         })
-        if (data.vault.appRole) {
-          setEncAppRole({
-            engine: data.vault.appRole.engine || "",
-            retrySeconds: data.vault.appRole.retrySeconds?.toString() || "",
-          })
-        }
       }
       if (data.local) {
         setEncLocal({
           keyDirectory: data.local.keyDirectory || "",
-          masterKeyId: data.local.masterKeyId || "",
         })
       }
+      setEncDefaultKeyId(data.defaultKeyId || "")
       setEncKmsSecretName(data.kmsSecretName || "")
-      setEncPingSeconds(data.pingSeconds?.toString() || "")
     } catch (e) {
       const err = e as ApiError
       toast.error(err.message || t("Failed to load encryption config"))
@@ -441,26 +438,15 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
         enabled: encEnabled,
         backend: encBackend,
         kmsSecretName: encKmsSecretName || undefined,
-        pingSeconds: encPingSeconds ? parseInt(encPingSeconds, 10) : undefined,
+        defaultKeyId: encDefaultKeyId.trim() || undefined,
       }
       if (encBackend === "vault") {
         body.vault = {
           endpoint: encVault.endpoint,
-          engine: encVault.engine || undefined,
-          namespace: encVault.namespace || undefined,
-          prefix: encVault.prefix || undefined,
-          authType: encVault.authType || undefined,
-        }
-        if (encVault.authType === "approle") {
-          body.vault.appRole = {
-            engine: encAppRole.engine || undefined,
-            retrySeconds: encAppRole.retrySeconds ? parseInt(encAppRole.retrySeconds, 10) : undefined,
-          }
         }
       } else {
         body.local = {
           keyDirectory: encLocal.keyDirectory || undefined,
-          masterKeyId: encLocal.masterKeyId || undefined,
         }
       }
       const res = await api.updateEncryption(namespace, name, body)
@@ -878,7 +864,9 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
           <CardHeader>
             <CardTitle className="text-base">{t("Encryption")}</CardTitle>
             <CardDescription>
-              {t("Configure server-side encryption (SSE) with a KMS backend. RustFS supports Local and Vault.")}
+              {t(
+                "Configure SSE KMS to match the RustFS server: Local (single-server tenant) or Vault (token in Secret). Vault path layout is fixed in RustFS.",
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -937,7 +925,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       <div className="space-y-4 rounded-md border border-border p-4">
                         <h4 className="text-sm font-semibold">{t("Vault Configuration")}</h4>
                         <div className="grid gap-4 sm:grid-cols-2">
-                          <div className="space-y-2">
+                          <div className="space-y-2 sm:col-span-2">
                             <Label>{t("Endpoint")}*</Label>
                             <Input
                               required
@@ -946,94 +934,10 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                               onChange={(e) => setEncVault((v) => ({ ...v, endpoint: e.target.value }))}
                             />
                           </div>
-                          <div className="space-y-2">
-                            <Label>{t("Engine")}</Label>
-                            <Input
-                              placeholder="kv"
-                              value={encVault.engine}
-                              onChange={(e) => setEncVault((v) => ({ ...v, engine: e.target.value }))}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label>{t("Namespace")}</Label>
-                            <Input
-                              placeholder={`${t("Optional")} – Vault Enterprise`}
-                              value={encVault.namespace}
-                              onChange={(e) => setEncVault((v) => ({ ...v, namespace: e.target.value }))}
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label>{t("Prefix")}</Label>
-                            <Input
-                              placeholder={t("Optional")}
-                              value={encVault.prefix}
-                              onChange={(e) => setEncVault((v) => ({ ...v, prefix: e.target.value }))}
-                            />
-                          </div>
                         </div>
-
-                        {/* Auth type selector */}
-                        <div className="space-y-2 pt-2">
-                          <Label>{t("Auth Type")}</Label>
-                          <div className="flex gap-4">
-                            <label className="flex items-center gap-2 text-sm">
-                              <input
-                                type="radio"
-                                name="vault-auth"
-                                value="token"
-                                checked={encVault.authType !== "approle"}
-                                onChange={() => setEncVault((v) => ({ ...v, authType: "token" }))}
-                              />
-                              Token
-                            </label>
-                            <label className="flex items-center gap-2 text-sm">
-                              <input
-                                type="radio"
-                                name="vault-auth"
-                                value="approle"
-                                checked={encVault.authType === "approle"}
-                                onChange={() => setEncVault((v) => ({ ...v, authType: "approle" }))}
-                              />
-                              AppRole
-                            </label>
-                          </div>
-                        </div>
-
-                        {/* AppRole section */}
-                        {encVault.authType === "approle" && (
-                          <div className="space-y-4 rounded-md border border-dashed border-border p-4">
-                            <div className="flex items-center gap-2">
-                              <h5 className="text-sm font-semibold">App Role</h5>
-                              <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300">
-                                {t("Not yet implemented in backend")}
-                              </span>
-                            </div>
-                            <div className="grid gap-4 sm:grid-cols-2">
-                              <div className="space-y-2">
-                                <Label>{t("Engine")}</Label>
-                                <Input
-                                  placeholder="approle"
-                                  value={encAppRole.engine}
-                                  onChange={(e) => setEncAppRole((a) => ({ ...a, engine: e.target.value }))}
-                                />
-                              </div>
-                              <div className="space-y-2">
-                                <Label>{t("Retry (Seconds)")}</Label>
-                                <Input
-                                  type="number"
-                                  placeholder="10"
-                                  value={encAppRole.retrySeconds}
-                                  onChange={(e) => setEncAppRole((a) => ({ ...a, retrySeconds: e.target.value }))}
-                                />
-                              </div>
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                              {t(
-                                "AppRole ID and Secret are stored in the KMS Secret (keys: vault-approle-id, vault-approle-secret).",
-                              )}
-                            </p>
-                          </div>
-                        )}
+                        <p className="text-xs text-muted-foreground">
+                          {t("RustFS uses fixed Transit/KV paths; only address and token are configurable.")}
+                        </p>
                       </div>
                     )}
 
@@ -1050,38 +954,18 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                               onChange={(e) => setEncLocal((l) => ({ ...l, keyDirectory: e.target.value }))}
                             />
                           </div>
-                          <div className="space-y-2">
-                            <Label>{t("Master Key ID")}</Label>
-                            <Input
-                              placeholder="default-master-key"
-                              value={encLocal.masterKeyId}
-                              onChange={(e) => setEncLocal((l) => ({ ...l, masterKeyId: e.target.value }))}
-                            />
-                          </div>
                         </div>
                       </div>
                     )}
 
-                    {/* Status — Ping is mainly useful for remote backends (Vault) */}
-                    {encBackend === "vault" && (
-                      <div className="space-y-4 rounded-md border border-border p-4">
-                        <h4 className="text-sm font-semibold">{t("Status")}</h4>
-                        <div className="grid gap-4 sm:grid-cols-2">
-                          <div className="space-y-2">
-                            <Label>{t("Ping (Seconds)")}</Label>
-                            <Input
-                              type="number"
-                              placeholder={t("Optional")}
-                              value={encPingSeconds}
-                              onChange={(e) => setEncPingSeconds(e.target.value)}
-                            />
-                            <p className="text-xs text-muted-foreground">
-                              {t("Health check interval for KMS connectivity.")}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
+                    <div className="space-y-2">
+                      <Label>{t("Default Key ID")}</Label>
+                      <Input
+                        placeholder={t("Optional — maps to RUSTFS_KMS_DEFAULT_KEY_ID")}
+                        value={encDefaultKeyId}
+                        onChange={(e) => setEncDefaultKeyId(e.target.value)}
+                      />
+                    </div>
 
                     {/* KMS Secret name */}
                     <div className="space-y-2">
@@ -1093,9 +977,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       />
                       <p className="text-xs text-muted-foreground">
                         {encBackend === "vault"
-                          ? encVault.authType === "approle"
-                            ? t("Secret must contain 'vault-approle-id' and 'vault-approle-secret'.")
-                            : t("Secret must contain key 'vault-token'.")
+                          ? t("Required for Vault: Secret must contain key 'vault-token'.")
                           : t("Not required for Local backend.")}
                       </p>
                     </div>

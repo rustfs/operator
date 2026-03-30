@@ -332,7 +332,7 @@ impl Context {
     /// 2. Vault endpoint is non-empty when backend is Vault.
     /// 3. KMS Secret exists and contains the correct keys for the auth type.
     pub async fn validate_kms_secret(&self, tenant: &Tenant) -> Result<(), Error> {
-        use crate::types::v1alpha1::encryption::{KmsBackendType, VaultAuthType};
+        use crate::types::v1alpha1::encryption::KmsBackendType;
 
         let Some(ref enc) = tenant.spec.encryption else {
             return Ok(());
@@ -347,7 +347,7 @@ impl Context {
             validate_local_kms_tenant(enc.local.as_ref(), &tenant.spec.pools)?;
         }
 
-        // Validate Vault endpoint is non-empty and kms_secret is required for Vault
+        // Vault: non-empty endpoint and `kmsSecret` with `vault-token` (RustFS `build_vault_kms_config`).
         if enc.backend == KmsBackendType::Vault {
             let endpoint_empty = enc
                 .vault
@@ -359,7 +359,6 @@ impl Context {
                     message: "Vault endpoint must not be empty".to_string(),
                 });
             }
-            // Vault backend requires credentials (token or AppRole) from a Secret
             let secret_missing = enc
                 .kms_secret
                 .as_ref()
@@ -367,7 +366,9 @@ impl Context {
                 .unwrap_or(true);
             if secret_missing {
                 return Err(Error::KmsConfigInvalid {
-                    message: "Vault backend requires kmsSecret with vault-token or vault-approle-id/vault-approle-secret".to_string(),
+                    message:
+                        "Vault backend requires kmsSecret referencing a Secret with key vault-token"
+                            .to_string(),
                 });
             }
         }
@@ -387,32 +388,16 @@ impl Context {
             })?;
 
         if enc.backend == KmsBackendType::Vault {
-            let is_approle = enc.vault.as_ref().and_then(|v| v.auth_type.as_ref())
-                == Some(&VaultAuthType::Approle);
-
-            if is_approle {
-                for key in ["vault-approle-id", "vault-approle-secret"] {
-                    let has_key = secret.data.as_ref().is_some_and(|d| d.contains_key(key));
-                    if !has_key {
-                        return KmsSecretMissingKeySnafu {
-                            secret_name: secret_ref.name.clone(),
-                            key: key.to_string(),
-                        }
-                        .fail();
-                    }
+            let has_token = secret
+                .data
+                .as_ref()
+                .is_some_and(|d| d.contains_key("vault-token"));
+            if !has_token {
+                return KmsSecretMissingKeySnafu {
+                    secret_name: secret_ref.name.clone(),
+                    key: "vault-token".to_string(),
                 }
-            } else {
-                let has_token = secret
-                    .data
-                    .as_ref()
-                    .is_some_and(|d| d.contains_key("vault-token"));
-                if !has_token {
-                    return KmsSecretMissingKeySnafu {
-                        secret_name: secret_ref.name.clone(),
-                        key: "vault-token".to_string(),
-                    }
-                    .fail();
-                }
+                .fail();
             }
         }
 

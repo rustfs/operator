@@ -259,23 +259,12 @@ export interface EventListResponse {
 }
 
 // ----- Encryption -----
-export interface AppRoleInfo {
-  engine: string | null
-  retrySeconds: number | null
-}
-
 export interface VaultInfo {
   endpoint: string
-  engine: string | null
-  namespace: string | null
-  prefix: string | null
-  authType: string | null
-  appRole: AppRoleInfo | null
 }
 
 export interface LocalKmsInfo {
   keyDirectory: string | null
-  masterKeyId: string | null
 }
 
 export interface SecurityContextInfo {
@@ -291,7 +280,7 @@ export interface EncryptionInfoResponse {
   vault: VaultInfo | null
   local: LocalKmsInfo | null
   kmsSecretName: string | null
-  pingSeconds: number | null
+  defaultKeyId: string | null
   securityContext: SecurityContextInfo | null
 }
 
@@ -300,21 +289,12 @@ export interface UpdateEncryptionRequest {
   backend?: string
   vault?: {
     endpoint: string
-    engine?: string
-    namespace?: string
-    prefix?: string
-    authType?: string
-    appRole?: {
-      engine?: string
-      retrySeconds?: number
-    }
   }
   local?: {
     keyDirectory?: string
-    masterKeyId?: string
   }
   kmsSecretName?: string
-  pingSeconds?: number
+  defaultKeyId?: string
 }
 
 export interface EncryptionUpdateResponse {

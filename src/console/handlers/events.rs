@@ -17,10 +17,10 @@ use std::result::Result as StdResult;
 use std::time::Duration;
 
 use crate::console::{
-    error::{self, Error, Result},
-    models::event::{EventItem, EventListResponse},
+    error::{Error, Result},
+    models::event::EventListResponse,
     state::Claims,
-    tenant_event_scope::{discover_tenant_event_scope, merge_namespace_events},
+    tenant_event_scope::{discover_tenant_event_scope, list_scoped_events_v1, merge_events_v1},
 };
 use axum::{
     Extension,
@@ -28,18 +28,18 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures::StreamExt;
-use k8s_openapi::api::core::v1 as corev1;
+use k8s_openapi::api::events::v1 as eventsv1;
 use kube::{
     Api, Client,
-    api::ListParams,
     runtime::{WatchStreamExt, watcher},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
 /// SSE stream of merged tenant-scoped Kubernetes events (PRD §5.1).
 ///
-/// Uses the same `session` cookie JWT as other console routes. Payload each tick is JSON
-/// `EventListResponse` (full snapshot, max [`tenant_event_scope::MAX_EVENTS_SNAPSHOT`]).
+/// Uses the same `session` cookie JWT as other console routes. Payloads use named SSE events:
+/// - `snapshot`: JSON [`EventListResponse`]
+/// - `stream_error`: JSON `{"message":"..."}` (watch/snapshot failures)
 pub async fn stream_tenant_events(
     Path((namespace, tenant)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
@@ -65,6 +65,15 @@ pub async fn stream_tenant_events(
     ))
 }
 
+fn snapshot_sse_event(json: String) -> Event {
+    Event::default().event("snapshot").data(json)
+}
+
+fn stream_error_sse_event(message: &str) -> Event {
+    let payload = serde_json::json!({ "message": message }).to_string();
+    Event::default().event("stream_error").data(payload)
+}
+
 async fn run_event_sse_loop(
     client: Client,
     namespace: String,
@@ -72,15 +81,11 @@ async fn run_event_sse_loop(
     tx: tokio::sync::mpsc::Sender<StdResult<Event, Infallible>>,
     first_json: String,
 ) -> Result<()> {
-    if tx
-        .send(Ok(Event::default().data(first_json)))
-        .await
-        .is_err()
-    {
+    if tx.send(Ok(snapshot_sse_event(first_json))).await.is_err() {
         return Ok(());
     }
 
-    let event_api: Api<corev1::Event> = Api::namespaced(client.clone(), &namespace);
+    let event_api: Api<eventsv1::Event> = Api::namespaced(client.clone(), &namespace);
     let mut watch = watcher(event_api, watcher::Config::default())
         .default_backoff()
         .boxed();
@@ -90,33 +95,45 @@ async fn run_event_sse_loop(
     loop {
         tokio::select! {
             _ = scope_tick.tick() => {
-                let json = match build_snapshot_json(&client, &namespace, &tenant).await {
-                    Ok(j) => j,
+                match build_snapshot_json(&client, &namespace, &tenant).await {
+                    Ok(json) => {
+                        if tx.send(Ok(snapshot_sse_event(json))).await.is_err() {
+                            return Ok(());
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!("tenant events snapshot failed: {}", e);
-                        continue;
+                        let msg = e.to_string();
+                        if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
+                            return Ok(());
+                        }
                     }
-                };
-                if tx.send(Ok(Event::default().data(json))).await.is_err() {
-                    return Ok(());
                 }
             }
             ev = watch.next() => {
                 match ev {
                     Some(Ok(_)) => {
-                        let json = match build_snapshot_json(&client, &namespace, &tenant).await {
-                            Ok(j) => j,
+                        match build_snapshot_json(&client, &namespace, &tenant).await {
+                            Ok(json) => {
+                                if tx.send(Ok(snapshot_sse_event(json))).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
                             Err(e) => {
                                 tracing::warn!("tenant events snapshot failed: {}", e);
-                                continue;
+                                let msg = e.to_string();
+                                if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
+                                    return Ok(());
+                                }
                             }
-                        };
-                        if tx.send(Ok(Event::default().data(json))).await.is_err() {
-                            return Ok(());
                         }
                     }
                     Some(Err(e)) => {
                         tracing::warn!("Kubernetes Event watch error: {}", e);
+                        let msg = format!("Kubernetes Event watch error: {}", e);
+                        if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
+                            return Ok(());
+                        }
                     }
                     None => return Ok(()),
                 }
@@ -127,17 +144,8 @@ async fn run_event_sse_loop(
 
 async fn build_snapshot_json(client: &Client, namespace: &str, tenant: &str) -> Result<String> {
     let scope = discover_tenant_event_scope(client, namespace, tenant).await?;
-    let api: Api<corev1::Event> = Api::namespaced(client.clone(), namespace);
-    let list = api.list(&ListParams::default()).await.map_err(|e| {
-        tracing::warn!(
-            "List events for tenant {}/{} failed: {}",
-            namespace,
-            tenant,
-            e
-        );
-        error::map_kube_error(e, format!("Events for tenant '{}'", tenant))
-    })?;
-    let items: Vec<EventItem> = merge_namespace_events(&scope, list.items);
+    let raw = list_scoped_events_v1(client, namespace, &scope).await?;
+    let items = merge_events_v1(raw);
     let body = EventListResponse { events: items };
     serde_json::to_string(&body).map_err(|e| Error::Json { source: e })
 }
