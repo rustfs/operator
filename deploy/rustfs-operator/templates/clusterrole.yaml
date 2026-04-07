@@ -37,8 +37,16 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Events for reconciliation notifications and console event list
+  # PersistentVolumeClaims - read (tenant-scoped event discovery lists PVC names)
   - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+
+  # Events for reconciliation notifications and console event list (core + events.k8s.io)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["get", "list", "watch", "create", "patch"]
 {{- end }}

@@ -18,8 +18,7 @@ use crate::console::{
     state::Claims,
 };
 use crate::types::v1alpha1::encryption::{
-    EncryptionConfig, KmsBackendType, LocalKmsConfig, VaultAppRoleConfig, VaultAuthType,
-    VaultKmsConfig,
+    EncryptionConfig, KmsBackendType, LocalKmsConfig, VaultKmsConfig,
 };
 use crate::types::v1alpha1::tenant::Tenant;
 use axum::{Extension, Json, extract::Path};
@@ -47,21 +46,12 @@ pub async fn get_encryption(
                 backend: enc.backend.to_string(),
                 vault: enc.vault.as_ref().map(|v| VaultInfo {
                     endpoint: v.endpoint.clone(),
-                    engine: v.engine.clone(),
-                    namespace: v.namespace.clone(),
-                    prefix: v.prefix.clone(),
-                    auth_type: v.auth_type.as_ref().map(|a| a.to_string()),
-                    app_role: v.app_role.as_ref().map(|ar| AppRoleInfo {
-                        engine: ar.engine.clone(),
-                        retry_seconds: ar.retry_seconds,
-                    }),
                 }),
                 local: enc.local.as_ref().map(|l| LocalInfo {
                     key_directory: l.key_directory.clone(),
-                    master_key_id: l.master_key_id.clone(),
                 }),
                 kms_secret_name: enc.kms_secret.as_ref().map(|s| s.name.clone()),
-                ping_seconds: enc.ping_seconds,
+                default_key_id: enc.default_key_id.clone(),
                 security_context: tenant.spec.security_context.as_ref().map(|sc| {
                     SecurityContextInfo {
                         run_as_user: sc.run_as_user,
@@ -77,7 +67,7 @@ pub async fn get_encryption(
                 vault: None,
                 local: None,
                 kms_secret_name: None,
-                ping_seconds: None,
+                default_key_id: None,
                 security_context: tenant.spec.security_context.as_ref().map(|sc| {
                     SecurityContextInfo {
                         run_as_user: sc.run_as_user,
@@ -112,7 +102,6 @@ pub async fn update_encryption(
             _ => KmsBackendType::Local,
         };
 
-        // Validate Vault config when backend is Vault (fail fast with 400 instead of invalid spec)
         if backend == KmsBackendType::Vault {
             let vault_ok = body
                 .vault
@@ -139,17 +128,6 @@ pub async fn update_encryption(
         let vault = if backend == KmsBackendType::Vault {
             body.vault.map(|v| VaultKmsConfig {
                 endpoint: v.endpoint,
-                engine: v.engine,
-                namespace: v.namespace,
-                prefix: v.prefix,
-                auth_type: v.auth_type.map(|s| match s.as_str() {
-                    "approle" => VaultAuthType::Approle,
-                    _ => VaultAuthType::Token,
-                }),
-                app_role: v.app_role.map(|ar| VaultAppRoleConfig {
-                    engine: ar.engine,
-                    retry_seconds: ar.retry_seconds,
-                }),
             })
         } else {
             None
@@ -158,7 +136,6 @@ pub async fn update_encryption(
         let local = if backend == KmsBackendType::Local {
             body.local.map(|l| LocalKmsConfig {
                 key_directory: l.key_directory,
-                master_key_id: l.master_key_id,
             })
         } else {
             None
@@ -175,7 +152,7 @@ pub async fn update_encryption(
             vault,
             local,
             kms_secret,
-            ping_seconds: body.ping_seconds,
+            default_key_id: body.default_key_id.filter(|s| !s.is_empty()),
         })
     } else {
         Some(EncryptionConfig {

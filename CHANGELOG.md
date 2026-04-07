@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Console RBAC**: `ClusterRole` for the console (Helm [`deploy/rustfs-operator/templates/console-clusterrole.yaml`](deploy/rustfs-operator/templates/console-clusterrole.yaml) and [`deploy/k8s-dev/console-rbac.yaml`](deploy/k8s-dev/console-rbac.yaml)) now includes `get` / `list` / `watch` on **`events.k8s.io` `events`**, required for Tenant Events aggregation (in addition to `""` `events`).
+
+- **Operator RBAC**: `ClusterRole` for the operator ([`deploy/rustfs-operator/templates/clusterrole.yaml`](deploy/rustfs-operator/templates/clusterrole.yaml) and [`deploy/k8s-dev/operator-rbac.yaml`](deploy/k8s-dev/operator-rbac.yaml)) now includes **`events.k8s.io` `events`** (`get` / `list` / `watch` / `create` / `patch`). Dev scripts (e.g. [`scripts/deploy/deploy-rustfs-4node.sh`](scripts/deploy/deploy-rustfs-4node.sh)) often use `kubectl create token rustfs-operator` for Console login; that identity must be able to list **events.k8s.io** Events for Tenant Events SSE.
+
+- **Operator RBAC**: `ClusterRole` for the operator ServiceAccount now includes `get` / `list` / `watch` on `persistentvolumeclaims` (Helm [`deploy/rustfs-operator/templates/clusterrole.yaml`](deploy/rustfs-operator/templates/clusterrole.yaml) and [`deploy/k8s-dev/operator-rbac.yaml`](deploy/k8s-dev/operator-rbac.yaml)). Tenant event scope discovery lists PVCs labeled for the tenant; without this rule, the API returned `Forbidden` when the request identity was `rustfs-system:rustfs-operator`.
+
 - **`console-web` / `make pre-commit`**: `npm run lint` now runs `eslint .` (bare `eslint` only printed CLI help). Added `format` / `format:check` scripts; [`Makefile`](Makefile) `console-fmt` and `console-fmt-check` call them so Prettier resolves from `node_modules` after `npm install` in `console-web/`.
 
 - **Tenant `Pool` CRD validation (CEL)**: Match the operator console API — require `servers × volumesPerServer >= 4` for every pool, and `>= 6` total volumes when `servers == 3` (fixes the previous 3-server rule using `< 4` in CEL). Regenerated [`deploy/rustfs-operator/crds/tenant-crd.yaml`](deploy/rustfs-operator/crds/tenant-crd.yaml) and [`tenant.yaml`](deploy/rustfs-operator/crds/tenant.yaml). Added [`validate_pool_total_volumes`](src/types/v1alpha1/pool.rs) as the shared Rust implementation used by [`src/console/handlers/pools.rs`](src/console/handlers/pools.rs).
@@ -28,9 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Console Tenant Events (breaking)**: Removed `GET /api/v1/namespaces/{namespace}/tenants/{tenant}/events`. Events are delivered via **SSE** `GET .../tenants/{tenant}/events/stream` (`text/event-stream`). Payloads use named events: `snapshot` (JSON `EventListResponse`) and `stream_error` (JSON `{ "message" }` on watch/snapshot failures). Listing uses **`events.k8s.io/v1`** with per-resource field selectors `regarding.kind` + `regarding.name` (bounded concurrency) instead of listing all namespace events. The **Events** tab uses `EventSource` (`withCredentials`) and listens for `snapshot` / `stream_error`; transport `error` toasts are deduplicated until `onopen`. Aggregates events for the Tenant CR, Pods, StatefulSets, and PVCs per PRD scope; legacy **`core/v1` Events** not mirrored to `events.k8s.io` may be absent.
+
 - **Tenant `spec.encryption.vault`**: Removed `tlsSkipVerify` and `customCertificates` (they were never wired to `rustfs-kms`). Vault TLS should rely on system-trusted CAs or TLS upstream. The project is still pre-production; if you have old YAML with these keys, remove them before apply.
 
-- **KMS pod environment** ([`tenant/workloads.rs`](src/types/v1alpha1/tenant/workloads.rs)): Align variable names with the RustFS server and `rustfs-kms` (`RUSTFS_KMS_ENABLE`, `RUSTFS_KMS_VAULT_ADDRESS`, KV mount and key prefix, local `RUSTFS_KMS_KEY_DIR` / `RUSTFS_KMS_DEFAULT_KEY_ID`, etc.); remove Vault TLS certificate volume mounts; `ping_seconds` remains documented as reserved (not injected).
+- **Tenant `spec.encryption` (breaking)**: CRD and Console API now match **RustFS server startup** (`rustfs/src/init.rs` / `config/cli.rs`) only. `vault` retains **`endpoint`**; `local` retains **`keyDirectory`**; optional **`defaultKeyId`** maps to `RUSTFS_KMS_DEFAULT_KEY_ID`. Removed `pingSeconds`, Vault `engine` / `namespace` / `prefix` / `authType` / `appRole`, and `local.masterKeyId`. Injected pod env vars are only those the RustFS binary reads (no unused `RUSTFS_KMS_VAULT_*` tuning). Regenerated [`deploy/rustfs-operator/crds/tenant-crd.yaml`](deploy/rustfs-operator/crds/tenant-crd.yaml) and [`tenant.yaml`](deploy/rustfs-operator/crds/tenant.yaml).
 
 - **Local KMS** ([`context.rs`](src/context.rs)): Validate absolute `keyDirectory` and require a single server replica across pools (multi-replica tenants need Vault or shared storage).
 

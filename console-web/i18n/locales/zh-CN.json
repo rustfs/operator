@@ -201,7 +201,11 @@
   "Tenant YAML updated": "租户 YAML 已更新",
   "Failed to load tenant YAML": "加载租户 YAML 失败",
   "Encryption": "加密",
-  "Configure server-side encryption (SSE) with a KMS backend. RustFS supports Local and Vault.": "配置服务端加密 (SSE) 的 KMS 后端。RustFS 支持 Local 和 Vault。",
+  "Configure SSE KMS to match the RustFS server: Local (single-server tenant) or Vault (token in Secret). Vault path layout is fixed in RustFS.": "按 RustFS 服务端配置 SSE KMS：Local（单节点租户）或 Vault（Secret 中的 token）。Vault 路径布局由 RustFS 固定。",
+  "RustFS uses fixed Transit/KV paths; only address and token are configurable.": "RustFS 固定 Transit/KV 路径；仅可配置地址与 token。",
+  "Default Key ID": "默认密钥 ID",
+  "Optional — maps to RUSTFS_KMS_DEFAULT_KEY_ID": "可选 — 对应 RUSTFS_KMS_DEFAULT_KEY_ID",
+  "Required for Vault: Secret must contain key 'vault-token'.": "Vault 必填：Secret 须包含键 `vault-token`。",
   "Enable Encryption": "启用加密",
   "KMS Backend": "KMS 后端",
   "Vault Configuration": "Vault 配置",
@@ -244,5 +248,8 @@
   "Saving...": "保存中...",
   "No changes to save": "没有可保存的修改",
   "Tenant updated": "租户已更新",
-  "Update failed": "更新失败"
+  "Update failed": "更新失败",
+  "Events stream could not be loaded": "事件流无法加载",
+  "Events data could not be parsed": "事件数据无法解析",
+  "Events stream error": "事件流错误"
 }

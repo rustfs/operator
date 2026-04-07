@@ -37,6 +37,13 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Tenant Events SSE / discovery uses events.k8s.io/v1 (demo login often uses rustfs-operator token)
+  - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["get", "list", "watch", "create", "patch"]
 ---

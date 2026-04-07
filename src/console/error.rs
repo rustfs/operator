@@ -52,9 +52,16 @@ pub enum Error {
     Json { source: serde_json::Error },
 }
 
-/// Map `kube::Error` to a console error (404 -> NotFound, 409 -> Conflict).
+/// Map `kube::Error` to a console error (403 -> Forbidden, 404 -> NotFound, 409 -> Conflict).
 pub fn map_kube_error(e: kube::Error, not_found_resource: impl Into<String>) -> Error {
     match &e {
+        kube::Error::Api(ae) if ae.code == 403 => Error::Forbidden {
+            message: if ae.message.is_empty() {
+                "Kubernetes API access denied".to_string()
+            } else {
+                ae.message.clone()
+            },
+        },
         kube::Error::Api(ae) if ae.code == 404 => Error::NotFound {
             resource: not_found_resource.into(),
         },

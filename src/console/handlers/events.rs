@@ -12,65 +12,142 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::convert::Infallible;
+use std::result::Result as StdResult;
+use std::time::Duration;
+
 use crate::console::{
     error::{Error, Result},
-    models::event::{EventItem, EventListResponse},
+    models::event::EventListResponse,
     state::Claims,
+    tenant_event_scope::{discover_tenant_event_scope, list_scoped_events_v1, merge_events_v1},
 };
-use axum::{Extension, Json, extract::Path};
-use k8s_openapi::api::core::v1 as corev1;
-use kube::{Api, Client, api::ListParams};
+use axum::{
+    Extension,
+    extract::Path,
+    response::sse::{Event, KeepAlive, Sse},
+};
+use futures::StreamExt;
+use k8s_openapi::api::events::v1 as eventsv1;
+use kube::{
+    Api, Client,
+    runtime::{WatchStreamExt, watcher},
+};
+use tokio_stream::wrappers::ReceiverStream;
 
-/// List Kubernetes events for objects named like the tenant.
+/// SSE stream of merged tenant-scoped Kubernetes events (PRD §5.1).
 ///
-/// On list failure (RBAC, field selector, etc.) returns an empty list and logs a warning so the
-/// tenant detail page does not 500.
-pub async fn list_tenant_events(
+/// Uses the same `session` cookie JWT as other console routes. Payloads use named SSE events:
+/// - `snapshot`: JSON [`EventListResponse`]
+/// - `stream_error`: JSON `{"message":"..."}` (watch/snapshot failures)
+pub async fn stream_tenant_events(
     Path((namespace, tenant)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
-) -> Result<Json<EventListResponse>> {
-    let client = match create_client(&claims).await {
-        Ok(c) => c,
-        Err(e) => return Err(e),
-    };
-    let api: Api<corev1::Event> = Api::namespaced(client, &namespace);
+) -> Result<Sse<ReceiverStream<StdResult<Event, Infallible>>>> {
+    let client = create_client(&claims).await?;
+    // Preflight: fail the HTTP request if snapshot cannot be built (avoids 200 + empty SSE).
+    let first_json = build_snapshot_json(&client, &namespace, &tenant).await?;
+    let (tx, rx) = tokio::sync::mpsc::channel::<StdResult<Event, Infallible>>(16);
+    let ns = namespace.clone();
+    let tenant_name = tenant.clone();
 
-    let field_selector = format!("involvedObject.name={}", tenant);
-    let events = match api
-        .list(&ListParams::default().fields(&field_selector))
-        .await
-    {
-        Ok(ev) => ev,
-        Err(e) => {
-            tracing::warn!(
-                "List events for tenant {}/{} failed (returning empty): {}",
-                namespace,
-                tenant,
-                e
-            );
-            return Ok(Json(EventListResponse { events: vec![] }));
+    tokio::spawn(async move {
+        if let Err(e) = run_event_sse_loop(client, ns, tenant_name, tx, first_json).await {
+            tracing::warn!("Tenant events SSE ended with error: {}", e);
         }
-    };
+    });
 
-    let items: Vec<EventItem> = events
-        .items
-        .into_iter()
-        .map(|e| EventItem {
-            event_type: e.type_.unwrap_or_default(),
-            reason: e.reason.unwrap_or_default(),
-            message: e.message.unwrap_or_default(),
-            involved_object: format!(
-                "{}/{}",
-                e.involved_object.kind.unwrap_or_default(),
-                e.involved_object.name.unwrap_or_default()
-            ),
-            first_timestamp: e.first_timestamp.map(|ts| ts.0.to_rfc3339()),
-            last_timestamp: e.last_timestamp.map(|ts| ts.0.to_rfc3339()),
-            count: e.count.unwrap_or(0),
-        })
-        .collect();
+    let stream = ReceiverStream::new(rx);
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    ))
+}
 
-    Ok(Json(EventListResponse { events: items }))
+fn snapshot_sse_event(json: String) -> Event {
+    Event::default().event("snapshot").data(json)
+}
+
+fn stream_error_sse_event(message: &str) -> Event {
+    let payload = serde_json::json!({ "message": message }).to_string();
+    Event::default().event("stream_error").data(payload)
+}
+
+async fn run_event_sse_loop(
+    client: Client,
+    namespace: String,
+    tenant: String,
+    tx: tokio::sync::mpsc::Sender<StdResult<Event, Infallible>>,
+    first_json: String,
+) -> Result<()> {
+    if tx.send(Ok(snapshot_sse_event(first_json))).await.is_err() {
+        return Ok(());
+    }
+
+    let event_api: Api<eventsv1::Event> = Api::namespaced(client.clone(), &namespace);
+    let mut watch = watcher(event_api, watcher::Config::default())
+        .default_backoff()
+        .boxed();
+    let mut scope_tick = tokio::time::interval(Duration::from_secs(30));
+    scope_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = scope_tick.tick() => {
+                match build_snapshot_json(&client, &namespace, &tenant).await {
+                    Ok(json) => {
+                        if tx.send(Ok(snapshot_sse_event(json))).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("tenant events snapshot failed: {}", e);
+                        let msg = e.to_string();
+                        if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            ev = watch.next() => {
+                match ev {
+                    Some(Ok(_)) => {
+                        match build_snapshot_json(&client, &namespace, &tenant).await {
+                            Ok(json) => {
+                                if tx.send(Ok(snapshot_sse_event(json))).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("tenant events snapshot failed: {}", e);
+                                let msg = e.to_string();
+                                if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!("Kubernetes Event watch error: {}", e);
+                        let msg = format!("Kubernetes Event watch error: {}", e);
+                        if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+async fn build_snapshot_json(client: &Client, namespace: &str, tenant: &str) -> Result<String> {
+    let scope = discover_tenant_event_scope(client, namespace, tenant).await?;
+    let raw = list_scoped_events_v1(client, namespace, &scope).await?;
+    let items = merge_events_v1(raw);
+    let body = EventListResponse { events: items };
+    serde_json::to_string(&body).map_err(|e| Error::Json { source: e })
 }
 
 /// Build a client impersonating the session token.

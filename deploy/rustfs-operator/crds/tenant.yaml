@@ -54,19 +54,21 @@ spec:
                 properties:
                   backend:
                     default: local
-                    description: 'KMS backend type: `local` or `vault`.'
+                    description: 'KMS backend: `local` or `vault`.'
                     enum:
                     - local
                     - vault
+                    type: string
+                  defaultKeyId:
+                    description: Optional default SSE key id (`RUSTFS_KMS_DEFAULT_KEY_ID`).
+                    nullable: true
                     type: string
                   enabled:
                     default: false
                     description: Enable server-side encryption. When `false`, all other fields are ignored.
                     type: boolean
                   kmsSecret:
-                    description: |-
-                      Reference to a Secret containing sensitive KMS credentials
-                      (Vault token or AppRole credentials).
+                    description: Secret holding `vault-token` when using Vault.
                     nullable: true
                     properties:
                       name:
@@ -76,70 +78,20 @@ spec:
                     - name
                     type: object
                   local:
-                    description: 'Local file-based settings (optional when `backend: local`).'
+                    description: 'Local: optional key directory override.'
                     nullable: true
                     properties:
                       keyDirectory:
-                        description: |-
-                          Absolute directory for KMS key files inside the container (default: `/data/kms-keys`).
-                          Must be absolute; RustFS validates this for the local backend.
-                        nullable: true
-                        type: string
-                      masterKeyId:
-                        description: Default KMS key id for SSE (maps to `RUSTFS_KMS_DEFAULT_KEY_ID` in the RustFS binary).
+                        description: 'Absolute directory for KMS key files (default: `/data/kms-keys`).'
                         nullable: true
                         type: string
                     type: object
-                  pingSeconds:
-                    description: |-
-                      Reserved for future KMS health-check tuning. Not injected into pods: the current RustFS
-                      release does not read `RUSTFS_KMS_PING_SECONDS` in the server startup path.
-                    format: int32
-                    nullable: true
-                    type: integer
                   vault:
-                    description: 'Vault-specific settings (required when `backend: vault`).'
+                    description: 'Vault: HTTP(S) endpoint (required when `backend: vault`).'
                     nullable: true
                     properties:
-                      appRole:
-                        description: |-
-                          AppRole authentication settings. Only used when `authType: approle`.
-                          The actual `role_id` and `secret_id` values live in the KMS Secret
-                          under keys `vault-approle-id` and `vault-approle-secret`.
-                        nullable: true
-                        properties:
-                          engine:
-                            description: Engine mount path for AppRole auth (e.g. `approle`).
-                            nullable: true
-                            type: string
-                          retrySeconds:
-                            description: 'Retry interval in seconds for AppRole login attempts (default: 10).'
-                            format: int32
-                            nullable: true
-                            type: integer
-                        type: object
-                      authType:
-                        description: Authentication method. Defaults to `token` when not set.
-                        enum:
-                        - token
-                        - approle
-                        - null
-                        nullable: true
-                        type: string
                       endpoint:
-                        description: Vault server endpoint (e.g. `https://vault.example.com:8200`).
-                        type: string
-                      engine:
-                        description: KV secrets engine mount path (maps to `RUSTFS_KMS_VAULT_KV_MOUNT` in rustfs-kms; e.g. `secret`, `kv`).
-                        nullable: true
-                        type: string
-                      namespace:
-                        description: Vault namespace (Enterprise feature).
-                        nullable: true
-                        type: string
-                      prefix:
-                        description: Key prefix inside the KV engine (maps to `RUSTFS_KMS_VAULT_KEY_PREFIX`).
-                        nullable: true
+                        description: Vault server URL (e.g. `https://vault.example.com:8200`).
                         type: string
                     required:
                     - endpoint
@@ -1308,7 +1260,7 @@ spec:
                 nullable: true
                 properties:
                   fsGroup:
-                    description: GID applied to all volumes mounted in the Pod.
+                    description: GID applied to all volumes mounted in the Pod (`fsGroup`).
                     format: int64
                     nullable: true
                     type: integer
@@ -1318,7 +1270,7 @@ spec:
                     nullable: true
                     type: integer
                   runAsNonRoot:
-                    description: 'Enforce non-root execution (default: true).'
+                    description: 'Enforce non-root execution (default in the operator: `true` when set).'
                     nullable: true
                     type: boolean
                   runAsUser:

@@ -124,11 +124,11 @@ pub fn pod_routes() -> Router<AppState> {
         )
 }
 
-/// Kubernetes events for a tenant
+/// Kubernetes events for a tenant (SSE)
 pub fn event_routes() -> Router<AppState> {
     Router::new().route(
-        "/namespaces/:namespace/tenants/:tenant/events",
-        get(handlers::events::list_tenant_events),
+        "/namespaces/:namespace/tenants/:tenant/events/stream",
+        get(handlers::events::stream_tenant_events),
     )
 }
 

@@ -24,39 +24,24 @@ pub struct EncryptionInfoResponse {
     pub vault: Option<VaultInfo>,
     pub local: Option<LocalInfo>,
     pub kms_secret_name: Option<String>,
-    pub ping_seconds: Option<i32>,
+    pub default_key_id: Option<String>,
     pub security_context: Option<SecurityContextInfo>,
 }
 
-/// Vault configuration (non-sensitive fields only).
+/// Vault endpoint only (token lives in `kmsSecret`).
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultInfo {
     pub endpoint: String,
-    pub engine: Option<String>,
-    pub namespace: Option<String>,
-    pub prefix: Option<String>,
-    pub auth_type: Option<String>,
-    pub app_role: Option<AppRoleInfo>,
 }
 
-/// AppRole non-sensitive fields.
-#[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct AppRoleInfo {
-    pub engine: Option<String>,
-    pub retry_seconds: Option<i32>,
-}
-
-/// Local KMS configuration.
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalInfo {
     pub key_directory: Option<String>,
-    pub master_key_id: Option<String>,
 }
 
-/// SecurityContext information (lives at TenantSpec level, shown alongside encryption).
+/// SecurityContext information (TenantSpec; shown alongside encryption for convenience).
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityContextInfo {
@@ -67,7 +52,6 @@ pub struct SecurityContextInfo {
 }
 
 /// PUT request – update encryption configuration.
-/// SecurityContext is managed separately via the Security tab (PUT .../security-context).
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateEncryptionRequest {
@@ -76,32 +60,19 @@ pub struct UpdateEncryptionRequest {
     pub vault: Option<UpdateVaultRequest>,
     pub local: Option<UpdateLocalRequest>,
     pub kms_secret_name: Option<String>,
-    pub ping_seconds: Option<i32>,
+    pub default_key_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateVaultRequest {
     pub endpoint: String,
-    pub engine: Option<String>,
-    pub namespace: Option<String>,
-    pub prefix: Option<String>,
-    pub auth_type: Option<String>,
-    pub app_role: Option<UpdateAppRoleRequest>,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateAppRoleRequest {
-    pub engine: Option<String>,
-    pub retry_seconds: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateLocalRequest {
     pub key_directory: Option<String>,
-    pub master_key_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

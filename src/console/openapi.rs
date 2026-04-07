@@ -69,7 +69,7 @@ use crate::console::models::topology::{
         api_delete_pod,
         api_restart_pod,
         api_get_pod_logs,
-        api_list_events,
+        api_stream_tenant_events,
         api_list_nodes,
         api_get_cluster_resources,
         api_list_namespaces,
@@ -268,9 +268,9 @@ fn api_restart_pod(_body: Json<RestartPodRequest>) -> Json<DeletePodResponse> {
 #[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods/{pod}/logs", params(("namespace" = String, Path), ("name" = String, Path), ("pod" = String, Path), ("container" = Option<String>, Query), ("tail_lines" = Option<i64>, Query), ("timestamps" = Option<bool>, Query)), responses((status = 200, description = "Plain text log output", content_type = "text/plain")), tag = "pods")]
 fn api_get_pod_logs() {}
 
-// --- Events ---
-#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{tenant}/events", params(("namespace" = String, Path), ("tenant" = String, Path)), responses((status = 200, body = EventListResponse)), tag = "events")]
-fn api_list_events() -> Json<EventListResponse> {
+// --- Events (SSE) ---
+#[utoipa::path(get, path = "/api/v1/namespaces/{namespace}/tenants/{tenant}/events/stream", params(("namespace" = String, Path), ("tenant" = String, Path)), responses((status = 200, description = "text/event-stream; `event: snapshot` + JSON EventListResponse; `event: stream_error` + JSON { message }", body = EventListResponse, content_type = "application/json")), tag = "events")]
+fn api_stream_tenant_events() {
     unimplemented!("Documentation only")
 }
 
