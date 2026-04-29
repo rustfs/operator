@@ -87,15 +87,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            # Docker Hub
             rustfs/operator:latest
             rustfs/operator:${{ steps.version.outputs.version }}
-            # GHCR 
             ghcr.io/${{ github.repository_owner }}/operator:latest
             ghcr.io/${{ github.repository_owner }}/operator:${{ steps.version.outputs.version }}
-            # Quay.io
-            #quay.io/rustfs/operator:latest
-            #quay.io/rustfs/operator:${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
