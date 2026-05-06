@@ -85,8 +85,8 @@ pub async fn get_topology_overview(
                 .as_ref()
                 .map(|labels| {
                     labels
-                        .iter()
-                        .filter_map(|(k, _)| {
+                        .keys()
+                        .filter_map(|k| {
                             k.strip_prefix("node-role.kubernetes.io/")
                                 .map(|r| r.to_string())
                         })
