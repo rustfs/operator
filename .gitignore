@@ -25,6 +25,7 @@ SCRIPTS-UPDATE.md
 AGENTS.md
 docs/
 .codex
+.codex/
 .claude/
 .cursor/
 .gemini/
