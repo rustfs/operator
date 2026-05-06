@@ -1,6 +1,6 @@
 # RustFS Kubernetes Operator
 
-A Kubernetes operator for [RustFS](https://rustfs.com/) object storage, written in Rust with [kube-rs](https://github.com/kube-rs/kube). It reconciles a **`Tenant` custom resource** (`rustfs.com/v1alpha1`) and provisions ConfigMaps, Secrets, RBAC, Services, and StatefulSets so RustFS runs as an erasure-coded cluster inside your cluster.
+A Kubernetes operator for [RustFS](https://rustfs.com/) object storage, written in Rust with [kube-rs](https://github.com/kube-rs/kube). It reconciles a **`Tenant` custom resource** (`rustfs.com/v1alpha1`), validates referenced credential and KMS Secrets, and applies RBAC, Services, and StatefulSets so RustFS runs as an erasure-coded cluster inside your cluster.
 
 **Status:** v0.1.0 pre-release — under active development, **not production-ready**.
 
@@ -11,13 +11,17 @@ A Kubernetes operator for [RustFS](https://rustfs.com/) object storage, written 
 - **Operator HTTP console** — Optional management API (`cargo run -- console`, default port **9090**) used by [`console-web/`](console-web/) (Next.js UI).
 - **Tooling** — CRD YAML generation, Docker multi-stage image, Kind-focused scripts under [`scripts/`](scripts/).
 
-RustFS **S3 API** and **RustFS Console UI** inside a Tenant are exposed on **9000** and **9001** respectively; the operator’s own HTTP API is separate (typically **9090**). See [`CLAUDE.md`](CLAUDE.md) for ports and env vars.
+RustFS **S3 API** and **RustFS Console UI** inside a Tenant are exposed on **9000** and **9001** respectively; the operator’s own HTTP API is separate (typically **9090**).
+
+## Architecture
+
+![RustFS Operator Architecture](assets/rustfs-operator-architecture.png)
 
 ## Requirements
 
 - **Rust** — Toolchain from [`rust-toolchain.toml`](rust-toolchain.toml) (stable; edition 2024).
 - **Kubernetes** — Target API **v1.30** (see `Cargo.toml` / `k8s-openapi` features); a reachable cluster for `server` mode.
-- **console-web** (optional) — **Node.js ≥ 20** and `npm install` in `console-web/` if you run frontend lint/format or UI dev.
+- **console-web** (optional) — **Node.js ≥ 20** and `pnpm install` in `console-web/` if you run frontend lint/format or UI dev.
 
 ## Quick start
 
@@ -44,7 +48,7 @@ cargo run -- console
 docker build -t rustfs/operator:dev .
 ```
 
-**End-to-end on Kind** (single-node or multi-node) — see [`scripts/README.md`](scripts/README.md).
+**End-to-end on Kind** (single-node or multi-node) — use the scripts under [`scripts/deploy/`](scripts/deploy/), with cleanup and status helpers under [`scripts/cleanup/`](scripts/cleanup/) and [`scripts/check/`](scripts/check/).
 
 ## Development
 
@@ -52,7 +56,7 @@ From the repo root:
 
 | Command | Purpose |
 |--------|---------|
-| `make pre-commit` | Full local gate: Rust `fmt` / `clippy` / `test` + `console-web` ESLint and Prettier (run after `npm install` in `console-web/`). |
+| `make pre-commit` | Full local gate: Rust `fmt` / `clippy` / `test` + `console-web` ESLint and Prettier (run after `pnpm install` in `console-web/`). |
 | `make fmt` / `make clippy` / `make test` | Individual Rust checks. |
 | `make console-lint` / `make console-fmt-check` | Frontend only. |
 
@@ -62,7 +66,7 @@ Contribution workflow, commit style, and PR expectations: [`CONTRIBUTING.md`](CO
 
 ## Repository layout
 
-- **scripts/** — Deploy, cleanup, and check scripts (see [scripts/README.md](scripts/README.md))
+- **scripts/** — Deploy, cleanup, and check scripts
   - `scripts/deploy/` — One-shot deploy (Kind + Operator + Tenant)
   - `scripts/cleanup/` — Resource cleanup
   - `scripts/check/` — Cluster and Tenant status checks
@@ -72,17 +76,16 @@ Contribution workflow, commit style, and PR expectations: [`CONTRIBUTING.md`](CO
   - `deploy/kind/` — Kind cluster configs (e.g. 4-node)
 - **examples/** — Sample Tenant CRs
 - **console-web/** — Operator management UI (Next.js)
-- **docs/** — Architecture and development documentation
 
 ## Documentation
 
 | Doc | Content |
 |-----|---------|
-| [CLAUDE.md](CLAUDE.md) | Architecture, reconcile loop, CRD fields, RustFS ports and env (maintainer / AI context). |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Quality gates, `make pre-commit`, PR rules. |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Local environment (kind, IDE, workflows). |
-| [docs/architecture-decisions.md](docs/architecture-decisions.md) | ADRs. |
-| [CHANGELOG.md](CHANGELOG.md) | Release notes. |
+| [examples/README.md](examples/README.md) | Tenant manifests and usage notes. |
+| [deploy/README.md](deploy/README.md) | Helm and Kubernetes deployment entry point. |
+| [deploy/rustfs-operator/README.md](deploy/rustfs-operator/README.md) | Helm chart values and examples. |
+| [console-web/README.md](console-web/README.md) | Operator console frontend development and deployment. |
 
 ## License
 

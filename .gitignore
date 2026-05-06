@@ -18,10 +18,6 @@ console-web/.next/
 console-web/docs/
 console-web/out/
 console-web/node_modules/
-# Cursor IDE: ignore contents except versioned Agent skills
-.cursor/*
-!.cursor/skills/
-!.cursor/skills/**
 
 # Docs / summaries (local or generated)
 CONSOLE-INTEGRATION-SUMMARY.md
@@ -30,3 +26,6 @@ AGENTS.md
 docs/
 .codex
 .codex/
+.claude/
+.cursor/
+.gemini/
