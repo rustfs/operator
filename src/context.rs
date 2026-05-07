@@ -100,6 +100,27 @@ fn validate_local_kms_tenant(
     Ok(())
 }
 
+fn status_semantically_equal(
+    current: Option<&types::v1alpha1::status::Status>,
+    next: &types::v1alpha1::status::Status,
+) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+
+    let mut current = current.clone();
+    let mut next = next.clone();
+    normalize_status_for_compare(&mut current);
+    normalize_status_for_compare(&mut next);
+    current == next
+}
+
+fn normalize_status_for_compare(status: &mut types::v1alpha1::status::Status) {
+    for pool in &mut status.pools {
+        pool.last_update_time = None;
+    }
+}
+
 pub struct Context {
     pub(crate) client: kube::Client,
     pub(crate) recorder: Recorder,
@@ -177,6 +198,18 @@ impl Context {
             .await
     }
 
+    pub async fn patch_status_if_changed(
+        &self,
+        resource: &Tenant,
+        status: crate::types::v1alpha1::status::Status,
+    ) -> Result<Option<Tenant>, Error> {
+        if status_semantically_equal(resource.status.as_ref(), &status) {
+            return Ok(None);
+        }
+
+        self.update_status(resource, status).await.map(Some)
+    }
+
     pub async fn delete<T>(&self, name: &str, namespace: &str) -> Result<(), Error>
     where
         T: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
@@ -216,6 +249,19 @@ impl Context {
     {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
         api.list(&ListParams::default()).context(KubeSnafu).await
+    }
+
+    pub async fn list_with_params<T>(
+        &self,
+        namespace: &str,
+        params: &ListParams,
+    ) -> Result<ObjectList<T>, Error>
+    where
+        T: Clone + DeserializeOwned + Debug + Resource<Scope = NamespaceResourceScope>,
+        <T as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
+        api.list(params).context(KubeSnafu).await
     }
 
     pub async fn apply<T>(&self, resource: &T, namespace: &str) -> Result<T, Error>

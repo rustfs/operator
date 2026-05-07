@@ -30,6 +30,7 @@ use tracing::{info, warn};
 
 mod context;
 pub mod reconcile;
+mod status;
 pub mod types;
 pub mod utils;
 

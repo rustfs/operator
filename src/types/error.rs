@@ -30,6 +30,9 @@ pub enum Error {
         message: String,
     },
 
+    #[snafu(display("pool deletion is blocked for tenant '{}': {}", name, message))]
+    PoolDeleteBlocked { name: String, message: String },
+
     #[snafu(display("invalid tenant name '{}': {}", name, reason))]
     InvalidTenantName { name: String, reason: String },
 

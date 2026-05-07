@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use strum::Display;
 
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Pool {
     /// Name of the StatefulSet for this pool
@@ -56,7 +56,7 @@ pub struct Pool {
     pub last_update_time: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, Display)]
+#[derive(Deserialize, Serialize, Clone, Debug, Display, PartialEq, Eq)]
 pub enum PoolState {
     #[strum(to_string = "PoolCreated")]
     Created,

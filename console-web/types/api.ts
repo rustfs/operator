@@ -12,6 +12,13 @@ export interface TenantListItem {
   namespace: string
   pools: PoolInfo[]
   state: string
+  ready?: boolean
+  reconciling?: boolean
+  degraded?: boolean
+  primary_reason?: string | null
+  generation?: number | null
+  observed_generation?: number | null
+  stale?: boolean
   created_at: string | null
 }
 
@@ -19,7 +26,14 @@ export interface TenantListResponse {
   tenants: TenantListItem[]
 }
 
-export type TenantLifecycleState = "Ready" | "Updating" | "Degraded" | "NotReady" | "Unknown"
+export type TenantLifecycleState =
+  | "Ready"
+  | "Reconciling"
+  | "Blocked"
+  | "Updating"
+  | "Degraded"
+  | "NotReady"
+  | "Unknown"
 
 export interface TenantStateCountItem {
   state: string
@@ -46,11 +60,35 @@ export interface ServiceInfo {
   ports: ServicePort[]
 }
 
+export interface TenantCondition {
+  type: string
+  status: string
+  reason: string
+  message: string
+  last_transition_time: string | null
+  observed_generation: number | null
+}
+
+export interface TenantStatusSummary {
+  current_state: string
+  ready: boolean
+  reconciling: boolean
+  degraded: boolean
+  primary_reason: string | null
+  primary_message: string | null
+  observed_generation: number | null
+  stale: boolean
+  next_actions: string[]
+}
+
 export interface TenantDetailsResponse {
   name: string
   namespace: string
   pools: PoolInfo[]
   state: string
+  status_summary: TenantStatusSummary
+  conditions: TenantCondition[]
+  next_actions: string[]
   image: string | null
   mount_path: string | null
   created_at: string | null

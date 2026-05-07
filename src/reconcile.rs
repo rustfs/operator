@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use crate::context::Context;
+use crate::status::{StatusBuilder, StatusError};
+use crate::types::v1alpha1::status::{ConditionType, Reason, Status};
 use crate::types::v1alpha1::tenant::Tenant;
 use crate::{context, types};
 use k8s_openapi::api::core::v1 as corev1;
@@ -23,7 +25,15 @@ use kube::runtime::events::EventType;
 use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
+
+mod phases;
+
+use phases::{
+    finalize_tenant_status, maybe_cleanup_terminating_pods, reconcile_pool_statefulsets,
+    reconcile_rbac_resources, reconcile_services, validate_no_pool_rename,
+    validate_tenant_prerequisites,
+};
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -47,384 +57,255 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         return Ok(Action::await_change());
     }
 
-    // Validate tenant name is DNS-1035 compliant (required for derived Service names)
-    if let Err(e) = latest_tenant.validate_name() {
-        let _ = ctx
-            .record(
-                &latest_tenant,
-                EventType::Warning,
-                "InvalidTenantName",
-                &format!("{}", e),
-            )
-            .await;
-        return Err(e.into());
-    }
+    patch_reconcile_started(&ctx, &latest_tenant).await;
 
-    // Validate credential Secret if configured
-    // This only validates the Secret exists and has required keys.
-    // Actual credential injection happens via secretKeyRef in the StatefulSet.
-    if let Some(ref cfg) = latest_tenant.spec.creds_secret
-        && !cfg.name.is_empty()
-        && let Err(e) = ctx.validate_credential_secret(&latest_tenant).await
-    {
-        // Record event for credential validation failure
-        let _ = ctx
-            .record(
-                &latest_tenant,
-                EventType::Warning,
-                "CredentialValidationFailed",
-                &format!("Failed to validate credentials: {}", e),
-            )
-            .await;
-        return Err(e.into());
-    }
+    validate_tenant_prerequisites(&ctx, &latest_tenant).await?;
 
-    // Validate encryption / KMS: Vault requires endpoint + kmsSecret (and correct keys);
-    // must run whenever encryption is enabled — not only when kmsSecret is set, or Vault
-    // without a Secret reference would skip validation entirely.
-    if let Some(ref enc) = latest_tenant.spec.encryption
-        && enc.enabled
-        && let Err(e) = ctx.validate_kms_secret(&latest_tenant).await
-    {
-        let _ = ctx
-            .record(
-                &latest_tenant,
-                EventType::Warning,
-                "KmsSecretValidationFailed",
-                &format!("Failed to validate KMS secret: {}", e),
-            )
-            .await;
-        return Err(e.into());
-    }
+    maybe_cleanup_terminating_pods(&ctx, &latest_tenant, &ns).await?;
 
-    // Warn if Local backend has a kmsSecret configured (not used for Local)
-    if let Some(ref enc) = latest_tenant.spec.encryption
-        && enc.enabled
-        && enc.backend == crate::types::v1alpha1::encryption::KmsBackendType::Local
-        && enc.kms_secret.as_ref().is_some_and(|s| !s.name.is_empty())
-    {
-        let _ = ctx
-            .record(
-                &latest_tenant,
-                EventType::Warning,
-                "KmsConfigWarning",
-                "Local KMS backend does not use kmsSecret; the Secret reference will be ignored",
-            )
-            .await;
-    }
+    reconcile_rbac_resources(&ctx, &latest_tenant, &ns).await?;
 
-    // 0. Optional: unblock StatefulSet pods stuck terminating when their node is down.
-    // This is inspired by Longhorn's "Pod Deletion Policy When Node is Down".
-    if let Some(policy) = latest_tenant
-        .spec
-        .pod_deletion_policy_when_node_is_down
-        .clone()
-        && policy != crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing
-    {
-        cleanup_stuck_terminating_pods_on_down_nodes(&latest_tenant, &ns, &ctx, policy).await?;
-    }
+    reconcile_services(&ctx, &latest_tenant, &ns).await?;
 
-    // 1. Create RBAC resources (conditionally based on service account settings)
-    let custom_sa = latest_tenant.spec.service_account_name.is_some();
-    let create_rbac = latest_tenant
-        .spec
-        .create_service_account_rbac
-        .unwrap_or(false);
+    validate_no_pool_rename(&ctx, &latest_tenant, &ns).await?;
 
-    if !custom_sa || create_rbac {
-        // Create Role
-        let role = ctx.apply(&latest_tenant.new_role(), &ns).await?;
+    let summary = reconcile_pool_statefulsets(&ctx, &latest_tenant, &ns).await?;
+    finalize_tenant_status(&ctx, &latest_tenant, summary).await
+}
 
-        if !custom_sa {
-            // Create default ServiceAccount and bind it
-            let service_account = ctx.apply(&latest_tenant.new_service_account(), &ns).await?;
-            ctx.apply(
-                &latest_tenant.new_role_binding(&service_account.name_any(), &role),
-                &ns,
-            )
-            .await?;
-        } else {
-            // Use custom ServiceAccount and bind it
-            let sa_name = latest_tenant.service_account_name();
-            ctx.apply(&latest_tenant.new_role_binding(&sa_name, &role), &ns)
-                .await?;
+#[cfg(test)]
+fn should_create_rbac(tenant: &Tenant) -> bool {
+    phases::should_create_rbac(tenant)
+}
+
+async fn context_result<T>(
+    result: Result<T, context::Error>,
+    ctx: &Context,
+    tenant: &Tenant,
+) -> Result<T, Error> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let status_error = StatusError::from_context_error(&error);
+            patch_status_error(ctx, tenant, &status_error).await;
+            Err(error.into())
         }
     }
+}
 
-    // 2. Create Services
-    ctx.apply(&latest_tenant.new_io_service(), &ns).await?;
-    ctx.apply(&latest_tenant.new_console_service(), &ns).await?;
-    ctx.apply(&latest_tenant.new_headless_service(), &ns)
-        .await?;
-
-    // 3. Validate no pool renames (detect orphaned StatefulSets)
-    // Pool renames create new StatefulSets but leave old ones orphaned
-    let owned_statefulsets = ctx
-        .list::<k8s_openapi::api::apps::v1::StatefulSet>(&ns)
-        .await?;
-
-    let current_pool_names: std::collections::HashSet<_> = latest_tenant
-        .spec
-        .pools
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect();
-
-    for ss in owned_statefulsets {
-        // Check if this StatefulSet is owned by this Tenant
-        if let Some(owner_refs) = &ss.metadata.owner_references {
-            let owned_by_tenant = owner_refs.iter().any(|owner| {
-                owner.kind == "Tenant"
-                    && owner.name == latest_tenant.name()
-                    && owner.uid == latest_tenant.metadata.uid.as_deref().unwrap_or("")
-            });
-
-            if owned_by_tenant {
-                let ss_name = ss.metadata.name.as_deref().unwrap_or("");
-                let tenant_prefix = format!("{}-", latest_tenant.name());
-
-                // Extract pool name from StatefulSet name (format: {tenant}-{pool})
-                if let Some(pool_name) = ss_name.strip_prefix(&tenant_prefix)
-                    && !current_pool_names.contains(pool_name)
-                {
-                    // Found orphaned StatefulSet - pool was renamed or removed
-                    return Err(types::error::Error::ImmutableFieldModified {
-                        name: latest_tenant.name(),
-                        field: "spec.pools[].name".to_string(),
-                        message: format!(
-                            "Pool name cannot be changed. Found StatefulSet '{}' for pool '{}' which no longer exists in spec. \
-                            Pool renames are not supported because they change the StatefulSet selector (immutable field). \
-                            To rename a pool: 1) Delete the Tenant, 2) Recreate with new pool names.",
-                            ss_name, pool_name
-                        ),
-                    }.into());
-                }
-            }
+async fn types_result<T>(
+    result: Result<T, types::error::Error>,
+    ctx: &Context,
+    tenant: &Tenant,
+) -> Result<T, Error> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let status_error = StatusError::from_types_error(&error);
+            patch_status_error(ctx, tenant, &status_error).await;
+            Err(error.into())
         }
     }
+}
 
-    // 4. Create or update StatefulSets for each pool and collect their statuses
-    let mut pool_statuses = Vec::new();
-    let mut any_updating = false;
-    let mut any_degraded = false;
-    let mut total_replicas = 0;
-    let mut ready_replicas = 0;
+async fn patch_status_error(ctx: &Context, tenant: &Tenant, status_error: &StatusError) {
+    let mut builder = StatusBuilder::from_tenant(tenant);
+    builder.mark_error(status_error);
+    let status = builder.build();
+    let should_record =
+        condition_marker_changed(tenant.status.as_ref(), &status, status_error.condition_type);
 
-    for pool in &latest_tenant.spec.pools {
-        let ss_name = format!("{}-{}", latest_tenant.name(), pool.name);
+    if should_record {
+        let _ = ctx
+            .record(
+                tenant,
+                status_error.event_type,
+                status_error.reason.as_str(),
+                &status_error.safe_message,
+            )
+            .await;
+    }
 
-        // Try to get existing StatefulSet
-        match ctx
-            .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
-            .await
-        {
-            Ok(existing_ss) => {
-                // StatefulSet exists - check if update is needed
-                debug!("StatefulSet {} exists, checking if update needed", ss_name);
+    match ctx.patch_status_if_changed(tenant, status).await {
+        Ok(Some(_)) => {
+            info!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                reason = status_error.reason.as_str(),
+                condition = status_error.condition_type.as_str(),
+                "patched Tenant status for reconcile error"
+            );
+        }
+        Ok(None) => {
+            debug!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                reason = status_error.reason.as_str(),
+                "skipped Tenant status patch because error status is unchanged"
+            );
+        }
+        Err(error) => {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                reason = status_error.reason.as_str(),
+                %error,
+                "failed to patch Tenant status for reconcile error"
+            );
+            let status_patch_error = StatusError::status_patch_failed(status_error.reason);
+            let _ = ctx
+                .record(
+                    tenant,
+                    status_patch_error.event_type,
+                    status_patch_error.reason.as_str(),
+                    &status_patch_error.safe_message,
+                )
+                .await;
+        }
+    }
+}
 
-                // First, validate that the update is safe (no immutable field changes)
-                if let Err(e) = latest_tenant.validate_statefulset_update(&existing_ss, pool) {
-                    error!("StatefulSet {} update validation failed: {}", ss_name, e);
+async fn patch_reconcile_started(ctx: &Context, tenant: &Tenant) {
+    if !should_mark_reconcile_started(tenant) {
+        debug!(
+            tenant = %tenant.name(),
+            namespace = ?tenant.namespace(),
+            generation = ?tenant.metadata.generation,
+            observed_generation = ?tenant.status.as_ref().and_then(|status| status.observed_generation),
+            "skipping ReconcileStarted status patch because observed generation is current"
+        );
+        return;
+    }
 
-                    // Record event for validation failure
-                    let _ = ctx
-                        .record(
-                            &latest_tenant,
-                            EventType::Warning,
-                            "StatefulSetUpdateValidationFailed",
-                            &format!("Cannot update StatefulSet {}: {}", ss_name, e),
-                        )
-                        .await;
+    let mut builder = StatusBuilder::from_tenant(tenant);
+    builder.mark_started();
+    let status = builder.build();
 
-                    return Err(e.into());
-                }
+    info!(
+        tenant = %tenant.name(),
+        namespace = ?tenant.namespace(),
+        generation = ?tenant.metadata.generation,
+        observed_generation = ?tenant.status.as_ref().and_then(|status| status.observed_generation),
+        "marking Tenant reconcile started for stale or missing status"
+    );
 
-                // Check if update is actually needed
-                if latest_tenant.statefulset_needs_update(&existing_ss, pool)? {
-                    debug!("StatefulSet {} needs update, applying changes", ss_name);
+    match ctx.patch_status_if_changed(tenant, status).await {
+        Ok(Some(_)) => {
+            info!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                "patched Tenant ReconcileStarted status"
+            );
+        }
+        Ok(None) => {
+            debug!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                "ReconcileStarted status patch was a no-op"
+            );
+        }
+        Err(error) => {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                %error,
+                "failed to patch Tenant ReconcileStarted status"
+            );
+            let status_patch_error = StatusError::status_patch_failed(Reason::ReconcileStarted);
+            let _ = ctx
+                .record(
+                    tenant,
+                    status_patch_error.event_type,
+                    status_patch_error.reason.as_str(),
+                    &status_patch_error.safe_message,
+                )
+                .await;
+        }
+    }
+}
 
-                    // Record event for update start
-                    let _ = ctx
-                        .record(
-                            &latest_tenant,
-                            EventType::Normal,
-                            "StatefulSetUpdateStarted",
-                            &format!("Updating StatefulSet {}", ss_name),
-                        )
-                        .await;
+fn should_mark_reconcile_started(tenant: &Tenant) -> bool {
+    match (
+        tenant
+            .status
+            .as_ref()
+            .and_then(|status| status.observed_generation),
+        tenant.metadata.generation,
+    ) {
+        (Some(observed), Some(generation)) => observed < generation,
+        (None, Some(_)) => true,
+        (None, None) => tenant.status.is_none(),
+        (Some(_), None) => false,
+    }
+}
 
-                    // Apply the update
-                    ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
-                        .await?;
-
-                    debug!("StatefulSet {} updated successfully", ss_name);
-                } else {
-                    debug!("StatefulSet {} is up to date, no changes needed", ss_name);
-                }
-
-                // Fetch the StatefulSet again to get the latest status after any updates
-                let ss = ctx
-                    .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
-                    .await?;
-
-                // Build pool status from StatefulSet
-                let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
-
-                // Track if any pool is updating or degraded
-                use crate::types::v1alpha1::status::pool::PoolState;
-                match pool_status.state {
-                    PoolState::Updating => any_updating = true,
-                    PoolState::Degraded | PoolState::RolloutFailed => any_degraded = true,
-                    _ => {}
-                }
-
-                // Accumulate replica counts
-                if let Some(r) = pool_status.replicas {
-                    total_replicas += r;
-                }
-                if let Some(r) = pool_status.ready_replicas {
-                    ready_replicas += r;
-                }
-
-                pool_statuses.push(pool_status);
-            }
-            Err(e) if e.to_string().contains("NotFound") => {
-                // StatefulSet doesn't exist - create it
-                debug!("StatefulSet {} not found, creating", ss_name);
-
-                // Record event for creation
+async fn patch_status_and_record(
+    ctx: &Context,
+    tenant: &Tenant,
+    status: Status,
+    condition_type: ConditionType,
+    reason: Reason,
+    event_type: EventType,
+    message: &str,
+) -> Result<(), Error> {
+    let should_record = condition_marker_changed(tenant.status.as_ref(), &status, condition_type);
+    let patched = ctx.patch_status_if_changed(tenant, status).await?;
+    match patched {
+        Some(_) => {
+            info!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                reason = reason.as_str(),
+                condition = condition_type.as_str(),
+                "patched Tenant status after reconciliation"
+            );
+            if should_record {
                 let _ = ctx
-                    .record(
-                        &latest_tenant,
-                        EventType::Normal,
-                        "StatefulSetCreated",
-                        &format!("Creating StatefulSet {}", ss_name),
-                    )
+                    .record(tenant, event_type, reason.as_str(), message)
                     .await;
-
-                ctx.apply(&latest_tenant.new_statefulset(pool)?, &ns)
-                    .await?;
-
-                debug!("StatefulSet {} created successfully", ss_name);
-
-                // After creation, fetch the StatefulSet to get its status
-                let ss = ctx
-                    .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, &ns)
-                    .await?;
-                let pool_status = latest_tenant.build_pool_status(&pool.name, &ss);
-                any_updating = true; // New StatefulSet is always updating initially
-                pool_statuses.push(pool_status);
-            }
-            Err(e) => {
-                // Other error - propagate
-                error!("Failed to get StatefulSet {}: {}", ss_name, e);
-                return Err(e.into());
             }
         }
-    }
-
-    // 5. Aggregate pool statuses and determine overall Tenant conditions
-    use crate::types::v1alpha1::status::{Condition, Status};
-
-    let observed_generation = latest_tenant.metadata.generation;
-    let current_time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-
-    let mut conditions = Vec::new();
-
-    // Determine Ready condition
-    let ready_condition = if any_degraded {
-        Condition {
-            type_: "Ready".to_string(),
-            status: "False".to_string(),
-            last_transition_time: Some(current_time.clone()),
-            observed_generation,
-            reason: "PoolDegraded".to_string(),
-            message: "One or more pools are degraded".to_string(),
+        None => {
+            debug!(
+                tenant = %tenant.name(),
+                namespace = ?tenant.namespace(),
+                reason = reason.as_str(),
+                "skipped Tenant status patch because reconciled status is unchanged"
+            );
         }
-    } else if any_updating {
-        Condition {
-            type_: "Ready".to_string(),
-            status: "False".to_string(),
-            last_transition_time: Some(current_time.clone()),
-            observed_generation,
-            reason: "RolloutInProgress".to_string(),
-            message: "StatefulSet rollout in progress".to_string(),
-        }
-    } else if ready_replicas == total_replicas && total_replicas > 0 {
-        Condition {
-            type_: "Ready".to_string(),
-            status: "True".to_string(),
-            last_transition_time: Some(current_time.clone()),
-            observed_generation,
-            reason: "AllPodsReady".to_string(),
-            message: format!("{}/{} pods ready", ready_replicas, total_replicas),
-        }
-    } else {
-        Condition {
-            type_: "Ready".to_string(),
-            status: "False".to_string(),
-            last_transition_time: Some(current_time.clone()),
-            observed_generation,
-            reason: "PodsNotReady".to_string(),
-            message: format!("{}/{} pods ready", ready_replicas, total_replicas),
-        }
-    };
-    conditions.push(ready_condition);
-
-    // Determine Progressing condition
-    if any_updating {
-        conditions.push(Condition {
-            type_: "Progressing".to_string(),
-            status: "True".to_string(),
-            last_transition_time: Some(current_time.clone()),
-            observed_generation,
-            reason: "RolloutInProgress".to_string(),
-            message: "StatefulSet rollout in progress".to_string(),
-        });
     }
+    Ok(())
+}
 
-    // Determine Degraded condition
-    if any_degraded {
-        conditions.push(Condition {
-            type_: "Degraded".to_string(),
-            status: "True".to_string(),
-            last_transition_time: Some(current_time.clone()),
-            observed_generation,
-            reason: "PoolDegraded".to_string(),
-            message: "One or more pools are degraded".to_string(),
-        });
-    }
+fn condition_marker_changed(
+    previous_status: Option<&Status>,
+    next_status: &Status,
+    condition_type: ConditionType,
+) -> bool {
+    condition_marker(previous_status, condition_type)
+        != condition_marker(Some(next_status), condition_type)
+}
 
-    // Determine overall state
-    let current_state = if any_degraded {
-        "Degraded".to_string()
-    } else if any_updating {
-        "Updating".to_string()
-    } else if ready_replicas == total_replicas && total_replicas > 0 {
-        "Ready".to_string()
-    } else {
-        "NotReady".to_string()
-    };
+fn condition_marker(
+    status: Option<&Status>,
+    condition_type: ConditionType,
+) -> Option<(String, String)> {
+    status
+        .and_then(|status| status.condition(condition_type))
+        .map(|condition| (condition.status.clone(), condition.reason.clone()))
+}
 
-    // Build and update status
-    let status = Status {
-        current_state,
-        available_replicas: ready_replicas,
-        pools: pool_statuses,
-        observed_generation,
-        conditions,
-    };
-
-    debug!("Updating tenant status: {:?}", status);
-    ctx.update_status(&latest_tenant, status).await?;
-
-    // Requeue faster if any pool is updating
-    if any_updating {
-        debug!("Pools are updating, requeuing in 10 seconds");
-        Ok(Action::requeue(Duration::from_secs(10)))
-    } else {
-        Ok(Action::await_change())
-    }
+fn statefulset_owned_by_tenant(
+    ss: &k8s_openapi::api::apps::v1::StatefulSet,
+    tenant: &Tenant,
+) -> bool {
+    ss.metadata.owner_references.as_ref().is_some_and(|refs| {
+        refs.iter().any(|owner| {
+            owner.kind == "Tenant"
+                && owner.name == tenant.name()
+                && owner.uid == tenant.metadata.uid.as_deref().unwrap_or("")
+        })
+    })
 }
 
 async fn cleanup_stuck_terminating_pods_on_down_nodes(
@@ -626,7 +507,8 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
             // Immutable field / invalid name errors - require user intervention
             // Use 60-second requeue to reduce event/log spam while user fixes the issue
             types::error::Error::ImmutableFieldModified { .. }
-            | types::error::Error::InvalidTenantName { .. } => {
+            | types::error::Error::InvalidTenantName { .. }
+            | types::error::Error::PoolDeleteBlocked { .. } => {
                 Action::requeue(Duration::from_secs(60))
             }
 
@@ -639,25 +521,50 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
 #[cfg(test)]
 mod tests {
     use super::is_node_down;
-    use super::{pod_has_owner_kind, pod_matches_policy_controller_kind};
+    use super::{
+        pod_has_owner_kind, pod_matches_policy_controller_kind, should_create_rbac,
+        should_mark_reconcile_started,
+    };
     use k8s_openapi::api::core::v1 as corev1;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 
-    // Test 10: RBAC creation logic - default behavior
+    use crate::types::v1alpha1::status::Status;
+
+    #[test]
+    fn should_not_mark_reconcile_started_when_generation_is_current() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.generation = Some(3);
+        tenant.status = Some(Status {
+            current_state: "Ready".to_string(),
+            observed_generation: Some(3),
+            ..Default::default()
+        });
+
+        assert!(!should_mark_reconcile_started(&tenant));
+    }
+
+    #[test]
+    fn should_mark_reconcile_started_for_missing_or_stale_status() {
+        let mut missing = crate::tests::create_test_tenant(None, None);
+        missing.metadata.generation = Some(3);
+        missing.status = None;
+        assert!(should_mark_reconcile_started(&missing));
+
+        let mut stale = crate::tests::create_test_tenant(None, None);
+        stale.metadata.generation = Some(3);
+        stale.status = Some(Status {
+            current_state: "Ready".to_string(),
+            observed_generation: Some(2),
+            ..Default::default()
+        });
+        assert!(should_mark_reconcile_started(&stale));
+    }
+
     #[test]
     fn test_should_create_rbac_default() {
         let tenant = crate::tests::create_test_tenant(None, None);
 
-        let custom_sa = tenant.spec.service_account_name.is_some();
-        let create_rbac = tenant.spec.create_service_account_rbac.unwrap_or(false);
-        let should_create_rbac = !custom_sa || create_rbac;
-
-        assert!(!custom_sa, "Should not have custom SA");
-        assert!(
-            !create_rbac,
-            "createServiceAccountRbac should default to false"
-        );
-        assert!(should_create_rbac, "Should create RBAC when no custom SA");
+        assert!(should_create_rbac(&tenant));
     }
 
     // Test 11: RBAC creation logic - custom SA with createServiceAccountRbac=true
@@ -665,16 +572,7 @@ mod tests {
     fn test_should_create_rbac_custom_sa_with_rbac() {
         let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(true));
 
-        let custom_sa = tenant.spec.service_account_name.is_some();
-        let create_rbac = tenant.spec.create_service_account_rbac.unwrap_or(false);
-        let should_create_rbac = !custom_sa || create_rbac;
-
-        assert!(custom_sa, "Should have custom SA");
-        assert!(create_rbac, "createServiceAccountRbac should be true");
-        assert!(
-            should_create_rbac,
-            "Should create RBAC when explicitly requested"
-        );
+        assert!(should_create_rbac(&tenant));
     }
 
     // Test 12: RBAC creation logic - custom SA with createServiceAccountRbac=false
@@ -683,13 +581,7 @@ mod tests {
         let tenant =
             crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(false));
 
-        let custom_sa = tenant.spec.service_account_name.is_some();
-        let create_rbac = tenant.spec.create_service_account_rbac.unwrap_or(false);
-        let should_create_rbac = !custom_sa || create_rbac;
-
-        assert!(custom_sa, "Should have custom SA");
-        assert!(!create_rbac, "createServiceAccountRbac should be false");
-        assert!(!should_create_rbac, "Should skip RBAC creation");
+        assert!(!should_create_rbac(&tenant));
     }
 
     // Test 13: RBAC creation logic - custom SA with createServiceAccountRbac=None (default)
@@ -697,19 +589,7 @@ mod tests {
     fn test_should_skip_rbac_custom_sa_default() {
         let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), None);
 
-        let custom_sa = tenant.spec.service_account_name.is_some();
-        let create_rbac = tenant.spec.create_service_account_rbac.unwrap_or(false);
-        let should_create_rbac = !custom_sa || create_rbac;
-
-        assert!(custom_sa, "Should have custom SA");
-        assert!(
-            !create_rbac,
-            "createServiceAccountRbac should default to false"
-        );
-        assert!(
-            !should_create_rbac,
-            "Should skip RBAC when None treated as false"
-        );
+        assert!(!should_create_rbac(&tenant));
     }
 
     // Test 14: Service account determination in reconcile logic
