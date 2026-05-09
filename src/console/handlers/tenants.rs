@@ -160,6 +160,10 @@ pub async fn get_tenant_details(
         })
         .collect();
 
+    let status_summary = tenant_status_summary(&tenant);
+    let conditions = tenant_conditions(&tenant);
+    let next_actions = status_summary.next_actions.clone();
+
     Ok(Json(TenantDetailsResponse {
         name: tenant.name_any(),
         namespace: tenant.namespace().unwrap_or_default(),
@@ -173,11 +177,10 @@ pub async fn get_tenant_details(
                 volumes_per_server: p.persistence.volumes_per_server,
             })
             .collect(),
-        state: tenant
-            .status
-            .as_ref()
-            .map(|s| s.current_state.to_string())
-            .unwrap_or_else(|| "Unknown".to_string()),
+        state: status_summary.current_state.clone(),
+        status_summary,
+        conditions,
+        next_actions,
         image: tenant.spec.image.clone(),
         mount_path: tenant.spec.mount_path.clone(),
         created_at: tenant
@@ -291,25 +294,9 @@ pub async fn create_tenant(
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", req.name)))?;
 
-    Ok(Json(TenantListItem {
-        name: created.name_any(),
-        namespace: created.namespace().unwrap_or_default(),
-        pools: created
-            .spec
-            .pools
-            .iter()
-            .map(|p| PoolInfo {
-                name: p.name.clone(),
-                servers: p.servers,
-                volumes_per_server: p.persistence.volumes_per_server,
-            })
-            .collect(),
-        state: "Creating".to_string(),
-        created_at: created
-            .metadata
-            .creation_timestamp
-            .map(|ts| ts.0.to_rfc3339()),
-    }))
+    let item = tenant_to_list_item(created);
+
+    Ok(Json(item))
 }
 
 /// Delete a Tenant CR.
@@ -458,29 +445,7 @@ pub async fn update_tenant(
     Ok(Json(UpdateTenantResponse {
         success: true,
         message: format!("Tenant updated: {}", updated_fields.join(", ")),
-        tenant: TenantListItem {
-            name: updated_tenant.name_any(),
-            namespace: updated_tenant.namespace().unwrap_or_default(),
-            pools: updated_tenant
-                .spec
-                .pools
-                .iter()
-                .map(|p| PoolInfo {
-                    name: p.name.clone(),
-                    servers: p.servers,
-                    volumes_per_server: p.persistence.volumes_per_server,
-                })
-                .collect(),
-            state: updated_tenant
-                .status
-                .as_ref()
-                .map(|s| s.current_state.to_string())
-                .unwrap_or_else(|| "Unknown".to_string()),
-            created_at: updated_tenant
-                .metadata
-                .creation_timestamp
-                .map(|ts| ts.0.to_rfc3339()),
-        },
+        tenant: tenant_to_list_item(updated_tenant),
     }))
 }
 
@@ -623,36 +588,15 @@ fn build_tenant_list_items(
         .collect()
 }
 
-fn tenant_to_list_item(t: Tenant) -> TenantListItem {
-    let state = tenant_state(&t);
-    TenantListItem {
-        name: t.name_any(),
-        namespace: t.namespace().unwrap_or_default(),
-        pools: t
-            .spec
-            .pools
-            .iter()
-            .map(|p| PoolInfo {
-                name: p.name.clone(),
-                servers: p.servers,
-                volumes_per_server: p.persistence.volumes_per_server,
-            })
-            .collect(),
-        state,
-        created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
-    }
-}
-
 fn tenant_state(t: &Tenant) -> String {
-    t.status
-        .as_ref()
-        .map(|s| s.current_state.to_string())
-        .unwrap_or_else(|| "Unknown".to_string())
+    tenant_status_summary(t).current_state
 }
 
 fn state_matches_filter(state: &str, state_filter: Option<&str>) -> bool {
     match state_filter {
-        Some(filter) => state.eq_ignore_ascii_case(filter),
+        Some(filter) => canonical_console_state_filter(Some(filter)).is_some_and(|filter| {
+            canonical_console_state(Some(state)).eq_ignore_ascii_case(&filter)
+        }),
         None => true,
     }
 }
@@ -667,5 +611,22 @@ fn summarize_tenant_states(tenants: &[Tenant]) -> TenantStateCountsResponse {
     TenantStateCountsResponse {
         total: tenants.len() as u32,
         counts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::state_matches_filter;
+
+    #[test]
+    fn state_filter_is_case_insensitive_for_known_states() {
+        assert!(state_matches_filter("Ready", Some("ready")));
+        assert!(state_matches_filter("Reconciling", Some("updating")));
+        assert!(state_matches_filter("Blocked", Some("blocked")));
+    }
+
+    #[test]
+    fn unknown_filter_value_does_not_match_unknown_state() {
+        assert!(!state_matches_filter("Unknown", Some("foo")));
     }
 }

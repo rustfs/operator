@@ -263,23 +263,42 @@ impl Tenant {
         let current_revision = status.and_then(|s| s.current_revision.clone());
         let update_revision = status.and_then(|s| s.update_revision.clone());
 
-        // Determine pool state based on StatefulSet status
+        // Determine pool state based on StatefulSet status. Kubernetes StatefulSet
+        // status is authoritative only after the controller has observed the latest
+        // generation; revision mismatch also means a rollout is still in progress.
         let state = if let Some(status) = status {
-            let desired = status.replicas;
+            let desired = ss
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.replicas)
+                .unwrap_or(status.replicas);
             let ready = status.ready_replicas.unwrap_or(0);
             let updated = status.updated_replicas.unwrap_or(0);
             let current = status.current_replicas.unwrap_or(0);
+            let observed_current = match (status.observed_generation, ss.metadata.generation) {
+                (Some(observed), Some(generation)) => observed >= generation,
+                (Some(_), None) | (None, None) => true,
+                (None, Some(_)) => false,
+            };
+            let revisions_match = match (&status.current_revision, &status.update_revision) {
+                (Some(current_revision), Some(update_revision)) => {
+                    current_revision == update_revision
+                }
+                (None, None) => true,
+                _ => false,
+            };
 
             if desired == 0 {
                 PoolState::NotCreated
-            } else if ready == desired && updated == desired {
-                // All replicas are ready and updated
-                PoolState::RolloutComplete
-            } else if updated < desired || current < desired {
-                // Rollout in progress
+            } else if !observed_current
+                || !revisions_match
+                || updated < desired
+                || current < desired
+            {
                 PoolState::Updating
+            } else if ready == desired && updated == desired {
+                PoolState::RolloutComplete
             } else if ready < desired {
-                // Some replicas not ready
                 PoolState::Degraded
             } else {
                 PoolState::Initialized
@@ -360,6 +379,62 @@ pub fn validate_dns1035_label(name: &str) -> Result<(), types::error::Error> {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::v1alpha1::status::pool::PoolState;
+    use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    fn statefulset_with_status(
+        generation: i64,
+        observed_generation: i64,
+        replicas: i32,
+        ready_replicas: i32,
+        updated_replicas: i32,
+        current_revision: &str,
+        update_revision: &str,
+    ) -> StatefulSet {
+        StatefulSet {
+            metadata: ObjectMeta {
+                name: Some("test-tenant-pool-0".to_string()),
+                generation: Some(generation),
+                ..Default::default()
+            },
+            spec: Some(StatefulSetSpec {
+                replicas: Some(replicas),
+                ..Default::default()
+            }),
+            status: Some(StatefulSetStatus {
+                observed_generation: Some(observed_generation),
+                replicas,
+                ready_replicas: Some(ready_replicas),
+                updated_replicas: Some(updated_replicas),
+                current_replicas: Some(replicas),
+                current_revision: Some(current_revision.to_string()),
+                update_revision: Some(update_revision.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pool_status_treats_stale_statefulset_observation_as_updating() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let ss = statefulset_with_status(2, 1, 4, 4, 4, "rev-a", "rev-a");
+
+        let pool_status = tenant.build_pool_status("pool-0", &ss);
+
+        assert_eq!(pool_status.state, PoolState::Updating);
+    }
+
+    #[test]
+    fn pool_status_requires_current_and_update_revisions_to_match() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let ss = statefulset_with_status(2, 2, 4, 4, 4, "rev-a", "rev-b");
+
+        let pool_status = tenant.build_pool_status("pool-0", &ss);
+
+        assert_eq!(pool_status.state, PoolState::Updating);
+    }
 
     // Test 1: Default behavior - no custom SA
     #[test]

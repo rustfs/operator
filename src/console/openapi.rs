@@ -36,9 +36,9 @@ use crate::console::models::pool::{
 };
 use crate::console::models::tenant::{
     CreatePoolRequest, CreateTenantRequest, DeleteTenantResponse, EnvVar, LoggingConfig, PoolInfo,
-    ServiceInfo, ServicePort, TenantDetailsResponse, TenantListItem, TenantListQuery,
-    TenantListResponse, TenantStateCountsResponse, TenantYAML, UpdateTenantRequest,
-    UpdateTenantResponse,
+    ServiceInfo, ServicePort, TenantCondition, TenantDetailsResponse, TenantListItem,
+    TenantListQuery, TenantListResponse, TenantStateCountsResponse, TenantStatusSummary,
+    TenantYAML, UpdateTenantRequest, UpdateTenantResponse,
 };
 use crate::console::models::topology::{
     TopologyCluster, TopologyClusterSummary, TopologyNamespace, TopologyNode,
@@ -84,6 +84,8 @@ use crate::console::models::topology::{
         TenantListResponse,
         TenantListQuery,
         TenantStateCountsResponse,
+        TenantCondition,
+        TenantStatusSummary,
         TenantDetailsResponse,
         CreateTenantRequest,
         CreatePoolRequest,

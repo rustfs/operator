@@ -100,6 +100,57 @@ fn validate_local_kms_tenant(
     Ok(())
 }
 
+fn status_semantically_equal(
+    current: Option<&types::v1alpha1::status::Status>,
+    next: &types::v1alpha1::status::Status,
+) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+
+    let mut current = current.clone();
+    let mut next = next.clone();
+    normalize_status_for_compare(&mut current);
+    normalize_status_for_compare(&mut next);
+    current == next
+}
+
+fn normalize_status_for_compare(status: &mut types::v1alpha1::status::Status) {
+    for pool in &mut status.pools {
+        pool.last_update_time = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SecretValidationKind {
+    Credential,
+    Kms,
+}
+
+pub(crate) fn is_kube_not_found(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Kube {
+            source: kube::Error::Api(response),
+        } if response.code == 404
+    )
+}
+
+pub(crate) fn map_secret_get_error(
+    error: Error,
+    name: String,
+    kind: SecretValidationKind,
+) -> Error {
+    if !is_kube_not_found(&error) {
+        return error;
+    }
+
+    match kind {
+        SecretValidationKind::Credential => Error::CredentialSecretNotFound { name },
+        SecretValidationKind::Kms => Error::KmsSecretNotFound { name },
+    }
+}
+
 pub struct Context {
     pub(crate) client: kube::Client,
     pub(crate) recorder: Recorder,
@@ -177,6 +228,18 @@ impl Context {
             .await
     }
 
+    pub async fn patch_status_if_changed(
+        &self,
+        resource: &Tenant,
+        status: crate::types::v1alpha1::status::Status,
+    ) -> Result<Option<Tenant>, Error> {
+        if status_semantically_equal(resource.status.as_ref(), &status) {
+            return Ok(None);
+        }
+
+        self.update_status(resource, status).await.map(Some)
+    }
+
     pub async fn delete<T>(&self, name: &str, namespace: &str) -> Result<(), Error>
     where
         T: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
@@ -216,6 +279,19 @@ impl Context {
     {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
         api.list(&ListParams::default()).context(KubeSnafu).await
+    }
+
+    pub async fn list_with_params<T>(
+        &self,
+        namespace: &str,
+        params: &ListParams,
+    ) -> Result<ObjectList<T>, Error>
+    where
+        T: Clone + DeserializeOwned + Debug + Resource<Scope = NamespaceResourceScope>,
+        <T as kube::Resource>::DynamicType: Default,
+    {
+        let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
+        api.list(params).context(KubeSnafu).await
     }
 
     pub async fn apply<T>(&self, resource: &T, namespace: &str) -> Result<T, Error>
@@ -258,12 +334,16 @@ impl Context {
         if let Some(ref cfg) = tenant.spec.creds_secret
             && !cfg.name.is_empty()
         {
-            let secret: Secret = self
-                .get(&cfg.name, &tenant.namespace()?)
-                .await
-                .map_err(|_| Error::CredentialSecretNotFound {
-                    name: cfg.name.clone(),
-                })?;
+            let secret: Secret = match self.get(&cfg.name, &tenant.namespace()?).await {
+                Ok(secret) => secret,
+                Err(error) => {
+                    return Err(map_secret_get_error(
+                        error,
+                        cfg.name.clone(),
+                        SecretValidationKind::Credential,
+                    ));
+                }
+            };
 
             // Validate Secret has required keys
             if let Some(data) = secret.data {
@@ -380,12 +460,16 @@ impl Context {
             return Ok(());
         }
 
-        let secret: Secret = self
-            .get(&secret_ref.name, &tenant.namespace()?)
-            .await
-            .map_err(|_| Error::KmsSecretNotFound {
-                name: secret_ref.name.clone(),
-            })?;
+        let secret: Secret = match self.get(&secret_ref.name, &tenant.namespace()?).await {
+            Ok(secret) => secret,
+            Err(error) => {
+                return Err(map_secret_get_error(
+                    error,
+                    secret_ref.name.clone(),
+                    SecretValidationKind::Kms,
+                ));
+            }
+        };
 
         if enc.backend == KmsBackendType::Vault {
             let has_token = secret
@@ -490,6 +574,7 @@ impl Context {
 mod validate_local_kms_tests {
     use super::Error;
     use super::validate_local_kms_tenant;
+    use super::{SecretValidationKind, map_secret_get_error};
     use crate::types::v1alpha1::encryption::LocalKmsConfig;
     use crate::types::v1alpha1::persistence::PersistenceConfig;
     use crate::types::v1alpha1::pool::Pool;
@@ -504,6 +589,52 @@ mod validate_local_kms_tests {
             },
             scheduling: Default::default(),
         }
+    }
+
+    fn api_error(code: u16, reason: &str) -> Error {
+        Error::Kube {
+            source: kube::Error::Api(kube::error::ErrorResponse {
+                status: "Failure".to_string(),
+                message: reason.to_string(),
+                reason: reason.to_string(),
+                code,
+            }),
+        }
+    }
+
+    #[test]
+    fn credential_secret_get_maps_only_404_to_not_found() {
+        let err = map_secret_get_error(
+            api_error(404, "NotFound"),
+            "creds".to_string(),
+            SecretValidationKind::Credential,
+        );
+
+        assert!(matches!(err, Error::CredentialSecretNotFound { name } if name == "creds"));
+    }
+
+    #[test]
+    fn credential_secret_get_preserves_forbidden_as_kube_error() {
+        let err = map_secret_get_error(
+            api_error(403, "Forbidden"),
+            "creds".to_string(),
+            SecretValidationKind::Credential,
+        );
+
+        assert!(
+            matches!(err, Error::Kube { source: kube::Error::Api(response) } if response.code == 403)
+        );
+    }
+
+    #[test]
+    fn kms_secret_get_maps_only_404_to_not_found() {
+        let err = map_secret_get_error(
+            api_error(404, "NotFound"),
+            "kms".to_string(),
+            SecretValidationKind::Kms,
+        );
+
+        assert!(matches!(err, Error::KmsSecretNotFound { name } if name == "kms"));
     }
 
     #[test]

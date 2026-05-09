@@ -1,4 +1,4 @@
-export type TopologyTenantState = "Ready" | "Updating" | "Degraded" | "NotReady" | "Unknown"
+export type TopologyTenantState = "Ready" | "Reconciling" | "Blocked" | "Updating" | "Degraded" | "NotReady" | "Unknown"
 
 export interface TopologyClusterSummary {
   nodes: number
@@ -48,6 +48,11 @@ export interface TopologyTenant {
   name: string
   namespace: string
   state: TopologyTenantState
+  ready?: boolean
+  reconciling?: boolean
+  degraded?: boolean
+  stale?: boolean
+  primary_reason?: string | null
   created_at: string | null
   summary: TopologyTenantSummary
   pools?: TopologyPool[]

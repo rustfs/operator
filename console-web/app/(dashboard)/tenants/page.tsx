@@ -31,13 +31,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import * as api from "@/lib/api"
 import { ApiError } from "@/lib/api-client"
 import { routes } from "@/lib/routes"
+import { normalizeTenantLifecycleState } from "@/lib/tenant-state"
 import { parseSizeToBytes, formatBinaryBytes } from "@/lib/utils"
 import type { ServiceInfo, TenantLifecycleState, TenantListItem, TenantStateCountsResponse } from "@/types/api"
 
 const ALL_NAMESPACES = "__all__"
-const TENANT_STATES: TenantLifecycleState[] = ["Ready", "Updating", "Degraded", "NotReady", "Unknown"]
+const TENANT_STATES: TenantLifecycleState[] = ["Ready", "Reconciling", "Blocked", "Degraded", "NotReady", "Unknown"]
 const EMPTY_STATE_COUNTS: Record<TenantLifecycleState, number> = {
   Ready: 0,
+  Reconciling: 0,
+  Blocked: 0,
   Updating: 0,
   Degraded: 0,
   NotReady: 0,
@@ -58,6 +61,18 @@ const STATE_THEME: Record<
     dot: "bg-emerald-500",
     label: "text-emerald-700",
     activeCard: "border-emerald-300 ring-1 ring-emerald-200",
+  },
+  Reconciling: {
+    badge: "bg-blue-50 text-blue-700 border-blue-200",
+    dot: "bg-blue-500",
+    label: "text-blue-700",
+    activeCard: "border-blue-300 ring-1 ring-blue-200",
+  },
+  Blocked: {
+    badge: "bg-purple-50 text-purple-700 border-purple-200",
+    dot: "bg-purple-500",
+    label: "text-purple-700",
+    activeCard: "border-purple-300 ring-1 ring-purple-200",
   },
   Updating: {
     badge: "bg-blue-50 text-blue-700 border-blue-200",
@@ -96,18 +111,7 @@ function makeTenantKey(namespace: string, name: string): string {
   return `${namespace}/${name}`
 }
 
-function normalizeTenantState(state: string | null | undefined): TenantLifecycleState {
-  const normalized = (state ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_-]/g, "")
-  if (normalized === "ready" || normalized === "running") return "Ready"
-  if (normalized === "updating" || normalized.includes("provision")) return "Updating"
-  if (normalized === "degraded") return "Degraded"
-  if (normalized === "notready" || normalized === "error" || normalized.includes("fail")) return "NotReady"
-  if (normalized === "unknown" || normalized === "stopped") return "Unknown"
-  return "Unknown"
-}
+const normalizeTenantState = normalizeTenantLifecycleState
 
 function parseStateCounts(payload: TenantStateCountsResponse): Record<TenantLifecycleState, number> {
   const result: Record<TenantLifecycleState, number> = { ...EMPTY_STATE_COUNTS }
@@ -392,7 +396,7 @@ export default function TenantsListPage() {
         <p className="text-sm text-muted-foreground">{t("Manage RustFS tenant instances.")}</p>
       </PageHeader>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
         <button
           type="button"
           onClick={() => setSelectedState(null)}

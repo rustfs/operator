@@ -14,6 +14,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import * as api from "@/lib/api"
 import { ApiError } from "@/lib/api-client"
+import { normalizeTopologyTenantState } from "@/lib/tenant-state"
 import { cn, formatBinaryBytes, formatK8sMemory } from "@/lib/utils"
 import type { ClusterResourcesResponse, NamespaceItem, NodeInfo } from "@/types/api"
 import type { TopologyOverviewResponse, TopologyTenantState } from "@/types/topology"
@@ -32,6 +33,16 @@ const STATE_THEME: Record<
     badge: "border-emerald-200 bg-emerald-50 text-emerald-700",
     dot: "bg-emerald-500",
     card: "border-emerald-200 bg-emerald-50/60",
+  },
+  Reconciling: {
+    badge: "border-blue-200 bg-blue-50 text-blue-700",
+    dot: "bg-blue-500",
+    card: "border-blue-200 bg-blue-50/60",
+  },
+  Blocked: {
+    badge: "border-purple-200 bg-purple-50 text-purple-700",
+    dot: "bg-purple-500",
+    card: "border-purple-200 bg-purple-50/60",
   },
   Updating: {
     badge: "border-blue-200 bg-blue-50 text-blue-700",
@@ -60,8 +71,11 @@ function getTreeDotClass(state: string): string {
     case "Ready":
     case "Running":
       return "bg-emerald-500"
+    case "Reconciling":
     case "Updating":
       return "bg-blue-500"
+    case "Blocked":
+      return "bg-purple-500"
     case "Degraded":
     case "Pending":
       return "bg-amber-500"
@@ -151,7 +165,10 @@ export default function DashboardPage() {
   const topologySummary = topology?.cluster.summary
   const tenantCount = topology?.namespaces.reduce((sum, ns) => sum + ns.tenants.length, 0) ?? 0
   const unhealthyCount =
-    topology?.namespaces.reduce((sum, ns) => sum + ns.tenants.filter((t) => t.state !== "Ready").length, 0) ?? 0
+    topology?.namespaces.reduce(
+      (sum, ns) => sum + ns.tenants.filter((tenant) => normalizeTopologyTenantState(tenant.state) !== "Ready").length,
+      0,
+    ) ?? 0
 
   const allPods = topology?.namespaces.flatMap((ns) => ns.tenants.flatMap((t) => t.pods ?? [])) ?? []
   const podTotal = allPods.length
@@ -257,6 +274,7 @@ export default function DashboardPage() {
                                 const tenantId = `t:${ns.name}/${tenant.name}`
                                 const pools = tenant.pools ?? []
                                 const pods = tenant.pods ?? []
+                                const tenantState = normalizeTopologyTenantState(tenant.state)
                                 return (
                                   <div key={tenant.name} className="vtree-vnode">
                                     <button
@@ -264,10 +282,10 @@ export default function DashboardPage() {
                                       className="vtree-vbox vtree-vbox--tenant"
                                       onClick={() => toggleTreeNode(tenantId)}
                                     >
-                                      <span className={cn("vtree-vdot", getTreeDotClass(tenant.state))} />
+                                      <span className={cn("vtree-vdot", getTreeDotClass(tenantState))} />
                                       <span className="vtree-vbox-name">{tenant.name}</span>
-                                      <span className={cn("vtree-vstate", STATE_THEME[tenant.state].badge)}>
-                                        {t(tenant.state)}
+                                      <span className={cn("vtree-vstate", STATE_THEME[tenantState].badge)}>
+                                        {t(tenantState)}
                                       </span>
                                       <RiArrowDownSLine
                                         className={cn("vtree-vchevron", !isTreeExpanded(tenantId) && "rotate-180")}

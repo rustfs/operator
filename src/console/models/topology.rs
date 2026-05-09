@@ -60,6 +60,11 @@ pub struct TopologyTenant {
     pub name: String,
     pub namespace: String,
     pub state: String,
+    pub ready: bool,
+    pub reconciling: bool,
+    pub degraded: bool,
+    pub stale: bool,
+    pub primary_reason: Option<String>,
     pub created_at: Option<String>,
     pub summary: TopologyTenantSummary,
     #[serde(skip_serializing_if = "Option::is_none")]

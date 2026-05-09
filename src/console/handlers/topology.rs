@@ -18,6 +18,7 @@ use crate::console::{
         format_cpu_from_millicores, format_memory_from_bytes, parse_cpu_to_millicores,
         parse_memory_to_bytes,
     },
+    models::tenant::tenant_status_summary,
     models::topology::*,
     state::Claims,
 };
@@ -199,13 +200,14 @@ pub async fn get_topology_overview(
                 .map(|t| {
                     let name = t.name_any();
                     let namespace = t.namespace().unwrap_or_default();
-                    let state = t
-                        .status
-                        .as_ref()
-                        .map(|s| s.current_state.clone())
-                        .unwrap_or_else(|| "Unknown".to_string());
+                    let status_summary = tenant_status_summary(t);
+                    let state = status_summary.current_state.clone();
 
-                    if !is_healthy_state(&state) {
+                    if !(status_summary.ready
+                        && !status_summary.reconciling
+                        && !status_summary.degraded
+                        && !status_summary.stale)
+                    {
                         unhealthy_count += 1;
                     }
 
@@ -276,6 +278,11 @@ pub async fn get_topology_overview(
                         name,
                         namespace,
                         state,
+                        ready: status_summary.ready,
+                        reconciling: status_summary.reconciling,
+                        degraded: status_summary.degraded,
+                        stale: status_summary.stale,
+                        primary_reason: status_summary.primary_reason,
                         created_at,
                         summary: TopologyTenantSummary {
                             pool_count,
@@ -324,11 +331,6 @@ pub async fn get_topology_overview(
         namespaces,
         nodes,
     }))
-}
-
-/// Whether the tenant aggregate state counts as healthy for the UI.
-fn is_healthy_state(state: &str) -> bool {
-    matches!(state, "Ready" | "Initialized")
 }
 
 /// Map operator `PoolState` to a short UI label.

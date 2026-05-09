@@ -86,6 +86,8 @@
   "Endpoint is unavailable": "Endpoint is unavailable",
   "Copy failed": "Copy failed",
   "Status": "Status",
+  "Reconciling": "Reconciling",
+  "Blocked": "Blocked",
   "Updating": "Updating",
   "Degraded": "Degraded",
   "NotReady": "NotReady",

@@ -86,6 +86,8 @@
   "Endpoint is unavailable": "Endpoint 不可用",
   "Copy failed": "复制失败",
   "Status": "状态",
+  "Reconciling": "协调中",
+  "Blocked": "阻塞",
   "Updating": "更新中",
   "Degraded": "降级",
   "NotReady": "未就绪",
