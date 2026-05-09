@@ -42,5 +42,60 @@ grep -q '^    - name: RUSTFS_UNSAFE_BYPASS_DISK_CHECK$' examples/tenant-4nodes.y
   && echo "  ✓ Kind demo bypasses same-disk safety check explicitly" \
   || { echo "  ✗ examples/tenant-4nodes.yaml must set RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true for local Kind PVs"; exit 1; }
 
+echo "9. Checking Rust-native e2e harness skeleton exists..."
+for required_file in \
+  e2e/Cargo.toml \
+  e2e/README.md \
+  e2e/manifests/kind-rustfs-e2e.yaml \
+  e2e/src/lib.rs \
+  e2e/src/framework/mod.rs \
+  e2e/src/framework/config.rs \
+  e2e/src/framework/command.rs \
+  e2e/src/framework/kind.rs \
+  e2e/src/framework/kubectl.rs \
+  e2e/src/framework/live.rs \
+  e2e/src/framework/tools.rs \
+  e2e/src/framework/kube_client.rs \
+  e2e/src/framework/console_client.rs \
+  e2e/src/framework/wait.rs \
+  e2e/src/framework/artifacts.rs \
+  e2e/src/framework/port_forward.rs \
+  e2e/src/framework/resources.rs \
+  e2e/src/framework/storage.rs \
+  e2e/src/framework/deploy.rs \
+  e2e/src/framework/images.rs \
+  e2e/src/framework/assertions.rs \
+  e2e/src/framework/tenant_factory.rs \
+  e2e/src/cases/mod.rs \
+  e2e/src/cases/smoke.rs \
+  e2e/src/cases/operator.rs \
+  e2e/src/cases/console.rs \
+  e2e/src/cases/faults.rs \
+  e2e/src/bin/rustfs-e2e.rs \
+  e2e/tests/smoke.rs \
+  e2e/tests/operator.rs \
+  e2e/tests/console.rs \
+  e2e/tests/faults.rs; do
+  test -f "$required_file" || { echo "  ✗ Missing $required_file"; exit 1; }
+done
+echo "  ✓ Rust-native e2e harness skeleton files exist"
+
+echo "10. Checking e2e Makefile live entrypoints are exposed..."
+grep -q '^e2e-live-create:' Makefile \
+  && grep -q '^e2e-live-run:' Makefile \
+  && grep -q '^e2e-live-update:' Makefile \
+  && grep -q '^e2e-live-delete:' Makefile \
+  && grep -q '^e2e-build-all:' Makefile \
+  && grep -q '^e2e-kind-create:' Makefile \
+  && grep -q '^e2e-kind-delete:' Makefile \
+  && grep -q '^e2e-kind-load-images:' Makefile \
+  && grep -q '^e2e-release-live:' Makefile \
+  && grep -q '^e2e-smoke-live:' Makefile \
+  && grep -q '^e2e-operator-live:' Makefile \
+  && grep -q '^e2e-console-live:' Makefile \
+  && grep -q '^e2e-faults-live:' Makefile \
+  && echo "  ✓ e2e live Makefile targets exist" \
+  || { echo "  ✗ Makefile must expose e2e live entrypoints"; exit 1; }
+
 echo ""
 echo "All script checks passed! ✅"

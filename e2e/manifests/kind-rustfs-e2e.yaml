@@ -1,0 +1,46 @@
+# Kind cluster configuration for RustFS Operator e2e runs.
+# Keep this file dedicated to e2e so release tests never reuse the demo cluster.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: rustfs-e2e
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "worker-group=storage-1,rustfs-storage=true"
+    extraMounts:
+      - hostPath: /tmp/rustfs-e2e-storage-1
+        containerPath: /mnt/data
+
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "worker-group=storage-2,rustfs-storage=true"
+    extraMounts:
+      - hostPath: /tmp/rustfs-e2e-storage-2
+        containerPath: /mnt/data
+
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "worker-group=storage-3,rustfs-storage=true"
+    extraMounts:
+      - hostPath: /tmp/rustfs-e2e-storage-3
+        containerPath: /mnt/data
