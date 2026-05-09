@@ -1,4 +1,6 @@
 /target
+/e2e/target
+.e2e-cache
 /vendor
 .idea
 .DS_Store
