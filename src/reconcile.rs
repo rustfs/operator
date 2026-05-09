@@ -57,7 +57,9 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         return Ok(Action::await_change());
     }
 
-    patch_reconcile_started(&ctx, &latest_tenant).await;
+    if should_mark_reconcile_started(&latest_tenant) {
+        patch_reconcile_started(&ctx, &latest_tenant).await;
+    }
 
     validate_tenant_prerequisites(&ctx, &latest_tenant).await?;
 
@@ -152,6 +154,16 @@ async fn patch_status_error(ctx: &Context, tenant: &Tenant, status_error: &Statu
                 %error,
                 "failed to patch Tenant status for reconcile error"
             );
+            if should_record {
+                let _ = ctx
+                    .record(
+                        tenant,
+                        status_error.event_type,
+                        status_error.reason.as_str(),
+                        &status_error.safe_message,
+                    )
+                    .await;
+            }
             let status_patch_error = StatusError::status_patch_failed(status_error.reason);
             let _ = ctx
                 .record(
@@ -525,10 +537,9 @@ mod tests {
         pod_has_owner_kind, pod_matches_policy_controller_kind, should_create_rbac,
         should_mark_reconcile_started,
     };
+    use crate::types::v1alpha1::status::Status;
     use k8s_openapi::api::core::v1 as corev1;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
-
-    use crate::types::v1alpha1::status::Status;
 
     #[test]
     fn should_not_mark_reconcile_started_when_generation_is_current() {

@@ -245,7 +245,11 @@ impl StatusBuilder {
     }
 
     pub fn mark_error(&mut self, error: &StatusError) {
-        self.clear_blocked_reason_conditions();
+        self.clear_stale_blocked_conditions(
+            error.condition_type,
+            error.reason,
+            &error.safe_message,
+        );
 
         match error.impact {
             StatusImpact::UserBlocked => {
@@ -418,6 +422,34 @@ impl StatusBuilder {
         }
     }
 
+    fn clear_stale_blocked_conditions(
+        &mut self,
+        current_condition_type: ConditionType,
+        reason: Reason,
+        message: &str,
+    ) {
+        let current_type = current_condition_type.as_str();
+        for condition in &mut self.next.conditions {
+            if condition.type_ == current_type
+                || condition.status != ConditionStatus::False.as_str()
+                || !is_blocked_reason(&condition.reason)
+            {
+                continue;
+            }
+
+            if condition.status != ConditionStatus::Unknown.as_str() {
+                condition.last_transition_time = Some(self.now.clone());
+            }
+            condition.status = ConditionStatus::Unknown.as_str().to_string();
+            condition.reason = reason.as_str().to_string();
+            condition.message = format!(
+                "Condition was not confirmed during the current reconcile: {}",
+                message
+            );
+            condition.observed_generation = self.generation;
+        }
+    }
+
     fn set_condition(
         &mut self,
         type_: ConditionType,
@@ -433,12 +465,6 @@ impl StatusBuilder {
             observed_generation: self.generation,
             now: self.now.clone(),
         });
-    }
-
-    fn clear_blocked_reason_conditions(&mut self) {
-        self.next
-            .conditions
-            .retain(|condition| !is_blocked_reason(&condition.reason));
     }
 }
 
@@ -682,6 +708,47 @@ mod tests {
     }
 
     #[test]
+    fn transient_error_does_not_keep_old_blocked_component_primary() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.generation = Some(7);
+        tenant.status = Some(Status {
+            current_state: "Blocked".to_string(),
+            available_replicas: 0,
+            pools: Vec::new(),
+            observed_generation: Some(7),
+            conditions: vec![condition(
+                "CredentialsReady",
+                "False",
+                "CredentialSecretNotFound",
+            )],
+        });
+        let status_error = StatusError {
+            reason: Reason::KubernetesApiError,
+            condition_type: ConditionType::Ready,
+            impact: StatusImpact::Transient,
+            safe_message: "Kubernetes API request failed".to_string(),
+            event_type: EventType::Warning,
+        };
+
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let status = builder.build();
+
+        assert_eq!(status.current_state, "Reconciling");
+        assert_eq!(
+            crate::types::v1alpha1::status::primary_condition(&status)
+                .map(|condition| condition.reason.as_str()),
+            Some("KubernetesApiError")
+        );
+        assert_eq!(
+            status
+                .condition(ConditionType::CredentialsReady)
+                .map(|condition| condition.status.as_str()),
+            Some("Unknown")
+        );
+    }
+
+    #[test]
     fn next_actions_are_registry_driven() {
         assert_eq!(
             crate::types::v1alpha1::status::next_actions_for_reason("PoolDeleteBlocked"),
@@ -764,7 +831,12 @@ mod tests {
                 .map(|condition| condition.reason.as_str()),
             Some("KubernetesApiError")
         );
-        assert!(status.condition(ConditionType::CredentialsReady).is_none());
+        assert_eq!(
+            status
+                .condition(ConditionType::CredentialsReady)
+                .map(|condition| condition.status.as_str()),
+            Some("Unknown")
+        );
     }
 
     #[test]
