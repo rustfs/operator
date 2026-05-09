@@ -343,6 +343,7 @@ deploy_operator_and_console() {
 
     local image_name="rustfs/operator:dev"
     local console_web_image="rustfs/console-web:dev"
+    local rustfs_server_image="rustfs/rustfs:latest"
 
     log_info "Building Operator (release)..."
     cargo build --release
@@ -372,13 +373,32 @@ deploy_operator_and_console() {
         exit 1
     }
 
-    # Load RustFS server image if present locally
+    # Load RustFS server image. The 4-node Kind demo is intended to run from a
+    # node-local image; if this fails, Tenant pods will fall back to Docker Hub
+    # and commonly end up in ImagePullBackOff in offline/proxied environments.
     if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q '^rustfs/rustfs:latest$'; then
-        log_info "Loading RustFS server image..."
-        kind load docker-image rustfs/rustfs:latest --name ${CLUSTER_NAME} 2>/dev/null || log_warning "Failed to load rustfs/rustfs:latest; Tenant may pull from registry"
+        log_info "Loading RustFS server image into Kind..."
+        kind load docker-image "$rustfs_server_image" --name ${CLUSTER_NAME} || {
+            log_error "Failed to load rustfs/rustfs:latest into Kind"
+            log_info "Build or pull the RustFS server image first, then rerun:"
+            log_info "  docker build -t rustfs/rustfs:latest <rustfs-server-repo>"
+            log_info "  kind load docker-image rustfs/rustfs:latest --name ${CLUSTER_NAME}"
+            exit 1
+        }
     else
-        log_warning "rustfs/rustfs:latest not found locally; Tenant will try to pull from registry"
+        log_error "rustfs/rustfs:latest not found locally"
+        log_info "Build or pull the RustFS server image first, then rerun:"
+        log_info "  docker build -t rustfs/rustfs:latest <rustfs-server-repo>"
+        exit 1
     fi
+
+    log_info "Verifying RustFS server image is available on all Kind nodes..."
+    for node in "${CLUSTER_NAME}-control-plane" "${WORKER_NODES[@]}"; do
+        if ! docker exec "$node" crictl images 2>/dev/null | grep -Eq 'rustfs/rustfs[[:space:]]+latest'; then
+            log_error "rustfs/rustfs:latest was not loaded into Kind node ${node}"
+            exit 1
+        fi
+    done
 
     log_info "Creating Console JWT Secret..."
     local jwt_secret
