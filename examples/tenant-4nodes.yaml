@@ -10,6 +10,9 @@ metadata:
     app: rustfs
 spec:
   image: rustfs/rustfs:latest
+  # Kind demos load the server image into node-local containerd. Avoid forcing
+  # Docker Hub access for the `latest` tag when the image is already present.
+  imagePullPolicy: IfNotPresent
   podManagementPolicy: Parallel
 
   # Credentials (optional - RustFS has built-in defaults if not specified)
@@ -59,6 +62,10 @@ spec:
   env:
     - name: RUST_LOG
       value: info
+    # Kind local PVs are backed by directories on the same Docker node disk.
+    # This is acceptable for local demos only; production must use distinct disks.
+    - name: RUSTFS_UNSAFE_BYPASS_DISK_CHECK
+      value: "true"
 
 ---
 # Credentials Secret for RustFS (keys must be at least 8 characters)
