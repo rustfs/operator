@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn live_and_destructive_guards_are_disabled_by_default() {
-        let config = E2eConfig::from_env();
+        let config = E2eConfig::defaults();
 
         assert!(require_live_enabled(&config).is_err());
         assert!(require_destructive_enabled(&config).is_err());

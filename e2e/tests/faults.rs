@@ -17,14 +17,14 @@ use rustfs_operator_e2e::framework::{config::E2eConfig, live};
 
 #[test]
 fn faults_are_not_destructive_without_explicit_opt_in() {
-    let config = E2eConfig::from_env();
+    let config = E2eConfig::defaults();
 
     assert!(!config.destructive_enabled);
     assert!(live::require_destructive_enabled(&config).is_err());
 }
 
 #[test]
-#[ignore = "reserved for destructive fault scenarios; run through `make e2e-faults-live` only after adding concrete fault cases"]
+#[ignore = "reserved for destructive fault scenarios; no public live target in the reduced workflow"]
 fn fault_live_suite_requires_explicit_destructive_opt_in() -> Result<()> {
     let config = E2eConfig::from_env();
 

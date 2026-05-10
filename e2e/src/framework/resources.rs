@@ -89,19 +89,19 @@ mod tests {
 
     #[test]
     fn smoke_tenant_manifest_wires_secret_storage_and_image() {
-        let config = E2eConfig::from_env();
+        let config = E2eConfig::defaults();
         let manifest = smoke_tenant_manifest(&config).expect("tenant manifest");
 
         assert!(manifest.contains("kind: Tenant"));
         assert!(manifest.contains("namespace: rustfs-e2e-smoke"));
-        assert!(manifest.contains("image: rustfs/rustfs:e2e"));
+        assert!(manifest.contains("image: rustfs/rustfs:latest"));
         assert!(manifest.contains("storageClassName: local-storage"));
         assert!(manifest.contains("name: e2e-tenant-credentials"));
     }
 
     #[test]
     fn credential_secret_uses_e2e_tenant_scope() {
-        let config = E2eConfig::from_env();
+        let config = E2eConfig::defaults();
         let manifest = credential_secret_manifest(&config);
 
         assert_eq!(credential_secret_name(&config), "e2e-tenant-credentials");

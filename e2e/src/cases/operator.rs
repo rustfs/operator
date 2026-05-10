@@ -15,36 +15,13 @@
 use super::{CaseSpec, Suite};
 
 pub fn cases() -> Vec<CaseSpec> {
-    vec![
-        CaseSpec::new(
-            Suite::Operator,
-            "operator_tenant_ready_lifecycle",
-            "Apply a Tenant and assert StatefulSet, Pods, Tenant Ready status, pool rollout, and ReconcileSucceeded event.",
-            "operator/reconcile",
-            "operator",
-        ),
-        CaseSpec::new(
-            Suite::Operator,
-            "operator_status_conditions_events",
-            "Assert currentState, observedGeneration, Ready/Degraded/Reconciling conditions, and Kubernetes events.",
-            "operator/status",
-            "operator",
-        ),
-        CaseSpec::new(
-            Suite::Operator,
-            "operator_no_status_churn",
-            "Record Tenant resourceVersion after Ready and ensure the operator does not self-trigger status churn.",
-            "operator/stability",
-            "operator",
-        ),
-        CaseSpec::new(
-            Suite::Operator,
-            "operator_pod_delete_recovery",
-            "Delete a RustFS server Pod and verify StatefulSet and operator status recover to Ready.",
-            "operator/recovery",
-            "operator",
-        ),
-    ]
+    vec![CaseSpec::new(
+        Suite::Operator,
+        "operator_live_tenant_is_ready_and_observed",
+        "Assert the live Tenant is Ready, not Degraded, and has observed the current generation.",
+        "operator/status",
+        "operator",
+    )]
 }
 
 #[cfg(test)]
@@ -52,14 +29,12 @@ mod tests {
     use super::cases;
 
     #[test]
-    fn operator_case_inventory_covers_lifecycle_status_and_recovery() {
+    fn operator_case_inventory_matches_executable_tests() {
         let names = cases()
             .into_iter()
             .map(|case| case.name)
             .collect::<Vec<_>>();
 
-        assert!(names.contains(&"operator_tenant_ready_lifecycle"));
-        assert!(names.contains(&"operator_status_conditions_events"));
-        assert!(names.contains(&"operator_pod_delete_recovery"));
+        assert_eq!(names, vec!["operator_live_tenant_is_ready_and_observed"]);
     }
 }

@@ -31,6 +31,12 @@ const CONSOLE_FRONTEND_SERVICE: &str =
 const CONSOLE_JWT_SECRET_NAME: &str = "rustfs-operator-console-secret";
 const E2E_OPERATOR_IMAGE_TAG_DEFAULT: &str = "rustfs/operator:dev";
 const E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT: &str = "rustfs/console-web:dev";
+const E2E_CONTROL_PLANE_DEPLOYMENTS: [&str; 3] = [
+    "rustfs-operator",
+    "rustfs-operator-console",
+    "rustfs-operator-console-frontend",
+];
+const CONTROL_PLANE_ROLLOUT_TIMEOUT: &str = "180s";
 
 pub fn deploy_dev(config: &E2eConfig) -> Result<()> {
     let kubectl = Kubectl::new(config);
@@ -79,6 +85,37 @@ pub fn deploy_dev(config: &E2eConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn rollout_dev(config: &E2eConfig) -> Result<()> {
+    let kubectl = Kubectl::new(config).namespaced(&config.operator_namespace);
+
+    kubectl
+        .command(
+            ["rollout", "restart", "deployment"]
+                .into_iter()
+                .chain(E2E_CONTROL_PLANE_DEPLOYMENTS),
+        )
+        .run_checked()?;
+
+    wait_control_plane_rollout(config)
+}
+
+pub fn wait_control_plane_rollout(config: &E2eConfig) -> Result<()> {
+    let kubectl = Kubectl::new(config).namespaced(&config.operator_namespace);
+
+    for deployment in E2E_CONTROL_PLANE_DEPLOYMENTS {
+        kubectl
+            .command([
+                "rollout".to_string(),
+                "status".to_string(),
+                format!("deployment/{deployment}"),
+                format!("--timeout={CONTROL_PLANE_ROLLOUT_TIMEOUT}"),
+            ])
+            .run_checked()?;
+    }
+
+    Ok(())
+}
+
 fn ensure_console_jwt_secret(config: &E2eConfig) -> String {
     format!(
         r#"apiVersion: v1
@@ -107,7 +144,8 @@ fn patch_images_and_tags(manifest: &str, image: &str, fallback: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT, E2E_OPERATOR_IMAGE_TAG_DEFAULT, patch_images_and_tags,
+        E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT, E2E_CONTROL_PLANE_DEPLOYMENTS,
+        E2E_OPERATOR_IMAGE_TAG_DEFAULT, patch_images_and_tags,
     };
 
     #[test]
@@ -127,5 +165,17 @@ mod tests {
         assert!(!operator.contains(E2E_OPERATOR_IMAGE_TAG_DEFAULT));
         assert!(web.contains("image: rustfs/console-web:e2e"));
         assert!(!web.contains(E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT));
+    }
+
+    #[test]
+    fn rollout_deployments_are_explicit_and_stable() {
+        assert_eq!(
+            E2E_CONTROL_PLANE_DEPLOYMENTS,
+            [
+                "rustfs-operator",
+                "rustfs-operator-console",
+                "rustfs-operator-console-frontend",
+            ]
+        );
     }
 }

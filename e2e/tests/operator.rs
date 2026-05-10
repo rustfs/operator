@@ -19,7 +19,7 @@ use rustfs_operator_e2e::framework::{assertions, config::E2eConfig, kube_client,
 use operator::types::v1alpha1::tenant::Tenant;
 
 #[tokio::test]
-#[ignore = "requires a live Tenant; run through `make e2e-operator-live`"]
+#[ignore = "requires a live Tenant; run through `make e2e-live-run`"]
 async fn operator_live_tenant_is_ready_and_observed() -> Result<()> {
     let config = E2eConfig::from_env();
     live::require_live_enabled(&config)?;

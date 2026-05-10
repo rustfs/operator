@@ -14,8 +14,8 @@
 
 use anyhow::Result;
 use rustfs_operator_e2e::framework::{
-    artifacts::ArtifactCollector, config::E2eConfig, kube_client, kubectl::Kubectl, live,
-    resources, storage, tools::required_tool_checks, wait,
+    artifacts::ArtifactCollector, config::E2eConfig, deploy, kube_client, live, resources, storage,
+    tools::required_tool_checks, wait,
 };
 
 #[test]
@@ -24,7 +24,7 @@ fn smoke_required_tool_inventory_is_defined() {
 }
 
 #[test]
-#[ignore = "requires a dedicated Kind cluster; run through `make e2e-smoke-live`"]
+#[ignore = "requires a dedicated Kind cluster; run through `make e2e-live-run`"]
 fn smoke_dedicated_context_is_active() -> Result<()> {
     let config = E2eConfig::from_env();
 
@@ -34,35 +34,18 @@ fn smoke_dedicated_context_is_active() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires deployed operator components; run through `make e2e-smoke-live`"]
-fn smoke_operator_and_console_deployments_are_ready() -> Result<()> {
+#[ignore = "requires deployed operator components; run through `make e2e-live-run`"]
+fn smoke_control_plane_deployments_are_ready() -> Result<()> {
     let config = E2eConfig::from_env();
     live::require_live_enabled(&config)?;
     live::ensure_dedicated_context(&config)?;
-
-    let kubectl = Kubectl::new(&config).namespaced(&config.operator_namespace);
-    kubectl
-        .command([
-            "rollout",
-            "status",
-            "deployment/rustfs-operator",
-            "--timeout=180s",
-        ])
-        .run_checked()?;
-    kubectl
-        .command([
-            "rollout",
-            "status",
-            "deployment/rustfs-operator-console",
-            "--timeout=180s",
-        ])
-        .run_checked()?;
+    deploy::wait_control_plane_rollout(&config)?;
 
     Ok(())
 }
 
 #[tokio::test]
-#[ignore = "creates storage, credentials, and a Tenant; run through `make e2e-smoke-live`"]
+#[ignore = "creates storage, credentials, and a Tenant; run through `make e2e-live-run`"]
 async fn smoke_apply_tenant_and_wait_ready() -> Result<()> {
     let config = E2eConfig::from_env();
     live::require_live_enabled(&config)?;

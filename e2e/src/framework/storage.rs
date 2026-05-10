@@ -14,16 +14,21 @@
 
 use anyhow::Result;
 
-use crate::framework::{command::CommandSpec, config::E2eConfig, kubectl::Kubectl};
+use crate::framework::{
+    command::CommandSpec,
+    config::{E2eConfig, KIND_WORKER_COUNT},
+    kubectl::Kubectl,
+};
 
 pub const RUSTFS_RUN_AS_UID: u32 = 10001;
 
 pub fn worker_node_names(config: &E2eConfig) -> Vec<String> {
-    vec![
-        format!("{}-worker", config.cluster_name),
-        format!("{}-worker2", config.cluster_name),
-        format!("{}-worker3", config.cluster_name),
-    ]
+    (1..=KIND_WORKER_COUNT)
+        .map(|index| match index {
+            1 => format!("{}-worker", config.cluster_name),
+            _ => format!("{}-worker{index}", config.cluster_name),
+        })
+        .collect()
 }
 
 pub fn volume_path(index: usize) -> String {
@@ -69,7 +74,7 @@ volumeBindingMode: WaitForFirstConsumer
     );
 
     for index in 1..=config.pv_count {
-        let worker_group = ((index - 1) % 3) + 1;
+        let worker_group = ((index - 1) % KIND_WORKER_COUNT) + 1;
         manifest.push_str(&format!(
             r#"---
 apiVersion: v1
@@ -124,7 +129,7 @@ mod tests {
 
     #[test]
     fn local_storage_manifest_uses_configured_class_and_pv_count() {
-        let config = E2eConfig::from_env();
+        let config = E2eConfig::defaults();
         let manifest = local_storage_manifest(&config);
 
         assert!(manifest.contains("name: local-storage"));
@@ -139,7 +144,7 @@ mod tests {
 
     #[test]
     fn storage_volume_commands_target_dedicated_workers() {
-        let config = E2eConfig::from_env();
+        let config = E2eConfig::defaults();
 
         assert_eq!(
             worker_node_names(&config),

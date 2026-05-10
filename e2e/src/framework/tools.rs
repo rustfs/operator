@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
-
 use crate::framework::command::CommandSpec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,28 +41,12 @@ pub fn required_tool_checks() -> Vec<ToolCheck> {
     ]
 }
 
-pub fn run_doctor_checks() -> Vec<(&'static str, Result<String>)> {
-    required_tool_checks()
-        .into_iter()
-        .map(|check| {
-            let result = check.command.run_checked().map(|output| {
-                if output.stdout.trim().is_empty() {
-                    output.stderr.trim().to_string()
-                } else {
-                    output.stdout.lines().next().unwrap_or_default().to_string()
-                }
-            });
-            (check.name, result)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::required_tool_checks;
 
     #[test]
-    fn doctor_checks_cover_required_host_tools() {
+    fn required_tool_inventory_covers_live_e2e_dependencies() {
         let tools = required_tool_checks()
             .into_iter()
             .map(|check| check.name)

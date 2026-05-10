@@ -50,14 +50,6 @@ impl Kubectl {
     pub fn apply_yaml_command(&self, yaml: impl Into<String>) -> CommandSpec {
         self.command(["apply", "-f", "-"]).stdin(yaml)
     }
-
-    pub fn apply_file_command(&self, path: impl Into<String>) -> CommandSpec {
-        self.command(["apply".to_string(), "-f".to_string(), path.into()])
-    }
-
-    pub fn current_context_command() -> CommandSpec {
-        CommandSpec::new("kubectl").args(["config", "current-context"])
-    }
 }
 
 #[cfg(test)]
@@ -67,7 +59,7 @@ mod tests {
 
     #[test]
     fn kubectl_commands_pin_the_expected_context() {
-        let kubectl = Kubectl::new(&E2eConfig::from_env()).namespaced("rustfs-system");
+        let kubectl = Kubectl::new(&E2eConfig::defaults()).namespaced("rustfs-system");
         let command = kubectl.command(["get", "pods"]);
 
         assert_eq!(
@@ -78,7 +70,7 @@ mod tests {
 
     #[test]
     fn kubectl_apply_yaml_uses_stdin_without_exposing_payload() {
-        let kubectl = Kubectl::new(&E2eConfig::from_env());
+        let kubectl = Kubectl::new(&E2eConfig::defaults());
         let command = kubectl.apply_yaml_command("kind: Namespace");
 
         assert_eq!(

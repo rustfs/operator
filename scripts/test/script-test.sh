@@ -70,7 +70,6 @@ for required_file in \
   e2e/src/cases/smoke.rs \
   e2e/src/cases/operator.rs \
   e2e/src/cases/console.rs \
-  e2e/src/cases/faults.rs \
   e2e/src/bin/rustfs-e2e.rs \
   e2e/tests/smoke.rs \
   e2e/tests/operator.rs \
@@ -80,22 +79,17 @@ for required_file in \
 done
 echo "  ✓ Rust-native e2e harness skeleton files exist"
 
-echo "10. Checking e2e Makefile live entrypoints are exposed..."
-grep -q '^e2e-live-create:' Makefile \
-  && grep -q '^e2e-live-run:' Makefile \
-  && grep -q '^e2e-live-update:' Makefile \
-  && grep -q '^e2e-live-delete:' Makefile \
-  && grep -q '^e2e-build-all:' Makefile \
-  && grep -q '^e2e-kind-create:' Makefile \
-  && grep -q '^e2e-kind-delete:' Makefile \
-  && grep -q '^e2e-kind-load-images:' Makefile \
-  && grep -q '^e2e-release-live:' Makefile \
-  && grep -q '^e2e-smoke-live:' Makefile \
-  && grep -q '^e2e-operator-live:' Makefile \
-  && grep -q '^e2e-console-live:' Makefile \
-  && grep -q '^e2e-faults-live:' Makefile \
-  && echo "  ✓ e2e live Makefile targets exist" \
-  || { echo "  ✗ Makefile must expose e2e live entrypoints"; exit 1; }
+echo "10. Checking reduced e2e Makefile entrypoints are exposed..."
+actual_e2e_targets=$(grep -E '^e2e-[A-Za-z0-9_-]+:' Makefile | cut -d: -f1 | sort | tr '\n' ' ' | sed 's/ $//')
+expected_e2e_targets=$(printf '%s\n' e2e-check e2e-live-create e2e-live-delete e2e-live-run e2e-live-update | sort | tr '\n' ' ' | sed 's/ $//')
+if [ "$actual_e2e_targets" = "$expected_e2e_targets" ]; then
+  echo "  ✓ reduced e2e Makefile targets exist"
+else
+  echo "  ✗ Makefile must expose only e2e-check plus the four live entrypoints"
+  echo "    expected: $expected_e2e_targets"
+  echo "    actual:   $actual_e2e_targets"
+  exit 1
+fi
 
 echo ""
 echo "All script checks passed! ✅"

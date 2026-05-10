@@ -110,3 +110,6 @@ jobs:
 
       - name: Run clippy lints
         run: cargo clippy --all-features -- -D warnings
+
+      - name: Check Rust-native e2e harness
+        run: make e2e-check

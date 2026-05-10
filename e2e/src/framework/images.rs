@@ -42,14 +42,14 @@ mod tests {
 
     #[test]
     fn image_set_tracks_operator_console_and_server_images() {
-        let images = ImageSet::from_config(&E2eConfig::from_env());
+        let images = ImageSet::from_config(&E2eConfig::defaults());
 
         assert_eq!(
             images.all(),
             [
                 "rustfs/operator:e2e",
                 "rustfs/console-web:e2e",
-                "rustfs/rustfs:e2e"
+                "rustfs/rustfs:latest"
             ]
         );
     }

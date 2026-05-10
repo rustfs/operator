@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod console;
-pub mod faults;
 pub mod operator;
 pub mod smoke;
 
@@ -22,7 +21,6 @@ pub enum Suite {
     Smoke,
     Operator,
     Console,
-    Faults,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +55,6 @@ pub fn all_cases() -> Vec<CaseSpec> {
     cases.extend(smoke::cases());
     cases.extend(operator::cases());
     cases.extend(console::cases());
-    cases.extend(faults::cases());
     cases
 }
 
@@ -74,7 +71,6 @@ mod tests {
         assert!(suites.contains(&Suite::Smoke));
         assert!(suites.contains(&Suite::Operator));
         assert!(suites.contains(&Suite::Console));
-        assert!(suites.contains(&Suite::Faults));
     }
 
     #[test]
@@ -104,7 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn operator_and_console_cases_are_both_present() {
+    fn executable_cases_are_present_for_each_suite() {
         let counts = all_cases()
             .into_iter()
             .fold(HashMap::new(), |mut acc, case| {
@@ -112,7 +108,8 @@ mod tests {
                 acc
             });
 
-        assert!(counts.get(&Suite::Operator).copied().unwrap_or_default() >= 3);
-        assert!(counts.get(&Suite::Console).copied().unwrap_or_default() >= 3);
+        assert_eq!(counts.get(&Suite::Smoke).copied().unwrap_or_default(), 3);
+        assert_eq!(counts.get(&Suite::Operator).copied().unwrap_or_default(), 1);
+        assert_eq!(counts.get(&Suite::Console).copied().unwrap_or_default(), 1);
     }
 }

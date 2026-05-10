@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use anyhow::{Context, Result, bail};
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -111,6 +112,37 @@ impl CommandSpec {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+
+    pub fn spawn_background_with_log(&self, log_path: impl AsRef<Path>) -> Result<Child> {
+        if self.stdin.is_some() {
+            bail!(
+                "background command stdin is not supported: {}",
+                self.display()
+            );
+        }
+
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path.as_ref())
+            .with_context(|| format!("open command log {}", log_path.as_ref().display()))?;
+        let stderr = log
+            .try_clone()
+            .with_context(|| format!("clone command log {}", log_path.as_ref().display()))?;
+
+        let mut command = Command::new(&self.program);
+        command.args(&self.args);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .with_context(|| format!("failed to start background command: {}", self.display()))
     }
 
     pub fn run_checked(&self) -> Result<CommandOutput> {

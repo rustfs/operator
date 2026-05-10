@@ -13,17 +13,29 @@
 // limitations under the License.
 
 use anyhow::{Result, ensure};
-use rustfs_operator_e2e::framework::{config::E2eConfig, console_client::ConsoleClient, live};
+use rustfs_operator_e2e::framework::{
+    config::E2eConfig,
+    console_client::ConsoleClient,
+    live,
+    port_forward::{PortForwardGuard, PortForwardSpec},
+};
 use serde_json::Value;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+
+const CONSOLE_READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[tokio::test]
-#[ignore = "requires Console API reachability; run through `make e2e-console-live` after port-forward/ingress is available"]
+#[ignore = "requires Console API reachability; run through `make e2e-live-run`"]
 async fn console_live_health_ready_and_openapi_are_available() -> Result<()> {
     let config = E2eConfig::from_env();
     live::require_live_enabled(&config)?;
     live::ensure_dedicated_context(&config)?;
 
-    let console = ConsoleClient::new(&config.console_base_url)?;
+    let console_url = PortForwardSpec::console(&config.operator_namespace).local_base_url();
+    let mut port_forward = PortForwardSpec::start_console(&config)?;
+    let console = ConsoleClient::new(&console_url)?;
+    wait_for_console_health(&mut port_forward, &console).await?;
     let health = console.get_text("/healthz").await?;
     let ready = console.get_text("/readyz").await?;
     let openapi = console.get_json::<Value>("/api-docs/openapi.json").await?;
@@ -40,4 +52,28 @@ async fn console_live_health_ready_and_openapi_are_available() -> Result<()> {
     );
 
     Ok(())
+}
+
+async fn wait_for_console_health(
+    port_forward: &mut PortForwardGuard,
+    console: &ConsoleClient,
+) -> Result<()> {
+    let deadline = Instant::now() + CONSOLE_READY_TIMEOUT;
+
+    loop {
+        port_forward.ensure_running()?;
+        if console.get_text("/healthz").await.is_ok() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "console port-forward not ready after {:?}; command: {}; log {}:\n{}",
+                CONSOLE_READY_TIMEOUT,
+                port_forward.command_display(),
+                port_forward.log_path().display(),
+                port_forward.log_contents()
+            );
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
 }

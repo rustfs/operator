@@ -2,7 +2,7 @@
 
 This crate is the Rust-native integration-test harness for release-grade validation of the RustFS Operator and its Console API.
 
-The harness is intentionally separated from the main operator crate so heavy e2e dependencies do not slow the default `make pre-commit` path. It is driven through the reduced live entrypoints `e2e-live-create`, `e2e-live-run`, `e2e-live-update`, and `e2e-live-delete`.
+The harness is intentionally separated from the main operator crate so e2e-only dependencies stay scoped to the `e2e/` manifest while still being validated by `make e2e-check` and the default `make pre-commit` path. It is driven through the reduced live entrypoints `e2e-live-create`, `e2e-live-run`, `e2e-live-update`, and `e2e-live-delete`.
 
 ## Architecture
 
@@ -20,14 +20,14 @@ e2e/
     kind-rustfs-e2e.yaml  dedicated 1 control-plane + 3 worker Kind cluster
   src/
     lib.rs
-    bin/rustfs-e2e.rs  small CLI for plan/doctor/kind/image/storage commands
+    bin/rustfs-e2e.rs  Makefile-internal helper for live workflow steps
     framework/
       config.rs          environment and CI knobs
       command.rs         safe subprocess wrapper for kind/docker/kubectl
       kind.rs            Kind cluster lifecycle and host mount preparation
       kubectl.rs         kubectl command construction boundary
       live.rs            live-run guardrails and context safety
-      tools.rs           local tool doctor checks
+      tools.rs           local host tool inventory
       kube_client.rs     kube-rs client boundary
       console_client.rs  reqwest Console API boundary
       wait.rs            timeout/polling helpers and Tenant Ready wait
@@ -39,15 +39,14 @@ e2e/
       assertions.rs      Kubernetes and Tenant status assertions
       tenant_factory.rs  reusable Tenant manifests for e2e
     cases/
-      smoke.rs           install and health checks
-      operator.rs        reconcile/status/conditions/events checks
-      console.rs         Console API/auth/topology/events checks
-      faults.rs          deterministic failure/recovery checks
+      smoke.rs           install and readiness checks
+      operator.rs        Tenant status and observed-generation checks
+      console.rs         Console API health/readiness/OpenAPI checks
   tests/
     smoke.rs             ignored live smoke entrypoints
-    operator.rs          ignored live Operator assertions
-    console.rs           ignored live Console API assertions
-    faults.rs            destructive-fault guard entrypoint
+    operator.rs          ignored live Operator assertion
+    console.rs           ignored live Console API assertion
+    faults.rs            non-live destructive opt-in guard
 ```
 
 ## Boundary rules
@@ -72,55 +71,57 @@ operator ns:      rustfs-system
 test namespace:   rustfs-e2e-smoke
 tenant name:      e2e-tenant
 console URL:      http://127.0.0.1:19090
+rustfs image:      rustfs/rustfs:latest
 storage class:    local-storage
 PV count:         12
 kind config:      e2e/manifests/kind-rustfs-e2e.yaml
 ```
 
-Live tests are `#[ignore]` and require explicit opt-in:
+Live tests are `#[ignore]` and run through the reduced Make workflow. The Makefile injects `RUSTFS_E2E_LIVE=1` internally, so the common flow does not need the environment prefix:
 
 ```bash
-RUSTFS_E2E_LIVE=1 make e2e-smoke-live
-```
-
-Fault tests also require:
-
-```bash
-RUSTFS_E2E_DESTRUCTIVE=1
+make e2e-live-run
 ```
 
 The harness refuses to run live tests unless the active Kubernetes context matches the configured dedicated Kind context.
 
-## Usage (保留 4 个常用入口)
-
-- `make e2e-live-create`：
-  创建 live 环境（默认会 build e2e 镜像，删除旧 `kind-rustfs-e2e`，清理 dedicated storage，再 create + load 镜像）。
-- `make e2e-live-run`：
-  在现有 live 环境执行全部 live 用例（smoke/operator/console）。
-- `make e2e-live-update`：
-  只重建发生变化的镜像（默认增量），然后把镜像更新到 live（load + rollout）。
-  前提：控制面组件已部署（`make e2e-live-run` 之后或手工 `e2e-deploy-dev`）。
-  如需强制重建可加 `E2E_FORCE_REBUILD=1`。
-- `make e2e-live-delete`：
-  删除 live 集群，并清理 dedicated storage 目录 `/tmp/rustfs-e2e-storage-{1,2,3}`。
-
-推荐工作流：
+## Non-live validation
 
 ```bash
-# 首次创建环境
-make e2e-live-create
-
-# 先跑一遍用例（会部署控制面并创建 tenant）
-make e2e-live-run
-
-# 修改代码后，更新镜像并重启 deployment
-make e2e-live-update
-
-# 更新后再跑用例
-make e2e-live-run
-
-# 用完后清理
-make e2e-live-delete
+make e2e-check
 ```
 
-`make e2e-faults-live` 仍作为显式破坏性场景保留（需 `RUSTFS_E2E_DESTRUCTIVE=1`）。
+This runs e2e formatting, non-live tests, and clippy. Live tests remain `#[ignore]` and require the live commands below.
+
+## Usage (four common entry points)
+
+- `make e2e-live-create`:
+  Creates the dedicated live environment: builds the e2e image, removes old `kind-rustfs-e2e`, cleans dedicated storage, then performs create + image load.
+- `make e2e-live-run`:
+  Runs all live suites (smoke/operator/console) in an existing live environment.
+- `make e2e-live-update`:
+  Rebuilds the e2e image and updates it into the live environment (`load + rollout`).
+  Prerequisite: control-plane components must already be deployed (usually after `make e2e-live-run`).
+- `make e2e-live-delete`:
+  Deletes the live cluster and cleans dedicated storage at `/tmp/rustfs-e2e-storage-{1,2,3}`.
+
+Image builds use Docker host network internally to avoid local bridge DNS resolution issues for npm/crates registries; the exposed user entry points remain only these four commands.
+
+Recommended workflow:
+
+```bash
+# Initial setup
+make e2e-live-create
+
+# Run all suites once (deploys control plane and creates tenant)
+make e2e-live-run
+
+# Rebuild image and restart deployment after code changes
+make e2e-live-update
+
+# Run suites again after rollout
+make e2e-live-run
+
+# Clean up
+make e2e-live-delete
+```
