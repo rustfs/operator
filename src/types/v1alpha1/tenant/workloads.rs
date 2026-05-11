@@ -527,6 +527,7 @@ impl Tenant {
                             .scheduling
                             .topology_spread_constraints
                             .clone(),
+                        image_pull_secrets: self.spec.image_pull_secret.clone().map(|s| vec![s]),
                         ..Default::default()
                     }),
                 },
