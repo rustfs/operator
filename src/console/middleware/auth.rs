@@ -14,12 +14,13 @@
 
 use axum::{
     extract::{Request, State},
-    http::{Method, StatusCode, header},
+    http::{Method, header},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use jsonwebtoken::{DecodingKey, Validation, decode};
 
+use crate::console::error::Error;
 use crate::console::state::{AppState, Claims};
 
 /// JWT session middleware.
@@ -29,7 +30,7 @@ pub async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
     // Allow CORS preflight without 401 (browser would treat as CORS failure)
     if request.method() == Method::OPTIONS {
         return Ok(next.run(request).await);
@@ -52,7 +53,8 @@ pub async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let token = parse_session_cookie(cookies).ok_or(StatusCode::UNAUTHORIZED)?;
+    let token = parse_session_cookie(cookies)
+        .ok_or_else(|| unauthorized_response("Missing or invalid session"))?;
 
     // Verify JWT signature and claims
     let claims = decode::<Claims>(
@@ -62,7 +64,7 @@ pub async fn auth_middleware(
     )
     .map_err(|e| {
         tracing::warn!("JWT validation failed: {}", e);
-        StatusCode::UNAUTHORIZED
+        unauthorized_response("Missing or invalid session")
     })?
     .claims;
 
@@ -70,13 +72,20 @@ pub async fn auth_middleware(
     let now = chrono::Utc::now().timestamp() as usize;
     if claims.exp < now {
         tracing::warn!("Token expired");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(unauthorized_response("Missing or invalid session"));
     }
 
     // Stash claims for handlers
     request.extensions_mut().insert(claims);
 
     Ok(next.run(request).await)
+}
+
+fn unauthorized_response(message: &str) -> Response {
+    Error::Unauthorized {
+        message: message.to_string(),
+    }
+    .into_response()
 }
 
 /// Extract `session=<jwt>` from a raw `Cookie` header value
@@ -94,6 +103,17 @@ fn parse_session_cookie(cookies: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::StatusCode,
+        middleware,
+        routing::get,
+    };
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    use crate::console::state::AppState;
 
     #[test]
     fn test_parse_session_cookie() {
@@ -105,5 +125,37 @@ mod tests {
 
         let cookies = "other=value";
         assert_eq!(parse_session_cookie(cookies), None);
+    }
+
+    #[tokio::test]
+    async fn missing_session_returns_standard_error_contract()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::new("test-secret".to_string());
+        let app = Router::new()
+            .route("/api/v1/protected", get(|| async { "ok" }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/protected")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let value: serde_json::Value = serde_json::from_slice(&body)?;
+
+        assert_eq!(
+            value,
+            json!({
+                "code": "Unauthorized",
+                "reason": "Unauthorized",
+                "message": "Missing or invalid session"
+            })
+        );
+        Ok(())
     }
 }
