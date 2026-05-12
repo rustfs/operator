@@ -9,39 +9,39 @@ homepage = "https://rustfs.com"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-const-str = "1.0.0"
+const-str = "1.1.0"
 serde = { version = "1.0.228", features = ["derive"] }
-tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
+tokio = { version = "1.50.0", features = ["rt", "rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
-futures = "0.3.31"
+futures = "0.3.32"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-serde_json = "1.0.148"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
-strum = { version = "0.27.2", features = ["derive"] }
+strum = { version = "0.28.0", features = ["derive"] }
 k8s-openapi = { version = "0.26.1", features = ["v1_30", "schemars"] }
-kube = { version = "2.0.1", features = ["runtime", "derive", "client", "rustls-tls"] }
+kube = { version = "3.1.0", features = ["runtime", "derive", "client", "rustls-tls"] }
 schemars = "1"
-clap = { version = "4.5.54", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pemfile = "2.2.0"
-shadow-rs = "1.5.0"
-snafu = { version = "0.8.9", features = ["futures"] }
+shadow-rs = "2.0.0"
+snafu = { version = "0.9.0", features = ["futures"] }
 
 # Console dependencies
-axum = { version = "0.7", features = ["macros", "json"] }
+axum = { version = "0.8", features = ["macros", "json"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
-jsonwebtoken = "9.3"
-http = "1.2"
+jsonwebtoken = "10.4"
+http = "1.4"
 utoipa = { version = "5", features = ["chrono"] }
-utoipa-swagger-ui = { version = "8", features = ["axum", "vendored"] }
+utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 
 [dev-dependencies]
 
 [build-dependencies]
-shadow-rs = { version = "1.5.0", features = ["build"] }
+shadow-rs = { version = "2.0.0", features = ["build"] }
 
 [lints.rust]
 unused_variables = "allow"
