@@ -628,6 +628,11 @@ impl Tenant {
             return Ok(true);
         }
 
+        // Check image pull secrets
+        if existing_pod_spec.image_pull_secrets != desired_pod_spec.image_pull_secrets {
+            return Ok(true);
+        }
+
         // Check node selector
         if existing_pod_spec.node_selector != desired_pod_spec.node_selector {
             return Ok(true);
@@ -847,6 +852,12 @@ mod tests {
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
     use k8s_openapi::api::core::v1 as corev1;
 
+    fn image_pull_secret(name: &str) -> corev1::LocalObjectReference {
+        corev1::LocalObjectReference {
+            name: name.to_string(),
+        }
+    }
+
     // Test: Pod runs as non-root with proper security context
     #[test]
     fn test_statefulset_sets_security_context() {
@@ -1065,6 +1076,31 @@ mod tests {
         );
     }
 
+    // Test: StatefulSet renders tenant-level image pull secret
+    #[test]
+    fn test_statefulset_renders_image_pull_secret() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image_pull_secret = Some(image_pull_secret("registry-cred"));
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+
+        assert_eq!(
+            pod_spec.image_pull_secrets,
+            Some(vec![image_pull_secret("registry-cred")]),
+            "Pod should use tenant image pull secret"
+        );
+    }
+
     // Test: StatefulSet applies pool-level node selector
     #[test]
     fn test_statefulset_applies_node_selector() {
@@ -1262,6 +1298,74 @@ mod tests {
         assert!(
             needs_update,
             "StatefulSet should need update when image changes"
+        );
+    }
+
+    // Test: StatefulSet diff detection - image pull secret add
+    #[test]
+    fn test_statefulset_image_pull_secret_add_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        tenant.spec.image_pull_secret = Some(image_pull_secret("registry-cred"));
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when image pull secret is added"
+        );
+    }
+
+    // Test: StatefulSet diff detection - image pull secret change
+    #[test]
+    fn test_statefulset_image_pull_secret_change_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image_pull_secret = Some(image_pull_secret("old-registry-cred"));
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        tenant.spec.image_pull_secret = Some(image_pull_secret("new-registry-cred"));
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when image pull secret changes"
+        );
+    }
+
+    // Test: StatefulSet diff detection - image pull secret removal
+    #[test]
+    fn test_statefulset_image_pull_secret_removal_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image_pull_secret = Some(image_pull_secret("registry-cred"));
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        tenant.spec.image_pull_secret = None;
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when image pull secret is removed"
         );
     }
 
