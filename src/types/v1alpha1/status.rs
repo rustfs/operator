@@ -401,6 +401,7 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "InvalidTenantName" => vec!["renameTenant"],
         "ImmutableFieldModified" => vec!["restoreImmutableField"],
         "PoolDeleteBlocked" => vec!["restorePoolSpec", "startDecommissionAfterRestore"],
+        "DecommissionRequired" => vec!["startDecommission", "inspectPoolStatus"],
         "StatefulSetUpdateValidationFailed" => vec!["restoreImmutableField"],
         "StatefulSetApplyFailed" => vec!["retry", "inspectOperatorLogs"],
         "RolloutInProgress" => vec!["waitForRollout"],
@@ -467,6 +468,10 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("ObservedGenerationStale"),
             vec!["waitForReconcile"]
+        );
+        assert_eq!(
+            next_actions_for_reason("DecommissionRequired"),
+            vec!["startDecommission", "inspectPoolStatus"]
         );
     }
 

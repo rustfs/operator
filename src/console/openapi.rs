@@ -25,6 +25,9 @@ use crate::console::models::cluster::{
     ClusterResourcesResponse, CreateNamespaceRequest, NamespaceItem, NamespaceListResponse,
     NodeInfo, NodeListResponse,
 };
+use crate::console::models::common::{
+    ConsoleActionResponse, ConsoleErrorDetails, ConsoleErrorResponse,
+};
 use crate::console::models::event::{EventItem, EventListResponse};
 use crate::console::models::pod::{
     ContainerInfo, ContainerState, DeletePodResponse, LogsQuery, PodCondition, PodDetails,
@@ -80,6 +83,9 @@ use crate::console::models::topology::{
         LoginRequest,
         LoginResponse,
         SessionResponse,
+        ConsoleErrorResponse,
+        ConsoleErrorDetails,
+        ConsoleActionResponse,
         TenantListItem,
         TenantListResponse,
         TenantListQuery,
@@ -241,7 +247,25 @@ fn api_add_pool(_body: Json<AddPoolRequest>) -> Json<AddPoolResponse> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(delete, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools/{pool}", params(("namespace" = String, Path), ("name" = String, Path), ("pool" = String, Path)), responses((status = 200, body = DeletePoolResponse)), tag = "pools")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools/{pool}",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("pool" = String, Path)
+    ),
+    responses(
+        (status = 200, body = DeletePoolResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "pools"
+)]
 fn api_delete_pool() -> Json<DeletePoolResponse> {
     unimplemented!("Documentation only")
 }
@@ -301,4 +325,28 @@ fn api_create_namespace(_body: Json<CreateNamespaceRequest>) -> Json<NamespaceIt
 #[utoipa::path(get, path = "/api/v1/topology/overview", responses((status = 200, body = TopologyOverviewResponse)), tag = "topology")]
 fn api_get_topology_overview() -> Json<TopologyOverviewResponse> {
     unimplemented!("Documentation only")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiDoc;
+    use serde_json::Value;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn delete_pool_documents_standard_error_responses() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
+        let responses = spec
+            .pointer("/paths/~1api~1v1~1namespaces~1{namespace}~1tenants~1{name}~1pools~1{pool}/delete/responses")
+            .expect("delete pool responses exist");
+
+        for status in ["400", "401", "403", "404", "409", "500"] {
+            let pointer = format!("/{status}/content/application~1json/schema/$ref");
+            assert_eq!(
+                responses.pointer(&pointer).and_then(Value::as_str),
+                Some("#/components/schemas/ConsoleErrorResponse"),
+                "status {status} should use ConsoleErrorResponse"
+            );
+        }
+    }
 }

@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{Extension, Json, extract::Path};
+use axum::{Extension, Json, extract::Path, http::StatusCode};
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, ResourceExt, api::ListParams};
 
 use crate::console::{
     error::{self, Error, Result},
-    models::pool::*,
+    models::{common::ConsoleErrorDetails, pool::*},
     state::Claims,
 };
 use crate::types::v1alpha1::{
     persistence::PersistenceConfig,
     pool::{Pool, SchedulingConfig, validate_pool_total_volumes},
+    status::next_actions_for_reason,
     tenant::Tenant,
 };
 
@@ -83,6 +84,138 @@ fn is_valid_k8s_quantity(s: &str) -> bool {
 fn validate_pool_volumes(servers: i32, volumes_per_server: i32) -> Result<i32> {
     validate_pool_total_volumes(servers, volumes_per_server)
         .map_err(|message| Error::BadRequest { message })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PoolDeleteDecision {
+    RemoveFromSpec,
+    RequiresDecommission { reason: &'static str },
+}
+
+const REASON_DECOMMISSION_REQUIRED: &str = "DecommissionRequired";
+const REASON_OBSERVATION_STALE: &str = "ObservedGenerationStale";
+
+fn action_strings(reason: &str) -> Vec<String> {
+    next_actions_for_reason(reason)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn ensure_pool_delete_does_not_remove_last_pool(total_pools: usize) -> Result<()> {
+    if total_pools == 1 {
+        return Err(Error::BadRequest {
+            message: "Cannot delete the last pool. Delete the entire Tenant instead.".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn classify_pool_delete(
+    total_pools: usize,
+    managed_statefulset_exists: bool,
+    recorded_pool_status_exists: bool,
+) -> Result<PoolDeleteDecision> {
+    ensure_pool_delete_does_not_remove_last_pool(total_pools)?;
+
+    if managed_statefulset_exists || recorded_pool_status_exists {
+        return Ok(PoolDeleteDecision::RequiresDecommission {
+            reason: REASON_DECOMMISSION_REQUIRED,
+        });
+    }
+
+    Ok(PoolDeleteDecision::RemoveFromSpec)
+}
+
+fn is_pool_observation_current(tenant: &Tenant) -> bool {
+    tenant
+        .status
+        .as_ref()
+        .and_then(|status| status.observed_generation)
+        .zip(tenant.metadata.generation)
+        .is_some_and(|(observed_generation, generation)| observed_generation >= generation)
+}
+
+fn is_managed_pool_statefulset(
+    tenant: &Tenant,
+    statefulset: &appsv1::StatefulSet,
+    pool_name: &str,
+) -> bool {
+    let tenant_name = tenant.name_any();
+    let expected_name = format!("{}-{}", tenant_name, pool_name);
+    if statefulset.name_any() != expected_name {
+        return false;
+    }
+
+    let labels_match = statefulset.metadata.labels.as_ref().is_some_and(|labels| {
+        labels
+            .get("rustfs.tenant")
+            .is_some_and(|value| value == &tenant_name)
+            && labels
+                .get("rustfs.pool")
+                .is_some_and(|value| value == pool_name)
+    });
+    if !labels_match {
+        return false;
+    }
+
+    let Some(owner_references) = statefulset.metadata.owner_references.as_ref() else {
+        return false;
+    };
+    owner_references.iter().any(|owner| {
+        owner.kind == "Tenant"
+            && owner.name == tenant_name
+            && match tenant.metadata.uid.as_deref() {
+                Some(uid) => owner.uid == uid,
+                None => true,
+            }
+    })
+}
+
+fn pool_delete_requires_decommission_error(
+    namespace: &str,
+    tenant_name: &str,
+    pool_name: &str,
+    reason: &'static str,
+) -> Error {
+    Error::ActionRequired {
+        status: StatusCode::CONFLICT,
+        code: "PoolDeleteRequiresDecommission".to_string(),
+        reason: reason.to_string(),
+        message: format!(
+            "Pool '{}' already has managed resources and must be decommissioned before removal.",
+            pool_name
+        ),
+        next_actions: action_strings(reason),
+        details: Some(Box::new(ConsoleErrorDetails {
+            namespace: Some(namespace.to_string()),
+            tenant: Some(tenant_name.to_string()),
+            resource: Some(pool_name.to_string()),
+        })),
+    }
+}
+
+fn pool_delete_observation_pending_error(
+    namespace: &str,
+    tenant_name: &str,
+    pool_name: &str,
+) -> Error {
+    Error::ActionRequired {
+        status: StatusCode::CONFLICT,
+        code: "PoolDeleteObservationPending".to_string(),
+        reason: REASON_OBSERVATION_STALE.to_string(),
+        message: format!(
+            "Pool '{}' cannot be removed until the operator observes the current Tenant generation.",
+            pool_name
+        ),
+        next_actions: action_strings(REASON_OBSERVATION_STALE),
+        details: Some(Box::new(ConsoleErrorDetails {
+            namespace: Some(namespace.to_string()),
+            tenant: Some(tenant_name.to_string()),
+            resource: Some(pool_name.to_string()),
+        })),
+    }
 }
 
 /// List pools for a tenant (from spec + StatefulSet status).
@@ -359,7 +492,8 @@ pub async fn delete_pool(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<DeletePoolResponse>> {
     let client = create_client(&claims).await?;
-    let tenant_api: Api<Tenant> = Api::namespaced(client, &namespace);
+    let tenant_api: Api<Tenant> = Api::namespaced(client.clone(), &namespace);
+    let ss_api: Api<appsv1::StatefulSet> = Api::namespaced(client, &namespace);
 
     const MAX_RETRIES: u32 = 3;
     let mut last_conflict = None;
@@ -368,13 +502,6 @@ pub async fn delete_pool(
             .get(&tenant_name)
             .await
             .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", tenant_name)))?;
-
-        if tenant.spec.pools.len() == 1 {
-            return Err(Error::BadRequest {
-                message: "Cannot delete the last pool. Delete the entire Tenant instead."
-                    .to_string(),
-            });
-        }
 
         let pool_index = tenant
             .spec
@@ -385,6 +512,51 @@ pub async fn delete_pool(
                 resource: format!("Pool '{}'", pool_name),
             })?;
 
+        ensure_pool_delete_does_not_remove_last_pool(tenant.spec.pools.len())?;
+
+        if !is_pool_observation_current(&tenant) {
+            return Err(pool_delete_observation_pending_error(
+                &namespace,
+                &tenant_name,
+                &pool_name,
+            ));
+        }
+
+        let ss_name = format!("{}-{}", tenant_name, pool_name);
+        let managed_statefulset_exists = match ss_api.get(&ss_name).await {
+            Ok(statefulset) => is_managed_pool_statefulset(&tenant, &statefulset, &pool_name),
+            Err(kube::Error::Api(api_error)) if api_error.code == 404 => false,
+            Err(e) => {
+                return Err(error::map_kube_error(
+                    e,
+                    format!("StatefulSet '{}'", ss_name),
+                ));
+            }
+        };
+
+        let recorded_pool_status_exists = tenant.status.as_ref().is_some_and(|status| {
+            status
+                .pools
+                .iter()
+                .any(|pool_status| pool_status.ss_name == ss_name)
+        });
+
+        match classify_pool_delete(
+            tenant.spec.pools.len(),
+            managed_statefulset_exists,
+            recorded_pool_status_exists,
+        )? {
+            PoolDeleteDecision::RemoveFromSpec => {}
+            PoolDeleteDecision::RequiresDecommission { reason } => {
+                return Err(pool_delete_requires_decommission_error(
+                    &namespace,
+                    &tenant_name,
+                    &pool_name,
+                    reason,
+                ));
+            }
+        }
+
         tenant.spec.pools.remove(pool_index);
 
         match tenant_api
@@ -394,12 +566,11 @@ pub async fn delete_pool(
             Ok(_) => {
                 return Ok(Json(DeletePoolResponse {
                     success: true,
-                    message: format!("Pool '{}' deleted successfully", pool_name),
-                    warning: Some(
-                        "The StatefulSet and PVCs will be deleted by the Operator. \
-                         Data may be lost if PVCs are not using a retain policy."
-                            .to_string(),
+                    message: format!(
+                        "Pool '{}' was removed from Tenant spec before managed resources were created",
+                        pool_name
                     ),
+                    warning: None,
                 }));
             }
             Err(e) => {
@@ -430,4 +601,201 @@ async fn create_client(claims: &Claims) -> Result<Client> {
     Client::try_from(config).map_err(|e| Error::InternalServer {
         message: format!("Failed to create K8s client: {}", e),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PoolDeleteDecision, classify_pool_delete, is_managed_pool_statefulset,
+        is_pool_observation_current, pool_delete_observation_pending_error,
+        pool_delete_requires_decommission_error,
+    };
+    use crate::console::error::Error;
+    use crate::types::v1alpha1::{status::Status, tenant::TenantSpec};
+    use axum::http::StatusCode;
+    use std::collections::BTreeMap;
+
+    fn tenant_with_generations(
+        generation: i64,
+        observed_generation: Option<i64>,
+    ) -> crate::types::v1alpha1::tenant::Tenant {
+        crate::types::v1alpha1::tenant::Tenant {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("logs".to_string()),
+                namespace: Some("rustfs-system".to_string()),
+                generation: Some(generation),
+                ..Default::default()
+            },
+            spec: TenantSpec::default(),
+            status: Some(Status {
+                observed_generation,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn pool_delete_requires_decommission_error_contract() {
+        let error = pool_delete_requires_decommission_error(
+            "rustfs-system",
+            "logs",
+            "pool-a",
+            "DecommissionRequired",
+        );
+
+        match error {
+            Error::ActionRequired {
+                status,
+                code,
+                reason,
+                message,
+                next_actions,
+                details,
+            } => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(code, "PoolDeleteRequiresDecommission");
+                assert_eq!(reason, "DecommissionRequired");
+                assert_eq!(
+                    message,
+                    "Pool 'pool-a' already has managed resources and must be decommissioned before removal."
+                );
+                assert_eq!(
+                    next_actions,
+                    vec![
+                        "startDecommission".to_string(),
+                        "inspectPoolStatus".to_string()
+                    ]
+                );
+
+                let details = details.unwrap_or_else(|| panic!("expected error details"));
+                assert_eq!(details.namespace.as_deref(), Some("rustfs-system"));
+                assert_eq!(details.tenant.as_deref(), Some("logs"));
+                assert_eq!(details.resource.as_deref(), Some("pool-a"));
+            }
+            other => panic!("expected action-required error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_pool_delete_blocks_last_pool() {
+        let result = classify_pool_delete(1, false, false);
+
+        match result {
+            Err(Error::BadRequest { message }) => assert_eq!(
+                message,
+                "Cannot delete the last pool. Delete the entire Tenant instead."
+            ),
+            other => panic!("expected bad request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_pool_delete_requires_decommission_for_statefulset() {
+        let result = classify_pool_delete(2, true, false);
+
+        match result {
+            Ok(PoolDeleteDecision::RequiresDecommission { reason }) => {
+                assert_eq!(reason, "DecommissionRequired");
+            }
+            other => panic!("expected decommission requirement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_pool_delete_requires_decommission_for_recorded_status() {
+        let result = classify_pool_delete(2, false, true);
+
+        match result {
+            Ok(PoolDeleteDecision::RequiresDecommission { reason }) => {
+                assert_eq!(reason, "DecommissionRequired");
+            }
+            other => panic!("expected decommission requirement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_pool_delete_allows_uncreated_pool() {
+        let result = classify_pool_delete(2, false, false);
+
+        match result {
+            Ok(PoolDeleteDecision::RemoveFromSpec) => {}
+            other => panic!("expected remove-from-spec decision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pool_observation_requires_current_generation() {
+        assert!(!is_pool_observation_current(&tenant_with_generations(
+            2,
+            Some(1)
+        )));
+        assert!(is_pool_observation_current(&tenant_with_generations(
+            2,
+            Some(2)
+        )));
+        assert!(is_pool_observation_current(&tenant_with_generations(
+            2,
+            Some(3)
+        )));
+    }
+
+    #[test]
+    fn pool_delete_observation_pending_error_contract() {
+        let error = pool_delete_observation_pending_error("rustfs-system", "logs", "pool-a");
+
+        match error {
+            Error::ActionRequired {
+                status,
+                code,
+                reason,
+                next_actions,
+                details,
+                ..
+            } => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(code, "PoolDeleteObservationPending");
+                assert_eq!(reason, "ObservedGenerationStale");
+                assert_eq!(next_actions, vec!["waitForReconcile".to_string()]);
+
+                let details = details.unwrap_or_else(|| panic!("expected error details"));
+                assert_eq!(details.namespace.as_deref(), Some("rustfs-system"));
+                assert_eq!(details.tenant.as_deref(), Some("logs"));
+                assert_eq!(details.resource.as_deref(), Some("pool-a"));
+            }
+            other => panic!("expected action-required error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_pool_statefulset_requires_owner_and_labels() {
+        let mut tenant = tenant_with_generations(2, Some(2));
+        tenant.metadata.uid = Some("tenant-uid".to_string());
+
+        let labels = BTreeMap::from([
+            ("rustfs.tenant".to_string(), "logs".to_string()),
+            ("rustfs.pool".to_string(), "pool-a".to_string()),
+        ]);
+        let owner_reference = k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+            api_version: "rustfs.com/v1alpha1".to_string(),
+            kind: "Tenant".to_string(),
+            name: "logs".to_string(),
+            uid: "tenant-uid".to_string(),
+            ..Default::default()
+        };
+        let statefulset = k8s_openapi::api::apps::v1::StatefulSet {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("logs-pool-a".to_string()),
+                labels: Some(labels),
+                owner_references: Some(vec![owner_reference]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(is_managed_pool_statefulset(&tenant, &statefulset, "pool-a"));
+
+        let mut unowned = statefulset.clone();
+        unowned.metadata.owner_references = None;
+        assert!(!is_managed_pool_statefulset(&tenant, &unowned, "pool-a"));
+    }
 }
