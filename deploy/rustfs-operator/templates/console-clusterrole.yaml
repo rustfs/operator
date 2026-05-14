@@ -43,6 +43,11 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch"]
 
+  # cert-manager resources - read only for Console diagnostics
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch"]
+
   # PersistentVolumeClaims - read only
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]

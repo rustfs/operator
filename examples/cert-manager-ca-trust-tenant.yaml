@@ -1,0 +1,69 @@
+# Minimal RustFS Tenant example for cert-manager managed TLS and CA trust.
+#
+# This manifest is intentionally static: it does not install cert-manager, create an
+# Issuer, create any Secret, or require a live cluster. Before applying it in a
+# real cluster, create the referenced Issuer in the same namespace, or change
+# issuerRef.kind to ClusterIssuer and provide an existing ClusterIssuer.
+#
+# Current implementation notes:
+# - spec.tls.mode must be certManager for this flow.
+# - rotationStrategy=HotReload is currently rejected; use Rollout.
+# - enableInternodeHttps=true requires a CA source. CertificateSecretCa expects
+#   cert-manager to write ca.crt into the TLS Secret. Use SecretRef or SystemCa
+#   only when that matches your trust model.
+# - Existing cert-manager Secrets used with manageCertificate=false should carry
+#   rustfs.tenant=<tenant-name> if you want Secret changes to enqueue the Tenant.
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: cert-manager-ca-trust
+  namespace: rustfs-system
+spec:
+  image: rustfs/rustfs:latest
+
+  tls:
+    mode: certManager
+    mountPath: /var/run/rustfs/tls
+    rotationStrategy: Rollout
+    enableInternodeHttps: true
+    requireSanMatch: true
+    certManager:
+      manageCertificate: true
+      certificateName: cert-manager-ca-trust-server
+      secretName: cert-manager-ca-trust-server-tls
+      issuerRef:
+        group: cert-manager.io
+        kind: Issuer
+        name: rustfs-issuer
+      includeGeneratedDnsNames: true
+      dnsNames:
+        - cert-manager-ca-trust-io.rustfs-system.svc
+        - cert-manager-ca-trust-io.rustfs-system.svc.cluster.local
+      duration: 2160h
+      renewBefore: 360h
+      usages:
+        - server auth
+      caTrust:
+        source: CertificateSecretCa
+        trustSystemCa: false
+        trustLeafCertificateAsCa: false
+        # Alternative for a separate CA Secret:
+        # source: SecretRef
+        # caSecretRef:
+        #   name: cert-manager-ca-trust-ca
+        #   key: ca.crt
+        # clientCaSecretRef:
+        #   name: cert-manager-ca-trust-client-ca
+        #   key: ca.crt
+
+  pools:
+    - name: primary
+      servers: 1
+      persistence:
+        volumesPerServer: 4
+        volumeClaimTemplate:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi

@@ -22,6 +22,50 @@ use crate::framework::{
 
 pub const RUSTFS_RUN_AS_UID: u32 = 10001;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalStorageLayout {
+    pub storage_class: String,
+    pub pv_name_prefix: String,
+    pub volume_path_prefix: String,
+    pub pv_count: usize,
+}
+
+impl LocalStorageLayout {
+    pub fn from_config(config: &E2eConfig) -> Self {
+        Self {
+            storage_class: config.storage_class.clone(),
+            pv_name_prefix: format!("{}-pv", config.cluster_name),
+            volume_path_prefix: "/mnt/data".to_string(),
+            pv_count: config.pv_count,
+        }
+    }
+
+    pub fn new(
+        storage_class: impl Into<String>,
+        pv_name_prefix: impl Into<String>,
+        volume_path_prefix: impl Into<String>,
+        pv_count: usize,
+    ) -> Self {
+        Self {
+            storage_class: storage_class.into(),
+            pv_name_prefix: pv_name_prefix.into(),
+            volume_path_prefix: volume_path_prefix.into(),
+            pv_count,
+        }
+    }
+
+    fn pv_name(&self, index: usize) -> String {
+        format!("{}-{index}", self.pv_name_prefix)
+    }
+
+    fn volume_path(&self, index: usize) -> String {
+        format!(
+            "{}/vol{index}",
+            self.volume_path_prefix.trim_end_matches('/')
+        )
+    }
+}
+
 pub fn worker_node_names(config: &E2eConfig) -> Vec<String> {
     (1..=KIND_WORKER_COUNT)
         .map(|index| match index {
@@ -36,10 +80,17 @@ pub fn volume_path(index: usize) -> String {
 }
 
 pub fn volume_directory_commands(config: &E2eConfig) -> Vec<CommandSpec> {
+    volume_directory_commands_for_layout(config, &LocalStorageLayout::from_config(config))
+}
+
+pub fn volume_directory_commands_for_layout(
+    config: &E2eConfig,
+    layout: &LocalStorageLayout,
+) -> Vec<CommandSpec> {
     let mut commands = Vec::new();
     for node in worker_node_names(config) {
-        for index in 1..=config.pv_count {
-            let path = volume_path(index);
+        for index in 1..=layout.pv_count {
+            let path = layout.volume_path(index);
             commands.push(CommandSpec::new("docker").args([
                 "exec".to_string(),
                 node.clone(),
@@ -61,6 +112,13 @@ pub fn volume_directory_commands(config: &E2eConfig) -> Vec<CommandSpec> {
 }
 
 pub fn local_storage_manifest(config: &E2eConfig) -> String {
+    local_storage_manifest_for_layout(config, &LocalStorageLayout::from_config(config))
+}
+
+pub fn local_storage_manifest_for_layout(
+    _config: &E2eConfig,
+    layout: &LocalStorageLayout,
+) -> String {
     let mut manifest = format!(
         r#"---
 apiVersion: storage.k8s.io/v1
@@ -70,17 +128,17 @@ metadata:
 provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: WaitForFirstConsumer
 "#,
-        storage_class = config.storage_class
+        storage_class = layout.storage_class
     );
 
-    for index in 1..=config.pv_count {
+    for index in 1..=layout.pv_count {
         let worker_group = ((index - 1) % KIND_WORKER_COUNT) + 1;
         manifest.push_str(&format!(
             r#"---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: {cluster}-pv-{index}
+  name: {pv_name}
 spec:
   capacity:
     storage: 10Gi
@@ -100,10 +158,9 @@ spec:
               values:
                 - storage-{worker_group}
 "#,
-            cluster = config.cluster_name,
-            index = index,
-            storage_class = config.storage_class,
-            path = volume_path(index),
+            pv_name = layout.pv_name(index),
+            storage_class = layout.storage_class,
+            path = layout.volume_path(index),
             worker_group = worker_group
         ));
     }
@@ -112,12 +169,19 @@ spec:
 }
 
 pub fn prepare_local_storage(config: &E2eConfig) -> Result<()> {
-    for command in volume_directory_commands(config) {
+    prepare_local_storage_with_layout(config, &LocalStorageLayout::from_config(config))
+}
+
+pub fn prepare_local_storage_with_layout(
+    config: &E2eConfig,
+    layout: &LocalStorageLayout,
+) -> Result<()> {
+    for command in volume_directory_commands_for_layout(config, layout) {
         command.run_checked()?;
     }
 
     Kubectl::new(config)
-        .apply_yaml_command(local_storage_manifest(config))
+        .apply_yaml_command(local_storage_manifest_for_layout(config, layout))
         .run_checked()?;
     Ok(())
 }

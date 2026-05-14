@@ -15,7 +15,8 @@
 use crate::types::v1alpha1::{
     status::{
         ConditionStatus, ConditionType, CurrentState, Reason, Status, canonical_filter_state,
-        canonical_state, next_actions_for_reason, primary_condition, summarize_current_state,
+        canonical_state, certificate, next_actions_for_reason, primary_condition,
+        summarize_current_state,
     },
     tenant::Tenant,
 };
@@ -80,6 +81,8 @@ pub struct TenantDetailsResponse {
     pub status_summary: TenantStatusSummary,
     pub conditions: Vec<TenantCondition>,
     pub next_actions: Vec<String>,
+    #[serde(skip_serializing_if = "certificate::Status::is_empty")]
+    pub certificates: certificate::Status,
     pub image: Option<String>,
     pub mount_path: Option<String>,
     pub created_at: Option<String>,
@@ -316,6 +319,14 @@ pub fn tenant_conditions(tenant: &Tenant) -> Vec<TenantCondition> {
         .unwrap_or_default()
 }
 
+pub fn tenant_certificates(tenant: &Tenant) -> certificate::Status {
+    tenant
+        .status
+        .as_ref()
+        .map(|status| status.certificates.clone())
+        .unwrap_or_default()
+}
+
 pub fn tenant_to_list_item(tenant: Tenant) -> TenantListItem {
     let summary = tenant_status_summary(&tenant);
     TenantListItem {
@@ -404,6 +415,7 @@ mod tests {
                 condition("CredentialsReady", "False", "CredentialSecretNotFound"),
                 condition("Degraded", "True", "CredentialSecretNotFound"),
             ],
+            ..Default::default()
         });
 
         let summary = tenant_status_summary(&tenant);
@@ -430,6 +442,7 @@ mod tests {
                 condition("Ready", "True", "ReconcileSucceeded"),
                 condition("Degraded", "False", "ReconcileSucceeded"),
             ],
+            ..Default::default()
         });
 
         let summary = tenant_status_summary(&tenant);
@@ -455,6 +468,7 @@ mod tests {
             pools: Vec::new(),
             observed_generation: None,
             conditions: vec![condition("Ready", "True", "ReconcileSucceeded")],
+            ..Default::default()
         });
 
         let summary = tenant_status_summary(&tenant);
@@ -533,6 +547,36 @@ mod tests {
         assert_eq!(
             canonical_console_state(Some("Initialized")),
             "Ready".to_string()
+        );
+    }
+
+    #[test]
+    fn tenant_certificates_exposes_tls_status_for_details_api() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.status = Some(Status {
+            certificates: crate::types::v1alpha1::status::certificate::Status {
+                tls: Some(
+                    crate::types::v1alpha1::status::certificate::TlsCertificateStatus {
+                        mode: "certManager".to_string(),
+                        ready: false,
+                        last_error_reason: Some("CertManagerCertificateNotReady".to_string()),
+                        ..Default::default()
+                    },
+                ),
+            },
+            ..Default::default()
+        });
+
+        let certificates = tenant_certificates(&tenant);
+
+        let Some(tls) = certificates.tls.as_ref() else {
+            panic!("tls status should be exposed");
+        };
+        assert_eq!(tls.mode, "certManager");
+        assert!(!tls.ready);
+        assert_eq!(
+            tls.last_error_reason.as_deref(),
+            Some("CertManagerCertificateNotReady")
         );
     }
 

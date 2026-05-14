@@ -1282,6 +1282,138 @@ spec:
               serviceAccountName:
                 nullable: true
                 type: string
+              tls:
+                nullable: true
+                properties:
+                  certManager:
+                    nullable: true
+                    properties:
+                      caTrust:
+                        nullable: true
+                        properties:
+                          caSecretRef:
+                            nullable: true
+                            properties:
+                              key:
+                                default: ca.crt
+                                type: string
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          clientCaSecretRef:
+                            nullable: true
+                            properties:
+                              key:
+                                default: ca.crt
+                                type: string
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          source:
+                            default: CertificateSecretCa
+                            enum:
+                            - CertificateSecretCa
+                            - SecretRef
+                            - SystemCa
+                            type: string
+                          trustLeafCertificateAsCa:
+                            default: false
+                            type: boolean
+                          trustSystemCa:
+                            default: false
+                            type: boolean
+                        type: object
+                      certificateName:
+                        nullable: true
+                        type: string
+                      commonName:
+                        nullable: true
+                        type: string
+                      dnsNames:
+                        items:
+                          type: string
+                        type: array
+                      duration:
+                        nullable: true
+                        type: string
+                      includeGeneratedDnsNames:
+                        default: true
+                        type: boolean
+                      issuerRef:
+                        nullable: true
+                        properties:
+                          group:
+                            default: cert-manager.io
+                            type: string
+                          kind:
+                            default: Issuer
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      manageCertificate:
+                        default: false
+                        type: boolean
+                      privateKey:
+                        nullable: true
+                        properties:
+                          algorithm:
+                            nullable: true
+                            type: string
+                          encoding:
+                            nullable: true
+                            type: string
+                          rotationPolicy:
+                            nullable: true
+                            type: string
+                          size:
+                            format: int32
+                            nullable: true
+                            type: integer
+                        type: object
+                      renewBefore:
+                        nullable: true
+                        type: string
+                      secretName:
+                        nullable: true
+                        type: string
+                      secretType:
+                        nullable: true
+                        type: string
+                      usages:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  enableInternodeHttps:
+                    default: false
+                    type: boolean
+                  mode:
+                    default: disabled
+                    enum:
+                    - disabled
+                    - external
+                    - certManager
+                    type: string
+                  mountPath:
+                    default: /var/run/rustfs/tls
+                    type: string
+                  requireSanMatch:
+                    default: true
+                    type: boolean
+                  rotationStrategy:
+                    default: Rollout
+                    enum:
+                    - Rollout
+                    - HotReload
+                    type: string
+                type: object
             required:
             - pools
             type: object
@@ -1291,6 +1423,134 @@ spec:
               availableReplicas:
                 format: int32
                 type: integer
+              certificates:
+                properties:
+                  tls:
+                    nullable: true
+                    properties:
+                      caSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            nullable: true
+                            type: string
+                          name:
+                            type: string
+                          resourceVersion:
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      certificateRef:
+                        nullable: true
+                        properties:
+                          apiVersion:
+                            type: string
+                          kind:
+                            type: string
+                          name:
+                            type: string
+                          observedGeneration:
+                            format: int64
+                            nullable: true
+                            type: integer
+                          ready:
+                            nullable: true
+                            type: boolean
+                          reason:
+                            nullable: true
+                            type: string
+                        required:
+                        - apiVersion
+                        - kind
+                        - name
+                        type: object
+                      clientCaSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            nullable: true
+                            type: string
+                          name:
+                            type: string
+                          resourceVersion:
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      dnsNames:
+                        items:
+                          type: string
+                        type: array
+                      expiresInSeconds:
+                        format: int64
+                        nullable: true
+                        type: integer
+                      ipAddresses:
+                        items:
+                          type: string
+                        type: array
+                      lastErrorMessage:
+                        nullable: true
+                        type: string
+                      lastErrorReason:
+                        nullable: true
+                        type: string
+                      lastRolloutTriggerTime:
+                        nullable: true
+                        type: string
+                      lastValidatedTime:
+                        nullable: true
+                        type: string
+                      managedCertificate:
+                        nullable: true
+                        type: boolean
+                      mode:
+                        type: string
+                      mountPath:
+                        nullable: true
+                        type: string
+                      notAfter:
+                        nullable: true
+                        type: string
+                      notBefore:
+                        nullable: true
+                        type: string
+                      observedHash:
+                        nullable: true
+                        type: string
+                      ready:
+                        type: boolean
+                      rotationStrategy:
+                        nullable: true
+                        type: string
+                      sanMatched:
+                        nullable: true
+                        type: boolean
+                      serverSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            nullable: true
+                            type: string
+                          name:
+                            type: string
+                          resourceVersion:
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      trustSource:
+                        nullable: true
+                        type: string
+                    required:
+                    - mode
+                    - ready
+                    type: object
+                type: object
               conditions:
                 description: Kubernetes standard conditions
                 items:
