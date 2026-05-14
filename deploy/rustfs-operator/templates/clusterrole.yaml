@@ -37,6 +37,18 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
+  # cert-manager Certificate orchestration and readiness watches
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames: ["certificates.cert-manager.io"]
+    verbs: ["get"]
+
   # PersistentVolumeClaims - read (tenant-scoped event discovery lists PVC names)
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]

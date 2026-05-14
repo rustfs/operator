@@ -21,6 +21,7 @@ use crate::status::{StatusBuilder, StatusError};
 use crate::types;
 use crate::types::v1alpha1::status::{ConditionType, Reason};
 use crate::types::v1alpha1::tenant::Tenant;
+use crate::types::v1alpha1::tls::TlsPlan;
 use kube::ResourceExt;
 use kube::api::ListParams;
 use kube::runtime::controller::Action;
@@ -158,9 +159,11 @@ pub(super) async fn reconcile_services(
     ctx: &Context,
     tenant: &Tenant,
     namespace: &str,
+    tls_plan: &TlsPlan,
 ) -> Result<(), Error> {
     context_result(
-        ctx.apply(&tenant.new_io_service(), namespace).await,
+        ctx.apply(&tenant.new_io_service_with_tls_plan(tls_plan), namespace)
+            .await,
         ctx,
         tenant,
     )
@@ -172,7 +175,11 @@ pub(super) async fn reconcile_services(
     )
     .await?;
     context_result(
-        ctx.apply(&tenant.new_headless_service(), namespace).await,
+        ctx.apply(
+            &tenant.new_headless_service_with_tls_plan(tls_plan),
+            namespace,
+        )
+        .await,
         ctx,
         tenant,
     )
@@ -267,6 +274,7 @@ pub(super) async fn reconcile_pool_statefulsets(
     ctx: &Context,
     tenant: &Tenant,
     namespace: &str,
+    tls_plan: &TlsPlan,
 ) -> Result<PoolReconcileSummary, Error> {
     let mut summary = PoolReconcileSummary::default();
 
@@ -282,8 +290,8 @@ pub(super) async fn reconcile_pool_statefulsets(
                     tenant,
                     namespace,
                     pool,
-                    &ss_name,
                     existing_ss,
+                    tls_plan,
                     &mut summary,
                 )
                 .await?;
@@ -295,6 +303,7 @@ pub(super) async fn reconcile_pool_statefulsets(
                     namespace,
                     pool,
                     &ss_name,
+                    tls_plan,
                     &mut summary,
                 )
                 .await?;
@@ -325,22 +334,23 @@ async fn reconcile_existing_pool_statefulset(
     tenant: &Tenant,
     namespace: &str,
     pool: &crate::types::v1alpha1::pool::Pool,
-    ss_name: &str,
     existing_ss: k8s_openapi::api::apps::v1::StatefulSet,
+    tls_plan: &TlsPlan,
     summary: &mut PoolReconcileSummary,
 ) -> Result<(), Error> {
+    let ss_name = existing_ss.name_any();
     debug!("StatefulSet {} exists, checking if update needed", ss_name);
 
-    if let Err(e) = tenant.validate_statefulset_update(&existing_ss, pool) {
+    if let Err(e) = tenant.validate_statefulset_update_with_tls_plan(&existing_ss, pool, tls_plan) {
         error!("StatefulSet {} update validation failed: {}", ss_name, e);
 
-        let status_error = StatusError::statefulset_update_validation_failed(ss_name);
+        let status_error = StatusError::statefulset_update_validation_failed(&ss_name);
         patch_status_error(ctx, tenant, &status_error).await;
         return Err(e.into());
     }
 
     if types_result(
-        tenant.statefulset_needs_update(&existing_ss, pool),
+        tenant.statefulset_needs_update_with_tls_plan(&existing_ss, pool, tls_plan),
         ctx,
         tenant,
     )
@@ -357,9 +367,14 @@ async fn reconcile_existing_pool_statefulset(
             )
             .await;
 
-        let desired = types_result(tenant.new_statefulset(pool), ctx, tenant).await?;
+        let desired = types_result(
+            tenant.new_statefulset_with_tls_plan(pool, tls_plan),
+            ctx,
+            tenant,
+        )
+        .await?;
         if let Err(e) = ctx.apply(&desired, namespace).await {
-            let status_error = StatusError::statefulset_apply_failed(ss_name);
+            let status_error = StatusError::statefulset_apply_failed(&ss_name);
             patch_status_error(ctx, tenant, &status_error).await;
             return Err(e.into());
         }
@@ -370,7 +385,7 @@ async fn reconcile_existing_pool_statefulset(
     }
 
     let ss = context_result(
-        ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(ss_name, namespace)
+        ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, namespace)
             .await,
         ctx,
         tenant,
@@ -388,6 +403,7 @@ async fn reconcile_missing_pool_statefulset(
     namespace: &str,
     pool: &crate::types::v1alpha1::pool::Pool,
     ss_name: &str,
+    tls_plan: &TlsPlan,
     summary: &mut PoolReconcileSummary,
 ) -> Result<(), Error> {
     debug!("StatefulSet {} not found, creating", ss_name);
@@ -401,7 +417,12 @@ async fn reconcile_missing_pool_statefulset(
         )
         .await;
 
-    let desired = types_result(tenant.new_statefulset(pool), ctx, tenant).await?;
+    let desired = types_result(
+        tenant.new_statefulset_with_tls_plan(pool, tls_plan),
+        ctx,
+        tenant,
+    )
+    .await?;
     if let Err(e) = ctx.apply(&desired, namespace).await {
         let status_error = StatusError::statefulset_apply_failed(ss_name);
         patch_status_error(ctx, tenant, &status_error).await;
@@ -450,9 +471,13 @@ pub(super) async fn finalize_tenant_status(
     ctx: &Context,
     tenant: &Tenant,
     summary: PoolReconcileSummary,
+    tls_plan: TlsPlan,
 ) -> Result<Action, Error> {
     let mut builder = StatusBuilder::from_tenant(tenant);
     builder.set_pool_statuses(summary.pool_statuses);
+    if let Some(tls_status) = tls_plan.status {
+        builder.set_tls_status(tls_status);
+    }
 
     let (event_condition, event_reason, event_type, event_message) = if summary.any_degraded {
         builder.finish_degraded(

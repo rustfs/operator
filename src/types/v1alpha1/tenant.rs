@@ -16,6 +16,7 @@ use crate::types::v1alpha1::encryption::{EncryptionConfig, PodSecurityContextOve
 use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::logging::LoggingConfig;
 use crate::types::v1alpha1::pool::Pool;
+use crate::types::v1alpha1::tls::TlsConfig;
 use crate::types::{self, error::NoNamespaceSnafu};
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
@@ -81,6 +82,9 @@ pub struct TenantSpec {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub request_auto_cert: Option<bool>,

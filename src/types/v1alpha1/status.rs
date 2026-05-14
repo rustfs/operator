@@ -26,6 +26,7 @@ pub enum ConditionType {
     SpecValid,
     CredentialsReady,
     KmsReady,
+    TlsReady,
     PoolsReady,
     WorkloadsReady,
 }
@@ -39,6 +40,7 @@ impl ConditionType {
             Self::SpecValid => "SpecValid",
             Self::CredentialsReady => "CredentialsReady",
             Self::KmsReady => "KmsReady",
+            Self::TlsReady => "TlsReady",
             Self::PoolsReady => "PoolsReady",
             Self::WorkloadsReady => "WorkloadsReady",
         }
@@ -52,6 +54,7 @@ impl ConditionType {
             Self::SpecValid,
             Self::CredentialsReady,
             Self::KmsReady,
+            Self::TlsReady,
             Self::PoolsReady,
             Self::WorkloadsReady,
         ]
@@ -113,6 +116,24 @@ pub enum Reason {
     KmsSecretNotFound,
     KmsSecretMissingKey,
     KmsConfigInvalid,
+    TlsDisabled,
+    TlsConfigured,
+    CertManagerCrdMissing,
+    CertManagerIssuerNotFound,
+    CertManagerCertificateApplyFailed,
+    CertManagerCertificateNotReady,
+    CertificateSecretPending,
+    CertificateSecretNotFound,
+    CertificateSecretInvalidType,
+    CertificateSecretMissingKey,
+    CertificateKeyPairMismatch,
+    CertificateInvalid,
+    CertificateExpired,
+    CertificateSanMismatch,
+    CaBundleMissing,
+    CaBundleInvalid,
+    TlsHotReloadUnsupported,
+    CertificateExpiring,
     PoolDeleteBlocked,
     StatefulSetApplyFailed,
     StatefulSetUpdateValidationFailed,
@@ -138,6 +159,24 @@ impl Reason {
             Self::KmsSecretNotFound => "KmsSecretNotFound",
             Self::KmsSecretMissingKey => "KmsSecretMissingKey",
             Self::KmsConfigInvalid => "KmsConfigInvalid",
+            Self::TlsDisabled => "TlsDisabled",
+            Self::TlsConfigured => "TlsConfigured",
+            Self::CertManagerCrdMissing => "CertManagerCrdMissing",
+            Self::CertManagerIssuerNotFound => "CertManagerIssuerNotFound",
+            Self::CertManagerCertificateApplyFailed => "CertManagerCertificateApplyFailed",
+            Self::CertManagerCertificateNotReady => "CertManagerCertificateNotReady",
+            Self::CertificateSecretPending => "CertificateSecretPending",
+            Self::CertificateSecretNotFound => "CertificateSecretNotFound",
+            Self::CertificateSecretInvalidType => "CertificateSecretInvalidType",
+            Self::CertificateSecretMissingKey => "CertificateSecretMissingKey",
+            Self::CertificateKeyPairMismatch => "CertificateKeyPairMismatch",
+            Self::CertificateInvalid => "CertificateInvalid",
+            Self::CertificateExpired => "CertificateExpired",
+            Self::CertificateSanMismatch => "CertificateSanMismatch",
+            Self::CaBundleMissing => "CaBundleMissing",
+            Self::CaBundleInvalid => "CaBundleInvalid",
+            Self::TlsHotReloadUnsupported => "TlsHotReloadUnsupported",
+            Self::CertificateExpiring => "CertificateExpiring",
             Self::PoolDeleteBlocked => "PoolDeleteBlocked",
             Self::StatefulSetApplyFailed => "StatefulSetApplyFailed",
             Self::StatefulSetUpdateValidationFailed => "StatefulSetUpdateValidationFailed",
@@ -202,7 +241,9 @@ pub struct Status {
     /// Kubernetes standard conditions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
-    // pub certificates: certificate::Status,
+
+    #[serde(default, skip_serializing_if = "certificate::Status::is_empty")]
+    pub certificates: certificate::Status,
 }
 
 impl Status {
@@ -367,6 +408,19 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "KmsSecretNotFound"
             | "KmsSecretMissingKey"
             | "KmsConfigInvalid"
+            | "CertManagerCrdMissing"
+            | "CertManagerIssuerNotFound"
+            | "CertManagerCertificateApplyFailed"
+            | "CertificateSecretNotFound"
+            | "CertificateSecretInvalidType"
+            | "CertificateSecretMissingKey"
+            | "CertificateKeyPairMismatch"
+            | "CertificateInvalid"
+            | "CertificateExpired"
+            | "CertificateSanMismatch"
+            | "CaBundleMissing"
+            | "CaBundleInvalid"
+            | "TlsHotReloadUnsupported"
             | "PoolDeleteBlocked"
             | "StatefulSetUpdateValidationFailed"
     )
@@ -398,6 +452,25 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "KmsSecretNotFound" => vec!["createKmsSecret"],
         "KmsSecretMissingKey" => vec!["addRequiredKmsSecretKey"],
         "KmsConfigInvalid" => vec!["fixKmsConfig"],
+        "CertManagerCrdMissing" => vec!["installCertManager", "switchToExternalSecret"],
+        "CertManagerIssuerNotFound" => vec!["createIssuer", "fixIssuerRef"],
+        "CertManagerCertificateApplyFailed" => vec!["fixCertificateSpec", "inspectOperatorLogs"],
+        "CertManagerCertificateNotReady" => vec![
+            "inspectCertificate",
+            "inspectIssuer",
+            "inspectCertManagerLogs",
+        ],
+        "CertificateSecretPending" => vec!["waitForCertificateSecret", "inspectCertificate"],
+        "CertificateSecretNotFound" => vec!["createCertificateSecret", "fixSecretName"],
+        "CertificateSecretInvalidType" => vec!["replaceCertificateSecret", "fixSecretType"],
+        "CertificateSecretMissingKey" => vec!["addRequiredCertificateKey"],
+        "CertificateKeyPairMismatch" => vec!["replaceCertificateSecret"],
+        "CertificateInvalid" => vec!["replaceCertificateSecret"],
+        "CertificateExpired" => vec!["renewCertificate", "inspectCertManager"],
+        "CertificateSanMismatch" => vec!["addRequiredDnsNames", "reissueCertificate"],
+        "CaBundleMissing" => vec!["configureCaSecretRef", "enableSystemCaIfAppropriate"],
+        "CaBundleInvalid" => vec!["replaceCaBundle"],
+        "TlsHotReloadUnsupported" => vec!["useRolloutRotation", "enableCleanTlsDirectory"],
         "InvalidTenantName" => vec!["renameTenant"],
         "ImmutableFieldModified" => vec!["restoreImmutableField"],
         "PoolDeleteBlocked" => vec!["restorePoolSpec", "startDecommissionAfterRestore"],
@@ -472,6 +545,34 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("DecommissionRequired"),
             vec!["startDecommission", "inspectPoolStatus"]
+        );
+        assert_eq!(
+            next_actions_for_reason("CertManagerCertificateApplyFailed"),
+            vec!["fixCertificateSpec", "inspectOperatorLogs"]
+        );
+    }
+
+    #[test]
+    fn tls_blocked_reasons_are_primary_and_actionable() {
+        let status = Status {
+            current_state: "Blocked".to_string(),
+            observed_generation: Some(4),
+            conditions: vec![
+                condition("Ready", "False", "CaBundleMissing", Some(4)),
+                condition("TlsReady", "False", "CaBundleMissing", Some(4)),
+                condition("Degraded", "True", "CaBundleMissing", Some(4)),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(summarize_current_state(&status), "Blocked");
+        assert_eq!(
+            primary_condition(&status).map(|condition| condition.reason.as_str()),
+            Some("CaBundleMissing")
+        );
+        assert_eq!(
+            next_actions_for_reason("CaBundleMissing"),
+            vec!["configureCaSecretRef", "enableSystemCaIfAppropriate"]
         );
     }
 

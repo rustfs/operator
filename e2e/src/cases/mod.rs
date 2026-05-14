@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cert_manager_tls;
 pub mod console;
 pub mod operator;
 pub mod smoke;
@@ -21,6 +22,7 @@ pub enum Suite {
     Smoke,
     Operator,
     Console,
+    CertManagerTls,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub fn all_cases() -> Vec<CaseSpec> {
     cases.extend(smoke::cases());
     cases.extend(operator::cases());
     cases.extend(console::cases());
+    cases.extend(cert_manager_tls::cases());
     cases
 }
 
@@ -71,6 +74,7 @@ mod tests {
         assert!(suites.contains(&Suite::Smoke));
         assert!(suites.contains(&Suite::Operator));
         assert!(suites.contains(&Suite::Console));
+        assert!(suites.contains(&Suite::CertManagerTls));
     }
 
     #[test]
@@ -111,5 +115,12 @@ mod tests {
         assert_eq!(counts.get(&Suite::Smoke).copied().unwrap_or_default(), 3);
         assert_eq!(counts.get(&Suite::Operator).copied().unwrap_or_default(), 1);
         assert_eq!(counts.get(&Suite::Console).copied().unwrap_or_default(), 1);
+        assert_eq!(
+            counts
+                .get(&Suite::CertManagerTls)
+                .copied()
+                .unwrap_or_default(),
+            9
+        );
     }
 }

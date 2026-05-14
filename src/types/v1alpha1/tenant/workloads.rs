@@ -16,6 +16,7 @@ use super::Tenant;
 use crate::types;
 use crate::types::v1alpha1::encryption::KmsBackendType;
 use crate::types::v1alpha1::pool::Pool;
+use crate::types::v1alpha1::tls::{TlsPlan, http_probe};
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
@@ -24,6 +25,18 @@ const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 const DEFAULT_RUN_AS_USER: i64 = 10001;
 const DEFAULT_RUN_AS_GROUP: i64 = 10001;
 const DEFAULT_FS_GROUP: i64 = 10001;
+
+const TLS_OPERATOR_MANAGED_ENV_VARS: &[&str] = &[
+    "RUSTFS_VOLUMES",
+    "RUSTFS_TLS_PATH",
+    "RUSTFS_TRUST_SYSTEM_CA",
+    "RUSTFS_TRUST_LEAF_CERT_AS_CA",
+    "RUSTFS_SERVER_MTLS_ENABLE",
+];
+
+fn is_tls_operator_managed_env_var(name: &str) -> bool {
+    TLS_OPERATOR_MANAGED_ENV_VARS.contains(&name)
+}
 
 fn volume_claim_template_name(shard: i32) -> String {
     format!("{VOLUME_CLAIM_TEMPLATE_PREFIX}-{shard}")
@@ -38,7 +51,7 @@ impl Tenant {
     /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/rustfs{0...volumes-1}
     /// All pools are combined into a space-separated string for a unified cluster
     /// Follows RustFS convention: /data/rustfs0, /data/rustfs1, etc.
-    fn rustfs_volumes_env_value(&self) -> Result<String, types::error::Error> {
+    fn rustfs_volumes_env_value(&self, scheme: &str) -> Result<String, types::error::Error> {
         let namespace = self.namespace()?;
         let tenant_name = self.name();
         let headless_service = self.headless_service_name();
@@ -54,7 +67,7 @@ impl Tenant {
                 // Construct volume specification with range notation
                 // Follows RustFS convention: /data/rustfs{0...N}
                 format!(
-                    "http://{tenant_name}-{pool_name}-{{0...{}}}.{headless_service}.{namespace}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
+                    "{scheme}://{tenant_name}-{pool_name}-{{0...{}}}.{headless_service}.{namespace}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
                     pool.servers - 1,
                     base_path.trim_end_matches('/'),
                     pool.persistence.volumes_per_server - 1
@@ -323,6 +336,14 @@ impl Tenant {
     }
 
     pub fn new_statefulset(&self, pool: &Pool) -> Result<v1::StatefulSet, types::error::Error> {
+        self.new_statefulset_with_tls_plan(pool, &TlsPlan::disabled())
+    }
+
+    pub fn new_statefulset_with_tls_plan(
+        &self,
+        pool: &Pool,
+        tls_plan: &TlsPlan,
+    ) -> Result<v1::StatefulSet, types::error::Error> {
         let labels = self.pool_labels(pool);
         let selector_labels = self.pool_selector_labels(pool);
 
@@ -346,12 +367,13 @@ impl Tenant {
         let mut env_vars = Vec::new();
 
         // Add RUSTFS_VOLUMES environment variable for multi-node communication
-        let rustfs_volumes = self.rustfs_volumes_env_value()?;
+        let rustfs_volumes = self.rustfs_volumes_env_value(tls_plan.internode_scheme)?;
         env_vars.push(corev1::EnvVar {
             name: "RUSTFS_VOLUMES".to_owned(),
             value: Some(rustfs_volumes),
             ..Default::default()
         });
+        env_vars.extend(tls_plan.env.clone());
 
         // Add required RustFS environment variables
         env_vars.push(corev1::EnvVar {
@@ -403,10 +425,14 @@ impl Tenant {
             });
         }
 
-        // Merge with user-provided environment variables
-        // User-provided vars can override operator-managed ones
+        // Merge with user-provided environment variables.
+        // Preserve the legacy override behavior except for TLS runtime values that
+        // must stay aligned with the rendered TLS mounts, probes, status, and hash.
         for user_env in &self.spec.env {
-            // Remove any existing var with the same name to allow override
+            if tls_plan.enabled && is_tls_operator_managed_env_var(&user_env.name) {
+                continue;
+            }
+            // Remove any existing var with the same name to allow non-reserved overrides.
             env_vars.retain(|e| e.name != user_env.name);
             env_vars.push(user_env.clone());
         }
@@ -423,6 +449,8 @@ impl Tenant {
         env_vars.extend(kms_env);
         pod_volumes.append(&mut kms_volumes);
         volume_mounts.append(&mut kms_mounts);
+        pod_volumes.extend(tls_plan.volumes.clone());
+        volume_mounts.extend(tls_plan.volume_mounts.clone());
 
         // Enforce non-root execution and make mounted volumes writable by RustFS user.
         // If spec.securityContext overrides are set, use those values instead.
@@ -476,6 +504,15 @@ impl Tenant {
                 .image_pull_policy
                 .as_ref()
                 .map(ToString::to_string),
+            liveness_probe: tls_plan
+                .enabled
+                .then(|| http_probe("/health", tls_plan.probe_scheme)),
+            readiness_probe: tls_plan
+                .enabled
+                .then(|| http_probe("/health/ready", tls_plan.probe_scheme)),
+            startup_probe: tls_plan
+                .enabled
+                .then(|| http_probe("/health", tls_plan.probe_scheme)),
             ..Default::default()
         };
 
@@ -505,6 +542,8 @@ impl Tenant {
                 template: corev1::PodTemplateSpec {
                     metadata: Some(metav1::ObjectMeta {
                         labels: Some(labels),
+                        annotations: (!tls_plan.pod_template_annotations.is_empty())
+                            .then(|| tls_plan.pod_template_annotations.clone()),
                         ..Default::default()
                     }),
                     spec: Some(corev1::PodSpec {
@@ -553,7 +592,16 @@ impl Tenant {
         existing: &v1::StatefulSet,
         pool: &Pool,
     ) -> Result<bool, types::error::Error> {
-        let desired = self.new_statefulset(pool)?;
+        self.statefulset_needs_update_with_tls_plan(existing, pool, &TlsPlan::disabled())
+    }
+
+    pub fn statefulset_needs_update_with_tls_plan(
+        &self,
+        existing: &v1::StatefulSet,
+        pool: &Pool,
+        tls_plan: &TlsPlan,
+    ) -> Result<bool, types::error::Error> {
+        let desired = self.new_statefulset_with_tls_plan(pool, tls_plan)?;
 
         // Compare key spec fields that should trigger updates
         let existing_spec = existing
@@ -597,6 +645,19 @@ impl Tenant {
             return Ok(true);
         }
 
+        // Check if pod template annotations changed (TLS hash rollout lives here).
+        if existing_template
+            .metadata
+            .as_ref()
+            .and_then(|m| m.annotations.as_ref())
+            != desired_template
+                .metadata
+                .as_ref()
+                .and_then(|m| m.annotations.as_ref())
+        {
+            return Ok(true);
+        }
+
         let existing_pod_spec =
             existing_template
                 .spec
@@ -630,6 +691,13 @@ impl Tenant {
 
         // Check image pull secrets
         if existing_pod_spec.image_pull_secrets != desired_pod_spec.image_pull_secrets {
+            return Ok(true);
+        }
+
+        // Check pod volumes (TLS Secret/CA mounts live here).
+        if serde_json::to_value(&existing_pod_spec.volumes)?
+            != serde_json::to_value(&desired_pod_spec.volumes)?
+        {
             return Ok(true);
         }
 
@@ -734,7 +802,16 @@ impl Tenant {
         existing: &v1::StatefulSet,
         pool: &Pool,
     ) -> Result<(), types::error::Error> {
-        let desired = self.new_statefulset(pool)?;
+        self.validate_statefulset_update_with_tls_plan(existing, pool, &TlsPlan::disabled())
+    }
+
+    pub fn validate_statefulset_update_with_tls_plan(
+        &self,
+        existing: &v1::StatefulSet,
+        pool: &Pool,
+        tls_plan: &TlsPlan,
+    ) -> Result<(), types::error::Error> {
+        let desired = self.new_statefulset_with_tls_plan(pool, tls_plan)?;
 
         let existing_spec = existing
             .spec
@@ -850,12 +927,249 @@ impl Tenant {
 mod tests {
     use super::{DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER};
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
+    use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
     use k8s_openapi::api::core::v1 as corev1;
 
     fn image_pull_secret(name: &str) -> corev1::LocalObjectReference {
         corev1::LocalObjectReference {
             name: name.to_string(),
         }
+    }
+
+    fn tls_plan(hash: &str) -> TlsPlan {
+        TlsPlan::for_test("server-tls", hash)
+    }
+
+    fn env_value<'a>(container: &'a corev1::Container, name: &str) -> Option<&'a str> {
+        container
+            .env
+            .as_ref()?
+            .iter()
+            .find(|var| var.name == name)?
+            .value
+            .as_deref()
+    }
+
+    #[test]
+    fn disabled_tls_statefulset_keeps_http_and_has_no_tls_wiring() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet without TLS");
+
+        let template = statefulset.spec.unwrap().template;
+        assert!(
+            template
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.annotations.as_ref())
+                .is_none_or(|annotations| !annotations.contains_key("operator.rustfs.com/tls-hash"))
+        );
+
+        let pod_spec = template.spec.unwrap();
+        assert!(pod_spec.volumes.as_ref().is_none_or(|volumes| {
+            !volumes
+                .iter()
+                .any(|volume| volume.name.starts_with("rustfs-tls"))
+        }));
+
+        let container = &pod_spec.containers[0];
+        assert!(
+            env_value(container, "RUSTFS_VOLUMES")
+                .is_some_and(|value| value.starts_with("http://"))
+        );
+        assert!(env_value(container, "RUSTFS_TLS_PATH").is_none());
+        assert!(container.liveness_probe.is_none());
+        assert!(container.readiness_probe.is_none());
+        assert!(container.startup_probe.is_none());
+        assert!(container.volume_mounts.as_ref().is_none_or(|mounts| {
+            !mounts
+                .iter()
+                .any(|mount| mount.name.starts_with("rustfs-tls"))
+        }));
+    }
+
+    #[test]
+    fn cert_manager_tls_statefulset_maps_secret_to_rustfs_tls_files() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset_with_tls_plan(pool, &tls_plan("sha256:test"))
+            .expect("Should create StatefulSet with TLS");
+
+        let template = statefulset.spec.unwrap().template;
+        let annotations = template.metadata.unwrap().annotations.unwrap();
+        assert_eq!(
+            annotations.get("operator.rustfs.com/tls-hash"),
+            Some(&"sha256:test".to_string())
+        );
+
+        let pod_spec = template.spec.unwrap();
+        let volumes = pod_spec.volumes.unwrap_or_default();
+        assert!(
+            volumes
+                .iter()
+                .any(|volume| volume.name == "rustfs-tls-server")
+        );
+
+        let container = &pod_spec.containers[0];
+        let env = container.env.as_ref().expect("TLS env should be present");
+        assert!(env.iter().any(|var| {
+            var.name == "RUSTFS_TLS_PATH" && var.value.as_deref() == Some("/var/run/rustfs/tls")
+        }));
+        assert!(env.iter().any(|var| {
+            var.name == "RUSTFS_VOLUMES"
+                && var
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with("https://"))
+        }));
+
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("TLS volume mounts should be present");
+        assert!(mounts.iter().any(|mount| {
+            mount.name == "rustfs-tls-server"
+                && mount.mount_path == "/var/run/rustfs/tls/rustfs_cert.pem"
+                && mount.sub_path.as_deref() == Some("rustfs_cert.pem")
+        }));
+        assert!(mounts.iter().any(|mount| {
+            mount.name == "rustfs-tls-server"
+                && mount.mount_path == "/var/run/rustfs/tls/rustfs_key.pem"
+                && mount.sub_path.as_deref() == Some("rustfs_key.pem")
+        }));
+        assert!(mounts.iter().any(|mount| {
+            mount.name == "rustfs-tls-server"
+                && mount.mount_path == "/var/run/rustfs/tls/ca.crt"
+                && mount.sub_path.as_deref() == Some("ca.crt")
+        }));
+
+        assert_eq!(
+            container
+                .readiness_probe
+                .as_ref()
+                .and_then(|probe| probe.http_get.as_ref())
+                .and_then(|http_get| http_get.scheme.as_deref()),
+            Some("HTTPS")
+        );
+    }
+
+    #[test]
+    fn tls_statefulset_keeps_operator_managed_env_when_spec_env_conflicts() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.env = vec![
+            corev1::EnvVar {
+                name: "RUSTFS_TLS_PATH".to_string(),
+                value: Some("/wrong/tls".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "RUSTFS_VOLUMES".to_string(),
+                value: Some("http://wrong.example/rustfs0".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "RUSTFS_TRUST_SYSTEM_CA".to_string(),
+                value: Some("false".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "RUSTFS_TRUST_LEAF_CERT_AS_CA".to_string(),
+                value: Some("false".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "RUSTFS_SERVER_MTLS_ENABLE".to_string(),
+                value: Some("false".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "CUSTOM_USER_ENV".to_string(),
+                value: Some("kept".to_string()),
+                ..Default::default()
+            },
+        ];
+        let pool = &tenant.spec.pools[0];
+        let plan = TlsPlan::rollout(
+            "/var/run/rustfs/tls".to_string(),
+            "sha256:reserved-env".to_string(),
+            "server-tls".to_string(),
+            Some("ca.crt".to_string()),
+            None,
+            Some(SecretKeyReference {
+                name: "client-ca".to_string(),
+                key: "ca.crt".to_string(),
+            }),
+            true,
+            true,
+            true,
+            None,
+        );
+
+        let statefulset = tenant
+            .new_statefulset_with_tls_plan(pool, &plan)
+            .expect("Should create StatefulSet with TLS");
+
+        let container = &statefulset
+            .spec
+            .as_ref()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("Pod template should have spec")
+            .containers[0];
+        let env = container.env.as_ref().expect("TLS env should be present");
+        for name in [
+            "RUSTFS_TLS_PATH",
+            "RUSTFS_VOLUMES",
+            "RUSTFS_TRUST_SYSTEM_CA",
+            "RUSTFS_TRUST_LEAF_CERT_AS_CA",
+            "RUSTFS_SERVER_MTLS_ENABLE",
+        ] {
+            assert_eq!(
+                env.iter().filter(|var| var.name == name).count(),
+                1,
+                "reserved env var {name} should appear exactly once"
+            );
+        }
+        assert_eq!(
+            env_value(container, "RUSTFS_TLS_PATH"),
+            Some("/var/run/rustfs/tls")
+        );
+        assert!(
+            env_value(container, "RUSTFS_VOLUMES")
+                .is_some_and(|value| value.starts_with("https://") && !value.contains("wrong"))
+        );
+        assert_eq!(env_value(container, "RUSTFS_TRUST_SYSTEM_CA"), Some("true"));
+        assert_eq!(
+            env_value(container, "RUSTFS_TRUST_LEAF_CERT_AS_CA"),
+            Some("true")
+        );
+        assert_eq!(
+            env_value(container, "RUSTFS_SERVER_MTLS_ENABLE"),
+            Some("true")
+        );
+        assert_eq!(env_value(container, "CUSTOM_USER_ENV"), Some("kept"));
+    }
+
+    #[test]
+    fn tls_hash_annotation_change_triggers_statefulset_update() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset_with_tls_plan(pool, &tls_plan("sha256:old"))
+            .expect("Should create StatefulSet with TLS");
+
+        let needs_update = tenant
+            .statefulset_needs_update_with_tls_plan(&statefulset, pool, &tls_plan("sha256:new"))
+            .expect("Should compare StatefulSet");
+
+        assert!(needs_update, "TLS hash change should roll the pod template");
     }
 
     // Test: Pod runs as non-root with proper security context

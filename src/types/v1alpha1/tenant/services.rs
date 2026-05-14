@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::Tenant;
+use crate::types::v1alpha1::tls::TlsPlan;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use k8s_openapi::apimachinery::pkg::util::intstr;
@@ -28,6 +29,10 @@ fn console_service_name(tenant: &Tenant) -> String {
 impl Tenant {
     /// a new io Service for tenant
     pub fn new_io_service(&self) -> corev1::Service {
+        self.new_io_service_with_tls_plan(&TlsPlan::disabled())
+    }
+
+    pub fn new_io_service_with_tls_plan(&self, tls_plan: &TlsPlan) -> corev1::Service {
         corev1::Service {
             metadata: metav1::ObjectMeta {
                 name: Some(io_service_name(self)),
@@ -42,7 +47,7 @@ impl Tenant {
                 ports: Some(vec![corev1::ServicePort {
                     port: 9000,
                     target_port: Some(intstr::IntOrString::Int(9000)),
-                    name: Some("http-rustfs".to_owned()),
+                    name: Some(rustfs_service_port_name(tls_plan).to_owned()),
                     ..Default::default()
                 }]),
                 ..Default::default()
@@ -78,6 +83,10 @@ impl Tenant {
 
     /// a new headless Service for tenant
     pub fn new_headless_service(&self) -> corev1::Service {
+        self.new_headless_service_with_tls_plan(&TlsPlan::disabled())
+    }
+
+    pub fn new_headless_service_with_tls_plan(&self, tls_plan: &TlsPlan) -> corev1::Service {
         corev1::Service {
             metadata: metav1::ObjectMeta {
                 name: Some(self.headless_service_name()),
@@ -93,12 +102,66 @@ impl Tenant {
                 selector: Some(self.selector_labels()),
                 ports: Some(vec![corev1::ServicePort {
                     port: 9000,
-                    name: Some("http-rustfs".to_owned()),
+                    name: Some(rustfs_service_port_name(tls_plan).to_owned()),
                     ..Default::default()
                 }]),
                 ..Default::default()
             }),
             ..Default::default()
         }
+    }
+}
+
+fn rustfs_service_port_name(tls_plan: &TlsPlan) -> &'static str {
+    if tls_plan.enabled {
+        "https-rustfs"
+    } else {
+        "http-rustfs"
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crate::types::v1alpha1::tls::TlsPlan;
+
+    fn first_port_name(service: &k8s_openapi::api::core::v1::Service) -> Option<&str> {
+        service
+            .spec
+            .as_ref()?
+            .ports
+            .as_ref()?
+            .first()?
+            .name
+            .as_deref()
+    }
+
+    #[test]
+    fn disabled_tls_keeps_rustfs_services_on_http_port_name() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+
+        assert_eq!(
+            first_port_name(&tenant.new_io_service()),
+            Some("http-rustfs")
+        );
+        assert_eq!(
+            first_port_name(&tenant.new_headless_service()),
+            Some("http-rustfs")
+        );
+    }
+
+    #[test]
+    fn enabled_tls_switches_rustfs_services_to_https_port_name() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let tls_plan = TlsPlan::for_test("server-tls", "sha256:test");
+
+        assert_eq!(
+            first_port_name(&tenant.new_io_service_with_tls_plan(&tls_plan)),
+            Some("https-rustfs")
+        );
+        assert_eq!(
+            first_port_name(&tenant.new_headless_service_with_tls_plan(&tls_plan)),
+            Some("https-rustfs")
+        );
     }
 }

@@ -91,5 +91,34 @@ else
   exit 1
 fi
 
+assert_cert_manager_crd_discovery_rbac() {
+  local manifest="$1"
+  python3 - "$manifest" <<'PY'
+import pathlib
+import re
+import sys
+
+manifest = pathlib.Path(sys.argv[1])
+pattern = re.compile(
+    r'^  - apiGroups: \["apiextensions\.k8s\.io"\]\n'
+    r'    resources: \["customresourcedefinitions"\]\n'
+    r'    resourceNames: \["certificates\.cert-manager\.io"\]\n'
+    r'    verbs: \["get"\]$',
+    re.MULTILINE,
+)
+if not pattern.search(manifest.read_text()):
+    sys.exit(1)
+PY
+}
+
+echo "11. Checking Operator RBAC can discover the cert-manager Certificate CRD..."
+for manifest in \
+  deploy/k8s-dev/operator-rbac.yaml \
+  deploy/rustfs-operator/templates/clusterrole.yaml; do
+  assert_cert_manager_crd_discovery_rbac "$manifest" \
+    || { echo "  ✗ $manifest must grant get on customresourcedefinitions/certificates.cert-manager.io"; exit 1; }
+done
+echo "  ✓ Operator RBAC grants scoped cert-manager Certificate CRD discovery"
+
 echo ""
 echo "All script checks passed! ✅"

@@ -19,6 +19,7 @@ pub mod persistence;
 pub mod pool;
 pub mod status;
 pub mod tenant;
+pub mod tls;
 
 // Re-export commonly used types
 pub use pool::{SchedulingConfig, validate_pool_total_volumes};

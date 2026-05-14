@@ -28,6 +28,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 mod phases;
+mod tls;
 
 use phases::{
     finalize_tenant_status, maybe_cleanup_terminating_pods, reconcile_pool_statefulsets,
@@ -42,6 +43,12 @@ pub enum Error {
 
     #[snafu(transparent)]
     Types { source: types::error::Error },
+
+    #[snafu(display("TLS reconciliation blocked ({reason}): {message}"))]
+    TlsBlocked { reason: String, message: String },
+
+    #[snafu(display("TLS reconciliation pending ({reason}): {message}"))]
+    TlsPending { reason: String, message: String },
 }
 
 pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<Action, Error> {
@@ -62,17 +69,18 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     }
 
     validate_tenant_prerequisites(&ctx, &latest_tenant).await?;
+    let tls_plan = tls::reconcile_tls(&ctx, &latest_tenant, &ns).await?;
 
     maybe_cleanup_terminating_pods(&ctx, &latest_tenant, &ns).await?;
 
     reconcile_rbac_resources(&ctx, &latest_tenant, &ns).await?;
 
-    reconcile_services(&ctx, &latest_tenant, &ns).await?;
+    reconcile_services(&ctx, &latest_tenant, &ns, &tls_plan).await?;
 
     validate_no_pool_rename(&ctx, &latest_tenant, &ns).await?;
 
-    let summary = reconcile_pool_statefulsets(&ctx, &latest_tenant, &ns).await?;
-    finalize_tenant_status(&ctx, &latest_tenant, summary).await
+    let summary = reconcile_pool_statefulsets(&ctx, &latest_tenant, &ns, &tls_plan).await?;
+    finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan).await
 }
 
 #[cfg(test)]
@@ -527,6 +535,9 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
             // Other type errors - use moderate requeue
             _ => Action::requeue(Duration::from_secs(15)),
         },
+
+        Error::TlsBlocked { .. } => Action::requeue(Duration::from_secs(60)),
+        Error::TlsPending { .. } => Action::requeue(Duration::from_secs(20)),
     }
 }
 

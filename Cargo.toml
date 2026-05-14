@@ -26,6 +26,8 @@ schemars = "1"
 clap = { version = "4.5.54", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pemfile = "2.2.0"
+webpki = { package = "rustls-webpki", version = "0.103" }
+sha2 = "0.10"
 shadow-rs = "1.5.0"
 snafu = { version = "0.8.9", features = ["futures"] }
 

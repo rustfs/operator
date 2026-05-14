@@ -15,8 +15,8 @@
 use crate::context;
 use crate::types;
 use crate::types::v1alpha1::status::{
-    ConditionInput, ConditionStatus, ConditionType, Reason, Status, is_blocked_reason, pool,
-    summarize_current_state,
+    ConditionInput, ConditionStatus, ConditionType, Reason, Status, certificate, is_blocked_reason,
+    pool, summarize_current_state,
 };
 use crate::types::v1alpha1::tenant::Tenant;
 use kube::runtime::events::EventType;
@@ -172,6 +172,14 @@ impl StatusError {
         )
     }
 
+    pub fn tls_blocked(reason: Reason, safe_message: String) -> Self {
+        Self::blocked(reason, ConditionType::TlsReady, safe_message)
+    }
+
+    pub fn tls_reconciling(reason: Reason, safe_message: String) -> Self {
+        Self::transient(reason, ConditionType::TlsReady, safe_message)
+    }
+
     fn blocked(reason: Reason, condition_type: ConditionType, safe_message: String) -> Self {
         Self {
             reason,
@@ -221,6 +229,19 @@ impl StatusBuilder {
     pub fn set_pool_statuses(&mut self, pools: Vec<pool::Pool>) {
         self.next.available_replicas = pools.iter().filter_map(|pool| pool.ready_replicas).sum();
         self.next.pools = pools;
+    }
+
+    pub fn set_tls_status(&mut self, tls: certificate::TlsCertificateStatus) {
+        let ready = tls.ready;
+        self.next.certificates.tls = Some(tls);
+        if ready {
+            self.set_condition(
+                ConditionType::TlsReady,
+                ConditionStatus::True,
+                Reason::TlsConfigured,
+                "TLS is configured for RustFS workloads".to_string(),
+            );
+        }
     }
 
     pub fn mark_started(&mut self) {
@@ -721,6 +742,7 @@ mod tests {
                 "False",
                 "CredentialSecretNotFound",
             )],
+            ..Default::default()
         });
         let status_error = StatusError {
             reason: Reason::KubernetesApiError,

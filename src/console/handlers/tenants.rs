@@ -163,6 +163,7 @@ pub async fn get_tenant_details(
     let status_summary = tenant_status_summary(&tenant);
     let conditions = tenant_conditions(&tenant);
     let next_actions = status_summary.next_actions.clone();
+    let certificates = tenant_certificates(&tenant);
 
     Ok(Json(TenantDetailsResponse {
         name: tenant.name_any(),
@@ -181,6 +182,7 @@ pub async fn get_tenant_details(
         status_summary,
         conditions,
         next_actions,
+        certificates,
         image: tenant.spec.image.clone(),
         mount_path: tenant.spec.mount_path.clone(),
         created_at: tenant
