@@ -504,15 +504,10 @@ impl Tenant {
                 .image_pull_policy
                 .as_ref()
                 .map(ToString::to_string),
-            liveness_probe: tls_plan
-                .enabled
-                .then(|| http_probe("/health", tls_plan.probe_scheme)),
-            readiness_probe: tls_plan
-                .enabled
-                .then(|| http_probe("/health/ready", tls_plan.probe_scheme)),
-            startup_probe: tls_plan
-                .enabled
-                .then(|| http_probe("/health", tls_plan.probe_scheme)),
+            liveness_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
+            readiness_probe: Some(http_probe("/health/ready", tls_plan.probe_scheme)),
+            startup_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
+            termination_message_policy: Some("FallbackToLogsOnError".to_string()),
             ..Default::default()
         };
 
@@ -981,9 +976,34 @@ mod tests {
                 .is_some_and(|value| value.starts_with("http://"))
         );
         assert!(env_value(container, "RUSTFS_TLS_PATH").is_none());
-        assert!(container.liveness_probe.is_none());
-        assert!(container.readiness_probe.is_none());
-        assert!(container.startup_probe.is_none());
+        assert_eq!(
+            container
+                .liveness_probe
+                .as_ref()
+                .and_then(|probe| probe.http_get.as_ref())
+                .and_then(|http_get| http_get.scheme.as_deref()),
+            Some("HTTP")
+        );
+        assert_eq!(
+            container
+                .readiness_probe
+                .as_ref()
+                .and_then(|probe| probe.http_get.as_ref())
+                .and_then(|http_get| http_get.path.as_deref()),
+            Some("/health/ready")
+        );
+        assert_eq!(
+            container
+                .startup_probe
+                .as_ref()
+                .and_then(|probe| probe.http_get.as_ref())
+                .and_then(|http_get| http_get.scheme.as_deref()),
+            Some("HTTP")
+        );
+        assert_eq!(
+            container.termination_message_policy.as_deref(),
+            Some("FallbackToLogsOnError")
+        );
         assert!(container.volume_mounts.as_ref().is_none_or(|mounts| {
             !mounts
                 .iter()
@@ -1055,6 +1075,10 @@ mod tests {
                 .and_then(|probe| probe.http_get.as_ref())
                 .and_then(|http_get| http_get.scheme.as_deref()),
             Some("HTTPS")
+        );
+        assert_eq!(
+            container.termination_message_policy.as_deref(),
+            Some("FallbackToLogsOnError")
         );
     }
 

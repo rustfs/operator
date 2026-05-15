@@ -57,6 +57,7 @@ impl KindCluster {
             }
             fs::create_dir_all(&dir)
                 .with_context(|| format!("create e2e host storage dir {}", dir.display()))?;
+            ensure_host_storage_dir_is_empty(&dir)?;
         }
         Ok(())
     }
@@ -66,6 +67,7 @@ impl KindCluster {
             ensure_dedicated_host_storage_dir(&dir)?;
             if fs::symlink_metadata(&dir).is_ok() {
                 self.remove_host_storage_dir(&dir)?;
+                ensure_host_storage_dir_is_absent(&dir)?;
             }
         }
         Ok(())
@@ -128,6 +130,34 @@ impl KindCluster {
     }
 }
 
+fn ensure_host_storage_dir_is_empty(dir: &Path) -> Result<()> {
+    let mut entries = fs::read_dir(dir)
+        .with_context(|| format!("read e2e host storage dir {}", dir.display()))?;
+
+    if let Some(entry) = entries.next() {
+        let entry =
+            entry.with_context(|| format!("inspect e2e host storage dir {}", dir.display()))?;
+        bail!(
+            "dedicated e2e storage dir {} is not empty after cleanup; first leftover entry: {}",
+            dir.display(),
+            entry.path().display()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_host_storage_dir_is_absent(dir: &Path) -> Result<()> {
+    if fs::symlink_metadata(dir).is_ok() {
+        bail!(
+            "dedicated e2e storage dir {} still exists after cleanup",
+            dir.display()
+        );
+    }
+
+    Ok(())
+}
+
 fn ensure_existing_dedicated_host_storage_dir_is_safe(path: &Path) -> Result<()> {
     ensure_dedicated_host_storage_dir(path)?;
     let metadata = fs::symlink_metadata(path)
@@ -185,7 +215,10 @@ fn current_uid() -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KindCluster, ensure_dedicated_host_storage_dir};
+    use super::{
+        KindCluster, ensure_dedicated_host_storage_dir, ensure_host_storage_dir_is_absent,
+        ensure_host_storage_dir_is_empty,
+    };
     use crate::framework::config::E2eConfig;
 
     #[test]
@@ -247,5 +280,25 @@ mod tests {
             kind.docker_clean_host_storage_command(std::path::Path::new("/tmp/other"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn host_storage_empty_guard_rejects_leftovers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        ensure_host_storage_dir_is_empty(temp.path()).expect("empty dir is accepted");
+
+        std::fs::write(temp.path().join("leftover"), "data").expect("write leftover");
+
+        let error = ensure_host_storage_dir_is_empty(temp.path()).expect_err("leftover rejected");
+        assert!(error.to_string().contains("is not empty after cleanup"));
+    }
+
+    #[test]
+    fn host_storage_absent_guard_rejects_existing_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error =
+            ensure_host_storage_dir_is_absent(temp.path()).expect_err("existing path rejected");
+
+        assert!(error.to_string().contains("still exists after cleanup"));
     }
 }

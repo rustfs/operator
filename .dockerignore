@@ -1,4 +1,14 @@
+.git
+.agents
+.codex
+.e2e-artifacts
+.e2e-cache
 target
+**/target
+console-web/.next
+console-web/node_modules
+console-web/out
+console-web/coverage
 .github
 CLA.md
 CONTRIBUTING.md

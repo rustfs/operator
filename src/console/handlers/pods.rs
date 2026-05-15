@@ -30,6 +30,42 @@ use kube::{
     api::{DeleteParams, ListParams, LogParams},
 };
 
+fn container_state_from_k8s(state: Option<&corev1::ContainerState>) -> ContainerState {
+    if let Some(running) = state.and_then(|s| s.running.as_ref()) {
+        ContainerState::Running {
+            started_at: running.started_at.as_ref().map(|t| t.0.to_rfc3339()),
+        }
+    } else if let Some(waiting) = state.and_then(|s| s.waiting.as_ref()) {
+        ContainerState::Waiting {
+            reason: waiting.reason.clone(),
+            message: waiting.message.clone(),
+        }
+    } else if let Some(terminated) = state.and_then(|s| s.terminated.as_ref()) {
+        ContainerState::Terminated {
+            reason: terminated.reason.clone(),
+            exit_code: terminated.exit_code,
+            finished_at: terminated.finished_at.as_ref().map(|t| t.0.to_rfc3339()),
+            message: terminated.message.clone(),
+        }
+    } else {
+        ContainerState::Waiting {
+            reason: Some("Unknown".to_string()),
+            message: None,
+        }
+    }
+}
+
+fn last_terminated_container(
+    status: Option<&corev1::PodStatus>,
+) -> Option<&corev1::ContainerStateTerminated> {
+    status?
+        .container_statuses
+        .as_ref()?
+        .iter()
+        .filter_map(|container| container.last_state.as_ref()?.terminated.as_ref())
+        .max_by_key(|terminated| terminated.finished_at.as_ref().map(|t| t.0))
+}
+
 /// Ensure the pod has `rustfs.tenant=<tenant>` label.
 fn ensure_pod_belongs_to_tenant(
     pod: &corev1::Pod,
@@ -127,6 +163,7 @@ pub async fn list_pods(
             .and_then(|s| s.container_statuses.as_ref())
             .map(|containers| containers.iter().map(|c| c.restart_count).sum::<i32>())
             .unwrap_or(0);
+        let last_exit = last_terminated_container(status);
 
         // Created timestamp and age
         let created_at = pod
@@ -153,6 +190,11 @@ pub async fn list_pods(
             node,
             ready: format!("{}/{}", ready_count, total_count),
             restarts,
+            last_state: last_exit
+                .and_then(|terminated| terminated.reason.clone())
+                .or_else(|| last_exit.map(|_| "Terminated".to_string())),
+            last_exit_code: last_exit.map(|terminated| terminated.exit_code),
+            last_exit_message: last_exit.and_then(|terminated| terminated.message.clone()),
             age,
             created_at,
         });
@@ -283,50 +325,25 @@ pub async fn get_pod_details(
     };
 
     // Container statuses
-    let containers = if let Some(container_statuses) =
-        status_info.and_then(|s| s.container_statuses.as_ref())
-    {
-        container_statuses
-            .iter()
-            .map(|cs| {
-                let state = if let Some(running) =
-                    &cs.state.as_ref().and_then(|s| s.running.as_ref())
-                {
-                    ContainerState::Running {
-                        started_at: running.started_at.as_ref().map(|t| t.0.to_rfc3339()),
-                    }
-                } else if let Some(waiting) = &cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
-                    ContainerState::Waiting {
-                        reason: waiting.reason.clone(),
-                        message: waiting.message.clone(),
-                    }
-                } else if let Some(terminated) =
-                    &cs.state.as_ref().and_then(|s| s.terminated.as_ref())
-                {
-                    ContainerState::Terminated {
-                        reason: terminated.reason.clone(),
-                        exit_code: terminated.exit_code,
-                        finished_at: terminated.finished_at.as_ref().map(|t| t.0.to_rfc3339()),
-                    }
-                } else {
-                    ContainerState::Waiting {
-                        reason: Some("Unknown".to_string()),
-                        message: None,
-                    }
-                };
-
-                ContainerInfo {
+    let containers =
+        if let Some(container_statuses) = status_info.and_then(|s| s.container_statuses.as_ref()) {
+            container_statuses
+                .iter()
+                .map(|cs| ContainerInfo {
                     name: cs.name.clone(),
                     image: cs.image.clone(),
                     ready: cs.ready,
                     restart_count: cs.restart_count,
-                    state,
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+                    state: container_state_from_k8s(cs.state.as_ref()),
+                    last_state: cs
+                        .last_state
+                        .as_ref()
+                        .map(|state| container_state_from_k8s(Some(state))),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     // Volume mounts
     let volumes = spec

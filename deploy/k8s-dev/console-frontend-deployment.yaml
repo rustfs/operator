@@ -1,5 +1,5 @@
 # Copyright 2025 RustFS Team
-# Console Web Frontend Deployment (used by scripts/deploy/deploy-rustfs.sh)
+# Console Web Frontend Deployment (used by the dev and e2e deployment flows)
 # Image built locally: rustfs/console-web:dev
 apiVersion: apps/v1
 kind: Deployment

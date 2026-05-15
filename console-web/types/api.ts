@@ -204,6 +204,9 @@ export interface PodListItem {
   node: string | null
   ready: string
   restarts: number
+  last_state?: string | null
+  last_exit_code?: number | null
+  last_exit_message?: string | null
   age: string
   created_at: string | null
 }
@@ -244,6 +247,7 @@ export interface ContainerStateTerminated {
   reason?: string
   exit_code: number
   finished_at?: string
+  message?: string
 }
 
 export type ContainerState = ContainerStateRunning | ContainerStateWaiting | ContainerStateTerminated
@@ -254,6 +258,7 @@ export interface ContainerInfo {
   ready: boolean
   restart_count: number
   state: ContainerState
+  last_state?: ContainerState | null
 }
 
 export interface VolumeInfo {
