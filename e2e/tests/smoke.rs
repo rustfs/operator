@@ -64,10 +64,14 @@ async fn smoke_apply_tenant_and_wait_ready() -> Result<()> {
 
     if let Err(error) = &result {
         let collector = ArtifactCollector::new(&config.artifacts_dir);
-        if let Err(artifact_error) =
-            collector.collect_kubernetes_snapshot("smoke_apply_tenant_and_wait_ready", &config)
-        {
-            eprintln!("failed to collect e2e artifacts after {error}: {artifact_error}");
+        match collector.collect_kubernetes_snapshot("smoke_apply_tenant_and_wait_ready", &config) {
+            Ok(report) => {
+                eprintln!("collected e2e artifacts under {}", report.dir.display());
+                eprintln!("{}", report.diagnosis);
+            }
+            Err(artifact_error) => {
+                eprintln!("failed to collect e2e artifacts after {error}: {artifact_error}");
+            }
         }
     }
 
