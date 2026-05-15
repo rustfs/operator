@@ -25,6 +25,7 @@ import { routes } from "@/lib/routes"
 import * as api from "@/lib/api"
 import type {
   TenantDetailsResponse,
+  TenantCondition,
   PoolDetails,
   PodListItem,
   EventItem,
@@ -62,6 +63,36 @@ function normalizeTab(value?: string | null): Tab {
     default:
       return "overview"
   }
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return "-"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
+}
+
+function shouldShowStatusNotice(tenant: TenantDetailsResponse): boolean {
+  const summary = tenant.status_summary
+  return summary.degraded || summary.reconciling || summary.stale || !summary.ready || tenant.state !== "Ready"
+}
+
+function getConditionRowTone(condition: TenantCondition): string {
+  if (condition.status === "True" && condition.type === "Degraded") {
+    return "bg-destructive/5"
+  }
+  if (condition.status === "False" && ["Ready", "PoolsReady", "WorkloadsReady"].includes(condition.type)) {
+    return "bg-destructive/5"
+  }
+  return ""
+}
+
+function podLastExitSummary(pod: PodListItem, exitedLabel: string): string {
+  if (pod.last_exit_code == null) return "-"
+  const state = pod.last_state && pod.last_state !== "Error" ? `${pod.last_state} ` : ""
+  const message = pod.last_exit_message?.trim()
+  const summary = `${state}${exitedLabel} ${pod.last_exit_code}`
+  return message ? `${summary}: ${message}` : summary
 }
 
 export function TenantDetailClient({ namespace, name, initialTab, initialYamlEditable }: TenantDetailClientProps) {
@@ -485,6 +516,11 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     { id: "security", labelKey: "Security" },
     { id: "edit", labelKey: "YAML" },
   ]
+  const statusNoticeVisible = shouldShowStatusNotice(tenant)
+  const statusSummary = tenant.status_summary
+  const statusReason = statusSummary.primary_reason || tenant.state
+  const statusMessage = statusSummary.primary_message || "-"
+  const statusNextActions = statusSummary.next_actions.length > 0 ? statusSummary.next_actions : tenant.next_actions
 
   return (
     <Page>
@@ -511,6 +547,28 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
           {t("State")}: {tenant.state}
         </p>
       </PageHeader>
+
+      {statusNoticeVisible && (
+        <div className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="font-medium">{t("Status reason")}:</span>
+            <span>{statusReason}</span>
+          </div>
+          <p className="mt-1 break-words text-muted-foreground">{statusMessage}</p>
+          {statusNextActions.length > 0 && (
+            <div className="mt-3">
+              <p className="font-medium">{t("Next actions")}</p>
+              <ul className="mt-1 list-disc space-y-1 pl-5 text-muted-foreground">
+                {statusNextActions.map((action) => (
+                  <li key={action} className="break-words">
+                    {action}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-2 border-b border-border mb-4">
         {tabs.map(({ id, labelKey }) => (
@@ -571,6 +629,43 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                         <TableCell>{svc.name}</TableCell>
                         <TableCell>{svc.service_type}</TableCell>
                         <TableCell>{svc.ports.map((p) => `${p.name}:${p.port}`).join(", ")}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
+          {tenant.conditions.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t("Status Conditions")}</CardTitle>
+                <CardDescription>{t("Detailed operator status conditions for this tenant.")}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("Type")}</TableHead>
+                      <TableHead>{t("Status")}</TableHead>
+                      <TableHead>{t("Reason")}</TableHead>
+                      <TableHead>{t("Message")}</TableHead>
+                      <TableHead>{t("Last transition")}</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {tenant.conditions.map((condition) => (
+                      <TableRow
+                        key={`${condition.type}-${condition.reason}`}
+                        className={getConditionRowTone(condition)}
+                      >
+                        <TableCell className="font-medium">{condition.type}</TableCell>
+                        <TableCell>{condition.status}</TableCell>
+                        <TableCell>{condition.reason || "-"}</TableCell>
+                        <TableCell className="max-w-[520px] whitespace-normal break-words">
+                          {condition.message || "-"}
+                        </TableCell>
+                        <TableCell>{formatTimestamp(condition.last_transition_time)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -784,6 +879,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                   <TableHead>{t("Pool")}</TableHead>
                   <TableHead>{t("Status")}</TableHead>
                   <TableHead>{t("Node")}</TableHead>
+                  <TableHead>{t("Last exit")}</TableHead>
                   <TableHead>{t("Age")}</TableHead>
                   <TableHead className="w-[180px]">{t("Actions")}</TableHead>
                 </TableRow>
@@ -795,6 +891,9 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                     <TableCell>{p.pool}</TableCell>
                     <TableCell>{p.status}</TableCell>
                     <TableCell>{p.node || "-"}</TableCell>
+                    <TableCell className="max-w-[420px] whitespace-normal break-words">
+                      {podLastExitSummary(p, t("exited"))}
+                    </TableCell>
                     <TableCell>{p.age}</TableCell>
                     <TableCell>
                       <div className="flex gap-1">

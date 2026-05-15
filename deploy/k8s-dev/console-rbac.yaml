@@ -1,5 +1,5 @@
 # Copyright 2025 RustFS Team
-# RBAC for Operator Console (used by scripts/deploy/deploy-rustfs.sh)
+# RBAC for Operator Console (used by the dev and e2e deployment flows)
 ---
 apiVersion: v1
 kind: ServiceAccount

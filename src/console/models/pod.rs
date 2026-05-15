@@ -25,6 +25,9 @@ pub struct PodListItem {
     pub node: Option<String>,
     pub ready: String, // e.g., "1/1"
     pub restarts: i32,
+    pub last_state: Option<String>,
+    pub last_exit_code: Option<i32>,
+    pub last_exit_message: Option<String>,
     pub age: String,
     pub created_at: Option<String>,
 }
@@ -80,6 +83,7 @@ pub struct ContainerInfo {
     pub ready: bool,
     pub restart_count: i32,
     pub state: ContainerState,
+    pub last_state: Option<ContainerState>,
 }
 
 /// Container lifecycle state
@@ -97,6 +101,7 @@ pub enum ContainerState {
         reason: Option<String>,
         exit_code: i32,
         finished_at: Option<String>,
+        message: Option<String>,
     },
 }
 
