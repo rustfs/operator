@@ -15,7 +15,7 @@
 .PHONY: pre-commit fmt fmt-check clippy test build help
 .PHONY: docker-build-operator docker-build-console-web docker-build-all
 .PHONY: console-lint console-fmt console-fmt-check
-.PHONY: e2e-check e2e-live-create e2e-live-run e2e-live-update e2e-live-delete
+.PHONY: e2e-check e2e-live-create .e2e-live-install-cert-manager e2e-live-run e2e-live-faults e2e-live-update e2e-live-delete
 
 # Default target
 IMAGE_REPO ?= rustfs/operator
@@ -40,8 +40,9 @@ help:
 	@echo "  make console-fmt     - Format frontend code with Prettier (console-web)"
 	@echo "  make console-fmt-check - Check frontend formatting with Prettier (console-web)"
 	@echo "  make e2e-check        - Check Rust-native e2e harness (fmt + test + clippy)"
-	@echo "  make e2e-live-create  - Clean dedicated storage, recreate live Kind environment and load e2e image"
-	@echo "  make e2e-live-run     - Run all live suites (smoke/operator/console) in the existing live environment"
+	@echo "  make e2e-live-create  - Clean dedicated storage, recreate live Kind environment, install cert-manager, and load e2e image"
+	@echo "  make e2e-live-run     - Run all non-destructive live suites in the existing live environment"
+	@echo "  make e2e-live-faults  - Run destructive live fault suites with RUSTFS_E2E_DESTRUCTIVE=1"
 	@echo "  make e2e-live-update  - Rebuild image and update the live environment (load + rollout)"
 	@echo "  make e2e-live-delete  - Delete live Kind environment and clean dedicated storage"
 
@@ -85,6 +86,11 @@ build:
 E2E_MANIFEST ?= e2e/Cargo.toml
 E2E_BIN ?= cargo run --manifest-path $(E2E_MANIFEST) --bin rustfs-e2e --
 E2E_TEST_THREADS ?= 1
+E2E_KUBE_CONTEXT ?= kind-rustfs-e2e
+CERT_MANAGER_VERSION ?= v1.16.2
+CERT_MANAGER_MANIFEST_URL ?= https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
+CERT_MANAGER_ROLLOUT_TIMEOUT ?= 180s
+E2E_LIVE_ENV ?= RUSTFS_E2E_LIVE=1 RUSTFS_E2E_CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
 
 # Rust-native e2e harness checks (non-live; ignored live tests remain opt-in)
 e2e-check:
@@ -96,27 +102,41 @@ e2e-check:
 e2e-live-create:
 	docker build --network host -t rustfs/operator:e2e .
 	docker build --network host -t rustfs/console-web:e2e -f console-web/Dockerfile console-web
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) kind-delete || true
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) kind-create
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) kind-load-images
+	$(E2E_LIVE_ENV) $(E2E_BIN) kind-delete || true
+	$(E2E_LIVE_ENV) $(E2E_BIN) kind-create
+	$(E2E_LIVE_ENV) $(E2E_BIN) kind-load-images
+	$(MAKE) .e2e-live-install-cert-manager
+
+.e2e-live-install-cert-manager:
+	kubectl --context $(E2E_KUBE_CONTEXT) apply -f $(CERT_MANAGER_MANIFEST_URL)
+	kubectl --context $(E2E_KUBE_CONTEXT) -n cert-manager rollout status deployment/cert-manager --timeout=$(CERT_MANAGER_ROLLOUT_TIMEOUT)
+	kubectl --context $(E2E_KUBE_CONTEXT) -n cert-manager rollout status deployment/cert-manager-cainjector --timeout=$(CERT_MANAGER_ROLLOUT_TIMEOUT)
+	kubectl --context $(E2E_KUBE_CONTEXT) -n cert-manager rollout status deployment/cert-manager-webhook --timeout=$(CERT_MANAGER_ROLLOUT_TIMEOUT)
 
 e2e-live-run:
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) assert-context
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) deploy-dev
+	$(E2E_LIVE_ENV) $(E2E_BIN) assert-context
+	$(MAKE) .e2e-live-install-cert-manager
+	$(E2E_LIVE_ENV) $(E2E_BIN) deploy-dev
+	$(E2E_LIVE_ENV) $(E2E_BIN) reset-live-fixtures
 	RUSTFS_E2E_LIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test smoke -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
 	RUSTFS_E2E_LIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test operator -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
+	RUSTFS_E2E_LIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test sts_functional -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
 	RUSTFS_E2E_LIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test console -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
+	RUSTFS_E2E_LIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test cert_manager_tls -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
 	@echo "configured live e2e suites passed."
+
+e2e-live-faults:
+	RUSTFS_E2E_LIVE=1 RUSTFS_E2E_DESTRUCTIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test faults -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
 
 e2e-live-update:
 	docker build --network host -t rustfs/operator:e2e .
 	docker build --network host -t rustfs/console-web:e2e -f console-web/Dockerfile console-web
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) assert-context
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) kind-load-images
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) rollout-dev
+	$(E2E_LIVE_ENV) $(E2E_BIN) assert-context
+	$(E2E_LIVE_ENV) $(E2E_BIN) kind-load-images
+	$(E2E_LIVE_ENV) $(E2E_BIN) rollout-dev
 
 e2e-live-delete:
-	RUSTFS_E2E_LIVE=1 $(E2E_BIN) kind-delete
+	$(E2E_LIVE_ENV) $(E2E_BIN) kind-delete
 
 
 # Build Docker images. The operator image includes the controller and Console API;

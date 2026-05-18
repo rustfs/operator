@@ -876,7 +876,7 @@ fn cert_manager_artifacts_do_not_expose_secret_material() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "requires cert-manager installed in the dedicated Kind cluster; run after `make e2e-live-run`"]
+#[ignore = "requires cert-manager installed in the dedicated Kind cluster; run through `make e2e-live-run`"]
 async fn cert_manager_managed_certificate_reaches_tls_ready_and_https_wiring() -> Result<()> {
     let base_config = E2eConfig::from_env();
     live::require_live_enabled(&base_config)?;
@@ -915,7 +915,7 @@ async fn cert_manager_managed_certificate_reaches_tls_ready_and_https_wiring() -
 }
 
 #[tokio::test]
-#[ignore = "creates an external TLS Secret and waits for rollout; run after `make e2e-live-run`"]
+#[ignore = "creates an external TLS Secret and waits for rollout; run through `make e2e-live-run`"]
 async fn cert_manager_external_secret_reaches_tls_ready_and_rolls_on_secret_hash() -> Result<()> {
     let base_config = E2eConfig::from_env();
     live::require_live_enabled(&base_config)?;
@@ -957,7 +957,7 @@ async fn cert_manager_external_secret_reaches_tls_ready_and_rolls_on_secret_hash
 }
 
 #[tokio::test]
-#[ignore = "mutates live Tenant fixtures; run after `make e2e-live-run`"]
+#[ignore = "mutates live Tenant fixtures; run through `make e2e-live-run`"]
 async fn cert_manager_rejects_secret_missing_tls_crt() -> Result<()> {
     assert_negative_case_tls_reason(
         tls_e2e::NegativeTlsCase::MissingTlsCrt,
@@ -967,7 +967,7 @@ async fn cert_manager_rejects_secret_missing_tls_crt() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "mutates live Tenant fixtures; run after `make e2e-live-run`"]
+#[ignore = "mutates live Tenant fixtures; run through `make e2e-live-run`"]
 async fn cert_manager_rejects_secret_missing_tls_key() -> Result<()> {
     assert_negative_case_tls_reason(
         tls_e2e::NegativeTlsCase::MissingTlsKey,
@@ -977,7 +977,7 @@ async fn cert_manager_rejects_secret_missing_tls_key() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "mutates live Tenant fixtures; run after `make e2e-live-run`"]
+#[ignore = "mutates live Tenant fixtures; run through `make e2e-live-run`"]
 async fn cert_manager_rejects_secret_missing_ca_for_internode_https() -> Result<()> {
     assert_negative_case_tls_reason(
         tls_e2e::NegativeTlsCase::MissingCaForInternodeHttps,
@@ -987,7 +987,7 @@ async fn cert_manager_rejects_secret_missing_ca_for_internode_https() -> Result<
 }
 
 #[tokio::test]
-#[ignore = "requires cert-manager API and mutates live Tenant fixtures; run after `make e2e-live-run`"]
+#[ignore = "requires cert-manager API and mutates live Tenant fixtures; run through `make e2e-live-run`"]
 async fn cert_manager_rejects_missing_issuer_for_managed_certificate() -> Result<()> {
     assert_negative_case_tls_reason(
         tls_e2e::NegativeTlsCase::MissingIssuer,
@@ -997,7 +997,7 @@ async fn cert_manager_rejects_missing_issuer_for_managed_certificate() -> Result
 }
 
 #[tokio::test]
-#[ignore = "requires cert-manager API and mutates live Tenant fixtures; run after `make e2e-live-run`"]
+#[ignore = "requires cert-manager API and mutates live Tenant fixtures; run through `make e2e-live-run`"]
 async fn cert_manager_reports_pending_certificate_not_ready() -> Result<()> {
     assert_negative_case_tls_reason(
         tls_e2e::NegativeTlsCase::PendingCertificate,
@@ -1007,7 +1007,7 @@ async fn cert_manager_reports_pending_certificate_not_ready() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "mutates live Tenant fixtures; run after `make e2e-live-run`"]
+#[ignore = "mutates live Tenant fixtures; run through `make e2e-live-run`"]
 async fn cert_manager_rejects_hot_reload() -> Result<()> {
     assert_negative_case_tls_reason(
         tls_e2e::NegativeTlsCase::HotReloadUnsupported,

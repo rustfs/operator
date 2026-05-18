@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use operator::types::v1alpha1::k8s::PodManagementPolicy;
 use std::path::PathBuf;
 use std::time::Duration;
 
 pub const DEFAULT_CLUSTER_NAME: &str = "rustfs-e2e";
 pub const DEFAULT_STORAGE_HOST_DIR_PREFIX: &str = "/tmp/rustfs-e2e-storage";
 pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:latest";
+pub const DEFAULT_CERT_MANAGER_VERSION: &str = "v1.16.2";
 pub const KIND_WORKER_COUNT: usize = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct E2eConfig {
     pub cluster_name: String,
     pub context: String,
@@ -33,6 +35,8 @@ pub struct E2eConfig {
     pub operator_image: String,
     pub console_web_image: String,
     pub rustfs_image: String,
+    pub cert_manager_version: String,
+    pub pod_management_policy: Option<PodManagementPolicy>,
     pub kind_config: PathBuf,
     pub artifacts_dir: PathBuf,
     pub live_enabled: bool,
@@ -71,6 +75,11 @@ impl E2eConfig {
             operator_image: "rustfs/operator:e2e".to_string(),
             console_web_image: "rustfs/console-web:e2e".to_string(),
             rustfs_image: env_or(&get_env, "RUSTFS_E2E_SERVER_IMAGE", DEFAULT_RUSTFS_IMAGE),
+            cert_manager_version: env_or(
+                &get_env,
+                "RUSTFS_E2E_CERT_MANAGER_VERSION",
+                DEFAULT_CERT_MANAGER_VERSION,
+            ),
             kind_config: PathBuf::from(env_or(
                 &get_env,
                 "RUSTFS_E2E_KIND_CONFIG",
@@ -81,6 +90,7 @@ impl E2eConfig {
                 "RUSTFS_E2E_ARTIFACTS",
                 "target/e2e/artifacts",
             )),
+            pod_management_policy: parse_pod_management_policy(&get_env),
             live_enabled: env_bool(&get_env, "RUSTFS_E2E_LIVE"),
             destructive_enabled: env_bool(&get_env, "RUSTFS_E2E_DESTRUCTIVE"),
             timeout: Duration::from_secs(env_u64(&get_env, "RUSTFS_E2E_TIMEOUT_SECONDS", 300)),
@@ -126,6 +136,20 @@ where
         .unwrap_or(default)
 }
 
+fn parse_pod_management_policy<F>(get_env: &F) -> Option<PodManagementPolicy>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let raw = get_env("RUSTFS_E2E_POD_MANAGEMENT_POLICY")?;
+    match raw.to_ascii_lowercase().as_str() {
+        "parallel" => Some(PodManagementPolicy::Parallel),
+        "orderedready" | "ordered_ready" | "ordered-ready" => {
+            Some(PodManagementPolicy::OrderedReady)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DEFAULT_RUSTFS_IMAGE, E2eConfig};
@@ -141,6 +165,7 @@ mod tests {
         assert_eq!(config.storage_class, "local-storage");
         assert_eq!(config.pv_count, 12);
         assert_eq!(config.rustfs_image, DEFAULT_RUSTFS_IMAGE);
+        assert_eq!(config.cert_manager_version, "v1.16.2");
         assert_eq!(
             config.kind_config,
             std::path::PathBuf::from("e2e/manifests/kind-rustfs-e2e.yaml")
@@ -157,6 +182,7 @@ mod tests {
             "RUSTFS_E2E_OPERATOR_IMAGE" => Some("rustfs/operator:other".to_string()),
             "RUSTFS_E2E_CONSOLE_WEB_IMAGE" => Some("rustfs/console-web:other".to_string()),
             "RUSTFS_E2E_SERVER_IMAGE" => Some("rustfs/rustfs:dev".to_string()),
+            "RUSTFS_E2E_CERT_MANAGER_VERSION" => Some("v9.9.9".to_string()),
             "RUSTFS_E2E_LIVE" => Some("true".to_string()),
             _ => None,
         });
@@ -166,6 +192,7 @@ mod tests {
         assert_eq!(config.operator_image, "rustfs/operator:e2e");
         assert_eq!(config.console_web_image, "rustfs/console-web:e2e");
         assert_eq!(config.rustfs_image, "rustfs/rustfs:dev");
+        assert_eq!(config.cert_manager_version, "v9.9.9");
         assert!(config.live_enabled);
     }
 }

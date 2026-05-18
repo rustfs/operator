@@ -12,16 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
-use kube::{Api, Client};
-use operator::types::v1alpha1::tenant::Tenant;
-
-pub async fn default_client() -> Result<Client> {
-    operator::install_rustls_crypto_provider();
-
-    Ok(Client::try_default().await?)
-}
-
-pub fn tenant_api(client: Client, namespace: &str) -> Api<Tenant> {
-    Api::namespaced(client, namespace)
-}
+pub mod binding;
+pub mod error;
+pub mod rustfs_client;
+pub mod server;
+pub mod session_policy;
+pub mod tls;
+pub mod token_review;
+pub mod types;

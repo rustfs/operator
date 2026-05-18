@@ -51,6 +51,32 @@ The following table lists the configurable parameters of the RustFS Operator cha
 | `operator.tolerations` | Tolerations for pod scheduling | `[]` |
 | `operator.affinity` | Affinity rules for pod scheduling | `{}` |
 
+### Operator STS Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `sts.enabled` | Enable the operator STS endpoint | `true` |
+| `sts.audience` | Kubernetes TokenReview audience expected by the operator STS endpoint | `sts.rustfs.com` |
+| `sts.port` | Operator container port for STS | `4223` |
+| `sts.tls.enabled` | Serve the operator STS endpoint over TLS | `true` |
+| `sts.tls.auto` | Create the operator STS TLS Secret when missing | `true` |
+| `sts.service.type` | Kubernetes Service type for STS | `ClusterIP` |
+| `sts.service.port` | Kubernetes Service port for STS | `4223` |
+
+The RustFS operator STS endpoint intentionally uses an explicit Tenant route:
+
+```text
+POST /sts/{tenantNamespace}/{tenantName}
+```
+
+This differs from MinIO Operator's namespace-only route. A `PolicyBinding` still lives in the Tenant namespace, but the workload must call STS with both the Tenant namespace and the Tenant name.
+
+The STS service is HTTPS by default. When `sts.tls.auto=true`, the operator creates the fixed `sts-tls` Secret in the operator namespace with `tls.crt`, `tls.key`, and `ca.crt`. Workloads must trust that CA. To use an externally issued certificate, pre-create `sts-tls` with a certificate signed by a CA already trusted by the workload and set `sts.tls.auto=false`.
+
+STS only issues credentials for TLS-enabled Tenants. For Tenant upstream calls, the operator selects the Tenant HTTPS service endpoint and trusts the CA recorded in `status.certificates.tls.caSecretRef`.
+
+Operator STS does not present a client certificate when calling the Tenant. Tenants configured with `spec.tls.certManager.caTrust.clientCaSecretRef` continue to run with server-side mTLS enabled, but Operator STS rejects those Tenants with HTTP 400 and `TenantTlsClientCertificateUnsupported`.
+
 ### RBAC Configuration
 
 | Parameter | Description | Default |
@@ -114,6 +140,81 @@ Install with your custom values:
 
 ```bash
 helm install rustfs-operator deploy/rustfs-operator/ -f custom-values.yaml
+```
+
+### STS PolicyBinding and Workload Token
+
+Create a `PolicyBinding` in the target Tenant namespace. The binding authorizes one workload ServiceAccount to request temporary credentials for policies already defined in RustFS:
+
+```yaml
+apiVersion: sts.rustfs.com/v1alpha1
+kind: PolicyBinding
+metadata:
+  name: reports-readonly
+  namespace: storage
+spec:
+  application:
+    namespace: reports
+    serviceaccount: reports-api
+  policies:
+    - readonly
+```
+
+The workload should mount a projected ServiceAccount token with an audience matching `sts.audience`:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reports-api
+  namespace: reports
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reports-api
+  namespace: reports
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reports-api
+  template:
+    metadata:
+      labels:
+        app: reports-api
+    spec:
+      serviceAccountName: reports-api
+      containers:
+        - name: app
+          image: example/reports-api:latest
+          volumeMounts:
+            - name: rustfs-sts-token
+              mountPath: /var/run/secrets/rustfs-sts
+              readOnly: true
+      volumes:
+        - name: rustfs-sts-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: sts.rustfs.com
+                  expirationSeconds: 3600
+```
+
+The workload then calls the operator STS service with the target Tenant namespace and Tenant name:
+
+```bash
+TOKEN="$(cat /var/run/secrets/rustfs-sts/token)"
+
+curl -sS -X POST \
+  --cacert /var/run/secrets/rustfs-sts-ca/ca.crt \
+  "https://rustfs-operator-sts.rustfs-system.svc:4223/sts/storage/rustfs-a" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "Version=2011-06-15" \
+  --data-urlencode "Action=AssumeRoleWithWebIdentity" \
+  --data-urlencode "WebIdentityToken=${TOKEN}" \
+  --data-urlencode "DurationSeconds=3600"
 ```
 
 ## Creating Tenant Resources

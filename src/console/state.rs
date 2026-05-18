@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use kube::Client;
 use std::sync::Arc;
 
 /// Shared Axum application state.
@@ -21,6 +22,11 @@ use std::sync::Arc;
 pub struct AppState {
     /// Symmetric key for signing session JWTs
     pub jwt_secret: Arc<String>,
+
+    /// Optional Kubernetes client used by control-plane APIs that need cluster access.
+    ///
+    /// Most unit tests run without a live cluster, so this is optional.
+    pub kube_client: Option<Client>,
 }
 
 impl AppState {
@@ -28,7 +34,14 @@ impl AppState {
     pub fn new(jwt_secret: String) -> Self {
         Self {
             jwt_secret: Arc::new(jwt_secret),
+            kube_client: None,
         }
+    }
+
+    /// Attach a Kubernetes client for request handlers that need cluster reads.
+    pub fn with_kube_client(mut self, kube_client: Client) -> Self {
+        self.kube_client = Some(kube_client);
+        self
     }
 }
 

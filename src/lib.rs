@@ -16,8 +16,14 @@
 
 use crate::context::Context;
 use crate::reconcile::{error_policy, reconcile_rustfs};
+use crate::types::v1alpha1::policy_binding::PolicyBinding;
 use crate::types::v1alpha1::tenant::Tenant;
+use axum::{Router, body::Body};
 use futures::StreamExt;
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperBuilder;
+use hyper_util::service::TowerToHyperService;
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
@@ -29,6 +35,8 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio_rustls::TlsAcceptor;
+use tower::ServiceExt as _;
 use tracing::{info, warn};
 
 const RUSTFS_TENANT_LABEL: &str = "rustfs.tenant";
@@ -36,6 +44,10 @@ const CERT_MANAGER_GROUP: &str = "cert-manager.io";
 const CERT_MANAGER_VERSION: &str = "v1";
 const CERT_MANAGER_CERTIFICATE_KIND: &str = "Certificate";
 const CERT_MANAGER_CERTIFICATE_PLURAL: &str = "certificates";
+
+pub fn install_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
 
 mod context;
 pub mod reconcile;
@@ -45,11 +57,14 @@ pub mod utils;
 
 // Console module (Web UI)
 pub mod console;
+pub mod sts;
 
 #[cfg(test)]
 pub mod tests;
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    install_rustls_crypto_provider();
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_level(true)
@@ -59,8 +74,32 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let client = Client::try_default().await?;
-    let tenant_client = Api::<Tenant>::all(client.clone());
+    if operator_sts_enabled() {
+        let sts_port = operator_sts_port();
+        let sts_state =
+            crate::console::state::AppState::new(String::new()).with_kube_client(client.clone());
+        let sts_tls_config = crate::sts::tls::OperatorStsTlsConfig::from_env();
+        let tls_server_config = if sts_tls_config.enabled {
+            let material =
+                crate::sts::tls::load_or_create_sts_tls_material(&client, &sts_tls_config).await?;
+            Some(Arc::new(crate::sts::tls::build_tls_server_config(
+                &material,
+            )?))
+        } else {
+            warn!("Operator STS TLS disabled by OPERATOR_STS_TLS_ENABLED=false");
+            None
+        };
+        let sts_listener = bind_sts_listener(sts_port, tls_server_config.is_some()).await?;
+        tokio::spawn(async move {
+            if let Err(error) = run_sts_server(sts_listener, sts_state, tls_server_config).await {
+                warn!(%error, "Operator STS server stopped unexpectedly");
+            }
+        });
+    } else {
+        tracing::info!("Operator STS server disabled by OPERATOR_STS_ENABLED=false");
+    }
 
+    let tenant_client = Api::<Tenant>::all(client.clone());
     let context = Context::new(client.clone());
     let controller = Controller::new(tenant_client, watcher::Config::default())
         .owns(
@@ -116,6 +155,113 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     Ok(())
+}
+
+fn operator_sts_port() -> u16 {
+    let default_port: u16 = 4223;
+    match std::env::var("OPERATOR_STS_PORT") {
+        Ok(raw_port) => match raw_port.parse::<u16>() {
+            Ok(port) => port,
+            Err(error) => {
+                warn!(
+                    %error,
+                    raw_port,
+                    "invalid OPERATOR_STS_PORT value, using default"
+                );
+                default_port
+            }
+        },
+        Err(_) => default_port,
+    }
+}
+
+fn operator_sts_enabled() -> bool {
+    match std::env::var("OPERATOR_STS_ENABLED") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => {
+                warn!(
+                    value,
+                    "invalid OPERATOR_STS_ENABLED value, defaulting to enabled"
+                );
+                true
+            }
+        },
+        Err(_) => true,
+    }
+}
+
+async fn bind_sts_listener(
+    port: u16,
+    tls_enabled: bool,
+) -> Result<tokio::net::TcpListener, Box<dyn std::error::Error>> {
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let scheme = if tls_enabled { "https" } else { "http" };
+    tracing::info!("Operator STS server listening on {}://{}", scheme, addr);
+    Ok(listener)
+}
+
+async fn run_sts_server(
+    listener: tokio::net::TcpListener,
+    state: crate::console::state::AppState,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = Router::new()
+        .merge(crate::sts::server::routes())
+        .with_state(state);
+
+    if let Some(tls_config) = tls_config {
+        serve_tls_sts_server(listener, app, tls_config).await?;
+    } else {
+        axum::serve(listener, app).await?;
+    }
+    Ok(())
+}
+
+async fn serve_tls_sts_server(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    tls_config: Arc<rustls::ServerConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let acceptor = TlsAcceptor::from(tls_config);
+
+    loop {
+        let (tcp_stream, remote_addr) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let service = app.clone();
+
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(tcp_stream).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    warn!(
+                        %remote_addr,
+                        %error,
+                        "Operator STS TLS handshake failed"
+                    );
+                    return;
+                }
+            };
+
+            let io = TokioIo::new(tls_stream);
+            let tower_service =
+                service.map_request(|request: http::Request<Incoming>| request.map(Body::new));
+            let hyper_service = TowerToHyperService::new(tower_service);
+
+            if let Err(error) = HyperBuilder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, hyper_service)
+                .await
+            {
+                warn!(
+                    %remote_addr,
+                    %error,
+                    "Operator STS HTTPS connection failed"
+                );
+            }
+        });
+    }
 }
 
 fn cert_manager_certificate_gvk() -> GroupVersionKind {
@@ -206,6 +352,12 @@ fn push_unique_tenant_ref(refs: &mut Vec<ObjectRef<Tenant>>, tenant_ref: ObjectR
     }
 }
 
+pub fn render_crds_yaml() -> Result<String, serde_yaml_ng::Error> {
+    let tenant = serde_yaml_ng::to_string(&Tenant::crd())?;
+    let policy_binding = serde_yaml_ng::to_string(&PolicyBinding::crd())?;
+    Ok(format!("{tenant}---\n{policy_binding}"))
+}
+
 pub async fn crd(file: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer: Pin<Box<dyn AsyncWrite + Send>> = if let Some(file) = file {
         Box::pin(
@@ -220,9 +372,8 @@ pub async fn crd(file: Option<String>) -> Result<(), Box<dyn std::error::Error>>
         Box::pin(tokio::io::stdout())
     };
 
-    writer
-        .write_all(serde_yaml_ng::to_string(&Tenant::crd())?.as_bytes())
-        .await?;
+    let yaml = render_crds_yaml()?;
+    writer.write_all(yaml.as_bytes()).await?;
 
     Ok(())
 }
@@ -301,6 +452,22 @@ mod controller_watch_tests {
 
         let refs = tenant_refs_for_cert_manager_certificate(labeled);
         assert_single_ref(&refs, "tenant-d", "storage");
+    }
+
+    #[test]
+    fn crd_output_includes_tenant_and_policy_binding_documents() {
+        let yaml = render_crds_yaml().expect("CRDs render to YAML");
+        let documents = yaml
+            .split("---")
+            .map(str::trim)
+            .filter(|document| !document.is_empty())
+            .collect::<Vec<_>>();
+
+        assert_eq!(documents.len(), 2);
+        assert!(documents[0].contains("name: tenants.rustfs.com"));
+        assert!(documents[1].contains("name: policybindings.sts.rustfs.com"));
+        assert!(documents[1].contains("kind: PolicyBinding"));
+        assert!(documents[1].contains("scope: Namespaced"));
     }
 
     fn tenant_owner_ref(name: &str) -> metav1::OwnerReference {

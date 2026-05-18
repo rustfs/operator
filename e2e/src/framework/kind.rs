@@ -22,6 +22,8 @@ use crate::framework::{
     config::{DEFAULT_STORAGE_HOST_DIR_PREFIX, E2eConfig, KIND_WORKER_COUNT},
 };
 
+const RUSTFS_FORMAT_MARKER_PATHS: [&str; 2] = [".rustfs.sys/format.json", ".minio.sys/format.json"];
+
 #[derive(Debug, Clone)]
 pub struct KindCluster {
     config: E2eConfig,
@@ -73,6 +75,32 @@ impl KindCluster {
         Ok(())
     }
 
+    pub fn stale_local_rustfs_format_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut stale_paths = Vec::new();
+
+        for dir in self.host_storage_dirs() {
+            if !dir.exists() {
+                continue;
+            }
+
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+
+                for marker_path in RUSTFS_FORMAT_MARKER_PATHS {
+                    let format_path = entry.path().join(marker_path);
+                    if format_path.exists() {
+                        stale_paths.push(format_path);
+                    }
+                }
+            }
+        }
+
+        Ok(stale_paths)
+    }
+
     fn remove_host_storage_dir(&self, dir: &Path) -> Result<()> {
         ensure_existing_dedicated_host_storage_dir_is_safe(dir)?;
         println!("removing dedicated e2e storage dir {}", dir.display());
@@ -119,13 +147,47 @@ impl KindCluster {
         ])
     }
 
-    pub fn load_image_command(&self, image: &str) -> CommandSpec {
-        CommandSpec::new("kind").args([
-            "load".to_string(),
-            "docker-image".to_string(),
+    pub fn load_image(&self, image: &str) -> Result<()> {
+        for node in self.node_names()? {
+            println!("loading {image} into {node} through containerd import");
+            self.ctr_import_image_command(image, &node)
+                .run_checked()
+                .with_context(|| format!("import {image} into Kind node {node}"))?;
+        }
+        Ok(())
+    }
+
+    fn node_names(&self) -> Result<Vec<String>> {
+        let output = CommandSpec::new("kind")
+            .args([
+                "get".to_string(),
+                "nodes".to_string(),
+                "--name".to_string(),
+                self.config.cluster_name.clone(),
+            ])
+            .run_checked()?;
+        let nodes: Vec<String> = output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string)
+            .collect();
+
+        if nodes.is_empty() {
+            bail!("kind cluster {} has no nodes", self.config.cluster_name);
+        }
+
+        Ok(nodes)
+    }
+
+    fn ctr_import_image_command(&self, image: &str, node: &str) -> CommandSpec {
+        CommandSpec::new("sh").args([
+            "-c".to_string(),
+            "docker save \"$1\" | docker exec --privileged -i \"$2\" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs -".to_string(),
+            "sh".to_string(),
             image.to_string(),
-            "--name".to_string(),
-            self.config.cluster_name.clone(),
+            node.to_string(),
         ])
     }
 }
@@ -222,13 +284,13 @@ mod tests {
     use crate::framework::config::E2eConfig;
 
     #[test]
-    fn load_image_command_targets_the_dedicated_cluster() {
+    fn ctr_import_image_command_streams_docker_archive_to_node_containerd() {
         let kind = KindCluster::new(E2eConfig::defaults());
-        let command = kind.load_image_command("rustfs/operator:e2e");
+        let command = kind.ctr_import_image_command("rustfs/rustfs:latest", "rustfs-e2e-worker");
 
         assert_eq!(
             command.display(),
-            "kind load docker-image rustfs/operator:e2e --name rustfs-e2e"
+            "sh -c docker save \"$1\" | docker exec --privileged -i \"$2\" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs - sh rustfs/rustfs:latest rustfs-e2e-worker"
         );
     }
 

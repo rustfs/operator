@@ -1,0 +1,74 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: policybindings.sts.rustfs.com
+spec:
+  group: sts.rustfs.com
+  names:
+    categories: []
+    kind: PolicyBinding
+    plural: policybindings
+    shortNames:
+    - policybinding
+    singular: policybinding
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.currentState
+      name: State
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for PolicyBindingSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              application:
+                properties:
+                  namespace:
+                    type: string
+                  serviceaccount:
+                    type: string
+                required:
+                - namespace
+                - serviceaccount
+                type: object
+              policies:
+                items:
+                  type: string
+                type: array
+                x-kubernetes-validations:
+                - message: policies must contain at least one policy
+                  rule: self.size() > 0
+            required:
+            - application
+            - policies
+            type: object
+          status:
+            nullable: true
+            properties:
+              currentState:
+                nullable: true
+                type: string
+              usage:
+                nullable: true
+                properties:
+                  authorizations:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+            type: object
+        required:
+        - spec
+        title: PolicyBinding
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

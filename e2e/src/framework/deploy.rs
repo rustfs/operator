@@ -16,13 +16,16 @@ use anyhow::Result;
 
 use crate::framework::{config::E2eConfig, kubectl::Kubectl, resources};
 
-const CONTROL_PLANE_CRD: &str =
-    include_str!("../../../deploy/rustfs-operator/crds/tenant-crd.yaml");
+const TENANT_CRD: &str = include_str!("../../../deploy/rustfs-operator/crds/tenant-crd.yaml");
+const POLICY_BINDING_CRD: &str =
+    include_str!("../../../deploy/rustfs-operator/crds/policybinding-crd.yaml");
 const OPERATOR_RBAC: &str = include_str!("../../../deploy/k8s-dev/operator-rbac.yaml");
 const CONSOLE_RBAC: &str = include_str!("../../../deploy/k8s-dev/console-rbac.yaml");
 const OPERATOR_DEPLOYMENT: &str = include_str!("../../../deploy/k8s-dev/operator-deployment.yaml");
 const CONSOLE_DEPLOYMENT: &str = include_str!("../../../deploy/k8s-dev/console-deployment.yaml");
 const CONSOLE_SERVICE: &str = include_str!("../../../deploy/k8s-dev/console-service.yaml");
+const OPERATOR_STS_SERVICE: &str =
+    include_str!("../../../deploy/k8s-dev/operator-sts-service.yaml");
 const CONSOLE_FRONTEND_DEPLOYMENT: &str =
     include_str!("../../../deploy/k8s-dev/console-frontend-deployment.yaml");
 const CONSOLE_FRONTEND_SERVICE: &str =
@@ -45,8 +48,9 @@ pub fn deploy_dev(config: &E2eConfig) -> Result<()> {
         .apply_yaml_command(resources::namespace_manifest(&config.operator_namespace))
         .run_checked()?;
 
+    kubectl.apply_yaml_command(TENANT_CRD).run_checked()?;
     kubectl
-        .apply_yaml_command(CONTROL_PLANE_CRD)
+        .apply_yaml_command(POLICY_BINDING_CRD)
         .run_checked()?;
 
     kubectl
@@ -71,6 +75,9 @@ pub fn deploy_dev(config: &E2eConfig) -> Result<()> {
         ))
         .run_checked()?;
     kubectl.apply_yaml_command(CONSOLE_SERVICE).run_checked()?;
+    kubectl
+        .apply_yaml_command(OPERATOR_STS_SERVICE)
+        .run_checked()?;
     kubectl
         .apply_yaml_command(patch_images_and_tags(
             CONSOLE_FRONTEND_DEPLOYMENT,
