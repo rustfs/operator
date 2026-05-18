@@ -51,6 +51,26 @@ operator:
   # Affinity rules for operator pod scheduling
   affinity: {}
 
+# Kubernetes ServiceAccount for operator STS endpoint
+sts:
+  # Enable/disable operator STS exposure
+  enabled: true
+  # Kubernetes TokenReview audience used by RustFS STS clients.
+  # Workloads should request projected service account tokens for this audience.
+  audience: sts.rustfs.com
+  # STS service/port in operator pods
+  port: 4223
+  tls:
+    # Operator STS listens with TLS by default and uses this Secret for server certs.
+    enabled: true
+    # When true, the operator creates the Secret if it is missing.
+    auto: true
+  service:
+    type: ClusterIP
+    port: 4223
+    clusterIP: ""
+    annotations: {}
+
 # ServiceAccount configuration
 serviceAccount:
   # Specifies whether a service account should be created

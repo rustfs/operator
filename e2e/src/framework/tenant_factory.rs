@@ -17,12 +17,13 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use operator::types::v1alpha1::k8s::ImagePullPolicy;
+use operator::types::v1alpha1::k8s::PodManagementPolicy;
 use operator::types::v1alpha1::persistence::PersistenceConfig;
 use operator::types::v1alpha1::pool::{Pool, SchedulingConfig};
 use operator::types::v1alpha1::tenant::{Tenant, TenantSpec};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TenantTemplate {
     pub namespace: String,
     pub name: String,
@@ -31,6 +32,7 @@ pub struct TenantTemplate {
     pub credential_secret_name: String,
     pub servers: i32,
     pub volumes_per_server: i32,
+    pub pod_management_policy: Option<PodManagementPolicy>,
     pub unsafe_bypass_disk_check: bool,
 }
 
@@ -50,6 +52,7 @@ impl TenantTemplate {
             credential_secret_name: credential_secret_name.into(),
             servers: 4,
             volumes_per_server: 2,
+            pod_management_policy: Some(PodManagementPolicy::Parallel),
             unsafe_bypass_disk_check: true,
         }
     }
@@ -103,6 +106,7 @@ impl TenantTemplate {
             pools: vec![pool],
             image: Some(self.image.clone()),
             image_pull_policy: Some(ImagePullPolicy::IfNotPresent),
+            pod_management_policy: self.pod_management_policy.clone(),
             creds_secret: Some(LocalObjectReference {
                 name: self.credential_secret_name.clone(),
             }),

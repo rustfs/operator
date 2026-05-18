@@ -16,6 +16,7 @@ pub mod encryption;
 pub mod k8s;
 pub mod logging;
 pub mod persistence;
+pub mod policy_binding;
 pub mod pool;
 pub mod status;
 pub mod tenant;
@@ -23,3 +24,111 @@ pub mod tls;
 
 // Re-export commonly used types
 pub use pool::{SchedulingConfig, validate_pool_total_volumes};
+
+#[cfg(test)]
+mod policy_binding_tests {
+    use super::policy_binding::{
+        PolicyBinding, PolicyBindingApplication, PolicyBindingSpec, PolicyBindingStatus,
+        PolicyBindingUsage,
+    };
+    use kube::{CustomResourceExt, Resource};
+    use serde_json::json;
+
+    #[test]
+    fn policy_binding_serializes_minio_aligned_field_names() {
+        let binding = PolicyBinding::new(
+            "readonly-binding",
+            PolicyBindingSpec {
+                application: PolicyBindingApplication {
+                    namespace: "apps".to_string(),
+                    serviceaccount: "readonly-sa".to_string(),
+                },
+                policies: vec!["readonly".to_string(), "diagnostics".to_string()],
+            },
+        );
+
+        let value = serde_json::to_value(&binding).expect("PolicyBinding serializes to JSON");
+
+        assert_eq!(value["apiVersion"], json!("sts.rustfs.com/v1alpha1"));
+        assert_eq!(value["kind"], json!("PolicyBinding"));
+        assert_eq!(value["spec"]["application"]["namespace"], json!("apps"));
+        assert_eq!(
+            value["spec"]["application"]["serviceaccount"],
+            json!("readonly-sa")
+        );
+        assert_eq!(
+            value["spec"]["policies"],
+            json!(["readonly", "diagnostics"])
+        );
+        assert!(value["spec"]["application"]["serviceAccount"].is_null());
+    }
+
+    #[test]
+    fn policy_binding_status_serializes_optional_usage_authorizations() {
+        let status = PolicyBindingStatus {
+            current_state: Some("Ready".to_string()),
+            usage: Some(PolicyBindingUsage {
+                authorizations: Some(3),
+            }),
+        };
+
+        let value = serde_json::to_value(status).expect("PolicyBindingStatus serializes to JSON");
+
+        assert_eq!(value["currentState"], json!("Ready"));
+        assert_eq!(value["usage"]["authorizations"], json!(3));
+    }
+
+    #[test]
+    fn policy_binding_crd_has_sts_group_kind_namespaced_scope_and_required_schema() {
+        let crd = serde_json::to_value(PolicyBinding::crd()).expect("PolicyBinding CRD serializes");
+
+        assert_eq!(crd["spec"]["group"], json!("sts.rustfs.com"));
+        assert_eq!(crd["spec"]["names"]["kind"], json!("PolicyBinding"));
+        assert_eq!(crd["spec"]["scope"], json!("Namespaced"));
+
+        let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
+        assert_eq!(schema["required"], json!(["application", "policies"]));
+        assert_eq!(
+            schema["properties"]["application"]["required"],
+            json!(["namespace", "serviceaccount"])
+        );
+        assert_eq!(
+            schema["properties"]["application"]["properties"]["namespace"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            schema["properties"]["application"]["properties"]["serviceaccount"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            schema["properties"]["policies"]["items"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            schema["properties"]["policies"]["x-kubernetes-validations"][0]["rule"],
+            json!("self.size() > 0")
+        );
+        assert_eq!(
+            schema["properties"]["policies"]["x-kubernetes-validations"][0]["message"],
+            json!("policies must contain at least one policy")
+        );
+
+        let status_schema =
+            &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"];
+        assert_eq!(
+            status_schema["properties"]["currentState"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            status_schema["properties"]["usage"]["properties"]["authorizations"]["type"],
+            json!("integer")
+        );
+    }
+
+    #[test]
+    fn policy_binding_resource_metadata_is_namespaced() {
+        assert_eq!(PolicyBinding::api_version(&()), "sts.rustfs.com/v1alpha1");
+        assert_eq!(PolicyBinding::kind(&()), "PolicyBinding");
+        assert_eq!(PolicyBinding::plural(&()), "policybindings");
+    }
+}

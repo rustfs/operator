@@ -1,0 +1,30 @@
+{{- if .Values.sts.enabled -}}
+{{- if ne .Values.sts.service.type "ClusterIP" -}}
+{{- fail "operator STS currently supports only ClusterIP; expose it outside the cluster through an explicitly configured ingress or gateway" -}}
+{{- end -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-sts
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+  {{- with .Values.sts.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.sts.service.type }}
+  {{- if and (eq .Values.sts.service.type "ClusterIP") .Values.sts.service.clusterIP }}
+  clusterIP: {{ .Values.sts.service.clusterIP }}
+  {{- end }}
+  ports:
+    - port: {{ .Values.sts.service.port }}
+      targetPort: sts
+      protocol: TCP
+      name: sts
+  selector:
+    {{- include "rustfs-operator.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+{{- end }}

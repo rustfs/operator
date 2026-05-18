@@ -50,13 +50,27 @@ fn cors_allowed_origins() -> Vec<HeaderValue> {
 
 /// Start the Console HTTP server (Axum).
 pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    crate::install_rustls_crypto_provider();
+
     tracing::info!("Starting RustFS Operator Console on port {}", port);
 
     // JWT signing secret (set JWT_SECRET in production)
     let jwt_secret = std::env::var("JWT_SECRET")
         .unwrap_or_else(|_| "rustfs-console-secret-change-me-in-production".to_string());
 
-    let state = AppState::new(jwt_secret);
+    let state = match Client::try_default().await {
+        Ok(kube_client) => {
+            tracing::info!("Kubernetes client initialized for STS authorization flow");
+            AppState::new(jwt_secret).with_kube_client(kube_client)
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Kubernetes client unavailable; STS authorization paths fall back to compatibility mode: {}",
+                error
+            );
+            AppState::new(jwt_secret)
+        }
+    };
 
     let cors_origins = cors_allowed_origins();
 

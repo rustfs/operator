@@ -45,6 +45,24 @@ impl PortForwardSpec {
         }
     }
 
+    pub fn operator_sts(namespace: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            service: "svc/rustfs-operator-sts".to_string(),
+            local_port: 14223,
+            remote_port: 4223,
+        }
+    }
+
+    pub fn tenant_io(namespace: impl Into<String>, tenant_name: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            service: format!("svc/{}-io", tenant_name.into()),
+            local_port: 19000,
+            remote_port: 9000,
+        }
+    }
+
     pub fn command(&self, kubectl: &Kubectl) -> CommandSpec {
         kubectl.clone().namespaced(&self.namespace).command([
             "port-forward".to_string(),
@@ -81,6 +99,16 @@ impl PortForwardSpec {
     pub fn start_console(config: &E2eConfig) -> Result<PortForwardGuard> {
         let kubectl = Kubectl::new(config);
         Self::console(&config.operator_namespace).start_with_temp_log(&kubectl)
+    }
+
+    pub fn start_operator_sts(config: &E2eConfig) -> Result<PortForwardGuard> {
+        let kubectl = Kubectl::new(config);
+        Self::operator_sts(&config.operator_namespace).start_with_temp_log(&kubectl)
+    }
+
+    pub fn start_tenant_io(config: &E2eConfig) -> Result<PortForwardGuard> {
+        let kubectl = Kubectl::new(config);
+        Self::tenant_io(&config.test_namespace, &config.tenant_name).start_with_temp_log(&kubectl)
     }
 }
 
@@ -136,6 +164,29 @@ mod tests {
         assert_eq!(
             command.display(),
             "kubectl --context kind-rustfs-e2e -n rustfs-system port-forward svc/rustfs-operator-console 19090:9090"
+        );
+    }
+
+    #[test]
+    fn sts_port_forward_targets_operator_sts_service() {
+        let kubectl = Kubectl::new(&E2eConfig::defaults());
+        let command = PortForwardSpec::operator_sts("rustfs-system").command(&kubectl);
+
+        assert_eq!(
+            command.display(),
+            "kubectl --context kind-rustfs-e2e -n rustfs-system port-forward svc/rustfs-operator-sts 14223:4223"
+        );
+    }
+
+    #[test]
+    fn tenant_io_port_forward_targets_tenant_service() {
+        let kubectl = Kubectl::new(&E2eConfig::defaults());
+        let command =
+            PortForwardSpec::tenant_io("rustfs-e2e-smoke", "e2e-tenant").command(&kubectl);
+
+        assert_eq!(
+            command.display(),
+            "kubectl --context kind-rustfs-e2e -n rustfs-e2e-smoke port-forward svc/e2e-tenant-io 19000:9000"
         );
     }
 }

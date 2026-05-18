@@ -16,12 +16,14 @@ pub mod cert_manager_tls;
 pub mod console;
 pub mod operator;
 pub mod smoke;
+pub mod sts;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Suite {
     Smoke,
     Operator,
     Console,
+    Sts,
     CertManagerTls,
 }
 
@@ -56,6 +58,7 @@ pub fn all_cases() -> Vec<CaseSpec> {
     let mut cases = Vec::new();
     cases.extend(smoke::cases());
     cases.extend(operator::cases());
+    cases.extend(sts::cases());
     cases.extend(console::cases());
     cases.extend(cert_manager_tls::cases());
     cases
@@ -73,6 +76,7 @@ mod tests {
 
         assert!(suites.contains(&Suite::Smoke));
         assert!(suites.contains(&Suite::Operator));
+        assert!(suites.contains(&Suite::Sts));
         assert!(suites.contains(&Suite::Console));
         assert!(suites.contains(&Suite::CertManagerTls));
     }
@@ -114,6 +118,7 @@ mod tests {
 
         assert_eq!(counts.get(&Suite::Smoke).copied().unwrap_or_default(), 3);
         assert_eq!(counts.get(&Suite::Operator).copied().unwrap_or_default(), 1);
+        assert_eq!(counts.get(&Suite::Sts).copied().unwrap_or_default(), 2);
         assert_eq!(counts.get(&Suite::Console).copied().unwrap_or_default(), 1);
         assert_eq!(
             counts

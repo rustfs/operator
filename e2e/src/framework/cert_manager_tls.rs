@@ -99,6 +99,23 @@ pub fn external_secret_storage_layout(config: &E2eConfig) -> storage::LocalStora
     positive_tls_storage_layout(config, EXTERNAL_SECRET_CASE_SUFFIX)
 }
 
+pub fn reset_positive_case_resources(config: &E2eConfig) -> Result<()> {
+    let managed = managed_certificate_case_config(config);
+    resources::reset_smoke_tenant_resources(&managed)?;
+    storage::reset_local_storage_for_layout(
+        &managed,
+        &managed_certificate_storage_layout(&managed),
+    )
+    .context("reset managed cert-manager TLS e2e storage")?;
+
+    let external = external_secret_case_config(config);
+    resources::reset_smoke_tenant_resources(&external)?;
+    storage::reset_local_storage_for_layout(&external, &external_secret_storage_layout(&external))
+        .context("reset external Secret cert-manager TLS e2e storage")?;
+
+    Ok(())
+}
+
 pub fn managed_secret_name(config: &E2eConfig) -> String {
     format!("{}-managed-tls", config.tenant_name)
 }

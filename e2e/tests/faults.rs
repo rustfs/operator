@@ -24,7 +24,7 @@ fn faults_are_not_destructive_without_explicit_opt_in() {
 }
 
 #[test]
-#[ignore = "reserved for destructive fault scenarios; no public live target in the reduced workflow"]
+#[ignore = "reserved for destructive fault scenarios; run through `make e2e-live-faults`"]
 fn fault_live_suite_requires_explicit_destructive_opt_in() -> Result<()> {
     let config = E2eConfig::from_env();
 

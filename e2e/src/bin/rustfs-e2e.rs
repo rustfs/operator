@@ -14,7 +14,8 @@
 
 use anyhow::{Result, bail};
 use rustfs_operator_e2e::framework::{
-    command::CommandSpec, config::E2eConfig, deploy, images::ImageSet, kind::KindCluster, live,
+    cert_manager_tls, command::CommandSpec, config::E2eConfig, deploy, images::ImageSet,
+    kind::KindCluster, live, resources, storage,
 };
 
 fn main() -> Result<()> {
@@ -28,6 +29,8 @@ fn main() -> Result<()> {
         "assert-context" => assert_context(&config),
         "kind-create" => create_kind_cluster(&config),
         "kind-delete" => delete_kind_cluster(&config),
+        "sanitize-live-storage" => sanitize_live_storage(&config),
+        "reset-live-fixtures" | "reset-live-smoke-fixture" => reset_live_fixtures(&config),
         "kind-load-images" => load_images(&config),
         "deploy-dev" => deploy_dev(&config),
         "rollout-dev" => rollout_dev(&config),
@@ -48,7 +51,11 @@ fn print_help() -> Result<()> {
     println!("  assert-context    Require RUSTFS_E2E_LIVE=1 and dedicated Kind context");
     println!("  kind-create       Create the dedicated Kind cluster");
     println!("  kind-delete       Delete the dedicated Kind cluster and storage");
-    println!("  kind-load-images  Load operator, console-web, and RustFS images into Kind");
+    println!("  sanitize-live-storage");
+    println!("  reset-live-fixtures");
+    println!(
+        "  kind-load-images  Load operator, console-web, RustFS, and dependency images into Kind"
+    );
     println!("  deploy-dev        Apply operator/console manifests into dedicated Kind");
     println!("  rollout-dev       Restart and wait for e2e control-plane deployments");
     Ok(())
@@ -77,6 +84,38 @@ fn delete_kind_cluster(config: &E2eConfig) -> Result<()> {
     Ok(())
 }
 
+fn sanitize_live_storage(config: &E2eConfig) -> Result<()> {
+    live::require_live_enabled(config)?;
+    let kind = KindCluster::new(config.clone());
+    let stale_paths = kind.stale_local_rustfs_format_paths()?;
+
+    if stale_paths.is_empty() {
+        println!("no stale rustfs format metadata found in dedicated host storage");
+        return Ok(());
+    }
+
+    println!(
+        "detected {} stale rustfs format file(s) in dedicated host storage",
+        stale_paths.len()
+    );
+    for path in stale_paths {
+        println!("  - {}", path.display());
+    }
+
+    bail!(
+        "refusing to reset live host storage while the Kind cluster may still be running; recreate the dedicated e2e cluster with `make e2e-live-create`"
+    )
+}
+
+fn reset_live_fixtures(config: &E2eConfig) -> Result<()> {
+    live::require_live_enabled(config)?;
+    live::ensure_dedicated_context(config)?;
+    resources::reset_smoke_tenant_resources(config)?;
+    storage::reset_default_local_storage(config)?;
+    cert_manager_tls::reset_positive_case_resources(config)?;
+    Ok(())
+}
+
 fn load_images(config: &E2eConfig) -> Result<()> {
     live::require_live_enabled(config)?;
 
@@ -92,8 +131,8 @@ fn load_images(config: &E2eConfig) -> Result<()> {
 
     let kind = KindCluster::new(config.clone());
     for image in images.all() {
-        println!("loading {image} into {}", config.cluster_name);
-        kind.load_image_command(image).run_checked()?;
+        println!("loading {image} into {} nodes", config.cluster_name);
+        kind.load_image(image)?;
     }
     Ok(())
 }
