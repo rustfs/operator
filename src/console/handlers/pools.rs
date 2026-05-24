@@ -25,7 +25,11 @@ use crate::console::{
 use crate::types::v1alpha1::{
     persistence::PersistenceConfig,
     pool::{Pool, SchedulingConfig, validate_pool_total_volumes},
+    pool_lifecycle::{
+        DecommissionAction, DecommissionRequest, PoolLifecycleSpec, PvcRetentionPolicy,
+    },
     status::next_actions_for_reason,
+    status::pool::PoolLifecycleState,
     tenant::Tenant,
 };
 
@@ -94,6 +98,7 @@ enum PoolDeleteDecision {
 
 const REASON_DECOMMISSION_REQUIRED: &str = "DecommissionRequired";
 const REASON_OBSERVATION_STALE: &str = "ObservedGenerationStale";
+const REASON_DECOMMISSION_REQUEST_CONFLICT: &str = "DecommissionRequestConflict";
 
 fn action_strings(reason: &str) -> Vec<String> {
     next_actions_for_reason(reason)
@@ -115,17 +120,217 @@ fn ensure_pool_delete_does_not_remove_last_pool(total_pools: usize) -> Result<()
 fn classify_pool_delete(
     total_pools: usize,
     managed_statefulset_exists: bool,
-    recorded_pool_status_exists: bool,
+    recorded_pool_status_requires_decommission: bool,
 ) -> Result<PoolDeleteDecision> {
     ensure_pool_delete_does_not_remove_last_pool(total_pools)?;
 
-    if managed_statefulset_exists || recorded_pool_status_exists {
+    if managed_statefulset_exists || recorded_pool_status_requires_decommission {
         return Ok(PoolDeleteDecision::RequiresDecommission {
             reason: REASON_DECOMMISSION_REQUIRED,
         });
     }
 
     Ok(PoolDeleteDecision::RemoveFromSpec)
+}
+
+fn pool_status_matches(
+    pool_status: &crate::types::v1alpha1::status::pool::Pool,
+    pool_name: &str,
+    ss_name: &str,
+) -> bool {
+    pool_status.name.as_deref() == Some(pool_name) || pool_status.ss_name == ss_name
+}
+
+fn pool_status_requires_decommission_before_spec_removal(
+    pool_status: &crate::types::v1alpha1::status::pool::Pool,
+) -> bool {
+    !matches!(
+        pool_status.lifecycle_state,
+        Some(PoolLifecycleState::Decommissioned)
+    )
+}
+
+fn has_recorded_pool_status_requiring_decommission(
+    tenant: &Tenant,
+    pool_name: &str,
+    ss_name: &str,
+) -> bool {
+    tenant.status.as_ref().is_some_and(|status| {
+        status
+            .pools
+            .iter()
+            .filter(|pool_status| pool_status_matches(pool_status, pool_name, ss_name))
+            .any(pool_status_requires_decommission_before_spec_removal)
+    })
+}
+
+fn recorded_pool_lifecycle_state(tenant: &Tenant, pool_name: &str) -> Option<PoolLifecycleState> {
+    let ss_name = format!("{}-{}", tenant.name(), pool_name);
+    tenant.status.as_ref().and_then(|status| {
+        status
+            .pools
+            .iter()
+            .find(|pool_status| pool_status_matches(pool_status, pool_name, &ss_name))
+            .and_then(|pool_status| pool_status.lifecycle_state.clone())
+    })
+}
+
+fn decommission_request_can_replace(
+    tenant: &Tenant,
+    pool_name: &str,
+    existing: &DecommissionRequest,
+    request_id: &str,
+    action: &DecommissionAction,
+) -> bool {
+    if existing.request_id == request_id && &existing.action == action {
+        return true;
+    }
+
+    if action == &DecommissionAction::Cancel {
+        return existing.action == DecommissionAction::Start
+            || matches!(
+                recorded_pool_lifecycle_state(tenant, pool_name),
+                Some(PoolLifecycleState::Decommissioning)
+            );
+    }
+
+    matches!(
+        recorded_pool_lifecycle_state(tenant, pool_name),
+        Some(PoolLifecycleState::DecommissionCanceled | PoolLifecycleState::DecommissionFailed)
+    )
+}
+
+fn decommission_cancel_is_allowed(
+    tenant: &Tenant,
+    pool_name: &str,
+    existing: Option<&DecommissionRequest>,
+) -> bool {
+    existing.is_some_and(|request| {
+        matches!(
+            request.action,
+            DecommissionAction::Start | DecommissionAction::Cancel
+        )
+    }) || matches!(
+        recorded_pool_lifecycle_state(tenant, pool_name),
+        Some(PoolLifecycleState::Decommissioning)
+    )
+}
+
+fn decommission_cancel_not_allowed_error(
+    namespace: &str,
+    tenant_name: &str,
+    pool_name: &str,
+) -> Error {
+    Error::ActionRequired {
+        status: StatusCode::CONFLICT,
+        code: "PoolDecommissionCancelNotAllowed".to_string(),
+        reason: REASON_DECOMMISSION_REQUEST_CONFLICT.to_string(),
+        message: format!(
+            "Pool '{}' does not have an active decommission request to cancel.",
+            pool_name
+        ),
+        next_actions: vec!["inspectPoolStatus".to_string()],
+        details: Some(Box::new(ConsoleErrorDetails {
+            namespace: Some(namespace.to_string()),
+            tenant: Some(tenant_name.to_string()),
+            resource: Some(pool_name.to_string()),
+        })),
+    }
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn validate_lifecycle_request_id(request_id: &str) -> Result<()> {
+    if request_id.trim().is_empty() {
+        return Err(Error::BadRequest {
+            message: "requestID must not be empty".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn decommission_request_conflict_error(
+    namespace: &str,
+    tenant_name: &str,
+    pool_name: &str,
+) -> Error {
+    Error::ActionRequired {
+        status: StatusCode::CONFLICT,
+        code: "PoolDecommissionRequestConflict".to_string(),
+        reason: REASON_DECOMMISSION_REQUEST_CONFLICT.to_string(),
+        message: format!(
+            "Pool '{}' already has a different decommission request. Wait for it to finish or clear the current request.",
+            pool_name
+        ),
+        next_actions: vec!["inspectPoolStatus".to_string()],
+        details: Some(Box::new(ConsoleErrorDetails {
+            namespace: Some(namespace.to_string()),
+            tenant: Some(tenant_name.to_string()),
+            resource: Some(pool_name.to_string()),
+        })),
+    }
+}
+
+fn upsert_decommission_request(
+    tenant: &mut Tenant,
+    pool_name: &str,
+    request_id: &str,
+    action: DecommissionAction,
+    reason: Option<String>,
+) -> Result<()> {
+    validate_lifecycle_request_id(request_id)?;
+
+    let lifecycle = tenant
+        .spec
+        .pool_lifecycle
+        .get_or_insert_with(|| PoolLifecycleSpec {
+            pvc_retention_policy: PvcRetentionPolicy::Retain,
+            decommission_requests: Vec::new(),
+        });
+
+    if let Some(existing) = lifecycle
+        .decommission_requests
+        .iter_mut()
+        .find(|request| request.pool_name == pool_name)
+    {
+        existing.request_id = request_id.to_string();
+        existing.action = action.clone();
+        existing.reason = reason;
+        if action == DecommissionAction::Cancel {
+            existing.cancel_requested_at = Some(now_rfc3339());
+        } else {
+            existing.requested_at = Some(now_rfc3339());
+            existing.cancel_requested_at = None;
+        }
+        return Ok(());
+    }
+
+    lifecycle.decommission_requests.push(DecommissionRequest {
+        pool_name: pool_name.to_string(),
+        request_id: request_id.to_string(),
+        action: action.clone(),
+        requested_at: Some(now_rfc3339()),
+        cancel_requested_at: (action == DecommissionAction::Cancel).then(now_rfc3339),
+        reason,
+    });
+
+    Ok(())
+}
+
+fn remove_decommission_request(tenant: &mut Tenant, pool_name: &str) {
+    let Some(lifecycle) = tenant.spec.pool_lifecycle.as_mut() else {
+        return;
+    };
+
+    lifecycle
+        .decommission_requests
+        .retain(|request| request.pool_name != pool_name);
+    if lifecycle.decommission_requests.is_empty() {
+        tenant.spec.pool_lifecycle = None;
+    }
 }
 
 fn is_pool_observation_current(tenant: &Tenant) -> bool {
@@ -302,6 +507,26 @@ pub async fn list_pools(
                 })
             });
 
+        let recorded_pool_status = tenant.status.as_ref().and_then(|status| {
+            status
+                .pools
+                .iter()
+                .find(|pool_status| pool_status_matches(pool_status, &pool.name, &ss_name))
+        });
+        let decommission = recorded_pool_status.and_then(|status| status.decommission.as_ref());
+        let progress = decommission.and_then(|status| status.progress.as_ref());
+        let cleanup = decommission.and_then(|status| status.cleanup.as_ref());
+        let decommission_last_error = decommission
+            .and_then(|status| status.last_error.as_ref())
+            .and_then(
+                |last_error| match (&last_error.reason, &last_error.message) {
+                    (Some(reason), Some(message)) => Some(format!("{reason}: {message}")),
+                    (Some(reason), None) => Some(reason.clone()),
+                    (None, Some(message)) => Some(message.clone()),
+                    (None, None) => None,
+                },
+            );
+
         pools_details.push(PoolDetails {
             name: pool.name.clone(),
             servers: pool.servers,
@@ -315,6 +540,23 @@ pub async fn list_pools(
             current_revision,
             update_revision,
             state,
+            lifecycle_state: recorded_pool_status
+                .and_then(|status| status.lifecycle_state.as_ref())
+                .map(ToString::to_string),
+            workload_state: recorded_pool_status
+                .and_then(|status| status.workload_state.as_ref())
+                .map(ToString::to_string),
+            decommission_phase: decommission
+                .and_then(|status| status.phase.as_ref())
+                .map(ToString::to_string),
+            decommission_objects_migrated: progress.and_then(|progress| progress.objects_migrated),
+            decommission_bytes_migrated: progress.and_then(|progress| progress.bytes_migrated),
+            decommission_objects_failed: progress.and_then(|progress| progress.objects_failed),
+            decommission_bytes_failed: progress.and_then(|progress| progress.bytes_failed),
+            decommission_cleanup_state: cleanup.map(|cleanup| cleanup.state.to_string()),
+            decommission_last_error,
+            decommission_last_poll_time: decommission
+                .and_then(|status| status.last_poll_time.clone()),
             created_at: ss.and_then(|s| {
                 s.metadata
                     .creation_timestamp
@@ -445,6 +687,7 @@ pub async fn add_pool(
             });
         }
 
+        remove_decommission_request(&mut tenant, pool_name);
         tenant.spec.pools.push(new_pool.clone());
 
         match tenant_api
@@ -468,6 +711,16 @@ pub async fn add_pool(
                         current_revision: None,
                         update_revision: None,
                         state: "Creating".to_string(),
+                        lifecycle_state: None,
+                        workload_state: None,
+                        decommission_phase: None,
+                        decommission_objects_migrated: None,
+                        decommission_bytes_migrated: None,
+                        decommission_objects_failed: None,
+                        decommission_bytes_failed: None,
+                        decommission_cleanup_state: None,
+                        decommission_last_error: None,
+                        decommission_last_poll_time: None,
                         created_at: t.metadata.creation_timestamp.map(|ts| ts.0.to_rfc3339()),
                     },
                 }));
@@ -484,6 +737,146 @@ pub async fn add_pool(
     Err(last_conflict.unwrap_or_else(|| Error::Conflict {
         message: "Resource was modified by another request, please retry".to_string(),
     }))
+}
+
+async fn write_pool_decommission_request(
+    namespace: String,
+    tenant_name: String,
+    pool_name: String,
+    claims: Claims,
+    request_id: String,
+    action: DecommissionAction,
+    reason: Option<String>,
+) -> Result<Json<PoolDecommissionRequestResponse>> {
+    validate_lifecycle_request_id(&request_id)?;
+
+    let client = create_client(&claims).await?;
+    let tenant_api: Api<Tenant> = Api::namespaced(client, &namespace);
+
+    const MAX_RETRIES: u32 = 3;
+    let mut last_conflict = None;
+    for _ in 0..MAX_RETRIES {
+        let mut tenant = tenant_api
+            .get(&tenant_name)
+            .await
+            .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", tenant_name)))?;
+
+        if !tenant.spec.pools.iter().any(|pool| pool.name == pool_name) {
+            return Err(Error::NotFound {
+                resource: format!("Pool '{}'", pool_name),
+            });
+        }
+
+        if action == DecommissionAction::Start {
+            ensure_pool_delete_does_not_remove_last_pool(tenant.spec.pools.len())?;
+        }
+
+        let existing_decommission_request = tenant
+            .spec
+            .pool_lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.request_for_pool(&pool_name));
+
+        if action == DecommissionAction::Cancel
+            && !decommission_cancel_is_allowed(&tenant, &pool_name, existing_decommission_request)
+        {
+            return Err(decommission_cancel_not_allowed_error(
+                &namespace,
+                &tenant_name,
+                &pool_name,
+            ));
+        }
+
+        if let Some(existing) = existing_decommission_request
+            && !decommission_request_can_replace(
+                &tenant,
+                &pool_name,
+                existing,
+                &request_id,
+                &action,
+            )
+        {
+            return Err(decommission_request_conflict_error(
+                &namespace,
+                &tenant_name,
+                &pool_name,
+            ));
+        }
+
+        upsert_decommission_request(
+            &mut tenant,
+            &pool_name,
+            &request_id,
+            action.clone(),
+            reason.clone(),
+        )?;
+
+        match tenant_api
+            .replace(&tenant_name, &Default::default(), &tenant)
+            .await
+        {
+            Ok(_) => {
+                let action_label = action.to_string();
+                return Ok(Json(PoolDecommissionRequestResponse {
+                    success: true,
+                    message: format!(
+                        "Pool '{}' decommission {} request '{}' was accepted",
+                        pool_name, action_label, request_id
+                    ),
+                    pool_name,
+                    request_id,
+                    action: action_label,
+                }));
+            }
+            Err(e) => {
+                let mapped = error::map_kube_error(e, String::new());
+                if !matches!(&mapped, Error::Conflict { .. }) {
+                    return Err(mapped);
+                }
+                last_conflict = Some(mapped);
+            }
+        }
+    }
+
+    Err(last_conflict.unwrap_or_else(|| Error::Conflict {
+        message: "Resource was modified by another request, please retry".to_string(),
+    }))
+}
+
+/// Write a Start decommission lifecycle request for a pool.
+pub async fn start_pool_decommission(
+    Path((namespace, tenant_name, pool_name)): Path<(String, String, String)>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<StartPoolDecommissionRequest>,
+) -> Result<Json<PoolDecommissionRequestResponse>> {
+    write_pool_decommission_request(
+        namespace,
+        tenant_name,
+        pool_name,
+        claims,
+        req.request_id,
+        DecommissionAction::Start,
+        req.reason,
+    )
+    .await
+}
+
+/// Write a Cancel decommission lifecycle request for a pool.
+pub async fn cancel_pool_decommission(
+    Path((namespace, tenant_name, pool_name)): Path<(String, String, String)>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<CancelPoolDecommissionRequest>,
+) -> Result<Json<PoolDecommissionRequestResponse>> {
+    write_pool_decommission_request(
+        namespace,
+        tenant_name,
+        pool_name,
+        claims,
+        req.request_id,
+        DecommissionAction::Cancel,
+        req.reason,
+    )
+    .await
 }
 
 /// Remove a pool from the tenant with optimistic-lock retries.
@@ -534,17 +927,13 @@ pub async fn delete_pool(
             }
         };
 
-        let recorded_pool_status_exists = tenant.status.as_ref().is_some_and(|status| {
-            status
-                .pools
-                .iter()
-                .any(|pool_status| pool_status.ss_name == ss_name)
-        });
+        let recorded_pool_status_requires_decommission =
+            has_recorded_pool_status_requiring_decommission(&tenant, &pool_name, &ss_name);
 
         match classify_pool_delete(
             tenant.spec.pools.len(),
             managed_statefulset_exists,
-            recorded_pool_status_exists,
+            recorded_pool_status_requires_decommission,
         )? {
             PoolDeleteDecision::RemoveFromSpec => {}
             PoolDeleteDecision::RequiresDecommission { reason } => {
@@ -558,6 +947,7 @@ pub async fn delete_pool(
         }
 
         tenant.spec.pools.remove(pool_index);
+        remove_decommission_request(&mut tenant, &pool_name);
 
         match tenant_api
             .replace(&tenant_name, &Default::default(), &tenant)
@@ -606,12 +996,26 @@ async fn create_client(claims: &Claims) -> Result<Client> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PoolDeleteDecision, classify_pool_delete, is_managed_pool_statefulset,
-        is_pool_observation_current, pool_delete_observation_pending_error,
-        pool_delete_requires_decommission_error,
+        PoolDeleteDecision, classify_pool_delete, decommission_cancel_is_allowed,
+        decommission_request_can_replace, has_recorded_pool_status_requiring_decommission,
+        is_managed_pool_statefulset, is_pool_observation_current,
+        pool_delete_observation_pending_error, pool_delete_requires_decommission_error,
+        remove_decommission_request, upsert_decommission_request, validate_lifecycle_request_id,
     };
     use crate::console::error::Error;
-    use crate::types::v1alpha1::{status::Status, tenant::TenantSpec};
+    use crate::types::v1alpha1::{
+        pool_lifecycle::{
+            DecommissionAction, DecommissionRequest, PoolLifecycleSpec, PvcRetentionPolicy,
+        },
+        status::{
+            Status,
+            pool::{
+                Pool as PoolStatus, PoolDecommissionCleanupState, PoolDecommissionCleanupStatus,
+                PoolLifecycleState, PoolState,
+            },
+        },
+        tenant::TenantSpec,
+    };
     use axum::http::StatusCode;
     use std::collections::BTreeMap;
 
@@ -721,6 +1125,277 @@ mod tests {
             Ok(PoolDeleteDecision::RemoveFromSpec) => {}
             other => panic!("expected remove-from-spec decision, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recorded_decommissioned_pool_status_does_not_block_spec_removal() {
+        let mut tenant = tenant_with_generations(2, Some(2));
+        tenant.status = Some(Status {
+            observed_generation: Some(2),
+            pools: vec![PoolStatus {
+                name: Some("pool-a".to_string()),
+                ss_name: "logs-pool-a".to_string(),
+                state: PoolState::NotCreated,
+                lifecycle_state: Some(PoolLifecycleState::Decommissioned),
+                workload_state: Some(PoolState::NotCreated),
+                decommission: None,
+                replicas: None,
+                ready_replicas: None,
+                current_replicas: None,
+                updated_replicas: None,
+                current_revision: None,
+                update_revision: None,
+                last_update_time: None,
+            }],
+            ..Default::default()
+        });
+
+        assert!(!has_recorded_pool_status_requiring_decommission(
+            &tenant,
+            "pool-a",
+            "logs-pool-a"
+        ));
+    }
+
+    #[test]
+    fn recorded_active_pool_status_blocks_spec_removal() {
+        let mut tenant = tenant_with_generations(2, Some(2));
+        tenant.status = Some(Status {
+            observed_generation: Some(2),
+            pools: vec![PoolStatus {
+                name: Some("pool-a".to_string()),
+                ss_name: "logs-pool-a".to_string(),
+                state: PoolState::RolloutComplete,
+                lifecycle_state: Some(PoolLifecycleState::Active),
+                workload_state: Some(PoolState::RolloutComplete),
+                decommission: None,
+                replicas: Some(4),
+                ready_replicas: Some(4),
+                current_replicas: Some(4),
+                updated_replicas: Some(4),
+                current_revision: None,
+                update_revision: None,
+                last_update_time: None,
+            }],
+            ..Default::default()
+        });
+
+        assert!(has_recorded_pool_status_requiring_decommission(
+            &tenant,
+            "pool-a",
+            "logs-pool-a"
+        ));
+    }
+
+    #[test]
+    fn lifecycle_request_id_is_required() {
+        assert!(validate_lifecycle_request_id("request-1").is_ok());
+        assert!(matches!(
+            validate_lifecycle_request_id(" "),
+            Err(Error::BadRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn cancel_decommission_replaces_existing_start_request() {
+        let mut tenant = tenant_with_generations(2, Some(2));
+        tenant.spec.pool_lifecycle = Some(PoolLifecycleSpec {
+            pvc_retention_policy: PvcRetentionPolicy::Retain,
+            decommission_requests: vec![DecommissionRequest {
+                pool_name: "pool-a".to_string(),
+                request_id: "start-1".to_string(),
+                action: DecommissionAction::Start,
+                requested_at: Some("2026-05-20T00:00:00Z".to_string()),
+                cancel_requested_at: None,
+                reason: None,
+            }],
+        });
+
+        let existing = tenant
+            .spec
+            .pool_lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.request_for_pool("pool-a"))
+            .expect("request should exist");
+        assert!(decommission_request_can_replace(
+            &tenant,
+            "pool-a",
+            existing,
+            "cancel-1",
+            &DecommissionAction::Cancel
+        ));
+
+        upsert_decommission_request(
+            &mut tenant,
+            "pool-a",
+            "cancel-1",
+            DecommissionAction::Cancel,
+            Some("operator requested stop".to_string()),
+        )
+        .expect("cancel should replace start");
+
+        let request = tenant
+            .spec
+            .pool_lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.request_for_pool("pool-a"))
+            .expect("request should remain");
+        assert_eq!(request.request_id, "cancel-1");
+        assert_eq!(request.action, DecommissionAction::Cancel);
+        assert!(request.cancel_requested_at.is_some());
+    }
+
+    #[test]
+    fn cancel_decommission_requires_active_request_or_status() {
+        let mut tenant = tenant_with_generations(2, Some(2));
+        assert!(!decommission_cancel_is_allowed(&tenant, "pool-a", None));
+
+        tenant.status = Some(Status {
+            observed_generation: Some(2),
+            pools: vec![PoolStatus {
+                name: Some("pool-a".to_string()),
+                ss_name: "logs-pool-a".to_string(),
+                state: PoolState::RolloutComplete,
+                lifecycle_state: Some(PoolLifecycleState::Decommissioning),
+                workload_state: Some(PoolState::RolloutComplete),
+                decommission: None,
+                replicas: Some(4),
+                ready_replicas: Some(4),
+                current_replicas: Some(4),
+                updated_replicas: Some(4),
+                current_revision: None,
+                update_revision: None,
+                last_update_time: None,
+            }],
+            ..Default::default()
+        });
+        assert!(decommission_cancel_is_allowed(&tenant, "pool-a", None));
+    }
+
+    #[test]
+    fn remove_decommission_request_drops_stale_pool_lifecycle_entry() {
+        let mut tenant = tenant_with_generations(2, Some(2));
+        tenant.spec.pool_lifecycle = Some(PoolLifecycleSpec {
+            pvc_retention_policy: PvcRetentionPolicy::Retain,
+            decommission_requests: vec![
+                DecommissionRequest {
+                    pool_name: "pool-a".to_string(),
+                    request_id: "start-a".to_string(),
+                    action: DecommissionAction::Start,
+                    requested_at: Some("2026-05-20T00:00:00Z".to_string()),
+                    cancel_requested_at: None,
+                    reason: None,
+                },
+                DecommissionRequest {
+                    pool_name: "pool-b".to_string(),
+                    request_id: "start-b".to_string(),
+                    action: DecommissionAction::Start,
+                    requested_at: Some("2026-05-20T00:00:00Z".to_string()),
+                    cancel_requested_at: None,
+                    reason: None,
+                },
+            ],
+        });
+
+        remove_decommission_request(&mut tenant, "pool-a");
+        let requests = &tenant
+            .spec
+            .pool_lifecycle
+            .as_ref()
+            .expect("lifecycle should remain for pool-b")
+            .decommission_requests;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].pool_name, "pool-b");
+
+        remove_decommission_request(&mut tenant, "pool-b");
+        assert!(tenant.spec.pool_lifecycle.is_none());
+    }
+
+    #[test]
+    fn start_decommission_can_replace_terminal_canceled_request() {
+        let mut tenant = tenant_with_generations(2, Some(2));
+        tenant.spec.pool_lifecycle = Some(PoolLifecycleSpec {
+            pvc_retention_policy: PvcRetentionPolicy::Retain,
+            decommission_requests: vec![DecommissionRequest {
+                pool_name: "pool-a".to_string(),
+                request_id: "cancel-1".to_string(),
+                action: DecommissionAction::Cancel,
+                requested_at: Some("2026-05-20T00:00:00Z".to_string()),
+                cancel_requested_at: Some("2026-05-20T00:01:00Z".to_string()),
+                reason: None,
+            }],
+        });
+        tenant.status = Some(Status {
+            observed_generation: Some(2),
+            pools: vec![PoolStatus {
+                name: Some("pool-a".to_string()),
+                ss_name: "logs-pool-a".to_string(),
+                state: PoolState::NotCreated,
+                lifecycle_state: Some(PoolLifecycleState::DecommissionCanceled),
+                workload_state: Some(PoolState::NotCreated),
+                decommission: None,
+                replicas: None,
+                ready_replicas: None,
+                current_replicas: None,
+                updated_replicas: None,
+                current_revision: None,
+                update_revision: None,
+                last_update_time: None,
+            }],
+            ..Default::default()
+        });
+
+        let existing = tenant
+            .spec
+            .pool_lifecycle
+            .as_ref()
+            .and_then(|lifecycle| lifecycle.request_for_pool("pool-a"))
+            .expect("request should exist");
+        assert!(decommission_request_can_replace(
+            &tenant,
+            "pool-a",
+            existing,
+            "start-2",
+            &DecommissionAction::Start
+        ));
+    }
+
+    #[test]
+    fn decommissioned_cleanup_state_is_non_blocking() {
+        let pool_status = PoolStatus {
+            name: Some("pool-a".to_string()),
+            ss_name: "logs-pool-a".to_string(),
+            state: PoolState::NotCreated,
+            lifecycle_state: Some(PoolLifecycleState::Decommissioned),
+            workload_state: Some(PoolState::NotCreated),
+            decommission: Some(
+                crate::types::v1alpha1::status::pool::PoolDecommissionStatus {
+                    cleanup: Some(PoolDecommissionCleanupStatus {
+                        state: PoolDecommissionCleanupState::PvcRetained,
+                        stateful_set_deleted_at: Some("2026-05-20T00:00:00Z".to_string()),
+                        pvc_retention_policy: Some("Retain".to_string()),
+                    }),
+                    request_id: Some("request-1".to_string()),
+                    rustfs_pool_id: Some("1".to_string()),
+                    endpoint_set_hash: Some("sha256:test".to_string()),
+                    phase: None,
+                    started_at: None,
+                    last_poll_time: None,
+                    completed_at: None,
+                    progress: None,
+                    last_error: None,
+                },
+            ),
+            replicas: None,
+            ready_replicas: None,
+            current_replicas: None,
+            updated_replicas: None,
+            current_revision: None,
+            update_revision: None,
+            last_update_time: None,
+        };
+
+        assert!(!super::pool_status_requires_decommission_before_spec_removal(&pool_status));
     }
 
     #[test]

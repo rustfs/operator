@@ -34,8 +34,9 @@ use crate::console::models::pod::{
     PodListItem, PodListResponse, PodStatus, RestartPodRequest, VolumeInfo,
 };
 use crate::console::models::pool::{
-    AddPoolRequest, AddPoolResponse, DeletePoolResponse, PoolDetails, PoolListResponse,
-    ResourceList, ResourceRequirements,
+    AddPoolRequest, AddPoolResponse, CancelPoolDecommissionRequest, DeletePoolResponse,
+    PoolDecommissionRequestResponse, PoolDetails, PoolListResponse, ResourceList,
+    ResourceRequirements, StartPoolDecommissionRequest,
 };
 use crate::console::models::tenant::{
     CreatePoolRequest, CreateTenantRequest, DeleteTenantResponse, EnvVar, LoggingConfig, PoolInfo,
@@ -67,6 +68,8 @@ use crate::console::models::topology::{
         api_list_pools,
         api_add_pool,
         api_delete_pool,
+        api_start_pool_decommission,
+        api_cancel_pool_decommission,
         api_list_pods,
         api_get_pod,
         api_delete_pod,
@@ -111,6 +114,9 @@ use crate::console::models::topology::{
         ResourceList,
         AddPoolResponse,
         DeletePoolResponse,
+        StartPoolDecommissionRequest,
+        CancelPoolDecommissionRequest,
+        PoolDecommissionRequestResponse,
         PodListItem,
         PodListResponse,
         PodDetails,
@@ -267,6 +273,58 @@ fn api_add_pool(_body: Json<AddPoolRequest>) -> Json<AddPoolResponse> {
     tag = "pools"
 )]
 fn api_delete_pool() -> Json<DeletePoolResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools/{pool}/decommission",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("pool" = String, Path)
+    ),
+    request_body = StartPoolDecommissionRequest,
+    responses(
+        (status = 200, body = PoolDecommissionRequestResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "pools"
+)]
+fn api_start_pool_decommission(
+    _body: Json<StartPoolDecommissionRequest>,
+) -> Json<PoolDecommissionRequestResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools/{pool}/decommission/cancel",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("pool" = String, Path)
+    ),
+    request_body = CancelPoolDecommissionRequest,
+    responses(
+        (status = 200, body = PoolDecommissionRequestResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "pools"
+)]
+fn api_cancel_pool_decommission(
+    _body: Json<CancelPoolDecommissionRequest>,
+) -> Json<PoolDecommissionRequestResponse> {
     unimplemented!("Documentation only")
 }
 

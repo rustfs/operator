@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use hmac::{Hmac, Mac};
 use k8s_openapi::{ByteString, api::core::v1 as corev1};
@@ -31,14 +32,73 @@ const JSON_CONTENT_TYPE: &str = "application/json";
 const ASSUME_ROLE_PATH: &str = "/";
 const ADD_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/add-canned-policy";
 const INFO_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/info-canned-policy";
+const POOLS_LIST_PATH: &str = "/rustfs/admin/v3/pools/list";
+const POOLS_STATUS_PATH: &str = "/rustfs/admin/v3/pools/status";
+const POOLS_DECOMMISSION_PATH: &str = "/rustfs/admin/v3/pools/decommission";
+const POOLS_CANCEL_PATH: &str = "/rustfs/admin/v3/pools/cancel";
 const ADMIN_SIGNING_SERVICE: &str = "s3";
 const STS_SIGNING_SERVICE: &str = "sts";
+const ADMIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const ADMIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Credentials read from Tenant `.spec.credsSecret`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustfsCredentials {
     pub access_key: String,
     pub secret_key: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct RustfsPoolListItem {
+    pub id: usize,
+    #[serde(rename = "cmdline")]
+    pub cmd_line: String,
+    #[serde(rename = "lastUpdate")]
+    pub last_update: String,
+    #[serde(rename = "totalSize")]
+    pub total_size: Option<u64>,
+    #[serde(rename = "currentSize")]
+    pub current_size: Option<u64>,
+    #[serde(rename = "usedSize")]
+    pub used_size: Option<u64>,
+    pub used: Option<f64>,
+    pub status: String,
+    #[serde(rename = "decommissionInfo")]
+    pub decommission: Option<RustfsPoolDecommissionInfo>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub struct RustfsPoolStatus {
+    pub id: usize,
+    #[serde(rename = "cmdline")]
+    pub cmd_line: String,
+    #[serde(rename = "lastUpdate")]
+    pub last_update: String,
+    #[serde(rename = "decommissionInfo")]
+    pub decommission: Option<RustfsPoolDecommissionInfo>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+pub struct RustfsPoolDecommissionInfo {
+    #[serde(rename = "startTime")]
+    pub start_time: Option<String>,
+    #[serde(rename = "startSize")]
+    pub start_size: Option<u64>,
+    #[serde(rename = "totalSize")]
+    pub total_size: Option<u64>,
+    #[serde(rename = "currentSize")]
+    pub current_size: Option<u64>,
+    pub complete: Option<bool>,
+    pub failed: Option<bool>,
+    pub canceled: Option<bool>,
+    #[serde(rename = "objectsDecommissioned")]
+    pub objects_decommissioned: Option<u64>,
+    #[serde(rename = "objectsDecommissionedFailed")]
+    pub objects_decommissioned_failed: Option<u64>,
+    #[serde(rename = "bytesDecommissioned")]
+    pub bytes_decommissioned: Option<u64>,
+    #[serde(rename = "bytesDecommissionedFailed")]
+    pub bytes_decommissioned_failed: Option<u64>,
 }
 
 /// Error type for RustFS admin/STS client operations.
@@ -121,6 +181,14 @@ pub struct RustfsAdminClient {
     http_client: HttpClient,
 }
 
+fn default_http_client() -> HttpClient {
+    HttpClient::builder()
+        .connect_timeout(ADMIN_HTTP_CONNECT_TIMEOUT)
+        .timeout(ADMIN_HTTP_REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| HttpClient::new())
+}
+
 impl RustfsAdminClient {
     pub const STS_VERSION: &'static str = "2011-06-15";
     pub const STS_ACTION: &'static str = "AssumeRole";
@@ -130,7 +198,12 @@ impl RustfsAdminClient {
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
     ) -> Self {
-        Self::new_with_base_url_and_http_client(base_url, access_key, secret_key, HttpClient::new())
+        Self::new_with_base_url_and_http_client(
+            base_url,
+            access_key,
+            secret_key,
+            default_http_client(),
+        )
     }
 
     pub fn new_with_base_url_and_ca_pem(
@@ -141,7 +214,9 @@ impl RustfsAdminClient {
     ) -> Result<Self, RustfsClientError> {
         let certs = Certificate::from_pem_bundle(ca_pem)
             .map_err(|_| RustfsClientError::InvalidTenantTlsCa)?;
-        let mut builder = HttpClient::builder();
+        let mut builder = HttpClient::builder()
+            .connect_timeout(ADMIN_HTTP_CONNECT_TIMEOUT)
+            .timeout(ADMIN_HTTP_REQUEST_TIMEOUT);
         for cert in certs {
             builder = builder.add_root_certificate(cert);
         }
@@ -382,6 +457,48 @@ impl RustfsAdminClient {
         Ok(())
     }
 
+    pub async fn list_pools(&self) -> Result<Vec<RustfsPoolListItem>, RustfsClientError> {
+        let body = self
+            .send_admin_request("GET", POOLS_LIST_PATH, "", "", None)
+            .await?;
+
+        serde_json::from_str::<Vec<RustfsPoolListItem>>(&body)
+            .map_err(|_| RustfsClientError::ParseResponseFailed)
+    }
+
+    pub async fn pool_status_by_id(
+        &self,
+        pool_id: &str,
+    ) -> Result<RustfsPoolStatus, RustfsClientError> {
+        let query = build_query_pairs(&[("by-id", "true"), ("pool", pool_id)]);
+        let body = self
+            .send_admin_request("GET", POOLS_STATUS_PATH, &query, "", None)
+            .await?;
+
+        serde_json::from_str::<RustfsPoolStatus>(&body)
+            .map_err(|_| RustfsClientError::ParseResponseFailed)
+    }
+
+    pub async fn start_pool_decommission_by_id(
+        &self,
+        pool_id: &str,
+    ) -> Result<(), RustfsClientError> {
+        let query = build_query_pairs(&[("by-id", "true"), ("pool", pool_id)]);
+        self.send_admin_request("POST", POOLS_DECOMMISSION_PATH, &query, "", None)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn cancel_pool_decommission_by_id(
+        &self,
+        pool_id: &str,
+    ) -> Result<(), RustfsClientError> {
+        let query = build_query_pairs(&[("by-id", "true"), ("pool", pool_id)]);
+        self.send_admin_request("POST", POOLS_CANCEL_PATH, &query, "", None)
+            .await?;
+        Ok(())
+    }
+
     /// Send AssumeRole request to RustFS admin STS endpoint (`/`).
     pub async fn assume_role(
         &self,
@@ -439,6 +556,68 @@ impl RustfsAdminClient {
             .map_err(|_| RustfsClientError::RequestFailed)?;
 
         parse_assume_role_response(&body).ok_or(RustfsClientError::ParseResponseFailed)
+    }
+
+    async fn send_admin_request(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &str,
+        content_type: Option<&str>,
+    ) -> Result<String, RustfsClientError> {
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
+        let url = if query.is_empty() {
+            url
+        } else {
+            format!("{url}?{query}")
+        };
+
+        let signed = self.sign_request(
+            method,
+            path,
+            query,
+            body,
+            content_type,
+            ADMIN_SIGNING_SERVICE,
+        )?;
+        let host = self.host()?;
+
+        let builder = match method {
+            "GET" => self.http_client.get(url),
+            "POST" => self.http_client.post(url),
+            "PUT" => self.http_client.put(url),
+            _ => return Err(RustfsClientError::RequestBuildFailed),
+        }
+        .header("x-amz-date", &signed.amz_date)
+        .header("x-amz-content-sha256", &signed.payload_hash)
+        .header("authorization", &signed.authorization)
+        .header("host", host);
+
+        let builder = if let Some(content_type) = content_type {
+            builder.header("content-type", content_type)
+        } else {
+            builder
+        };
+        let builder = if body.is_empty() {
+            builder
+        } else {
+            builder.body(body.to_string())
+        };
+
+        let response = builder
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            return Err(RustfsClientError::UnexpectedStatus(response.status()));
+        }
+
+        response
+            .text()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)
     }
 
     fn sign_request(
@@ -936,6 +1115,135 @@ mod tests {
                 .lock()
                 .await
                 .contains("/s3/aws4_request")
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_pools_parses_current_rustfs_pool_shape() {
+        let router = Router::new().route(
+            POOLS_LIST_PATH,
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    r#"[{"id":1,"cmdline":"http://tenant-pool-a-{0...3}.tenant-hl.ns.svc.cluster.local:9000/data/rustfs{0...3}","lastUpdate":"2026-05-20T00:00:00Z","totalSize":100,"currentSize":50,"usedSize":25,"used":25.0,"status":"running","decommissionInfo":{"startTime":"2026-05-20T00:00:00Z","complete":false,"failed":false,"canceled":false,"objectsDecommissioned":7,"objectsDecommissionedFailed":1,"bytesDecommissioned":9,"bytesDecommissionedFailed":2}}]"#,
+                )
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+        let pools = client.list_pools().await.unwrap();
+
+        assert_eq!(pools[0].id, 1);
+        assert_eq!(pools[0].status, "running");
+        assert_eq!(
+            pools[0]
+                .decommission
+                .as_ref()
+                .and_then(|info| info.objects_decommissioned),
+            Some(7)
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pool_decommission_start_uses_by_id_query_and_admin_signing() {
+        let capture = Capture::default();
+        let route_capture = capture.clone();
+
+        let router = Router::new()
+            .route(
+                POOLS_DECOMMISSION_PATH,
+                post(
+                    move |State(c): State<Capture>, req: Request<Body>| async move {
+                        *c.path.lock().await = req.uri().path().to_string();
+                        *c.query.lock().await = req.uri().query().unwrap_or("").to_string();
+                        *c.authorization.lock().await = req
+                            .headers()
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(route_capture.clone());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+        client.start_pool_decommission_by_id("1").await.unwrap();
+
+        assert_eq!(&*capture.path.lock().await, POOLS_DECOMMISSION_PATH);
+        assert_eq!(&*capture.query.lock().await, "by-id=true&pool=1");
+        assert!(
+            capture
+                .authorization
+                .lock()
+                .await
+                .contains("/s3/aws4_request")
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pool_status_uses_by_id_query_and_parses_decommission_info() {
+        let capture = Capture::default();
+        let route_capture = capture.clone();
+
+        let router = Router::new()
+            .route(
+                POOLS_STATUS_PATH,
+                get(
+                    move |State(c): State<Capture>, req: Request<Body>| async move {
+                        *c.path.lock().await = req.uri().path().to_string();
+                        *c.query.lock().await = req.uri().query().unwrap_or("").to_string();
+
+                        (
+                            StatusCode::OK,
+                            r#"{"id":1,"cmdline":"http://tenant-pool-a-{0...3}.tenant-hl.ns.svc.cluster.local:9000/data/rustfs{0...3}","lastUpdate":"2026-05-20T00:00:00Z","decommissionInfo":{"startTime":"2026-05-20T00:00:00Z","complete":true,"failed":false,"canceled":false,"objectsDecommissioned":10,"objectsDecommissionedFailed":0,"bytesDecommissioned":20,"bytesDecommissionedFailed":0}}"#,
+                        )
+                    },
+                ),
+            )
+            .with_state(route_capture.clone());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+        let status = client.pool_status_by_id("1").await.unwrap();
+
+        assert_eq!(status.id, 1);
+        assert_eq!(&*capture.path.lock().await, POOLS_STATUS_PATH);
+        assert_eq!(&*capture.query.lock().await, "by-id=true&pool=1");
+        assert_eq!(
+            status.decommission.and_then(|info| info.complete),
+            Some(true)
         );
 
         server.abort();

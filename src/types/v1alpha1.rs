@@ -18,6 +18,7 @@ pub mod logging;
 pub mod persistence;
 pub mod policy_binding;
 pub mod pool;
+pub mod pool_lifecycle;
 pub mod status;
 pub mod tenant;
 pub mod tls;

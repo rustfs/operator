@@ -21,11 +21,27 @@ use strum::Display;
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Pool {
+    /// Pool name from Tenant spec. Optional for backward compatibility with older status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
     /// Name of the StatefulSet for this pool
     pub ss_name: String,
 
     /// Current state of the pool
     pub state: PoolState,
+
+    /// Lifecycle state of the pool, separate from StatefulSet rollout state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<PoolLifecycleState>,
+
+    /// Workload rollout state of this pool. Mirrors `state` for compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_state: Option<PoolState>,
+
+    /// Decommission progress and cleanup status for this pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decommission: Option<PoolDecommissionStatus>,
 
     /// Total number of non-terminated pods targeted by this pool's StatefulSet
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,6 +94,132 @@ pub enum PoolState {
 
     #[strum(to_string = "PoolDegraded")]
     Degraded,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Display, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "PascalCase")]
+#[schemars(rename_all = "PascalCase")]
+pub enum PoolLifecycleState {
+    #[strum(to_string = "Active")]
+    Active,
+
+    #[strum(to_string = "Decommissioning")]
+    Decommissioning,
+
+    #[strum(to_string = "Decommissioned")]
+    Decommissioned,
+
+    #[strum(to_string = "DecommissionCanceled")]
+    DecommissionCanceled,
+
+    #[strum(to_string = "DecommissionFailed")]
+    DecommissionFailed,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolDecommissionStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rustfs_pool_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_set_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<PoolDecommissionPhase>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_poll_time: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<PoolDecommissionProgress>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<PoolDecommissionCleanupStatus>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<PoolDecommissionLastError>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Display, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "PascalCase")]
+#[schemars(rename_all = "PascalCase")]
+pub enum PoolDecommissionPhase {
+    #[strum(to_string = "Pending")]
+    Pending,
+
+    #[strum(to_string = "Running")]
+    Running,
+
+    #[strum(to_string = "Complete")]
+    Complete,
+
+    #[strum(to_string = "Canceled")]
+    Canceled,
+
+    #[strum(to_string = "Failed")]
+    Failed,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolDecommissionProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects_migrated: Option<i64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_migrated: Option<i64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects_failed: Option<i64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_failed: Option<i64>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolDecommissionCleanupStatus {
+    pub state: PoolDecommissionCleanupState,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stateful_set_deleted_at: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pvc_retention_policy: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Display, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "PascalCase")]
+#[schemars(rename_all = "PascalCase")]
+pub enum PoolDecommissionCleanupState {
+    #[strum(to_string = "Pending")]
+    Pending,
+
+    #[strum(to_string = "StatefulSetDeleting")]
+    StatefulSetDeleting,
+
+    #[strum(to_string = "PvcRetained")]
+    PvcRetained,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, KubeSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolDecommissionLastError {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl JsonSchema for PoolState {

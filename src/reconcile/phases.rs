@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::pool_lifecycle::{PoolLifecycleDecision, PoolLifecycleDecisions};
 use super::{
     Error, cleanup_stuck_terminating_pods_on_down_nodes, context, context_result,
     patch_status_and_record, patch_status_error, statefulset_owned_by_tenant, types_result,
@@ -19,13 +20,15 @@ use super::{
 use crate::context::Context;
 use crate::status::{StatusBuilder, StatusError};
 use crate::types;
+use crate::types::v1alpha1::status::pool::PoolLifecycleState;
 use crate::types::v1alpha1::status::{ConditionType, Reason};
 use crate::types::v1alpha1::tenant::Tenant;
 use crate::types::v1alpha1::tls::TlsPlan;
 use kube::ResourceExt;
-use kube::api::ListParams;
+use kube::api::{DeleteParams, ListParams, PropagationPolicy};
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
+use std::collections::HashSet;
 use std::time::Duration;
 use tracing::{debug, error, warn};
 
@@ -34,8 +37,30 @@ pub(super) struct PoolReconcileSummary {
     pool_statuses: Vec<crate::types::v1alpha1::status::pool::Pool>,
     any_updating: bool,
     any_degraded: bool,
+    any_lifecycle_reconciling: bool,
+    any_removed_pool_cleanup_reconciling: bool,
+    any_lifecycle_decommissioned: bool,
+    any_lifecycle_failed: bool,
+    any_lifecycle_canceled: bool,
+    lifecycle_requeue_after: Option<Duration>,
     total_replicas: i32,
     ready_replicas: i32,
+}
+
+const REMOVED_POOL_CLEANUP_REQUEUE_INTERVAL: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+pub(super) struct RemovedDecommissionedPoolCleanup {
+    pub(super) allowed_removed_pool_names: HashSet<String>,
+    pub(super) any_reconciling: bool,
+    pub(super) requeue_after: Option<Duration>,
+}
+
+impl RemovedDecommissionedPoolCleanup {
+    fn mark_reconciling(&mut self) {
+        self.any_reconciling = true;
+        self.requeue_after = Some(REMOVED_POOL_CLEANUP_REQUEUE_INTERVAL);
+    }
 }
 
 pub(super) async fn validate_tenant_prerequisites(
@@ -188,10 +213,116 @@ pub(super) async fn reconcile_services(
     Ok(())
 }
 
+pub(super) async fn cleanup_removed_decommissioned_pool_statefulsets(
+    ctx: &Context,
+    tenant: &Tenant,
+    namespace: &str,
+) -> Result<RemovedDecommissionedPoolCleanup, Error> {
+    let owned_statefulsets = context_result(
+        ctx.list_with_params::<k8s_openapi::api::apps::v1::StatefulSet>(
+            namespace,
+            &ListParams::default().labels(&format!("rustfs.tenant={}", tenant.name())),
+        )
+        .await,
+        ctx,
+        tenant,
+    )
+    .await?;
+
+    let current_pool_names: HashSet<_> =
+        tenant.spec.pools.iter().map(|p| p.name.as_str()).collect();
+    let tenant_prefix = format!("{}-", tenant.name());
+    let mut cleanup = RemovedDecommissionedPoolCleanup::default();
+
+    for ss in owned_statefulsets
+        .iter()
+        .filter(|ss| statefulset_owned_by_tenant(ss, tenant))
+    {
+        let Some(ss_name) = ss.metadata.name.as_deref() else {
+            continue;
+        };
+        let Some(pool_name) = ss_name.strip_prefix(&tenant_prefix) else {
+            continue;
+        };
+        if current_pool_names.contains(pool_name) {
+            continue;
+        }
+        if !removed_pool_is_decommissioned(tenant, pool_name, ss_name) {
+            continue;
+        }
+
+        cleanup
+            .allowed_removed_pool_names
+            .insert(pool_name.to_string());
+        if ss.metadata.deletion_timestamp.is_some() {
+            cleanup.mark_reconciling();
+            continue;
+        }
+
+        let delete_params = DeleteParams {
+            propagation_policy: Some(PropagationPolicy::Background),
+            ..DeleteParams::default()
+        };
+        debug!(
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            pool = %pool_name,
+            statefulset = %ss_name,
+            "deleting StatefulSet for removed decommissioned pool"
+        );
+        let delete_requested = match ctx
+            .delete_with_params::<k8s_openapi::api::apps::v1::StatefulSet>(
+                ss_name,
+                namespace,
+                &delete_params,
+            )
+            .await
+        {
+            Ok(()) => true,
+            Err(error) if is_not_found_context_error(&error) => false,
+            Err(error) => {
+                let status_error = StatusError::from_context_error(&error);
+                patch_status_error(ctx, tenant, &status_error).await;
+                return Err(error.into());
+            }
+        };
+
+        if delete_requested {
+            cleanup.mark_reconciling();
+            let _ = ctx
+                .record(
+                    tenant,
+                    EventType::Normal,
+                    "PoolRemoved",
+                    &format!(
+                        "Deleting StatefulSet '{}' after decommissioned pool was removed from spec",
+                        ss_name
+                    ),
+                )
+                .await;
+        }
+    }
+
+    Ok(cleanup)
+}
+
+fn removed_pool_is_decommissioned(tenant: &Tenant, pool_name: &str, ss_name: &str) -> bool {
+    tenant.status.as_ref().is_some_and(|status| {
+        status.pools.iter().any(|pool_status| {
+            (pool_status.name.as_deref() == Some(pool_name) || pool_status.ss_name == ss_name)
+                && matches!(
+                    pool_status.lifecycle_state,
+                    Some(PoolLifecycleState::Decommissioned)
+                )
+        })
+    })
+}
+
 pub(super) async fn validate_no_pool_rename(
     ctx: &Context,
     tenant: &Tenant,
     namespace: &str,
+    allowed_removed_pool_names: &HashSet<String>,
 ) -> Result<(), Error> {
     let owned_statefulsets = context_result(
         ctx.list_with_params::<k8s_openapi::api::apps::v1::StatefulSet>(
@@ -224,6 +355,7 @@ pub(super) async fn validate_no_pool_rename(
     let mut removed_pool_names: Vec<_> = existing_pool_names
         .iter()
         .filter(|pool_name| !current_pool_names.contains(pool_name.as_str()))
+        .filter(|pool_name| !allowed_removed_pool_names.contains(*pool_name))
         .cloned()
         .collect();
     removed_pool_names.sort_unstable();
@@ -275,11 +407,38 @@ pub(super) async fn reconcile_pool_statefulsets(
     tenant: &Tenant,
     namespace: &str,
     tls_plan: &TlsPlan,
+    lifecycle_decisions: &PoolLifecycleDecisions,
+    removed_pool_cleanup: &RemovedDecommissionedPoolCleanup,
 ) -> Result<PoolReconcileSummary, Error> {
-    let mut summary = PoolReconcileSummary::default();
+    let mut summary = PoolReconcileSummary {
+        any_lifecycle_reconciling: lifecycle_decisions.any_reconciling,
+        any_removed_pool_cleanup_reconciling: removed_pool_cleanup.any_reconciling,
+        any_lifecycle_failed: lifecycle_decisions.any_failed,
+        any_lifecycle_canceled: lifecycle_decisions.any_canceled,
+        lifecycle_requeue_after: earliest_requeue_after(
+            lifecycle_decisions.requeue_after,
+            removed_pool_cleanup.requeue_after,
+        ),
+        ..Default::default()
+    };
 
     for pool in &tenant.spec.pools {
         let ss_name = format!("{}-{}", tenant.name(), pool.name);
+        let lifecycle_decision = lifecycle_decisions.decision_for(&pool.name);
+        if lifecycle_decision.is_some_and(|decision| decision.skip_workload_reconcile) {
+            reconcile_lifecycle_gated_pool_statefulset(
+                ctx,
+                tenant,
+                namespace,
+                pool,
+                &ss_name,
+                lifecycle_decision,
+                &mut summary,
+            )
+            .await?;
+            continue;
+        }
+
         match ctx
             .get::<k8s_openapi::api::apps::v1::StatefulSet>(&ss_name, namespace)
             .await
@@ -320,6 +479,15 @@ pub(super) async fn reconcile_pool_statefulsets(
     Ok(summary)
 }
 
+fn earliest_requeue_after(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
 fn is_not_found_context_error(error: &context::Error) -> bool {
     matches!(
         error,
@@ -327,6 +495,76 @@ fn is_not_found_context_error(error: &context::Error) -> bool {
             source: kube::Error::Api(api_error)
         } if api_error.code == 404
     )
+}
+
+async fn reconcile_lifecycle_gated_pool_statefulset(
+    ctx: &Context,
+    tenant: &Tenant,
+    namespace: &str,
+    pool: &crate::types::v1alpha1::pool::Pool,
+    ss_name: &str,
+    lifecycle_decision: Option<&PoolLifecycleDecision>,
+    summary: &mut PoolReconcileSummary,
+) -> Result<(), Error> {
+    debug!(
+        tenant = %tenant.name(),
+        namespace = %namespace,
+        pool = %pool.name,
+        "skipping normal StatefulSet reconcile because pool lifecycle gate is active"
+    );
+
+    let mut pool_status = match ctx
+        .get::<k8s_openapi::api::apps::v1::StatefulSet>(ss_name, namespace)
+        .await
+    {
+        Ok(ss) => tenant.build_pool_status(&pool.name, &ss),
+        Err(error) if is_not_found_context_error(&error) => missing_pool_status(tenant, &pool.name),
+        Err(error) => {
+            let status_error = StatusError::from_context_error(&error);
+            patch_status_error(ctx, tenant, &status_error).await;
+            return Err(error.into());
+        }
+    };
+
+    if let Some(decision) = lifecycle_decision {
+        apply_lifecycle_decision(&mut pool_status, decision);
+    }
+
+    update_pool_summary(summary, pool_status);
+
+    Ok(())
+}
+
+fn missing_pool_status(
+    tenant: &Tenant,
+    pool_name: &str,
+) -> crate::types::v1alpha1::status::pool::Pool {
+    crate::types::v1alpha1::status::pool::Pool {
+        name: Some(pool_name.to_string()),
+        ss_name: format!("{}-{}", tenant.name(), pool_name),
+        state: crate::types::v1alpha1::status::pool::PoolState::NotCreated,
+        lifecycle_state: Some(PoolLifecycleState::Active),
+        workload_state: Some(crate::types::v1alpha1::status::pool::PoolState::NotCreated),
+        decommission: None,
+        replicas: None,
+        ready_replicas: None,
+        current_replicas: None,
+        updated_replicas: None,
+        current_revision: None,
+        update_revision: None,
+        last_update_time: Some(
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+    }
+}
+
+fn apply_lifecycle_decision(
+    pool_status: &mut crate::types::v1alpha1::status::pool::Pool,
+    decision: &PoolLifecycleDecision,
+) {
+    pool_status.lifecycle_state = Some(decision.state.clone());
+    pool_status.workload_state = Some(pool_status.state.clone());
+    pool_status.decommission = decision.decommission.clone();
 }
 
 async fn reconcile_existing_pool_statefulset(
@@ -457,6 +695,22 @@ fn update_pool_summary(
         _ => {}
     }
 
+    match pool_status.lifecycle_state {
+        Some(PoolLifecycleState::Decommissioning) => summary.any_lifecycle_reconciling = true,
+        Some(PoolLifecycleState::Decommissioned) => summary.any_lifecycle_decommissioned = true,
+        Some(PoolLifecycleState::DecommissionFailed) => summary.any_lifecycle_failed = true,
+        Some(PoolLifecycleState::DecommissionCanceled) => summary.any_lifecycle_canceled = true,
+        _ => {}
+    }
+
+    if matches!(
+        pool_status.lifecycle_state,
+        Some(PoolLifecycleState::Decommissioned)
+    ) {
+        summary.pool_statuses.push(pool_status);
+        return;
+    }
+
     if let Some(replicas) = pool_status.replicas {
         summary.total_replicas += replicas;
     }
@@ -479,7 +733,65 @@ pub(super) async fn finalize_tenant_status(
         builder.set_tls_status(tls_status);
     }
 
-    let (event_condition, event_reason, event_type, event_message) = if summary.any_degraded {
+    let (event_condition, event_reason, event_type, event_message) = if summary.any_lifecycle_failed
+    {
+        builder.finish_degraded(
+            Reason::PoolDecommissionFailed,
+            ConditionType::PoolsReady,
+            "One or more pool decommission operations failed".to_string(),
+        );
+        (
+            ConditionType::PoolsReady,
+            Reason::PoolDecommissionFailed,
+            EventType::Warning,
+            "One or more pool decommission operations failed".to_string(),
+        )
+    } else if summary.any_lifecycle_canceled {
+        builder.finish_degraded(
+            Reason::PoolDecommissionCanceled,
+            ConditionType::PoolsReady,
+            "One or more pool decommission operations were canceled".to_string(),
+        );
+        (
+            ConditionType::PoolsReady,
+            Reason::PoolDecommissionCanceled,
+            EventType::Warning,
+            "One or more pool decommission operations were canceled".to_string(),
+        )
+    } else if summary.any_removed_pool_cleanup_reconciling {
+        builder.finish_reconciling(
+            Reason::PoolDecommissioning,
+            "Decommissioned pool cleanup is in progress".to_string(),
+        );
+        (
+            ConditionType::PoolsReady,
+            Reason::PoolDecommissioning,
+            EventType::Normal,
+            "Decommissioned pool cleanup is in progress".to_string(),
+        )
+    } else if summary.any_lifecycle_reconciling {
+        builder.finish_reconciling(
+            Reason::PoolDecommissioning,
+            "Pool decommission is in progress".to_string(),
+        );
+        (
+            ConditionType::PoolsReady,
+            Reason::PoolDecommissioning,
+            EventType::Normal,
+            "Pool decommission is in progress".to_string(),
+        )
+    } else if summary.any_lifecycle_decommissioned {
+        builder.finish_reconciling(
+            Reason::PoolDecommissioned,
+            "Pool decommission completed; remove the pool from spec to finish cleanup".to_string(),
+        );
+        (
+            ConditionType::PoolsReady,
+            Reason::PoolDecommissioned,
+            EventType::Normal,
+            "Pool decommission completed; remove the pool from spec to finish cleanup".to_string(),
+        )
+    } else if summary.any_degraded {
         builder.finish_degraded(
             Reason::PoolDegraded,
             ConditionType::PoolsReady,
@@ -545,10 +857,46 @@ pub(super) async fn finalize_tenant_status(
     )
     .await?;
 
-    if summary.any_updating {
+    if let Some(requeue_after) = summary.lifecycle_requeue_after {
+        debug!(
+            seconds = requeue_after.as_secs(),
+            "Pool lifecycle is active, requeuing"
+        );
+        Ok(Action::requeue(requeue_after))
+    } else if summary.any_updating {
         debug!("Pools are updating, requeuing in 10 seconds");
         Ok(Action::requeue(Duration::from_secs(10)))
     } else {
         Ok(Action::await_change())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removed_pool_cleanup_marks_reconciling_and_requeues() {
+        let mut cleanup = RemovedDecommissionedPoolCleanup::default();
+
+        cleanup.mark_reconciling();
+
+        assert!(cleanup.any_reconciling);
+        assert_eq!(
+            cleanup.requeue_after,
+            Some(REMOVED_POOL_CLEANUP_REQUEUE_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn earliest_requeue_after_prefers_shorter_duration() {
+        assert_eq!(
+            earliest_requeue_after(Some(Duration::from_secs(30)), Some(Duration::from_secs(10))),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            earliest_requeue_after(None, Some(Duration::from_secs(10))),
+            Some(Duration::from_secs(10))
+        );
     }
 }

@@ -28,13 +28,15 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 mod phases;
+mod pool_lifecycle;
 mod tls;
 
 use phases::{
-    finalize_tenant_status, maybe_cleanup_terminating_pods, reconcile_pool_statefulsets,
-    reconcile_rbac_resources, reconcile_services, validate_no_pool_rename,
-    validate_tenant_prerequisites,
+    cleanup_removed_decommissioned_pool_statefulsets, finalize_tenant_status,
+    maybe_cleanup_terminating_pods, reconcile_pool_statefulsets, reconcile_rbac_resources,
+    reconcile_services, validate_no_pool_rename, validate_tenant_prerequisites,
 };
+use pool_lifecycle::reconcile_pool_lifecycle;
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -77,9 +79,28 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
 
     reconcile_services(&ctx, &latest_tenant, &ns, &tls_plan).await?;
 
-    validate_no_pool_rename(&ctx, &latest_tenant, &ns).await?;
+    let removed_pool_cleanup =
+        cleanup_removed_decommissioned_pool_statefulsets(&ctx, &latest_tenant, &ns).await?;
 
-    let summary = reconcile_pool_statefulsets(&ctx, &latest_tenant, &ns, &tls_plan).await?;
+    validate_no_pool_rename(
+        &ctx,
+        &latest_tenant,
+        &ns,
+        &removed_pool_cleanup.allowed_removed_pool_names,
+    )
+    .await?;
+
+    let lifecycle_decisions = reconcile_pool_lifecycle(&ctx, &latest_tenant, &ns).await?;
+
+    let summary = reconcile_pool_statefulsets(
+        &ctx,
+        &latest_tenant,
+        &ns,
+        &tls_plan,
+        &lifecycle_decisions,
+        &removed_pool_cleanup,
+    )
+    .await?;
     finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan).await
 }
 
