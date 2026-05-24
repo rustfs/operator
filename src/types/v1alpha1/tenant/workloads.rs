@@ -47,33 +47,37 @@ fn stateful_name(tenant: &Tenant, pool: &Pool) -> String {
 }
 
 impl Tenant {
+    pub(crate) fn rustfs_pool_volume_spec(
+        &self,
+        pool: &Pool,
+        scheme: &str,
+        namespace: &str,
+    ) -> String {
+        let tenant_name = self.name();
+        let headless_service = self.headless_service_name();
+        let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
+
+        format!(
+            "{scheme}://{tenant_name}-{}-{{0...{}}}.{headless_service}.{namespace}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
+            pool.name,
+            pool.servers - 1,
+            base_path.trim_end_matches('/'),
+            pool.persistence.volumes_per_server - 1
+        )
+    }
+
     /// Constructs the RUSTFS_VOLUMES environment variable value
     /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/rustfs{0...volumes-1}
     /// All pools are combined into a space-separated string for a unified cluster
     /// Follows RustFS convention: /data/rustfs0, /data/rustfs1, etc.
     fn rustfs_volumes_env_value(&self, scheme: &str) -> Result<String, types::error::Error> {
         let namespace = self.namespace()?;
-        let tenant_name = self.name();
-        let headless_service = self.headless_service_name();
-
-        let volume_specs: Vec<String> = self
+        let volume_specs = self
             .spec
             .pools
             .iter()
-            .map(|pool| {
-                let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
-                let pool_name = &pool.name;
-
-                // Construct volume specification with range notation
-                // Follows RustFS convention: /data/rustfs{0...N}
-                format!(
-                    "{scheme}://{tenant_name}-{pool_name}-{{0...{}}}.{headless_service}.{namespace}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
-                    pool.servers - 1,
-                    base_path.trim_end_matches('/'),
-                    pool.persistence.volumes_per_server - 1
-                )
-            })
-            .collect();
+            .map(|pool| self.rustfs_pool_volume_spec(pool, scheme, &namespace))
+            .collect::<Vec<_>>();
 
         Ok(volume_specs.join(" "))
     }

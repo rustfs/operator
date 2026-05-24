@@ -245,10 +245,22 @@ impl Context {
         T: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
         <T as kube::Resource>::DynamicType: Default,
     {
+        self.delete_with_params::<T>(name, namespace, &DeleteParams::default())
+            .await
+    }
+
+    pub async fn delete_with_params<T>(
+        &self,
+        name: &str,
+        namespace: &str,
+        params: &DeleteParams,
+    ) -> Result<(), Error>
+    where
+        T: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Debug,
+        <T as kube::Resource>::DynamicType: Default,
+    {
         let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
-        api.delete(name, &DeleteParams::default())
-            .context(KubeSnafu)
-            .await?;
+        api.delete(name, params).context(KubeSnafu).await?;
         Ok(())
     }
 

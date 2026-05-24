@@ -422,6 +422,45 @@ spec:
                 - null
                 nullable: true
                 type: string
+              poolLifecycle:
+                description: Explicit lifecycle requests for pool decommissioning.
+                nullable: true
+                properties:
+                  decommissionRequests:
+                    items:
+                      properties:
+                        action:
+                          enum:
+                          - Start
+                          - Cancel
+                          type: string
+                        cancelRequestedAt:
+                          nullable: true
+                          type: string
+                        poolName:
+                          type: string
+                        reason:
+                          nullable: true
+                          type: string
+                        requestId:
+                          type: string
+                        requestedAt:
+                          nullable: true
+                          type: string
+                      required:
+                      - action
+                      - poolName
+                      - requestId
+                      type: object
+                    type: array
+                  pvcRetentionPolicy:
+                    enum:
+                    - Retain
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: decommissionRequests must contain at most one entry per poolName
+                  rule: '!has(self.decommissionRequests) || self.decommissionRequests.all(r, self.decommissionRequests.exists_one(other, other.poolName == r.poolName))'
               pools:
                 items:
                   description: |-
@@ -1603,8 +1642,104 @@ spec:
                       description: Current revision hash of the StatefulSet
                       nullable: true
                       type: string
+                    decommission:
+                      description: Decommission progress and cleanup status for this pool.
+                      nullable: true
+                      properties:
+                        cleanup:
+                          nullable: true
+                          properties:
+                            pvcRetentionPolicy:
+                              nullable: true
+                              type: string
+                            state:
+                              enum:
+                              - Pending
+                              - StatefulSetDeleting
+                              - PvcRetained
+                              type: string
+                            statefulSetDeletedAt:
+                              nullable: true
+                              type: string
+                          required:
+                          - state
+                          type: object
+                        completedAt:
+                          nullable: true
+                          type: string
+                        endpointSetHash:
+                          nullable: true
+                          type: string
+                        lastError:
+                          nullable: true
+                          properties:
+                            message:
+                              nullable: true
+                              type: string
+                            reason:
+                              nullable: true
+                              type: string
+                          type: object
+                        lastPollTime:
+                          nullable: true
+                          type: string
+                        phase:
+                          enum:
+                          - Pending
+                          - Running
+                          - Complete
+                          - Canceled
+                          - Failed
+                          - null
+                          nullable: true
+                          type: string
+                        progress:
+                          nullable: true
+                          properties:
+                            bytesFailed:
+                              format: int64
+                              nullable: true
+                              type: integer
+                            bytesMigrated:
+                              format: int64
+                              nullable: true
+                              type: integer
+                            objectsFailed:
+                              format: int64
+                              nullable: true
+                              type: integer
+                            objectsMigrated:
+                              format: int64
+                              nullable: true
+                              type: integer
+                          type: object
+                        requestId:
+                          nullable: true
+                          type: string
+                        rustfsPoolId:
+                          nullable: true
+                          type: string
+                        startedAt:
+                          nullable: true
+                          type: string
+                      type: object
                     lastUpdateTime:
                       description: Last time the pool status was updated
+                      nullable: true
+                      type: string
+                    lifecycleState:
+                      description: Lifecycle state of the pool, separate from StatefulSet rollout state.
+                      enum:
+                      - Active
+                      - Decommissioning
+                      - Decommissioned
+                      - DecommissionCanceled
+                      - DecommissionFailed
+                      - null
+                      nullable: true
+                      type: string
+                    name:
+                      description: Pool name from Tenant spec. Optional for backward compatibility with older status.
                       nullable: true
                       type: string
                     readyReplicas:
@@ -1632,6 +1767,10 @@ spec:
                       format: int32
                       nullable: true
                       type: integer
+                    workloadState:
+                      description: Workload rollout state of this pool. Mirrors `state` for compatibility.
+                      nullable: true
+                      type: string
                   required:
                   - ssName
                   - state
@@ -1650,3 +1789,4 @@ spec:
     storage: true
     subresources:
       status: {}
+---

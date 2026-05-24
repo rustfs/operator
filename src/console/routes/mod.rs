@@ -97,6 +97,14 @@ pub fn pool_routes() -> Router<AppState> {
             "/namespaces/:namespace/tenants/:name/pools/:pool",
             delete(handlers::pools::delete_pool),
         )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pools/:pool/decommission",
+            post(handlers::pools::start_pool_decommission),
+        )
+        .route(
+            "/namespaces/:namespace/tenants/:name/pools/:pool/decommission/cancel",
+            post(handlers::pools::cancel_pool_decommission),
+        )
 }
 
 /// Pod list, detail, delete, restart, logs

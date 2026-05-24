@@ -16,6 +16,7 @@ use crate::types::v1alpha1::encryption::{EncryptionConfig, PodSecurityContextOve
 use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::logging::LoggingConfig;
 use crate::types::v1alpha1::pool::Pool;
+use crate::types::v1alpha1::pool_lifecycle::PoolLifecycleSpec;
 use crate::types::v1alpha1::tls::TlsConfig;
 use crate::types::{self, error::NoNamespaceSnafu};
 use k8s_openapi::api::core::v1 as corev1;
@@ -51,6 +52,10 @@ pub struct TenantSpec {
 
     #[x_kube(validation = Rule::new("self.size() > 0").message("pools must be configured"))]
     pub pools: Vec<Pool>,
+
+    /// Explicit lifecycle requests for pool decommissioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_lifecycle: Option<PoolLifecycleSpec>,
 
     #[serde(
         default = "helper::get_rustfs_image",
@@ -316,8 +321,12 @@ impl Tenant {
             Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
 
         crate::types::v1alpha1::status::pool::Pool {
+            name: Some(pool_name.to_string()),
             ss_name,
-            state,
+            state: state.clone(),
+            lifecycle_state: Some(crate::types::v1alpha1::status::pool::PoolLifecycleState::Active),
+            workload_state: Some(state),
+            decommission: None,
             replicas,
             ready_replicas,
             current_replicas,

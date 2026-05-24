@@ -9,9 +9,12 @@ import type {
   PoolDetails,
   AddPoolRequest,
   AddPoolResponse,
+  CancelPoolDecommissionRequest,
   DeletePoolResponse,
+  PoolDecommissionRequestResponse,
   PodListResponse,
   PodDetails,
+  StartPoolDecommissionRequest,
   DeletePodResponse,
   NodeListResponse,
   NamespaceListResponse,
@@ -118,6 +121,27 @@ export async function addPool(namespace: string, tenantName: string, body: AddPo
 
 export async function deletePool(namespace: string, tenantName: string, poolName: string): Promise<DeletePoolResponse> {
   return apiClient.delete<DeletePoolResponse>(`${pool(namespace, tenantName, poolName)}`)
+}
+
+export async function startPoolDecommission(
+  namespace: string,
+  tenantName: string,
+  poolName: string,
+  body: StartPoolDecommissionRequest,
+): Promise<PoolDecommissionRequestResponse> {
+  return apiClient.post<PoolDecommissionRequestResponse>(`${pool(namespace, tenantName, poolName)}/decommission`, body)
+}
+
+export async function cancelPoolDecommission(
+  namespace: string,
+  tenantName: string,
+  poolName: string,
+  body: CancelPoolDecommissionRequest,
+): Promise<PoolDecommissionRequestResponse> {
+  return apiClient.post<PoolDecommissionRequestResponse>(
+    `${pool(namespace, tenantName, poolName)}/decommission/cancel`,
+    body,
+  )
 }
 
 // ----- Pods -----

@@ -163,6 +163,16 @@ export interface PoolDetails {
   current_revision: string | null
   update_revision: string | null
   state: string
+  lifecycle_state: string | null
+  workload_state: string | null
+  decommission_phase: string | null
+  decommission_objects_migrated: number | null
+  decommission_bytes_migrated: number | null
+  decommission_objects_failed: number | null
+  decommission_bytes_failed: number | null
+  decommission_cleanup_state: string | null
+  decommission_last_error: string | null
+  decommission_last_poll_time: string | null
   created_at: string | null
 }
 
@@ -193,6 +203,24 @@ export interface DeletePoolResponse {
   success: boolean
   message: string
   warning?: string
+}
+
+export interface StartPoolDecommissionRequest {
+  requestId: string
+  reason?: string
+}
+
+export interface CancelPoolDecommissionRequest {
+  requestId: string
+  reason?: string
+}
+
+export interface PoolDecommissionRequestResponse {
+  success: boolean
+  message: string
+  poolName: string
+  requestId: string
+  action: string
 }
 
 // ----- Pod -----

@@ -135,6 +135,10 @@ pub enum Reason {
     TlsHotReloadUnsupported,
     CertificateExpiring,
     PoolDeleteBlocked,
+    PoolDecommissioning,
+    PoolDecommissioned,
+    PoolDecommissionCanceled,
+    PoolDecommissionFailed,
     StatefulSetApplyFailed,
     StatefulSetUpdateValidationFailed,
     RolloutInProgress,
@@ -178,6 +182,10 @@ impl Reason {
             Self::TlsHotReloadUnsupported => "TlsHotReloadUnsupported",
             Self::CertificateExpiring => "CertificateExpiring",
             Self::PoolDeleteBlocked => "PoolDeleteBlocked",
+            Self::PoolDecommissioning => "PoolDecommissioning",
+            Self::PoolDecommissioned => "PoolDecommissioned",
+            Self::PoolDecommissionCanceled => "PoolDecommissionCanceled",
+            Self::PoolDecommissionFailed => "PoolDecommissionFailed",
             Self::StatefulSetApplyFailed => "StatefulSetApplyFailed",
             Self::StatefulSetUpdateValidationFailed => "StatefulSetUpdateValidationFailed",
             Self::RolloutInProgress => "RolloutInProgress",
@@ -422,6 +430,8 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "CaBundleInvalid"
             | "TlsHotReloadUnsupported"
             | "PoolDeleteBlocked"
+            | "PoolDecommissionCanceled"
+            | "PoolDecommissionFailed"
             | "StatefulSetUpdateValidationFailed"
     )
 }
@@ -474,6 +484,10 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "InvalidTenantName" => vec!["renameTenant"],
         "ImmutableFieldModified" => vec!["restoreImmutableField"],
         "PoolDeleteBlocked" => vec!["restorePoolSpec", "startDecommissionAfterRestore"],
+        "PoolDecommissioning" => vec!["waitForDecommission", "inspectPoolStatus"],
+        "PoolDecommissioned" => vec!["removePoolSpec", "inspectRetainedPvcs"],
+        "PoolDecommissionCanceled" => vec!["startDecommission", "inspectPoolStatus"],
+        "PoolDecommissionFailed" => vec!["inspectPoolStatus", "inspectOperatorLogs"],
         "DecommissionRequired" => vec!["startDecommission", "inspectPoolStatus"],
         "StatefulSetUpdateValidationFailed" => vec!["restoreImmutableField"],
         "StatefulSetApplyFailed" => vec!["retry", "inspectOperatorLogs"],

@@ -30,6 +30,16 @@ pub struct PoolDetails {
     pub current_revision: Option<String>,
     pub update_revision: Option<String>,
     pub state: String,
+    pub lifecycle_state: Option<String>,
+    pub workload_state: Option<String>,
+    pub decommission_phase: Option<String>,
+    pub decommission_objects_migrated: Option<i64>,
+    pub decommission_bytes_migrated: Option<i64>,
+    pub decommission_objects_failed: Option<i64>,
+    pub decommission_bytes_failed: Option<i64>,
+    pub decommission_cleanup_state: Option<String>,
+    pub decommission_last_error: Option<String>,
+    pub decommission_last_poll_time: Option<String>,
     pub created_at: Option<String>,
 }
 
@@ -82,4 +92,31 @@ pub struct AddPoolResponse {
     pub success: bool,
     pub message: String,
     pub pool: PoolDetails,
+}
+
+/// Request body to start decommissioning a pool.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StartPoolDecommissionRequest {
+    pub request_id: String,
+    pub reason: Option<String>,
+}
+
+/// Request body to cancel pool decommissioning.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelPoolDecommissionRequest {
+    pub request_id: String,
+    pub reason: Option<String>,
+}
+
+/// Response after writing a pool decommission lifecycle request.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolDecommissionRequestResponse {
+    pub success: bool,
+    pub message: String,
+    pub pool_name: String,
+    pub request_id: String,
+    pub action: String,
 }
