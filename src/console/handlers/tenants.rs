@@ -18,15 +18,21 @@ use crate::console::{
     state::Claims,
 };
 use crate::types::v1alpha1::{
-    encryption::PodSecurityContextOverride, persistence::PersistenceConfig, pool::Pool,
-    tenant::Tenant,
+    encryption::PodSecurityContextOverride,
+    persistence::PersistenceConfig,
+    pool::Pool,
+    tenant::{Tenant, TenantSpec},
 };
 use axum::{
     Extension, Json,
     extract::{Path, Query},
 };
 use k8s_openapi::api::core::v1 as corev1;
-use kube::{Api, Client, ResourceExt, api::ListParams};
+use kube::{
+    Api, Client, ResourceExt,
+    api::{ListParams, Patch, PatchParams},
+};
+use serde_json::json;
 
 // curl -s -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \
@@ -91,7 +97,7 @@ pub async fn get_tenant_state_counts_by_namespace(
     Extension(claims): Extension<Claims>,
 ) -> Result<Json<TenantStateCountsResponse>> {
     let client = create_client(&claims).await?;
-    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+    let api: Api<Tenant> = Api::namespaced(client.clone(), &namespace);
 
     let tenants = api
         .list(&ListParams::default())
@@ -164,6 +170,11 @@ pub async fn get_tenant_details(
     let conditions = tenant_conditions(&tenant);
     let next_actions = status_summary.next_actions.clone();
     let certificates = tenant_certificates(&tenant);
+    let provisioning = tenant
+        .status
+        .as_ref()
+        .map(|status| status.provisioning.clone())
+        .unwrap_or_default();
 
     Ok(Json(TenantDetailsResponse {
         name: tenant.name_any(),
@@ -183,6 +194,7 @@ pub async fn get_tenant_details(
         conditions,
         next_actions,
         certificates,
+        provisioning,
         image: tenant.spec.image.clone(),
         mount_path: tenant.spec.mount_path.clone(),
         created_at: tenant
@@ -284,17 +296,22 @@ pub async fn create_tenant(
             creds_secret: req
                 .creds_secret
                 .map(|name| corev1::LocalObjectReference { name }),
+            policies: req.policies.unwrap_or_default(),
+            users: req.users.unwrap_or_default(),
+            buckets: req.buckets.unwrap_or_default(),
             security_context,
             ..Default::default()
         },
         status: None,
     };
 
-    let api: Api<Tenant> = Api::namespaced(client, &req.namespace);
+    let api: Api<Tenant> = Api::namespaced(client.clone(), &req.namespace);
     let created = api
         .create(&Default::default(), &tenant)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", req.name)))?;
+
+    label_provisioning_references(&client, &req.namespace, &req.name, &created.spec).await;
 
     let item = tenant_to_list_item(created);
 
@@ -326,7 +343,7 @@ pub async fn update_tenant(
     Json(req): Json<UpdateTenantRequest>,
 ) -> Result<Json<UpdateTenantResponse>> {
     let client = create_client(&claims).await?;
-    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+    let api: Api<Tenant> = Api::namespaced(client.clone(), &namespace);
 
     // Load current object
     let mut tenant = api
@@ -432,6 +449,21 @@ pub async fn update_tenant(
         updated_fields.push(format!("logging={}", logging.log_type));
     }
 
+    if let Some(policies) = req.policies {
+        tenant.spec.policies = policies;
+        updated_fields.push("policies".to_string());
+    }
+
+    if let Some(users) = req.users {
+        tenant.spec.users = users;
+        updated_fields.push("users".to_string());
+    }
+
+    if let Some(buckets) = req.buckets {
+        tenant.spec.buckets = buckets;
+        updated_fields.push("buckets".to_string());
+    }
+
     if updated_fields.is_empty() {
         return Err(Error::BadRequest {
             message: "No fields to update".to_string(),
@@ -443,6 +475,8 @@ pub async fn update_tenant(
         .replace(&name, &Default::default(), &tenant)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+
+    label_provisioning_references(&client, &namespace, &name, &updated_tenant.spec).await;
 
     Ok(Json(UpdateTenantResponse {
         success: true,
@@ -613,6 +647,58 @@ fn summarize_tenant_states(tenants: &[Tenant]) -> TenantStateCountsResponse {
     TenantStateCountsResponse {
         total: tenants.len() as u32,
         counts,
+    }
+}
+
+async fn label_provisioning_references(
+    client: &Client,
+    namespace: &str,
+    tenant_name: &str,
+    spec: &TenantSpec,
+) {
+    let patch = json!({
+        "metadata": {
+            "labels": {
+                "rustfs.tenant": tenant_name,
+            },
+        },
+    });
+    let params = PatchParams::default();
+
+    let config_maps: std::collections::BTreeSet<_> = spec
+        .policies
+        .iter()
+        .map(|policy| policy.document.config_map_key_ref.name.as_str())
+        .collect();
+    let config_map_api: Api<corev1::ConfigMap> = Api::namespaced(client.clone(), namespace);
+    for name in config_maps {
+        if let Err(error) = config_map_api
+            .patch(name, &params, &Patch::Merge(&patch))
+            .await
+        {
+            tracing::debug!(
+                namespace,
+                tenant = tenant_name,
+                config_map = name,
+                %error,
+                "Failed to label provisioning policy ConfigMap"
+            );
+        }
+    }
+
+    let secrets: std::collections::BTreeSet<_> =
+        spec.users.iter().map(|user| user.name.as_str()).collect();
+    let secret_api: Api<corev1::Secret> = Api::namespaced(client.clone(), namespace);
+    for name in secrets {
+        if let Err(error) = secret_api.patch(name, &params, &Patch::Merge(&patch)).await {
+            tracing::debug!(
+                namespace,
+                tenant = tenant_name,
+                secret = name,
+                %error,
+                "Failed to label provisioning user Secret"
+            );
+        }
     }
 }
 

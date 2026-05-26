@@ -244,6 +244,13 @@ impl StatusBuilder {
         }
     }
 
+    pub fn set_provisioning_status(
+        &mut self,
+        provisioning: crate::types::v1alpha1::status::provisioning::ProvisioningStatus,
+    ) {
+        self.next.provisioning = provisioning;
+    }
+
     pub fn mark_started(&mut self) {
         self.set_condition(
             ConditionType::Ready,
@@ -419,6 +426,84 @@ impl StatusBuilder {
         self.set_condition(condition_type, ConditionStatus::False, reason, message);
     }
 
+    pub fn finish_provisioning_ready(&mut self) {
+        self.finish_success();
+        self.set_condition(
+            ConditionType::ProvisioningReady,
+            ConditionStatus::True,
+            Reason::ProvisioningConfigured,
+            "Tenant provisioning is configured".to_string(),
+        );
+    }
+
+    pub fn finish_provisioning_pending(&mut self, message: String) {
+        self.mark_default_components_ready();
+        self.set_condition(
+            ConditionType::Ready,
+            ConditionStatus::False,
+            Reason::ProvisioningPending,
+            message.clone(),
+        );
+        self.set_condition(
+            ConditionType::Reconciling,
+            ConditionStatus::True,
+            Reason::ProvisioningPending,
+            message.clone(),
+        );
+        self.set_condition(
+            ConditionType::Degraded,
+            ConditionStatus::False,
+            Reason::ProvisioningPending,
+            "Tenant provisioning is progressing".to_string(),
+        );
+        self.set_condition(
+            ConditionType::WorkloadsReady,
+            ConditionStatus::True,
+            Reason::ReconcileSucceeded,
+            "WorkloadsReady is ready".to_string(),
+        );
+        self.set_condition(
+            ConditionType::ProvisioningReady,
+            ConditionStatus::False,
+            Reason::ProvisioningPending,
+            message,
+        );
+    }
+
+    pub fn finish_provisioning_failed(&mut self, reason: Reason, message: String) {
+        self.mark_default_components_ready();
+        self.set_condition(
+            ConditionType::Ready,
+            ConditionStatus::False,
+            reason,
+            message.clone(),
+        );
+        self.set_condition(
+            ConditionType::Reconciling,
+            ConditionStatus::False,
+            reason,
+            "Reconcile is blocked by provisioning failure".to_string(),
+        );
+        self.set_condition(
+            ConditionType::Degraded,
+            ConditionStatus::True,
+            reason,
+            message.clone(),
+        );
+        self.set_condition(
+            ConditionType::WorkloadsReady,
+            ConditionStatus::True,
+            Reason::ReconcileSucceeded,
+            "WorkloadsReady is ready".to_string(),
+        );
+        self.set_condition(
+            ConditionType::ProvisioningReady,
+            ConditionStatus::False,
+            reason,
+            message,
+        );
+    }
+
     pub fn build(mut self) -> Status {
         self.next.observed_generation = self.generation;
         self.next.current_state = summarize_current_state(&self.next);
@@ -433,6 +518,7 @@ impl StatusBuilder {
             ConditionType::KmsReady,
             ConditionType::PoolsReady,
             ConditionType::WorkloadsReady,
+            ConditionType::ProvisioningReady,
         ] {
             self.set_condition(
                 condition_type,

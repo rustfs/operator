@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::pool_lifecycle::{PoolLifecycleDecision, PoolLifecycleDecisions};
+use super::provisioning::{ProvisioningOutcome, reconcile_provisioning};
 use super::{
     Error, cleanup_stuck_terminating_pods_on_down_nodes, context, context_result,
     patch_status_and_record, patch_status_error, statefulset_owned_by_tenant, types_result,
@@ -815,16 +816,41 @@ pub(super) async fn finalize_tenant_status(
             "StatefulSet rollout in progress".to_string(),
         )
     } else if summary.ready_replicas == summary.total_replicas && summary.total_replicas > 0 {
-        builder.finish_success();
-        (
-            ConditionType::Ready,
-            Reason::ReconcileSucceeded,
-            EventType::Normal,
-            format!(
-                "{}/{} pods ready",
-                summary.ready_replicas, summary.total_replicas
-            ),
-        )
+        let namespace = tenant.namespace()?;
+        let provisioning = reconcile_provisioning(ctx, tenant, &namespace).await;
+        builder.set_provisioning_status(provisioning.status);
+        match provisioning.outcome {
+            ProvisioningOutcome::Ready => {
+                builder.finish_provisioning_ready();
+                (
+                    ConditionType::Ready,
+                    Reason::ReconcileSucceeded,
+                    EventType::Normal,
+                    format!(
+                        "{}/{} pods ready",
+                        summary.ready_replicas, summary.total_replicas
+                    ),
+                )
+            }
+            ProvisioningOutcome::Pending { message } => {
+                builder.finish_provisioning_pending(message.clone());
+                (
+                    ConditionType::ProvisioningReady,
+                    Reason::ProvisioningPending,
+                    EventType::Normal,
+                    message,
+                )
+            }
+            ProvisioningOutcome::Failed { reason, message } => {
+                builder.finish_provisioning_failed(reason, message.clone());
+                (
+                    ConditionType::ProvisioningReady,
+                    reason,
+                    EventType::Warning,
+                    message,
+                )
+            }
+        }
     } else {
         builder.finish_reconciling(
             Reason::PodsNotReady,

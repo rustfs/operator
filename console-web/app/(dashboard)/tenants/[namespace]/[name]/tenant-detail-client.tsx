@@ -33,6 +33,7 @@ import type {
   AddPoolRequest,
   EncryptionInfoResponse,
   UpdateEncryptionRequest,
+  ProvisioningItemStatus,
 } from "@/types/api"
 import { ApiError } from "@/lib/api-client"
 
@@ -65,7 +66,7 @@ function normalizeTab(value?: string | null): Tab {
   }
 }
 
-function formatTimestamp(value: string | null): string {
+function formatTimestamp(value: string | null | undefined): string {
   if (!value) return "-"
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
@@ -93,6 +94,25 @@ function podLastExitSummary(pod: PodListItem, exitedLabel: string): string {
   const message = pod.last_exit_message?.trim()
   const summary = `${state}${exitedLabel} ${pod.last_exit_code}`
   return message ? `${summary}: ${message}` : summary
+}
+
+function provisioningGroups(tenant: TenantDetailsResponse) {
+  const provisioning = tenant.provisioning
+  if (!provisioning) return []
+  return [
+    { type: "Policy", items: provisioning.policies ?? [] },
+    { type: "User", items: provisioning.users ?? [] },
+    { type: "Bucket", items: provisioning.buckets ?? [] },
+  ].filter((group) => group.items.length > 0)
+}
+
+function provisioningItemDetails(item: ProvisioningItemStatus): string {
+  const details: string[] = []
+  if (item.policies && item.policies.length > 0) details.push(`policies=${item.policies.join(",")}`)
+  if (item.region) details.push(`region=${item.region}`)
+  if (item.objectLock != null) details.push(`objectLock=${item.objectLock ? "true" : "false"}`)
+  if (item.lastAppliedGeneration != null) details.push(`generation=${item.lastAppliedGeneration}`)
+  return details.length > 0 ? details.join(" ") : "-"
 }
 
 export function TenantDetailClient({ namespace, name, initialTab, initialYamlEditable }: TenantDetailClientProps) {
@@ -521,6 +541,8 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   const statusReason = statusSummary.primary_reason || tenant.state
   const statusMessage = statusSummary.primary_message || "-"
   const statusNextActions = statusSummary.next_actions.length > 0 ? statusSummary.next_actions : tenant.next_actions
+  const provisioning = tenant.provisioning
+  const provisioningStatusGroups = provisioningGroups(tenant)
 
   return (
     <Page>
@@ -606,6 +628,53 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
               </p>
             </CardContent>
           </Card>
+          {provisioningStatusGroups.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t("Provisioning")}</CardTitle>
+                <CardDescription>
+                  {t("Phase")}: {provisioning?.phase ?? "-"}
+                  {provisioning?.observedGeneration != null
+                    ? ` · ${t("Observed generation")}: ${provisioning.observedGeneration}`
+                    : ""}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("Type")}</TableHead>
+                      <TableHead>{t("Name")}</TableHead>
+                      <TableHead>{t("Status")}</TableHead>
+                      <TableHead>{t("Reason")}</TableHead>
+                      <TableHead>{t("Details")}</TableHead>
+                      <TableHead>{t("Message")}</TableHead>
+                      <TableHead>{t("Last transition")}</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {provisioningStatusGroups.flatMap((group) =>
+                      group.items.map((item) => (
+                        <TableRow key={`${group.type}-${item.name}`}>
+                          <TableCell>{t(group.type)}</TableCell>
+                          <TableCell className="font-medium">{item.name}</TableCell>
+                          <TableCell>{item.state}</TableCell>
+                          <TableCell>{item.reason || "-"}</TableCell>
+                          <TableCell className="max-w-[320px] whitespace-normal break-words">
+                            {provisioningItemDetails(item)}
+                          </TableCell>
+                          <TableCell className="max-w-[420px] whitespace-normal break-words">
+                            {item.message || "-"}
+                          </TableCell>
+                          <TableCell>{formatTimestamp(item.lastTransitionTime)}</TableCell>
+                        </TableRow>
+                      )),
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+          )}
           {tenant.services.length > 0 && (
             <Card>
               <CardHeader>

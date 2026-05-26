@@ -30,6 +30,10 @@ use crate::sts::types::StsAssumeRoleCredentials;
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const JSON_CONTENT_TYPE: &str = "application/json";
 const ASSUME_ROLE_PATH: &str = "/";
+const ADD_USER_PATH: &str = "/rustfs/admin/v3/add-user";
+const USER_INFO_PATH: &str = "/rustfs/admin/v3/user-info";
+const SET_POLICY_PATH: &str = "/rustfs/admin/v3/set-policy";
+const LIST_CANNED_POLICIES_PATH: &str = "/rustfs/admin/v3/list-canned-policies";
 const ADD_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/add-canned-policy";
 const INFO_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/info-canned-policy";
 const POOLS_LIST_PATH: &str = "/rustfs/admin/v3/pools/list";
@@ -76,6 +80,12 @@ pub struct RustfsPoolStatus {
     pub last_update: String,
     #[serde(rename = "decommissionInfo")]
     pub decommission: Option<RustfsPoolDecommissionInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateBucketResult {
+    Created,
+    AlreadyExists,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
@@ -457,6 +467,212 @@ impl RustfsAdminClient {
         Ok(())
     }
 
+    pub async fn list_canned_policies(
+        &self,
+    ) -> Result<BTreeMap<String, String>, RustfsClientError> {
+        let body = self
+            .send_admin_request("GET", LIST_CANNED_POLICIES_PATH, "", "", None)
+            .await?;
+        let policies = serde_json::from_str::<BTreeMap<String, Value>>(&body)
+            .map_err(|_| RustfsClientError::ParseResponseFailed)?;
+
+        policies
+            .into_iter()
+            .map(|(name, policy)| {
+                serde_json::to_string(&policy)
+                    .map(|document| (name, document))
+                    .map_err(|_| RustfsClientError::ParseResponseFailed)
+            })
+            .collect()
+    }
+
+    pub async fn user_exists(&self, access_key: &str) -> Result<bool, RustfsClientError> {
+        if access_key.trim().is_empty() {
+            return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
+        }
+
+        let query = build_query_pairs(&[("accessKey", access_key)]);
+        let path = USER_INFO_PATH;
+        let url = format!("{}{}?{query}", self.base_url.trim_end_matches('/'), path);
+        let signed = self.sign_request("GET", path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .get(url)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(true);
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+            return Ok(false);
+        }
+
+        Err(RustfsClientError::UnexpectedStatus(status))
+    }
+
+    pub async fn add_user(
+        &self,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<(), RustfsClientError> {
+        if access_key.trim().is_empty() {
+            return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
+        }
+        if secret_key.is_empty() {
+            return Err(RustfsClientError::EmptyCredentialValue { key: "secretkey" });
+        }
+
+        let body = serde_json::json!({
+            "secretKey": secret_key,
+            "status": "enabled",
+        })
+        .to_string();
+        let query = build_query_pairs(&[("accessKey", access_key)]);
+
+        self.send_admin_request("PUT", ADD_USER_PATH, &query, &body, Some(JSON_CONTENT_TYPE))
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn set_user_policy(
+        &self,
+        access_key: &str,
+        policies: &[String],
+    ) -> Result<(), RustfsClientError> {
+        if access_key.trim().is_empty() {
+            return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
+        }
+
+        let policy_names = policies.join(",");
+        let query = build_query_pairs(&[
+            ("isGroup", "false"),
+            ("policyName", policy_names.as_str()),
+            ("userOrGroup", access_key),
+        ]);
+
+        self.send_admin_request("PUT", SET_POLICY_PATH, &query, "", None)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn create_bucket(
+        &self,
+        bucket: &str,
+        region: Option<&str>,
+        object_lock: bool,
+    ) -> Result<CreateBucketResult, RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let body = create_bucket_body(region);
+        let content_type = (!body.is_empty()).then_some("application/xml");
+        let mut extra_headers = Vec::new();
+        if let Some(content_type) = content_type {
+            extra_headers.push(("content-type", content_type));
+        }
+        if object_lock {
+            extra_headers.push(("x-amz-bucket-object-lock-enabled", "true"));
+        }
+        let signed = self.sign_request_with_extra_headers(
+            "PUT",
+            &path,
+            "",
+            &body,
+            ADMIN_SIGNING_SERVICE,
+            &extra_headers,
+        )?;
+        let host = self.host()?;
+
+        let mut request = self
+            .http_client
+            .put(format!("{}{}", self.base_url.trim_end_matches('/'), path))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host);
+
+        for (name, value) in &extra_headers {
+            request = request.header(*name, *value);
+        }
+        if !body.is_empty() {
+            request = request.body(body);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(CreateBucketResult::Created);
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if bucket_already_exists(status, &body) {
+            return Ok(CreateBucketResult::AlreadyExists);
+        }
+
+        Err(RustfsClientError::UnexpectedStatus(status))
+    }
+
+    pub async fn bucket_object_lock_enabled(
+        &self,
+        bucket: &str,
+    ) -> Result<bool, RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let query = build_query_pairs(&[("object-lock", "")]);
+        let signed = self.sign_request("GET", &path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .get(format!(
+                "{}{}?{query}",
+                self.base_url.trim_end_matches('/'),
+                path
+            ))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+                return Ok(false);
+            }
+            return Err(RustfsClientError::UnexpectedStatus(status));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+        Ok(body.contains("<ObjectLockEnabled>Enabled</ObjectLockEnabled>"))
+    }
+
     pub async fn list_pools(&self) -> Result<Vec<RustfsPoolListItem>, RustfsClientError> {
         let body = self
             .send_admin_request("GET", POOLS_LIST_PATH, "", "", None)
@@ -629,6 +845,28 @@ impl RustfsAdminClient {
         content_type: Option<&str>,
         service: &str,
     ) -> Result<SignedRequest, RustfsClientError> {
+        let extra_headers = content_type
+            .map(|content_type| vec![("content-type", content_type)])
+            .unwrap_or_default();
+        self.sign_request_with_extra_headers(
+            method,
+            path,
+            canonical_query,
+            payload,
+            service,
+            &extra_headers,
+        )
+    }
+
+    fn sign_request_with_extra_headers(
+        &self,
+        method: &str,
+        path: &str,
+        canonical_query: &str,
+        payload: &str,
+        service: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<SignedRequest, RustfsClientError> {
         let now = chrono::Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
@@ -641,21 +879,19 @@ impl RustfsAdminClient {
             ("x-amz-date", amz_date.as_str()),
         ];
 
-        if let Some(content_type) = content_type {
-            signed_headers.push(("content-type", content_type));
-        }
+        signed_headers.extend(extra_headers.iter().copied());
         signed_headers.sort_by_key(|(name, _)| *name);
 
         let canonical_headers: String = signed_headers
             .iter()
-            .map(|(key, value)| format!("{key}:{value}\n"))
+            .map(|(key, value)| format!("{}:{}\n", key.to_ascii_lowercase(), value.trim()))
             .collect();
         let mut signed_header_names = String::new();
         for (index, (name, _)) in signed_headers.iter().enumerate() {
             if index > 0 {
                 signed_header_names.push(';');
             }
-            signed_header_names.push_str(name);
+            signed_header_names.push_str(&name.to_ascii_lowercase());
         }
 
         let canonical_request = format!(
@@ -753,6 +989,50 @@ fn build_query_pairs(params: &[(&str, &str)]) -> String {
     }
 
     serializer.finish()
+}
+
+fn create_bucket_body(region: Option<&str>) -> String {
+    let Some(region) = region.map(str::trim).filter(|region| !region.is_empty()) else {
+        return String::new();
+    };
+
+    if region == "us-east-1" {
+        return String::new();
+    }
+
+    format!(
+        "<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LocationConstraint>{}</LocationConstraint></CreateBucketConfiguration>",
+        escape_xml(region)
+    )
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn body_mentions_not_found(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("nosuchuser")
+        || body.contains("no such user")
+        || body.contains("user not exist")
+        || body.contains("nosuchpolicy")
+        || body.contains("no such policy")
+        || body.contains("objectlockconfigurationnotfound")
+        || body.contains("not found")
+}
+
+fn bucket_already_exists(status: StatusCode, body: &str) -> bool {
+    if status == StatusCode::CONFLICT {
+        let body = body.to_ascii_lowercase();
+        return body.contains("bucketalreadyexists") || body.contains("bucketalreadyownedbyyou");
+    }
+
+    false
 }
 
 fn extract_canned_policy_document(body: &str) -> Result<String, RustfsClientError> {
@@ -924,6 +1204,7 @@ mod tests {
         query: Arc<Mutex<String>>,
         body: Arc<Mutex<String>>,
         authorization: Arc<Mutex<String>>,
+        object_lock_header: Arc<Mutex<String>>,
     }
 
     #[tokio::test]
@@ -1244,6 +1525,145 @@ mod tests {
         assert_eq!(
             status.decommission.and_then(|info| info.complete),
             Some(true)
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn add_user_uses_expected_path_query_and_body() {
+        let capture = Capture::default();
+        let route_capture = capture.clone();
+
+        let router = Router::new()
+            .route(
+                ADD_USER_PATH,
+                put(
+                    move |State(c): State<Capture>, req: Request<Body>| async move {
+                        *c.path.lock().await = req.uri().path().to_string();
+                        *c.query.lock().await = req.uri().query().unwrap_or("").to_string();
+                        let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                            .await
+                            .unwrap();
+                        *c.body.lock().await = String::from_utf8(body_bytes.to_vec()).unwrap();
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(route_capture.clone());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        client.add_user("app-user", "secret123").await.unwrap();
+
+        assert_eq!(&*capture.path.lock().await, ADD_USER_PATH);
+        assert_eq!(&*capture.query.lock().await, "accessKey=app-user");
+        assert_eq!(
+            &*capture.body.lock().await,
+            r#"{"secretKey":"secret123","status":"enabled"}"#
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn set_user_policy_uses_single_authoritative_mapping_call() {
+        let capture = Capture::default();
+        let route_capture = capture.clone();
+
+        let router = Router::new()
+            .route(
+                SET_POLICY_PATH,
+                put(
+                    move |State(c): State<Capture>, req: Request<Body>| async move {
+                        *c.path.lock().await = req.uri().path().to_string();
+                        *c.query.lock().await = req.uri().query().unwrap_or("").to_string();
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(route_capture.clone());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        client
+            .set_user_policy(
+                "app-user",
+                &["app-readwrite".to_string(), "diagnostics".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(&*capture.path.lock().await, SET_POLICY_PATH);
+        assert_eq!(
+            &*capture.query.lock().await,
+            "isGroup=false&policyName=app-readwrite%2Cdiagnostics&userOrGroup=app-user"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn create_bucket_sends_object_lock_header_and_region_body() {
+        let capture = Capture::default();
+        let route_capture = capture.clone();
+
+        let router = Router::new()
+            .route(
+                "/app-data",
+                put(
+                    move |State(c): State<Capture>, req: Request<Body>| async move {
+                        *c.path.lock().await = req.uri().path().to_string();
+                        *c.object_lock_header.lock().await = req
+                            .headers()
+                            .get("x-amz-bucket-object-lock-enabled")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                            .await
+                            .unwrap();
+                        *c.body.lock().await = String::from_utf8(body_bytes.to_vec()).unwrap();
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(route_capture.clone());
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let result = client
+            .create_bucket("app-data", Some("us-west-2"), true)
+            .await
+            .unwrap();
+
+        assert_eq!(result, CreateBucketResult::Created);
+        assert_eq!(&*capture.path.lock().await, "/app-data");
+        assert_eq!(&*capture.object_lock_header.lock().await, "true");
+        assert!(
+            capture
+                .body
+                .lock()
+                .await
+                .contains("<LocationConstraint>us-west-2</LocationConstraint>")
         );
 
         server.abort();

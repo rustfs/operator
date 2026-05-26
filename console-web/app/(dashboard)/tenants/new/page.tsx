@@ -16,7 +16,13 @@ import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { routes } from "@/lib/routes"
 import * as api from "@/lib/api"
-import type { CreatePoolRequest, CreateTenantRequest } from "@/types/api"
+import type {
+  CreatePoolRequest,
+  CreateTenantRequest,
+  ProvisioningBucket,
+  ProvisioningPolicy,
+  ProvisioningUser,
+} from "@/types/api"
 import { ApiError } from "@/lib/api-client"
 
 type CreateMode = "form" | "yaml"
@@ -62,6 +68,17 @@ function asPositiveInt(value: unknown): number | undefined {
     if (Number.isInteger(parsed) && parsed > 0) return parsed
   }
   return undefined
+}
+
+function asBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value
+  return undefined
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const values = value.map(asString)
+  return values.every((item): item is string => !!item) ? values : undefined
 }
 
 export default function TenantCreatePage() {
@@ -165,6 +182,61 @@ export default function TenantCreatePage() {
         }
       : undefined
 
+    const policiesRaw = spec?.policies
+    const policies = Array.isArray(policiesRaw)
+      ? policiesRaw.map((item): ProvisioningPolicy => {
+          const policy = asRecord(item)
+          const document = asRecord(policy?.document)
+          const configMapKeyRef = asRecord(document?.configMapKeyRef ?? document?.config_map_key_ref)
+          const policyName = asString(policy?.name)
+          const configMapName = asString(configMapKeyRef?.name)
+          const key = asString(configMapKeyRef?.key)
+          if (!policy || !policyName || !configMapName || !key) {
+            throw new Error(t("YAML policy provisioning fields are invalid"))
+          }
+          return {
+            name: policyName,
+            document: {
+              configMapKeyRef: {
+                name: configMapName,
+                key,
+              },
+            },
+          }
+        })
+      : undefined
+
+    const usersRaw = spec?.users
+    const users = Array.isArray(usersRaw)
+      ? usersRaw.map((item): ProvisioningUser => {
+          const user = asRecord(item)
+          const userName = asString(user?.name)
+          if (!user || !userName) {
+            throw new Error(t("YAML user provisioning fields are invalid"))
+          }
+          return {
+            name: userName,
+            policies: asStringArray(user.policies) ?? [],
+          }
+        })
+      : undefined
+
+    const bucketsRaw = spec?.buckets
+    const buckets = Array.isArray(bucketsRaw)
+      ? bucketsRaw.map((item): ProvisioningBucket => {
+          const bucket = asRecord(item)
+          const bucketName = asString(bucket?.name)
+          if (!bucket || !bucketName) {
+            throw new Error(t("YAML bucket provisioning fields are invalid"))
+          }
+          return {
+            name: bucketName,
+            region: asString(bucket.region),
+            objectLock: asBoolean(bucket.objectLock ?? bucket.object_lock),
+          }
+        })
+      : undefined
+
     return {
       name: parsedName,
       namespace: parsedNamespace,
@@ -172,6 +244,9 @@ export default function TenantCreatePage() {
       image: asString(spec?.image),
       mount_path: asString(spec?.mountPath ?? spec?.mount_path),
       creds_secret: asString(spec?.credsSecret ?? spec?.creds_secret),
+      policies,
+      users,
+      buckets,
       security_context,
     }
   }

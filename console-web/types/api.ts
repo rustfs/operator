@@ -89,10 +89,64 @@ export interface TenantDetailsResponse {
   status_summary: TenantStatusSummary
   conditions: TenantCondition[]
   next_actions: string[]
+  provisioning?: ProvisioningStatus
   image: string | null
   mount_path: string | null
   created_at: string | null
   services: ServiceInfo[]
+}
+
+export type ProvisioningDeletionPolicy = "Retain"
+
+export interface ConfigMapKeyReference {
+  name: string
+  key: string
+}
+
+export interface PolicyDocumentSource {
+  configMapKeyRef: ConfigMapKeyReference
+}
+
+export interface ProvisioningPolicy {
+  name: string
+  document: PolicyDocumentSource
+  deletionPolicy?: ProvisioningDeletionPolicy
+}
+
+export interface ProvisioningUser {
+  name: string
+  policies?: string[]
+  deletionPolicy?: ProvisioningDeletionPolicy
+}
+
+export interface ProvisioningBucket {
+  name: string
+  region?: string
+  objectLock?: boolean
+  deletionPolicy?: ProvisioningDeletionPolicy
+}
+
+export interface ProvisioningItemStatus {
+  name: string
+  state: string
+  reason: string
+  message?: string | null
+  lastTransitionTime?: string | null
+  desiredHash?: string | null
+  lastAppliedHash?: string | null
+  lastAppliedGeneration?: number | null
+  observedSecretResourceVersion?: string | null
+  policies?: string[]
+  region?: string | null
+  objectLock?: boolean | null
+}
+
+export interface ProvisioningStatus {
+  observedGeneration?: number | null
+  phase?: "Pending" | "Ready" | "Failed"
+  policies?: ProvisioningItemStatus[]
+  users?: ProvisioningItemStatus[]
+  buckets?: ProvisioningItemStatus[]
 }
 
 export interface CreatePoolRequest {
@@ -117,6 +171,9 @@ export interface CreateTenantRequest {
   image?: string
   mount_path?: string
   creds_secret?: string
+  policies?: ProvisioningPolicy[]
+  users?: ProvisioningUser[]
+  buckets?: ProvisioningBucket[]
   security_context?: CreateSecurityContextRequest
 }
 
@@ -127,6 +184,9 @@ export interface UpdateTenantRequest {
   creds_secret?: string
   pod_management_policy?: string
   image_pull_policy?: string
+  policies?: ProvisioningPolicy[]
+  users?: ProvisioningUser[]
+  buckets?: ProvisioningBucket[]
   logging?: {
     logType: string
     volumeSize?: string

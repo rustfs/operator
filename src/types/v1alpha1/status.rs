@@ -13,6 +13,7 @@
 // limitations under the License.
 pub mod certificate;
 pub mod pool;
+pub mod provisioning;
 pub mod state;
 
 use schemars::JsonSchema;
@@ -29,6 +30,7 @@ pub enum ConditionType {
     TlsReady,
     PoolsReady,
     WorkloadsReady,
+    ProvisioningReady,
 }
 
 impl ConditionType {
@@ -43,6 +45,7 @@ impl ConditionType {
             Self::TlsReady => "TlsReady",
             Self::PoolsReady => "PoolsReady",
             Self::WorkloadsReady => "WorkloadsReady",
+            Self::ProvisioningReady => "ProvisioningReady",
         }
     }
 
@@ -57,6 +60,7 @@ impl ConditionType {
             Self::TlsReady,
             Self::PoolsReady,
             Self::WorkloadsReady,
+            Self::ProvisioningReady,
         ]
         .iter()
         .position(|condition_type| condition_type.as_str() == type_)
@@ -144,6 +148,19 @@ pub enum Reason {
     RolloutInProgress,
     PodsNotReady,
     PoolDegraded,
+    ProvisioningConfigured,
+    ProvisioningPending,
+    ProvisioningFailed,
+    ProvisioningUnsupported,
+    PolicyDocumentConfigMapNotFound,
+    PolicyDocumentKeyNotFound,
+    PolicyApplyFailed,
+    PolicyConflict,
+    UserSecretInvalid,
+    UserPolicyNotFound,
+    UserPolicySetFailed,
+    BucketCreateFailed,
+    BucketObjectLockConflict,
     KubernetesApiError,
     StatusPatchFailed,
     ObservedGenerationStale,
@@ -191,6 +208,19 @@ impl Reason {
             Self::RolloutInProgress => "RolloutInProgress",
             Self::PodsNotReady => "PodsNotReady",
             Self::PoolDegraded => "PoolDegraded",
+            Self::ProvisioningConfigured => "ProvisioningConfigured",
+            Self::ProvisioningPending => "ProvisioningPending",
+            Self::ProvisioningFailed => "ProvisioningFailed",
+            Self::ProvisioningUnsupported => "ProvisioningUnsupported",
+            Self::PolicyDocumentConfigMapNotFound => "PolicyDocumentConfigMapNotFound",
+            Self::PolicyDocumentKeyNotFound => "PolicyDocumentKeyNotFound",
+            Self::PolicyApplyFailed => "PolicyApplyFailed",
+            Self::PolicyConflict => "PolicyConflict",
+            Self::UserSecretInvalid => "UserSecretInvalid",
+            Self::UserPolicyNotFound => "UserPolicyNotFound",
+            Self::UserPolicySetFailed => "UserPolicySetFailed",
+            Self::BucketCreateFailed => "BucketCreateFailed",
+            Self::BucketObjectLockConflict => "BucketObjectLockConflict",
             Self::KubernetesApiError => "KubernetesApiError",
             Self::StatusPatchFailed => "StatusPatchFailed",
             Self::ObservedGenerationStale => "ObservedGenerationStale",
@@ -252,6 +282,12 @@ pub struct Status {
 
     #[serde(default, skip_serializing_if = "certificate::Status::is_empty")]
     pub certificates: certificate::Status,
+
+    #[serde(
+        default,
+        skip_serializing_if = "provisioning::ProvisioningStatus::is_empty"
+    )]
+    pub provisioning: provisioning::ProvisioningStatus,
 }
 
 impl Status {
@@ -433,6 +469,16 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "PoolDecommissionCanceled"
             | "PoolDecommissionFailed"
             | "StatefulSetUpdateValidationFailed"
+            | "ProvisioningUnsupported"
+            | "PolicyDocumentConfigMapNotFound"
+            | "PolicyDocumentKeyNotFound"
+            | "PolicyApplyFailed"
+            | "PolicyConflict"
+            | "UserSecretInvalid"
+            | "UserPolicyNotFound"
+            | "UserPolicySetFailed"
+            | "BucketCreateFailed"
+            | "BucketObjectLockConflict"
     )
 }
 
@@ -499,6 +545,17 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
             "inspectEvents",
             "inspectOperatorLogs",
         ],
+        "ProvisioningPending" => vec!["waitForProvisioning"],
+        "ProvisioningUnsupported" => vec!["fixTenantProvisioningConfig"],
+        "PolicyDocumentConfigMapNotFound" => vec!["createPolicyConfigMap"],
+        "PolicyDocumentKeyNotFound" => vec!["addPolicyConfigMapKey"],
+        "PolicyApplyFailed" => vec!["fixPolicyDocument", "inspectOperatorLogs"],
+        "PolicyConflict" => vec!["inspectLivePolicy", "updatePolicySpec"],
+        "UserSecretInvalid" => vec!["fixUserSecret"],
+        "UserPolicyNotFound" => vec!["createPolicy", "fixUserPolicyList"],
+        "UserPolicySetFailed" => vec!["inspectUserPolicyMapping", "inspectOperatorLogs"],
+        "BucketCreateFailed" => vec!["inspectBucket", "inspectOperatorLogs"],
+        "BucketObjectLockConflict" => vec!["createObjectLockBucket", "fixBucketSpec"],
         "KubernetesApiError" => vec!["retry", "inspectOperatorLogs"],
         "ObservedGenerationStale" => vec!["waitForReconcile"],
         _ => Vec::new(),

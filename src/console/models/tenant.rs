@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use crate::types::v1alpha1::{
+    provisioning::{ProvisioningBucket, ProvisioningPolicy, ProvisioningUser},
     status::{
         ConditionStatus, ConditionType, CurrentState, Reason, Status, canonical_filter_state,
-        canonical_state, certificate, next_actions_for_reason, primary_condition,
+        canonical_state, certificate, next_actions_for_reason, primary_condition, provisioning,
         summarize_current_state,
     },
     tenant::Tenant,
@@ -83,6 +84,8 @@ pub struct TenantDetailsResponse {
     pub next_actions: Vec<String>,
     #[serde(skip_serializing_if = "certificate::Status::is_empty")]
     pub certificates: certificate::Status,
+    #[serde(skip_serializing_if = "provisioning::ProvisioningStatus::is_empty")]
+    pub provisioning: provisioning::ProvisioningStatus,
     pub image: Option<String>,
     pub mount_path: Option<String>,
     pub created_at: Option<String>,
@@ -148,6 +151,9 @@ pub struct CreateTenantRequest {
     pub image: Option<String>,
     pub mount_path: Option<String>,
     pub creds_secret: Option<String>,
+    pub policies: Option<Vec<ProvisioningPolicy>>,
+    pub users: Option<Vec<ProvisioningUser>>,
+    pub buckets: Option<Vec<ProvisioningBucket>>,
     /// Optional Pod SecurityContext override (runAsUser, runAsGroup, fsGroup, runAsNonRoot).
     pub security_context: Option<CreateSecurityContextRequest>,
 }
@@ -193,6 +199,15 @@ pub struct UpdateTenantRequest {
 
     /// Logging sidecar / volume settings
     pub logging: Option<LoggingConfig>,
+
+    /// Replace canned policy provisioning declarations.
+    pub policies: Option<Vec<ProvisioningPolicy>>,
+
+    /// Replace regular user provisioning declarations.
+    pub users: Option<Vec<ProvisioningUser>>,
+
+    /// Replace bucket provisioning declarations.
+    pub buckets: Option<Vec<ProvisioningBucket>>,
 }
 
 /// Key/value environment variable
