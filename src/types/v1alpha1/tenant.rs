@@ -17,6 +17,9 @@ use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::logging::LoggingConfig;
 use crate::types::v1alpha1::pool::Pool;
 use crate::types::v1alpha1::pool_lifecycle::PoolLifecycleSpec;
+use crate::types::v1alpha1::provisioning::{
+    ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
+};
 use crate::types::v1alpha1::tls::TlsConfig;
 use crate::types::{self, error::NoNamespaceSnafu};
 use k8s_openapi::api::core::v1 as corev1;
@@ -150,6 +153,21 @@ pub struct TenantSpec {
     /// For production use, always configure credentials via Secret or environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creds_secret: Option<corev1::LocalObjectReference>,
+
+    /// Canned policies that should be applied to the RustFS tenant.
+    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("policy names must be unique"))]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<ProvisioningPolicy>,
+
+    /// Regular users that should exist in the RustFS tenant.
+    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("user Secret names must be unique"))]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<ProvisioningUser>,
+
+    /// Buckets that should exist in the RustFS tenant.
+    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("bucket names must be unique"))]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buckets: Vec<ProvisioningBucket>,
 
     /// Encryption / KMS configuration for server-side encryption.
     /// When enabled, the operator injects KMS environment variables and mounts

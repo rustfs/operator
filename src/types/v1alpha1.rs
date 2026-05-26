@@ -19,6 +19,7 @@ pub mod persistence;
 pub mod policy_binding;
 pub mod pool;
 pub mod pool_lifecycle;
+pub mod provisioning;
 pub mod status;
 pub mod tenant;
 pub mod tls;
@@ -131,5 +132,51 @@ mod policy_binding_tests {
         assert_eq!(PolicyBinding::api_version(&()), "sts.rustfs.com/v1alpha1");
         assert_eq!(PolicyBinding::kind(&()), "PolicyBinding");
         assert_eq!(PolicyBinding::plural(&()), "policybindings");
+    }
+}
+
+#[cfg(test)]
+mod tenant_provisioning_crd_tests {
+    use super::tenant::Tenant;
+    use kube::CustomResourceExt;
+    use serde_json::json;
+
+    #[test]
+    fn tenant_crd_includes_provisioning_spec_status_and_uniqueness_rules() {
+        let crd = serde_json::to_value(Tenant::crd()).expect("Tenant CRD serializes");
+        let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"];
+        let spec = &schema["properties"]["spec"];
+        let status = &schema["properties"]["status"];
+
+        assert_eq!(spec["properties"]["policies"]["type"], json!("array"));
+        assert_eq!(spec["properties"]["users"]["type"], json!("array"));
+        assert_eq!(spec["properties"]["buckets"]["type"], json!("array"));
+        assert_eq!(
+            status["properties"]["provisioning"]["properties"]["policies"]["type"],
+            json!("array")
+        );
+        assert_eq!(
+            status["properties"]["provisioning"]["properties"]["phase"]["enum"],
+            json!(["Pending", "Ready", "Failed", null])
+        );
+
+        assert_eq!(
+            spec["properties"]["policies"]["x-kubernetes-validations"][0]["message"],
+            json!("policy names must be unique")
+        );
+        let user_policy_validations = &spec["properties"]["users"]["items"]["properties"]["policies"]
+            ["x-kubernetes-validations"];
+        assert!(
+            user_policy_validations
+                .as_array()
+                .expect("user policy validations are present")
+                .iter()
+                .any(|rule| rule["message"] == json!("user policy names must be unique"))
+        );
+        assert_eq!(
+            spec["properties"]["buckets"]["items"]["properties"]["name"]["x-kubernetes-validations"]
+                [0]["message"],
+            json!("bucket name must be a valid RustFS/S3 bucket name")
+        );
     }
 }

@@ -82,6 +82,9 @@ export async function updateTenant(
   if (body.env !== undefined) payload.env = body.env
   if (body.pod_management_policy !== undefined) payload.podManagementPolicy = body.pod_management_policy
   if (body.image_pull_policy !== undefined) payload.imagePullPolicy = body.image_pull_policy
+  if (body.policies !== undefined) payload.policies = body.policies
+  if (body.users !== undefined) payload.users = body.users
+  if (body.buckets !== undefined) payload.buckets = body.buckets
   if (body.logging !== undefined) payload.logging = body.logging
   return apiClient.put(`${tenant(namespace, name)}`, Object.keys(payload).length ? payload : undefined)
 }

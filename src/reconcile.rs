@@ -29,6 +29,7 @@ use tracing::{debug, error, info, warn};
 
 mod phases;
 mod pool_lifecycle;
+mod provisioning;
 mod tls;
 
 use phases::{

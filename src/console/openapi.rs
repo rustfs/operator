@@ -48,6 +48,13 @@ use crate::console::models::topology::{
     TopologyCluster, TopologyClusterSummary, TopologyNamespace, TopologyNode,
     TopologyOverviewResponse, TopologyPod, TopologyPool, TopologyTenant, TopologyTenantSummary,
 };
+use crate::types::v1alpha1::provisioning::{
+    ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy,
+    ProvisioningPolicy, ProvisioningUser,
+};
+use crate::types::v1alpha1::status::provisioning::{
+    ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus,
+};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -96,6 +103,16 @@ use crate::console::models::topology::{
         TenantCondition,
         TenantStatusSummary,
         TenantDetailsResponse,
+        ProvisioningStatus,
+        ProvisioningPhase,
+        ProvisioningItemStatus,
+        ProvisioningItemState,
+        ProvisioningPolicy,
+        ProvisioningUser,
+        ProvisioningBucket,
+        ProvisioningDeletionPolicy,
+        PolicyDocumentSource,
+        ConfigMapKeyReference,
         CreateTenantRequest,
         CreatePoolRequest,
         PoolInfo,
@@ -406,5 +423,31 @@ mod tests {
                 "status {status} should use ConsoleErrorResponse"
             );
         }
+    }
+
+    #[test]
+    fn tenant_api_documents_provisioning_fields() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
+        let schemas = spec
+            .pointer("/components/schemas")
+            .and_then(Value::as_object)
+            .expect("schemas exist");
+
+        assert!(schemas.contains_key("ProvisioningStatus"));
+        assert_eq!(
+            spec.pointer("/components/schemas/TenantDetailsResponse/properties/provisioning/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/ProvisioningStatus")
+        );
+        assert_eq!(
+            spec.pointer("/components/schemas/CreateTenantRequest/properties/policies/items/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/ProvisioningPolicy")
+        );
+        assert_eq!(
+            spec.pointer("/components/schemas/UpdateTenantRequest/properties/buckets/items/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/ProvisioningBucket")
+        );
     }
 }

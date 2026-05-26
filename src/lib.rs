@@ -102,9 +102,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tenant_client = Api::<Tenant>::all(client.clone());
     let context = Context::new(client.clone());
     let controller = Controller::new(tenant_client, watcher::Config::default())
-        .owns(
+        .watches(
             Api::<corev1::ConfigMap>::all(client.clone()),
             watcher::Config::default(),
+            tenant_refs_for_config_map,
         )
         .watches(
             Api::<corev1::Secret>::all(client.clone()),
@@ -287,6 +288,14 @@ fn tenant_refs_for_secret(secret: corev1::Secret) -> Vec<ObjectRef<Tenant>> {
     )
 }
 
+fn tenant_refs_for_config_map(config_map: corev1::ConfigMap) -> Vec<ObjectRef<Tenant>> {
+    tenant_refs_from_metadata(
+        config_map.metadata.namespace.as_deref(),
+        config_map.metadata.owner_references.as_deref(),
+        config_map.metadata.labels.as_ref(),
+    )
+}
+
 fn tenant_refs_for_cert_manager_certificate(certificate: DynamicObject) -> Vec<ObjectRef<Tenant>> {
     tenant_refs_from_metadata(
         certificate.metadata.namespace.as_deref(),
@@ -433,6 +442,38 @@ mod controller_watch_tests {
         let refs = tenant_refs_for_secret(secret);
 
         assert_single_ref(&refs, "tenant-b", "storage");
+    }
+
+    #[test]
+    fn config_map_mapper_uses_owner_reference_or_label() {
+        let owned = corev1::ConfigMap {
+            metadata: metav1::ObjectMeta {
+                name: Some("policy".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-policy")]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let refs = tenant_refs_for_config_map(owned);
+        assert_single_ref(&refs, "tenant-policy", "storage");
+
+        let labeled = corev1::ConfigMap {
+            metadata: metav1::ObjectMeta {
+                name: Some("policy".to_string()),
+                namespace: Some("storage".to_string()),
+                labels: Some(BTreeMap::from([(
+                    "rustfs.tenant".to_string(),
+                    "tenant-policy-label".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let refs = tenant_refs_for_config_map(labeled);
+        assert_single_ref(&refs, "tenant-policy-label", "storage");
     }
 
     #[test]

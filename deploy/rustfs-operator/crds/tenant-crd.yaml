@@ -27,6 +27,32 @@ spec:
         properties:
           spec:
             properties:
+              buckets:
+                description: Buckets that should exist in the RustFS tenant.
+                items:
+                  properties:
+                    deletionPolicy:
+                      enum:
+                      - Retain
+                      type: string
+                    name:
+                      type: string
+                      x-kubernetes-validations:
+                      - message: bucket name must be a valid RustFS/S3 bucket name
+                        rule: self.size() >= 3 && self.size() <= 63 && self != 'rustfs' && !self.matches('^(\\d+\\.){3}\\d+$') && !self.contains('..') && !self.contains('.-') && !self.contains('-.') && self.matches('^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
+                    objectLock:
+                      nullable: true
+                      type: boolean
+                    region:
+                      nullable: true
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-validations:
+                - message: bucket names must be unique
+                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
               createServiceAccountRbac:
                 nullable: true
                 type: boolean
@@ -422,6 +448,48 @@ spec:
                 - null
                 nullable: true
                 type: string
+              policies:
+                description: Canned policies that should be applied to the RustFS tenant.
+                items:
+                  properties:
+                    deletionPolicy:
+                      enum:
+                      - Retain
+                      type: string
+                    document:
+                      properties:
+                        configMapKeyRef:
+                          properties:
+                            key:
+                              type: string
+                              x-kubernetes-validations:
+                              - message: configMapKeyRef key must be not empty
+                                rule: self != ''
+                            name:
+                              type: string
+                              x-kubernetes-validations:
+                              - message: configMapKeyRef name must be not empty
+                                rule: self != ''
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - configMapKeyRef
+                      type: object
+                    name:
+                      type: string
+                      x-kubernetes-validations:
+                      - message: policy name must be not empty and must not contain whitespace
+                        rule: self != '' && !self.matches('.*\\s.*')
+                  required:
+                  - document
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-validations:
+                - message: policy names must be unique
+                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
               poolLifecycle:
                 description: Explicit lifecycle requests for pool decommissioning.
                 nullable: true
@@ -1453,6 +1521,35 @@ spec:
                     - HotReload
                     type: string
                 type: object
+              users:
+                description: Regular users that should exist in the RustFS tenant.
+                items:
+                  properties:
+                    deletionPolicy:
+                      enum:
+                      - Retain
+                      type: string
+                    name:
+                      type: string
+                      x-kubernetes-validations:
+                      - message: user Secret name must be not empty and must not contain whitespace
+                        rule: self != '' && !self.matches('.*\\s.*')
+                    policies:
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-validations:
+                      - message: user policy names must be not empty and must not contain whitespace
+                        rule: self.all(x, x != '' && !x.matches('.*\\s.*'))
+                      - message: user policy names must be unique
+                        rule: self.all(x, self.filter(y, y == x).size() == 1)
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-validations:
+                - message: user Secret names must be unique
+                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
             required:
             - pools
             type: object
@@ -1776,6 +1873,153 @@ spec:
                   - state
                   type: object
                 type: array
+              provisioning:
+                properties:
+                  buckets:
+                    items:
+                      properties:
+                        desiredHash:
+                          nullable: true
+                          type: string
+                        lastAppliedGeneration:
+                          format: int64
+                          nullable: true
+                          type: integer
+                        lastAppliedHash:
+                          nullable: true
+                          type: string
+                        lastTransitionTime:
+                          nullable: true
+                          type: string
+                        message:
+                          nullable: true
+                          type: string
+                        name:
+                          type: string
+                        objectLock:
+                          nullable: true
+                          type: boolean
+                        observedSecretResourceVersion:
+                          nullable: true
+                          type: string
+                        policies:
+                          items:
+                            type: string
+                          type: array
+                        reason:
+                          type: string
+                        region:
+                          nullable: true
+                          type: string
+                        state:
+                          type: string
+                      required:
+                      - name
+                      - reason
+                      - state
+                      type: object
+                    type: array
+                  observedGeneration:
+                    format: int64
+                    nullable: true
+                    type: integer
+                  phase:
+                    enum:
+                    - Pending
+                    - Ready
+                    - Failed
+                    - null
+                    nullable: true
+                    type: string
+                  policies:
+                    items:
+                      properties:
+                        desiredHash:
+                          nullable: true
+                          type: string
+                        lastAppliedGeneration:
+                          format: int64
+                          nullable: true
+                          type: integer
+                        lastAppliedHash:
+                          nullable: true
+                          type: string
+                        lastTransitionTime:
+                          nullable: true
+                          type: string
+                        message:
+                          nullable: true
+                          type: string
+                        name:
+                          type: string
+                        objectLock:
+                          nullable: true
+                          type: boolean
+                        observedSecretResourceVersion:
+                          nullable: true
+                          type: string
+                        policies:
+                          items:
+                            type: string
+                          type: array
+                        reason:
+                          type: string
+                        region:
+                          nullable: true
+                          type: string
+                        state:
+                          type: string
+                      required:
+                      - name
+                      - reason
+                      - state
+                      type: object
+                    type: array
+                  users:
+                    items:
+                      properties:
+                        desiredHash:
+                          nullable: true
+                          type: string
+                        lastAppliedGeneration:
+                          format: int64
+                          nullable: true
+                          type: integer
+                        lastAppliedHash:
+                          nullable: true
+                          type: string
+                        lastTransitionTime:
+                          nullable: true
+                          type: string
+                        message:
+                          nullable: true
+                          type: string
+                        name:
+                          type: string
+                        objectLock:
+                          nullable: true
+                          type: boolean
+                        observedSecretResourceVersion:
+                          nullable: true
+                          type: string
+                        policies:
+                          items:
+                            type: string
+                          type: array
+                        reason:
+                          type: string
+                        region:
+                          nullable: true
+                          type: string
+                        state:
+                          type: string
+                      required:
+                      - name
+                      - reason
+                      - state
+                      type: object
+                    type: array
+                type: object
             required:
             - availableReplicas
             - currentState
@@ -1789,4 +2033,3 @@ spec:
     storage: true
     subresources:
       status: {}
----
