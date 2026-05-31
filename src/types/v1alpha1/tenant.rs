@@ -161,6 +161,7 @@ pub struct TenantSpec {
 
     /// Regular users that should exist in the RustFS tenant.
     #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("user Secret names must be unique"))]
+    #[x_kube(validation = Rule::new("self.all(x, has(x.policies) && x.policies.size() > 0)").message("user policies must contain at least one policy"))]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<ProvisioningUser>,
 

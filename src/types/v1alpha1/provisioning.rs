@@ -62,6 +62,7 @@ pub struct ProvisioningUser {
     #[x_kube(validation = Rule::new("self != '' && !self.matches('.*\\\\s.*')").message("user Secret name must be not empty and must not contain whitespace"))]
     pub name: String,
 
+    /// Canned policies to map directly to this user.
     #[x_kube(validation = Rule::new("self.all(x, x != '' && !x.matches('.*\\\\s.*'))").message("user policy names must be not empty and must not contain whitespace"))]
     #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y == x).size() == 1)").message("user policy names must be unique"))]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

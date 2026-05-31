@@ -77,6 +77,33 @@ STS only issues credentials for TLS-enabled Tenants. For Tenant upstream calls, 
 
 Operator STS does not present a client certificate when calling the Tenant. Tenants configured with `spec.tls.certManager.caTrust.clientCaSecretRef` continue to run with server-side mTLS enabled, but Operator STS rejects those Tenants with HTTP 400 and `TenantTlsClientCertificateUnsupported`.
 
+### Tenant Provisioning
+
+Tenants can declare RustFS canned policies, regular users, and buckets directly in `spec.policies`, `spec.users`, and `spec.buckets`. Provisioning starts only after the Tenant workload is ready, uses `spec.credsSecret` as the RustFS admin credential source, and reports progress under `status.provisioning`.
+
+User provisioning requires a non-empty direct policy mapping:
+
+```yaml
+spec:
+  credsSecret:
+    name: rustfs-admin-creds
+  policies:
+    - name: app-readwrite
+      document:
+        configMapKeyRef:
+          name: app-policy
+          key: policy.json
+  users:
+    - name: app-user
+      policies:
+        - app-readwrite
+  buckets:
+    - name: app-data
+      objectLock: true
+```
+
+Policy ConfigMaps and user Secrets must live in the Tenant namespace. If they are created outside the Operator Console, add `rustfs.tenant=<tenant-name>` so changes to those resources enqueue the owning Tenant. Provisioned resources are retained when removed from the Tenant spec.
+
 ### RBAC Configuration
 
 | Parameter | Description | Default |

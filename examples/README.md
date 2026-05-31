@@ -11,6 +11,7 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 | [minimal-dev-tenant.yaml](./minimal-dev-tenant.yaml) | Development/Learning | ⭐ Simple | 40Gi | **Start here** if new |
 | [simple-tenant.yaml](./simple-tenant.yaml) | Documentation Reference | ⭐⭐ Moderate | Configurable | Learning all options |
 | [secret-credentials-tenant.yaml](./secret-credentials-tenant.yaml) | Secret-based Credentials | ⭐ Simple | Configurable | **Production credential security** |
+| [provisioning-tenant.yaml](./provisioning-tenant.yaml) | Policy/User/Bucket Provisioning | ⭐⭐ Moderate | 40Gi | Tenant bootstrap automation |
 | [multi-pool-tenant.yaml](./multi-pool-tenant.yaml) | Multiple Pools | ⭐⭐ Moderate | ~160Gi | Multi-pool setups |
 | [production-ha-tenant.yaml](./production-ha-tenant.yaml) | Production HA | ⭐⭐⭐ Advanced | 6.4TB | HA with zone distribution |
 | [cluster-expansion-tenant.yaml](./cluster-expansion-tenant.yaml) | Capacity Expansion | ⭐⭐⭐ Advanced | 384TB | Growing cluster capacity |
@@ -118,6 +119,27 @@ kubectl describe pod secure-tenant-pool-0-0 | grep -A5 "Environment:"
 - Enable Kubernetes Secret encryption at rest
 - Rotate credentials quarterly
 - Generate strong credentials: `openssl rand -hex 32`
+
+---
+
+### [provisioning-tenant.yaml](./provisioning-tenant.yaml) **Tenant Provisioning**
+
+Demonstrates operator-managed RustFS canned policies, regular users, and buckets.
+
+**Features demonstrated:**
+- Tenant admin credentials through `spec.credsSecret`
+- Policy document stored in a labeled ConfigMap
+- User credentials stored in a labeled Secret
+- Required non-empty direct policy mapping for each user
+- Bucket creation with object lock verification
+
+**Deployment:**
+```bash
+kubectl apply -f examples/provisioning-tenant.yaml
+kubectl wait --for=condition=Ready tenant/provisioning-demo --timeout=10m
+```
+
+ConfigMaps and user Secrets should carry `rustfs.tenant=<tenant-name>` when they are managed outside the Console so updates enqueue the owning Tenant.
 
 ---
 
