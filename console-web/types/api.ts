@@ -115,7 +115,7 @@ export interface ProvisioningPolicy {
 
 export interface ProvisioningUser {
   name: string
-  policies?: string[]
+  policies: string[]
   deletionPolicy?: ProvisioningDeletionPolicy
 }
 

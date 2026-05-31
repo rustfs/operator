@@ -35,19 +35,26 @@ const defaultPool: CreatePoolRequest = {
   storage_class: "",
 }
 
-const defaultTenantYaml = `apiVersion: rustfs.io/v1alpha1
+const defaultTenantYaml = `apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:
   name: my-tenant
   namespace: default
 spec:
   image: rustfs/rustfs:latest
-  credsSecret: rustfs-creds
+  credsSecret:
+    name: rustfs-creds
   pools:
     - name: pool-0
       servers: 2
-      volumesPerServer: 2
-      storageSize: 10Gi
+      persistence:
+        volumesPerServer: 2
+        volumeClaimTemplate:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
 `
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -136,8 +143,14 @@ export default function TenantCreatePage() {
 
     const metadata = asRecord(root.metadata)
     const spec = asRecord(root.spec)
+    const apiVersion = asString(root.apiVersion)
+    const kind = asString(root.kind)
     const parsedName = asString(metadata?.name)
     const parsedNamespace = asString(metadata?.namespace)
+
+    if (apiVersion !== "rustfs.com/v1alpha1" || kind !== "Tenant") {
+      throw new Error(t("YAML must be a rustfs.com/v1alpha1 Tenant"))
+    }
 
     if (!parsedName || !parsedNamespace) {
       throw new Error(t("YAML must include metadata.name and metadata.namespace"))
@@ -150,9 +163,18 @@ export default function TenantCreatePage() {
 
     const parsedPools: CreatePoolRequest[] = poolsRaw.map((poolItem, index) => {
       const pool = asRecord(poolItem)
+      const persistence = asRecord(pool?.persistence)
+      const volumeClaimTemplate = asRecord(persistence?.volumeClaimTemplate ?? persistence?.volume_claim_template)
+      const resources = asRecord(volumeClaimTemplate?.resources)
+      const requests = asRecord(resources?.requests)
       const servers = asPositiveInt(pool?.servers)
-      const volumesPerServer = asPositiveInt(pool?.volumesPerServer ?? pool?.volumes_per_server)
-      const storageSize = asString(pool?.storageSize ?? pool?.storage_size ?? pool?.size)
+      const volumesPerServer = asPositiveInt(
+        pool?.volumesPerServer ??
+          pool?.volumes_per_server ??
+          persistence?.volumesPerServer ??
+          persistence?.volumes_per_server,
+      )
+      const storageSize = asString(pool?.storageSize ?? pool?.storage_size ?? pool?.size ?? requests?.storage)
 
       if (!pool || !servers || !volumesPerServer || !storageSize) {
         throw new Error(t("YAML pool fields are invalid"))
@@ -163,11 +185,18 @@ export default function TenantCreatePage() {
         servers,
         volumes_per_server: volumesPerServer,
         storage_size: storageSize,
-        storage_class: asString(pool.storageClass ?? pool.storage_class) || undefined,
+        storage_class:
+          asString(
+            pool.storageClass ??
+              pool.storage_class ??
+              volumeClaimTemplate?.storageClassName ??
+              volumeClaimTemplate?.storage_class_name,
+          ) || undefined,
       }
     })
 
     const specSc = asRecord(spec?.securityContext ?? spec?.security_context)
+    const credsSecretRef = asRecord(spec?.credsSecret ?? spec?.creds_secret)
     const security_context = specSc
       ? {
           runAsUser: asPositiveInt(specSc.runAsUser ?? specSc.run_as_user),
@@ -211,12 +240,13 @@ export default function TenantCreatePage() {
       ? usersRaw.map((item): ProvisioningUser => {
           const user = asRecord(item)
           const userName = asString(user?.name)
-          if (!user || !userName) {
+          const userPolicies = asStringArray(user?.policies)
+          if (!user || !userName || !userPolicies || userPolicies.length === 0) {
             throw new Error(t("YAML user provisioning fields are invalid"))
           }
           return {
             name: userName,
-            policies: asStringArray(user.policies) ?? [],
+            policies: userPolicies,
           }
         })
       : undefined
@@ -243,7 +273,7 @@ export default function TenantCreatePage() {
       pools: parsedPools,
       image: asString(spec?.image),
       mount_path: asString(spec?.mountPath ?? spec?.mount_path),
-      creds_secret: asString(spec?.credsSecret ?? spec?.creds_secret),
+      creds_secret: asString(spec?.credsSecret ?? spec?.creds_secret) ?? asString(credsSecretRef?.name),
       policies,
       users,
       buckets,

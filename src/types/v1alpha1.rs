@@ -164,6 +164,15 @@ mod tenant_provisioning_crd_tests {
             spec["properties"]["policies"]["x-kubernetes-validations"][0]["message"],
             json!("policy names must be unique")
         );
+        let user_validations = &spec["properties"]["users"]["x-kubernetes-validations"];
+        assert!(
+            user_validations
+                .as_array()
+                .expect("user validations are present")
+                .iter()
+                .any(|rule| rule["message"]
+                    == json!("user policies must contain at least one policy"))
+        );
         let user_policy_validations = &spec["properties"]["users"]["items"]["properties"]["policies"]
             ["x-kubernetes-validations"];
         assert!(

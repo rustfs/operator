@@ -553,6 +553,9 @@ impl RustfsAdminClient {
         if access_key.trim().is_empty() {
             return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
         }
+        if policies.is_empty() || policies.iter().any(|policy| policy.trim().is_empty()) {
+            return Err(RustfsClientError::InvalidPolicyName);
+        }
 
         let policy_names = policies.join(",");
         let query = build_query_pairs(&[
@@ -1611,6 +1614,45 @@ mod tests {
             &*capture.query.lock().await,
             "isGroup=false&policyName=app-readwrite%2Cdiagnostics&userOrGroup=app-user"
         );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn set_user_policy_rejects_empty_policy_list() {
+        let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
+
+        let err = client
+            .set_user_policy("app-user", &[])
+            .await
+            .expect_err("empty policy list should be rejected before request");
+
+        assert!(matches!(err, RustfsClientError::InvalidPolicyName));
+    }
+
+    #[tokio::test]
+    async fn bucket_object_lock_enabled_parses_enabled_response() {
+        let router = Router::new().route(
+            "/app-data",
+            get(|req: Request<Body>| async move {
+                assert_eq!(req.uri().query().unwrap_or(""), "object-lock=");
+                (
+                    StatusCode::OK,
+                    "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>",
+                )
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+        assert!(client.bucket_object_lock_enabled("app-data").await.unwrap());
 
         server.abort();
     }

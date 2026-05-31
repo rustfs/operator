@@ -1535,6 +1535,7 @@ spec:
                       - message: user Secret name must be not empty and must not contain whitespace
                         rule: self != '' && !self.matches('.*\\s.*')
                     policies:
+                      description: Canned policies to map directly to this user.
                       items:
                         type: string
                       type: array
@@ -1550,6 +1551,8 @@ spec:
                 x-kubernetes-validations:
                 - message: user Secret names must be unique
                   rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
+                - message: user policies must contain at least one policy
+                  rule: self.all(x, has(x.policies) && x.policies.size() > 0)
             required:
             - pools
             type: object

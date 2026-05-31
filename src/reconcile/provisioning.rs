@@ -134,12 +134,12 @@ impl ProvisioningRun<'_> {
         item
     }
 
-    fn fail_all_active(&mut self, reason: Reason, message: &str) {
+    fn mark_all_active(&mut self, state: ProvisioningItemState, reason: Reason, message: &str) {
         for policy in &self.tenant.spec.policies {
             let mut item = self.item(
                 self.previous_policy(&policy.name),
                 &policy.name,
-                ProvisioningItemState::Failed,
+                state.clone(),
                 reason,
                 message,
             );
@@ -154,7 +154,7 @@ impl ProvisioningRun<'_> {
             let mut item = self.item(
                 self.previous_user(&user.name),
                 &user.name,
-                ProvisioningItemState::Failed,
+                state.clone(),
                 reason,
                 message,
             );
@@ -169,12 +169,16 @@ impl ProvisioningRun<'_> {
             let item = self.item(
                 self.previous_bucket(&bucket.name),
                 &bucket.name,
-                ProvisioningItemState::Failed,
+                state.clone(),
                 reason,
                 message,
             );
             self.push_bucket(item);
         }
+    }
+
+    fn fail_all_active(&mut self, reason: Reason, message: &str) {
+        self.mark_all_active(ProvisioningItemState::Failed, reason, message);
     }
 
     fn add_retained_items(&mut self) {
@@ -267,7 +271,11 @@ pub(super) async fn reconcile_provisioning(
         Ok(client) => client,
         Err(error) => {
             let (reason, message, pending) = client_error_outcome(error);
-            run.fail_all_active(reason, &message);
+            if pending {
+                run.mark_all_active(ProvisioningItemState::Pending, reason, &message);
+            } else {
+                run.fail_all_active(reason, &message);
+            }
             let phase = if pending {
                 ProvisioningPhase::Pending
             } else {
@@ -590,6 +598,17 @@ async fn reconcile_user(
     user: &ProvisioningUser,
 ) -> ProvisioningItemStatus {
     let previous = run.previous_user(&user.name);
+    if let Err(message) = validate_user_policies(user) {
+        let item = run.item(
+            previous,
+            &user.name,
+            ProvisioningItemState::Failed,
+            Reason::UserPolicyInvalid,
+            message,
+        );
+        return annotate_user_item(item, user, None);
+    }
+
     let credentials = match load_user_secret(run, user).await {
         Ok(credentials) => credentials,
         Err(message) => {
@@ -794,14 +813,21 @@ fn read_optional_secret_value(
 }
 
 fn validate_user_access_key(access_key: &str) -> Result<(), String> {
-    if access_key.len() < 3 {
-        return Err("user access key must be at least 3 characters".to_string());
+    if access_key.len() < 8 {
+        return Err("user access key must be at least 8 characters".to_string());
     }
     if access_key.chars().any(char::is_whitespace) {
         return Err("user access key must not contain whitespace".to_string());
     }
     if access_key.contains('=') || access_key.contains(',') {
         return Err("user access key must not contain reserved characters '=' or ','".to_string());
+    }
+    Ok(())
+}
+
+fn validate_user_policies(user: &ProvisioningUser) -> Result<(), String> {
+    if user.policies.is_empty() {
+        return Err("user must reference at least one policy".to_string());
     }
     Ok(())
 }
@@ -858,35 +884,59 @@ async fn reconcile_bucket(
         }
     };
 
-    if create_result == CreateBucketResult::AlreadyExists && bucket.object_lock_enabled() {
+    if bucket.object_lock_enabled() {
         match client.bucket_object_lock_enabled(&bucket.name).await {
             Ok(true) => {
+                let message = match create_result {
+                    CreateBucketResult::Created => {
+                        "RustFS bucket was created with object lock enabled"
+                    }
+                    CreateBucketResult::AlreadyExists => {
+                        "Bucket already existed with object lock enabled"
+                    }
+                };
                 let item = run.item(
                     previous,
                     &bucket.name,
                     ProvisioningItemState::Ready,
                     Reason::ProvisioningConfigured,
-                    "Bucket already existed with object lock enabled",
+                    message,
                 );
                 return annotate_bucket_item(item, bucket);
             }
             Ok(false) => {
+                let message = match create_result {
+                    CreateBucketResult::Created => {
+                        "Bucket was created but object lock is not enabled"
+                    }
+                    CreateBucketResult::AlreadyExists => {
+                        "Bucket already exists but object lock is not enabled"
+                    }
+                };
                 let item = run.item(
                     previous,
                     &bucket.name,
                     ProvisioningItemState::Failed,
                     Reason::BucketObjectLockConflict,
-                    "Bucket already exists but object lock is not enabled",
+                    message,
                 );
                 return annotate_bucket_item(item, bucket);
             }
             Err(error) => {
+                let message = match create_result {
+                    CreateBucketResult::Created => {
+                        format!("failed to verify created bucket object lock: {error}")
+                    }
+                    CreateBucketResult::AlreadyExists => {
+                        format!("failed to verify existing bucket object lock: {error}")
+                    }
+                };
                 let item = run.item(
                     previous,
                     &bucket.name,
                     ProvisioningItemState::Failed,
                     Reason::BucketObjectLockConflict,
-                    format!("failed to verify existing bucket object lock: {error}"),
+                    message,
                 );
                 return annotate_bucket_item(item, bucket);
             }
@@ -1009,6 +1059,7 @@ fn reason_from_str(reason: &str) -> Reason {
         "PolicyConflict" => Reason::PolicyConflict,
         "UserSecretInvalid" => Reason::UserSecretInvalid,
         "UserPolicyNotFound" => Reason::UserPolicyNotFound,
+        "UserPolicyInvalid" => Reason::UserPolicyInvalid,
         "UserPolicySetFailed" => Reason::UserPolicySetFailed,
         "BucketCreateFailed" => Reason::BucketCreateFailed,
         "BucketObjectLockConflict" => Reason::BucketObjectLockConflict,
@@ -1044,6 +1095,28 @@ mod tests {
             .expect_err("reserved characters should be rejected");
 
         assert!(error.contains("reserved characters"));
+    }
+
+    #[test]
+    fn access_key_requires_security_baseline_length() {
+        let error =
+            validate_user_access_key("app").expect_err("short access keys should be rejected");
+
+        assert!(error.contains("at least 8 characters"));
+    }
+
+    #[test]
+    fn user_policy_list_must_not_be_empty() {
+        let user = ProvisioningUser {
+            name: "app-user".to_string(),
+            policies: Vec::new(),
+            deletion_policy: Default::default(),
+        };
+
+        let error =
+            validate_user_policies(&user).expect_err("empty policy list should be rejected");
+
+        assert!(error.contains("at least one policy"));
     }
 
     #[test]

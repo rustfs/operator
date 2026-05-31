@@ -158,6 +158,7 @@ pub enum Reason {
     PolicyConflict,
     UserSecretInvalid,
     UserPolicyNotFound,
+    UserPolicyInvalid,
     UserPolicySetFailed,
     BucketCreateFailed,
     BucketObjectLockConflict,
@@ -218,6 +219,7 @@ impl Reason {
             Self::PolicyConflict => "PolicyConflict",
             Self::UserSecretInvalid => "UserSecretInvalid",
             Self::UserPolicyNotFound => "UserPolicyNotFound",
+            Self::UserPolicyInvalid => "UserPolicyInvalid",
             Self::UserPolicySetFailed => "UserPolicySetFailed",
             Self::BucketCreateFailed => "BucketCreateFailed",
             Self::BucketObjectLockConflict => "BucketObjectLockConflict",
@@ -476,6 +478,7 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "PolicyConflict"
             | "UserSecretInvalid"
             | "UserPolicyNotFound"
+            | "UserPolicyInvalid"
             | "UserPolicySetFailed"
             | "BucketCreateFailed"
             | "BucketObjectLockConflict"
@@ -553,6 +556,7 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "PolicyConflict" => vec!["inspectLivePolicy", "updatePolicySpec"],
         "UserSecretInvalid" => vec!["fixUserSecret"],
         "UserPolicyNotFound" => vec!["createPolicy", "fixUserPolicyList"],
+        "UserPolicyInvalid" => vec!["fixUserPolicyList"],
         "UserPolicySetFailed" => vec!["inspectUserPolicyMapping", "inspectOperatorLogs"],
         "BucketCreateFailed" => vec!["inspectBucket", "inspectOperatorLogs"],
         "BucketObjectLockConflict" => vec!["createObjectLockBucket", "fixBucketSpec"],
