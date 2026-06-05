@@ -104,7 +104,7 @@ spec:
   # for multi-node, multi-disk distributed storage communication.
   #
   # For this configuration, the generated RUSTFS_VOLUMES will be:
-  # http://example-tenant-pool-0-{0...1}.example-tenant-hl.rustfs-system.svc.cluster.local:9000/data/rustfs{0...1}
+  # http://example-tenant-primary-{0...1}.example-tenant-hl.rustfs-system.svc.cluster.local:9000/data/rustfs{0...1}
   #
   # This configures RustFS to:
   # - Communicate with 2 nodes (servers: 2)
