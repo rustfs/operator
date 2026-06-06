@@ -84,6 +84,7 @@ impl<L: Lock> LeaderElector<L> {
     /// Run the leader election loop until the cancel token is triggered.
     ///
     /// Blocks the current task, cycling through acquire → renew → release phases.
+    /// On transient lease/renewal loss, it retries acquisition after releasing.
     /// Always calls `on_stopped_leading` before returning, even if never became leader.
     pub async fn run(
         &self,
@@ -93,44 +94,55 @@ impl<L: Lock> LeaderElector<L> {
         let callbacks = Arc::new(callbacks);
         info!(identity = %self.config.identity, lock = %self.lock.describe(), "starting leader election");
 
-        // Phase 1: acquire
-        if !self.acquire(&cancel, &callbacks).await {
-            // Cancelled during acquire
-            callbacks.on_stopped_leading().await;
-            return Ok(());
+        loop {
+            // Phase 1: acquire
+            if cancel.is_cancelled() {
+                callbacks.on_stopped_leading().await;
+                return Ok(());
+            }
+
+            if !self.acquire(&cancel, &callbacks).await {
+                // Cancelled during acquire
+                callbacks.on_stopped_leading().await;
+                return Ok(());
+            }
+
+            // We are now the leader. Create a child token for the leading task.
+            let leading_cancel = CancellationToken::new();
+
+            // Phase 2: start the user's leading function in a separate task
+            let leading_handle = {
+                let lc = leading_cancel.clone();
+                let cb = callbacks.clone();
+                tokio::spawn(async move {
+                    cb.on_started_leading(lc).await;
+                })
+            };
+
+            // Phase 3: renew loop (exits on cancel or renew failure)
+            // false => stop; true => retry acquisition.
+            let should_retry = self.renew(&cancel).await;
+
+            // We lost leadership (or lost renew loop due cancel).
+            // Stop the leading task.
+            leading_cancel.cancel();
+            // Wait for the leading task to finish.
+            let _ = leading_handle.await;
+
+            // Phase 4: release if configured
+            if self.config.release_on_cancel {
+                self.release().await;
+            }
+
+            if !should_retry {
+                info!(identity = %self.config.identity, "stopped leading");
+                // Phase 5: notify stopped
+                callbacks.on_stopped_leading().await;
+                return Ok(());
+            }
+
+            warn!(identity = %self.config.identity, "lost leadership; retrying election");
         }
-
-        // We are now the leader. Create a child token for the leading task.
-        let leading_cancel = CancellationToken::new();
-
-        // Phase 2: start the user's leading function in a separate task
-        let leading_handle = {
-            let lc = leading_cancel.clone();
-            let cb = callbacks.clone();
-            tokio::spawn(async move {
-                cb.on_started_leading(lc).await;
-            })
-        };
-
-        // Phase 3: renew loop (exits on cancel or renew failure)
-        self.renew(&cancel).await;
-
-        // We lost leadership (renew failed or cancelled).
-        // Stop the leading task.
-        leading_cancel.cancel();
-        // Wait for the leading task to finish.
-        let _ = leading_handle.await;
-
-        // Phase 4: release if configured
-        if self.config.release_on_cancel {
-            self.release().await;
-        }
-
-        // Phase 5: notify stopped
-        callbacks.on_stopped_leading().await;
-
-        info!(identity = %self.config.identity, "stopped leading");
-        Ok(())
     }
 
     /// Spawn the elector as a background task, returning a handle for state observation
@@ -188,44 +200,60 @@ impl<L: Lock> LeaderElector<L> {
     }
 
     /// Renew phase: keep renewing the lease, giving up after renew_deadline of failures.
-    /// Exits cleanly when cancel is triggered (returns normally, does not indicate failure).
-    async fn renew(&self, cancel: &CancellationToken) {
+    /// Returns `true` when leadership should be re-acquired, `false` when stopping.
+    async fn renew(&self, cancel: &CancellationToken) -> bool {
         loop {
             if cancel.is_cancelled() {
                 debug!(identity = %self.config.identity, "renew cancelled");
-                return;
+                return false;
             }
-            if self.poll_renew().await {
+
+            if self.poll_renew(cancel).await {
                 // Renewal succeeded at least once; wait before next cycle, interruptible.
                 tokio::select! {
                     _ = tokio::time::sleep(self.config.retry_period) => {},
                     _ = cancel.cancelled() => {
                         debug!(identity = %self.config.identity, "renew sleep cancelled");
-                        return;
+                        return false;
                     }
                 }
             } else {
                 // Failed to renew within renew_deadline — give up leadership.
-                warn!(identity = %self.config.identity, "failed to renew lease within deadline, giving up leadership");
-                return;
+                if cancel.is_cancelled() {
+                    debug!(identity = %self.config.identity, "renew cancelled");
+                    return false;
+                }
+
+                warn!(identity = %self.config.identity, "failed to renew lease within deadline, retrying election");
+                return true;
             }
         }
     }
 
     /// Inner renew loop: retry within renew_deadline window.
-    /// Returns true if at least one renewal succeeded.
-    async fn poll_renew(&self) -> bool {
+    /// Returns `true` if at least one renewal succeeded.
+    /// Returns `false` if the renew window expires or cancellation is requested.
+    async fn poll_renew(&self, cancel: &CancellationToken) -> bool {
         let deadline = self.clock.now()
             + chrono::Duration::from_std(self.config.renew_deadline)
                 .unwrap_or(chrono::Duration::seconds(10));
         loop {
+            if cancel.is_cancelled() {
+                return false;
+            }
+
             if self.try_acquire_or_renew().await {
                 return true;
             }
             if self.clock.now() >= deadline {
                 return false;
             }
-            tokio::time::sleep(self.config.retry_period).await;
+            tokio::select! {
+                _ = tokio::time::sleep(self.config.retry_period) => {}
+                _ = cancel.cancelled() => {
+                    return false;
+                }
+            }
         }
     }
 
@@ -471,6 +499,7 @@ impl<C: LeaderCallbacks> LeaderCallbacks for StateTrackingCallbacks<C> {
     }
 
     async fn on_stopped_leading(&self) {
+        let _ = self.state_tx.send(LeaderState::Pending);
         self.inner.on_stopped_leading().await;
     }
 

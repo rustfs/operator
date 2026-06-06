@@ -36,6 +36,14 @@ spec:
           image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag }}"
           imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
           command: ["./operator", "server"]
+          {{- $leaderElect := gt (int .Values.operator.replicas) 1 }}
+          {{- if hasKey .Values.operator "leaderElect" }}
+          {{- if ne .Values.operator.leaderElect nil }}
+          {{- $leaderElect = .Values.operator.leaderElect }}
+          {{- end }}
+          {{- end }}
+          args:
+            - --leader-elect={{ ternary "true" "false" $leaderElect }}
           {{- if .Values.sts.enabled }}
           ports:
             - name: sts

@@ -59,7 +59,7 @@ impl LeaderCallbacks for MyCallbacks {
     }
 }
 
-// Run — blocks until cancelled or leadership is lost
+// Run — blocks until cancellation, retrying on transient leadership loss
 let cancel = CancellationToken::new();
 elector.run(MyCallbacks, cancel).await;
 ```
@@ -93,7 +93,7 @@ LeaderElector
 ├── acquire() — loop: try_acquire_or_renew → sleep(jittered retry_period)
 ├── renew()   — loop: try_acquire_or_renew within renew_deadline window
 ├── release() — clear holder_identity, preserve transition count
-└── run()     — orchestrate acquire → on_started_leading → renew → on_stopped_leading
+└── run()     — orchestrate acquire → on_started_leading → renew → on_stopped_leading (retries on lease loss)
 ```
 
 The `Lock` trait abstracts the backend:

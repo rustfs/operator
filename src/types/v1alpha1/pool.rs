@@ -267,14 +267,18 @@ fn validate_parity_for_pool(
     parity: usize,
     storage_class: &str,
 ) -> Result<(), String> {
-    if drives_per_set > 2 && parity > drives_per_set / 2 {
+    if drives_per_set == 0 {
+        return Err(format!(
+            "pool '{}' has invalid drivesPerSet {}, must be greater than zero",
+            pool.name, drives_per_set
+        ));
+    }
+
+    let max_parity = drives_per_set / 2;
+    if parity > max_parity {
         return Err(format!(
             "pool '{}' has RustFS drivesPerSet {}, but {} parity {} exceeds the maximum {}",
-            pool.name,
-            drives_per_set,
-            storage_class,
-            parity,
-            drives_per_set / 2
+            pool.name, drives_per_set, storage_class, parity, max_parity
         ));
     }
     Ok(())
@@ -330,7 +334,7 @@ fn literal_env_value<'a>(env: &'a [corev1::EnvVar], name: &str) -> Result<Option
 
     if var.value_from.is_some() {
         return Err(format!(
-            "{name} must use a literal value so the operator can validate RustFS erasure layout"
+            "{name} is configured with value_from, which is not supported during admission validation"
         ));
     }
 
@@ -510,6 +514,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_parity_exceeding_half_for_small_drive_set() {
+        let pools = vec![test_pool("pool-0", 2, 4)];
+        let env = vec![
+            corev1::EnvVar {
+                name: "RUSTFS_ERASURE_SET_DRIVE_COUNT".to_string(),
+                value: Some("2".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "RUSTFS_STORAGE_CLASS_STANDARD".to_string(),
+                value: Some("EC:2".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let err = validate_pool_collection("tenant", &pools, &env).unwrap_err();
+        assert!(err.contains("STANDARD parity 2 exceeds the maximum 1"));
+    }
+
+    #[test]
     fn honors_literal_erasure_env_for_pool_compatibility() {
         let pools = vec![test_pool("pool-0", 4, 4), test_pool("pool-1", 2, 2)];
         let env = vec![corev1::EnvVar {
@@ -519,6 +543,26 @@ mod tests {
         }];
 
         assert!(validate_pool_collection("tenant", &pools, &env).is_ok());
+    }
+
+    #[test]
+    fn rejects_erasure_layout_validation_with_value_from_env_vars() {
+        let pools = vec![test_pool("pool-0", 4, 4)];
+        let env = vec![corev1::EnvVar {
+            name: "RUSTFS_STORAGE_CLASS_STANDARD".to_string(),
+            value_from: Some(corev1::EnvVarSource {
+                secret_key_ref: Some(corev1::SecretKeySelector {
+                    name: "legacy-rustfs-config".to_string(),
+                    key: "standard-parity".to_string(),
+                    optional: Some(false),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+
+        let err = validate_pool_collection("tenant", &pools, &env).unwrap_err();
+        assert!(err.contains("not supported during admission validation"));
     }
 
     #[test]

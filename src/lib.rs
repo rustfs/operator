@@ -147,14 +147,14 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         elector.run(callbacks, cancel).await?;
     } else {
         info!("starting with leader election disabled");
-        run_controller(client).await;
+        run_controller(client, CancellationToken::new()).await;
     }
 
     Ok(())
 }
 
 /// Build and run the controller reconcile loop.
-async fn run_controller(client: Client) {
+async fn run_controller(client: Client, cancel: CancellationToken) {
     let tenant_client = Api::<Tenant>::all(client.clone());
     let context = Context::new(client.clone());
     let controller = Controller::new(tenant_client, watcher::Config::default())
@@ -201,15 +201,23 @@ async fn run_controller(client: Client) {
         }
     };
 
-    controller
+    let mut reconcile_stream = controller
         .run(reconcile_rustfs, error_policy, Arc::new(context))
-        .for_each(|res| async move {
-            match res {
-                Ok((tenant, _)) => info!("reconciled successful, object{:?}", tenant.name),
-                Err(e) => warn!("reconcile failed: {}", e),
+        .boxed();
+
+    tokio::select! {
+        _ = cancel.cancelled() => {
+            warn!("controller cancellation requested, stopping");
+        }
+        _ = async {
+            while let Some(res) = reconcile_stream.next().await {
+                match res {
+                    Ok((tenant, _)) => info!("reconciled successful, object{:?}", tenant.name),
+                    Err(e) => warn!("reconcile failed: {}", e),
+                }
             }
-        })
-        .await;
+        } => {}
+    }
 }
 
 /// Callbacks for running the controller inside leader election.
@@ -222,9 +230,11 @@ impl LeaderCallbacks for ControllerCallbacks {
     async fn on_started_leading(&self, cancel: CancellationToken) {
         info!("acquired leader lease, starting controller");
         let client = self.client.clone();
+        let controller_cancel = CancellationToken::new();
+        let run_cancel = controller_cancel.clone();
         // Run the controller in a separate task so we can select on the cancel token.
         let controller_handle = tokio::spawn(async move {
-            run_controller(client).await;
+            run_controller(client, run_cancel).await;
         });
         tokio::pin!(controller_handle);
 
@@ -234,7 +244,15 @@ impl LeaderCallbacks for ControllerCallbacks {
             }
             _ = cancel.cancelled() => {
                 info!("lost leader lease, stopping controller");
-                controller_handle.abort();
+                controller_cancel.cancel();
+                if tokio::time::timeout(Duration::from_secs(5), &mut controller_handle)
+                    .await
+                    .is_err()
+                {
+                    warn!("controller stop timed out, forcing shutdown");
+                    controller_handle.abort();
+                }
+                let _ = controller_handle.await;
             }
         }
     }
