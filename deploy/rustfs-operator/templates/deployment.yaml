@@ -51,13 +51,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          {{- if .Values.sts.enabled }}
-            - name: OPERATOR_STS_PORT
-              value: {{ .Values.sts.port | quote }}
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          {{- if .Values.sts.enabled }}
+            - name: OPERATOR_STS_PORT
+              value: {{ .Values.sts.port | quote }}
             - name: OPERATOR_STS_SERVICE_NAME
               value: {{ printf "%s-sts" (include "rustfs-operator.fullname" .) | quote }}
             - name: OPERATOR_STS_TLS_ENABLED
