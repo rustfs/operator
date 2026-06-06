@@ -15,7 +15,7 @@
 use crate::types::v1alpha1::encryption::{EncryptionConfig, PodSecurityContextOverride};
 use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::logging::LoggingConfig;
-use crate::types::v1alpha1::pool::Pool;
+use crate::types::v1alpha1::pool::{Pool, validate_pool_collection};
 use crate::types::v1alpha1::pool_lifecycle::PoolLifecycleSpec;
 use crate::types::v1alpha1::provisioning::{
     ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
@@ -53,7 +53,9 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<String>,
 
+    #[schemars(extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"]))]
     #[x_kube(validation = Rule::new("self.size() > 0").message("pools must be configured"))]
+    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("pool names must be unique"))]
     pub pools: Vec<Pool>,
 
     /// Explicit lifecycle requests for pool decommissioning.
@@ -197,6 +199,15 @@ impl Tenant {
     /// must start with a letter, end with an alphanumeric, max 63 chars.
     pub fn validate_name(&self) -> Result<(), types::error::Error> {
         validate_dns1035_label(&self.name())
+    }
+
+    pub fn validate_pools(&self) -> Result<(), types::error::Error> {
+        validate_pool_collection(&self.name(), &self.spec.pools, &self.spec.env).map_err(
+            |message| types::error::Error::InvalidPoolSpec {
+                name: self.name(),
+                message,
+            },
+        )
     }
 
     /// a new owner reference for tenant

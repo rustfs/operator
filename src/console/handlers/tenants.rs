@@ -20,7 +20,7 @@ use crate::console::{
 use crate::types::v1alpha1::{
     encryption::PodSecurityContextOverride,
     persistence::PersistenceConfig,
-    pool::Pool,
+    pool::{Pool, validate_pool_shape_immutable},
     tenant::{Tenant, TenantSpec},
 };
 use axum::{
@@ -304,6 +304,11 @@ pub async fn create_tenant(
         },
         status: None,
     };
+    if let Err(e) = tenant.validate_pools() {
+        return Err(Error::BadRequest {
+            message: e.to_string(),
+        });
+    }
 
     let api: Api<Tenant> = Api::namespaced(client.clone(), &req.namespace);
     let created = api
@@ -469,6 +474,11 @@ pub async fn update_tenant(
             message: "No fields to update".to_string(),
         });
     }
+    if let Err(e) = tenant.validate_pools() {
+        return Err(Error::BadRequest {
+            message: e.to_string(),
+        });
+    }
 
     // Replace status-safe fields
     let updated_tenant = api
@@ -545,16 +555,6 @@ pub async fn put_tenant_yaml(
         });
     }
 
-    // Validate: no duplicate pool names
-    let mut pool_names = std::collections::HashSet::new();
-    for pool in &in_tenant.spec.pools {
-        if !pool_names.insert(&pool.name) {
-            return Err(Error::BadRequest {
-                message: format!("Duplicate pool name '{}'", pool.name),
-            });
-        }
-    }
-
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::namespaced(client, &namespace);
 
@@ -564,8 +564,18 @@ pub async fn put_tenant_yaml(
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
+    if let Err(message) = validate_pool_shape_immutable(&current.spec.pools, &in_tenant.spec.pools)
+    {
+        return Err(Error::BadRequest { message });
+    }
+
     // Only update safe fields: spec, metadata.labels, metadata.annotations, metadata.finalizers
     current.spec = in_tenant.spec;
+    if let Err(e) = current.validate_pools() {
+        return Err(Error::BadRequest {
+            message: e.to_string(),
+        });
+    }
     if let Some(labels) = in_tenant.metadata.labels {
         current.metadata.labels = Some(labels);
     }

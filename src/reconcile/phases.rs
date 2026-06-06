@@ -75,6 +75,12 @@ pub(super) async fn validate_tenant_prerequisites(
         return Err(e.into());
     }
 
+    if let Err(e) = tenant.validate_pools() {
+        let status_error = StatusError::from_types_error(&e);
+        patch_status_error(ctx, tenant, &status_error).await;
+        return Err(e.into());
+    }
+
     // Validate credential Secret if configured.
     // This only validates the Secret exists and has required keys.
     // Actual credential injection happens via secretKeyRef in the StatefulSet.
@@ -423,6 +429,9 @@ pub(super) async fn reconcile_pool_statefulsets(
         ..Default::default()
     };
 
+    let mut existing_pool_statefulsets = Vec::new();
+    let mut created_missing_pool = false;
+
     for pool in &tenant.spec.pools {
         let ss_name = format!("{}-{}", tenant.name(), pool.name);
         let lifecycle_decision = lifecycle_decisions.decision_for(&pool.name);
@@ -445,16 +454,7 @@ pub(super) async fn reconcile_pool_statefulsets(
             .await
         {
             Ok(existing_ss) => {
-                reconcile_existing_pool_statefulset(
-                    ctx,
-                    tenant,
-                    namespace,
-                    pool,
-                    existing_ss,
-                    tls_plan,
-                    &mut summary,
-                )
-                .await?;
+                existing_pool_statefulsets.push((pool, existing_ss));
             }
             Err(e) if is_not_found_context_error(&e) => {
                 reconcile_missing_pool_statefulset(
@@ -467,6 +467,7 @@ pub(super) async fn reconcile_pool_statefulsets(
                     &mut summary,
                 )
                 .await?;
+                created_missing_pool = true;
             }
             Err(e) => {
                 error!("Failed to get StatefulSet {}: {}", ss_name, e);
@@ -475,6 +476,27 @@ pub(super) async fn reconcile_pool_statefulsets(
                 return Err(e.into());
             }
         }
+    }
+
+    if created_missing_pool {
+        for (pool, existing_ss) in existing_pool_statefulsets {
+            let pool_status = tenant.build_pool_status(&pool.name, &existing_ss);
+            update_pool_summary(&mut summary, pool_status);
+        }
+        return Ok(summary);
+    }
+
+    for (pool, existing_ss) in existing_pool_statefulsets {
+        reconcile_existing_pool_statefulset(
+            ctx,
+            tenant,
+            namespace,
+            pool,
+            existing_ss,
+            tls_plan,
+            &mut summary,
+        )
+        .await?;
     }
 
     Ok(summary)

@@ -128,6 +128,11 @@ impl StatusError {
                 ConditionType::SpecValid,
                 sanitize_message(reason),
             ),
+            types::error::Error::InvalidPoolSpec { message, .. } => Self::blocked(
+                Reason::InvalidPoolSpec,
+                ConditionType::SpecValid,
+                sanitize_message(message),
+            ),
             types::error::Error::ImmutableFieldModified { field, .. } => Self::blocked(
                 Reason::ImmutableFieldModified,
                 ConditionType::SpecValid,
