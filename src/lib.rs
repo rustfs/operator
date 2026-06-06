@@ -226,13 +226,15 @@ impl LeaderCallbacks for ControllerCallbacks {
         let controller_handle = tokio::spawn(async move {
             run_controller(client).await;
         });
+        tokio::pin!(controller_handle);
 
         tokio::select! {
-            _ = controller_handle => {
+            _ = &mut controller_handle => {
                 info!("controller finished");
             }
             _ = cancel.cancelled() => {
                 info!("lost leader lease, stopping controller");
+                controller_handle.abort();
             }
         }
     }
