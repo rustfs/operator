@@ -42,6 +42,7 @@ The following table lists the configurable parameters of the RustFS Operator cha
 | `operator.image.tag` | Operator image tag | `latest` |
 | `operator.image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `operator.imagePullSecrets` | Image pull secrets | `[]` |
+| `operator.leaderElect` | Enable leader election override (`null`/unset for auto by replicas) | `null` |
 | `operator.resources.requests.cpu` | CPU resource requests | `100m` |
 | `operator.resources.requests.memory` | Memory resource requests | `128Mi` |
 | `operator.resources.limits.cpu` | CPU resource limits | `500m` |
@@ -141,6 +142,24 @@ helm install rustfs-operator deploy/rustfs-operator/ \
   --set operator.resources.limits.memory=1Gi
 ```
 
+### Leader Election for Helm Deployments
+
+With the chart default behavior, `leaderElect` is automatically enabled when
+`operator.replicas > 1` and disabled when `operator.replicas <= 1`:
+
+```bash
+helm install rustfs-operator deploy/rustfs-operator/ \
+  --set operator.replicas=3
+```
+
+Override explicitly if needed (for example, to force single-leader mode in all cases):
+
+```bash
+helm install rustfs-operator deploy/rustfs-operator/ \
+  --set operator.replicas=3 \
+  --set operator.leaderElect=false
+```
+
 ### Using a Values File
 
 Create a custom `values.yaml`:
@@ -161,6 +180,7 @@ operator:
   env:
     - name: RUST_LOG
       value: debug
+  leaderElect:
 ```
 
 Install with your custom values:

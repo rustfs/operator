@@ -18,6 +18,9 @@ use operator::{ServerOptions, crd, run};
 
 shadow_rs::shadow!(build);
 
+const SERVICE_ACCOUNT_NAMESPACE_PATH: &str =
+    "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+
 #[allow(clippy::const_is_empty)]
 const SHORT_VERSION: &str = {
     if !build::TAG.is_empty() {
@@ -67,15 +70,15 @@ enum Commands {
 
     /// Run the controller
     Server {
-        /// Enable leader election for multi-replica deployments
-        #[arg(long, default_value = "true")]
+        /// Enable leader election (disable for single-replica/local mode)
+        #[arg(long, default_value = "false")]
         leader_elect: bool,
 
         /// Name of the Lease resource used for leader election
         #[arg(long, default_value = "rustfs-operator-leader")]
         leader_elect_lease_name: String,
 
-        /// Namespace of the Lease resource (defaults to pod namespace or "default")
+        /// Namespace for the LeaderLease (CLI flag > OPERATOR_NAMESPACE > pod namespace > default)
         #[arg(long)]
         leader_elect_namespace: Option<String>,
 
@@ -104,9 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             leader_elect_namespace,
             leader_elect_identity,
         } => {
-            let namespace = leader_elect_namespace
-                .or_else(|| std::env::var("OPERATOR_NAMESPACE").ok())
-                .unwrap_or_else(|| "default".to_string());
+            let namespace = resolve_leader_elect_namespace(leader_elect_namespace);
             let identity = leader_elect_identity
                 .or_else(|| std::env::var("POD_NAME").ok())
                 .unwrap_or_else(|| {
@@ -125,4 +126,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Console { port } => operator::console::server::run(port).await,
     }
+}
+
+fn resolve_leader_elect_namespace(cli_namespace: Option<String>) -> String {
+    if let Some(namespace) = cli_namespace {
+        let namespace = namespace.trim().to_string();
+        if !namespace.is_empty() {
+            return namespace;
+        }
+    }
+
+    if let Some(namespace) = std::env::var("OPERATOR_NAMESPACE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return namespace;
+    }
+
+    std::fs::read_to_string(SERVICE_ACCOUNT_NAMESPACE_PATH)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string())
 }

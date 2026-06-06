@@ -27,6 +27,8 @@ spec:
           image: rustfs/operator:dev
           imagePullPolicy: Never
           command: ["./operator", "server"]
+          args:
+            - "--leader-elect=false"
           ports:
             - name: sts
               containerPort: 4223

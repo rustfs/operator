@@ -161,35 +161,31 @@ impl Lock for LeaseLock {
     }
 
     async fn update(&self, record: LeaderElectionRecord) -> Result<(), Error> {
-        // Retrieve the cached resourceVersion from the last get/create/update.
-        let resource_version = {
-            let cached = self.cached.lock().await;
-            cached
-                .as_ref()
-                .and_then(|l| l.metadata.resource_version.clone())
-        };
+        let mut cached = self.cached.lock().await;
 
-        let resource_version = resource_version.ok_or_else(|| Error::Conflict)?;
+        let resource_version = cached
+            .as_ref()
+            .and_then(|lease| lease.metadata.resource_version.clone())
+            .ok_or_else(|| Error::Conflict)?;
 
         let api = self.api();
         let lease = self.build_lease(&record, Some(resource_version));
 
-        let updated = api
+        let updated = match api
             .replace(&self.name, &PostParams::default(), &lease)
             .await
-            .map_err(|e| {
-                if is_conflict(&e) {
-                    Error::Conflict
-                } else {
-                    Error::KubeApi { source: e }
-                }
-            })?;
-
-        // Update cache with the new resourceVersion.
         {
-            let mut cached = self.cached.lock().await;
-            *cached = Some(updated);
-        }
+            Ok(lease) => lease,
+            Err(e) => {
+                if is_conflict(&e) {
+                    *cached = None;
+                    return Err(Error::Conflict);
+                }
+                return Err(Error::KubeApi { source: e });
+            }
+        };
+
+        *cached = Some(updated);
 
         debug!(
             lease = %self.describe(),

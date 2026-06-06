@@ -1499,6 +1499,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kube-leader-election"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "rand",
+ "snafu",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "kube-runtime"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1746,12 +1763,14 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "hostname",
  "http",
  "hyper",
  "hyper-util",
  "jsonwebtoken",
  "k8s-openapi",
  "kube",
+ "kube-leader-election",
  "rcgen",
  "reqwest",
  "rustls",
@@ -2893,6 +2912,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",

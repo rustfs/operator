@@ -4,6 +4,9 @@
 operator:
   # Number of operator replicas
   replicas: 1
+  # Force leader election setting.
+  # If unset/null, Helm enables it automatically when replicas > 1.
+  leaderElect:
 
   image:
     repository: rustfs/operator
