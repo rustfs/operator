@@ -47,6 +47,10 @@ spec:
               value: {{ .Values.sts.enabled | quote }}
             - name: OPERATOR_STS_AUDIENCE
               value: {{ .Values.sts.audience | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           {{- if .Values.sts.enabled }}
             - name: OPERATOR_STS_PORT
               value: {{ .Values.sts.port | quote }}

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct PersistenceConfig {
     #[x_kube(validation = Rule::new("self > 0").message("volumesPerServer must be greater than 0"))]
+    #[x_kube(validation = Rule::new("self == oldSelf").message("volumesPerServer is immutable"))]
     pub volumes_per_server: i32,
 
     #[serde(skip_serializing_if = "Option::is_none")]

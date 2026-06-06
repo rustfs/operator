@@ -14,7 +14,7 @@
 
 use clap::{Parser, Subcommand};
 use const_str::concat;
-use operator::{crd, run};
+use operator::{ServerOptions, crd, run};
 
 shadow_rs::shadow!(build);
 
@@ -66,7 +66,23 @@ enum Commands {
     },
 
     /// Run the controller
-    Server {},
+    Server {
+        /// Enable leader election for multi-replica deployments
+        #[arg(long, default_value = "true")]
+        leader_elect: bool,
+
+        /// Name of the Lease resource used for leader election
+        #[arg(long, default_value = "rustfs-operator-leader")]
+        leader_elect_lease_name: String,
+
+        /// Namespace of the Lease resource (defaults to pod namespace or "default")
+        #[arg(long)]
+        leader_elect_namespace: Option<String>,
+
+        /// Identity for this instance in leader election (defaults to POD_NAME env or hostname)
+        #[arg(long)]
+        leader_elect_identity: Option<String>,
+    },
 
     /// Run the console web server
     Console {
@@ -82,7 +98,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Crd { file } => crd(file).await,
-        Commands::Server {} => run().await,
+        Commands::Server {
+            leader_elect,
+            leader_elect_lease_name,
+            leader_elect_namespace,
+            leader_elect_identity,
+        } => {
+            let namespace = leader_elect_namespace
+                .or_else(|| std::env::var("OPERATOR_NAMESPACE").ok())
+                .unwrap_or_else(|| "default".to_string());
+            let identity = leader_elect_identity
+                .or_else(|| std::env::var("POD_NAME").ok())
+                .unwrap_or_else(|| {
+                    hostname::get()
+                        .ok()
+                        .and_then(|h| h.into_string().ok())
+                        .unwrap_or_else(|| "unknown".to_string())
+                });
+            let options = ServerOptions {
+                leader_elect,
+                leader_elect_lease_name,
+                leader_elect_namespace: namespace,
+                leader_elect_identity: identity,
+            };
+            run(options).await
+        }
         Commands::Console { port } => operator::console::server::run(port).await,
     }
 }

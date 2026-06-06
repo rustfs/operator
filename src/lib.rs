@@ -31,11 +31,16 @@ use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{Controller, watcher};
 use kube::{Api, Client, CustomResourceExt, Resource};
+use kube_leader_election::{
+    LeaderCallbacks, LeaderElector, LeaderElectorConfig, LeaseLock, SystemClock,
+};
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use tracing::{info, warn};
 
@@ -44,6 +49,18 @@ const CERT_MANAGER_GROUP: &str = "cert-manager.io";
 const CERT_MANAGER_VERSION: &str = "v1";
 const CERT_MANAGER_CERTIFICATE_KIND: &str = "Certificate";
 const CERT_MANAGER_CERTIFICATE_PLURAL: &str = "certificates";
+
+/// Options for the operator server command.
+pub struct ServerOptions {
+    /// Whether to enable leader election.
+    pub leader_elect: bool,
+    /// Name of the Lease resource for leader election.
+    pub leader_elect_lease_name: String,
+    /// Namespace of the Lease resource.
+    pub leader_elect_namespace: String,
+    /// Identity of this instance in leader election.
+    pub leader_elect_identity: String,
+}
 
 pub fn install_rustls_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -62,7 +79,7 @@ pub mod sts;
 #[cfg(test)]
 pub mod tests;
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error>> {
     install_rustls_crypto_provider();
 
     tracing_subscriber::fmt()
@@ -86,7 +103,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &material,
             )?))
         } else {
-            warn!("Operator STS TLS disabled by OPERATOR_STS_TLS_ENABLED=false");
+            warn!("Operator STS TLS disabled by OPERATOR_STS_ENABLED=false");
             None
         };
         let sts_listener = bind_sts_listener(sts_port, tls_server_config.is_some()).await?;
@@ -99,6 +116,45 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Operator STS server disabled by OPERATOR_STS_ENABLED=false");
     }
 
+    if options.leader_elect {
+        info!(
+            identity = %options.leader_elect_identity,
+            lease = %format!("{}/{}", options.leader_elect_namespace, options.leader_elect_lease_name),
+            "starting with leader election enabled"
+        );
+
+        let lock = LeaseLock::new(
+            client.clone(),
+            &options.leader_elect_lease_name,
+            &options.leader_elect_namespace,
+            &options.leader_elect_identity,
+        );
+
+        let config = LeaderElectorConfig {
+            identity: options.leader_elect_identity.clone(),
+            lease_duration: Duration::from_secs(15),
+            renew_deadline: Duration::from_secs(10),
+            retry_period: Duration::from_secs(2),
+            release_on_cancel: true,
+        };
+
+        let callbacks = ControllerCallbacks {
+            client: client.clone(),
+        };
+
+        let cancel = CancellationToken::new();
+        let elector = LeaderElector::new(config, lock, SystemClock)?;
+        elector.run(callbacks, cancel).await?;
+    } else {
+        info!("starting with leader election disabled");
+        run_controller(client).await;
+    }
+
+    Ok(())
+}
+
+/// Build and run the controller reconcile loop.
+async fn run_controller(client: Client) {
     let tenant_client = Api::<Tenant>::all(client.clone());
     let context = Context::new(client.clone());
     let controller = Controller::new(tenant_client, watcher::Config::default())
@@ -154,8 +210,40 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .await;
+}
 
-    Ok(())
+/// Callbacks for running the controller inside leader election.
+struct ControllerCallbacks {
+    client: Client,
+}
+
+#[async_trait::async_trait]
+impl LeaderCallbacks for ControllerCallbacks {
+    async fn on_started_leading(&self, cancel: CancellationToken) {
+        info!("acquired leader lease, starting controller");
+        let client = self.client.clone();
+        // Run the controller in a separate task so we can select on the cancel token.
+        let controller_handle = tokio::spawn(async move {
+            run_controller(client).await;
+        });
+
+        tokio::select! {
+            _ = controller_handle => {
+                info!("controller finished");
+            }
+            _ = cancel.cancelled() => {
+                info!("lost leader lease, stopping controller");
+            }
+        }
+    }
+
+    async fn on_stopped_leading(&self) {
+        warn!("stopped leading");
+    }
+
+    async fn on_new_leader(&self, identity: String) {
+        info!(new_leader = %identity, "observed new leader");
+    }
 }
 
 fn operator_sts_port() -> u16 {

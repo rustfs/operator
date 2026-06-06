@@ -24,7 +24,10 @@ use crate::console::{
 };
 use crate::types::v1alpha1::{
     persistence::PersistenceConfig,
-    pool::{Pool, SchedulingConfig, validate_pool_total_volumes},
+    pool::{
+        Pool, SchedulingConfig, validate_pool_collection, validate_pool_name,
+        validate_pool_total_volumes,
+    },
     pool_lifecycle::{
         DecommissionAction, DecommissionRequest, PoolLifecycleSpec, PvcRetentionPolicy,
     },
@@ -32,26 +35,6 @@ use crate::types::v1alpha1::{
     status::pool::PoolLifecycleState,
     tenant::Tenant,
 };
-
-/// Validate a Kubernetes resource name (RFC 1123 subdomain: lowercase alphanumeric + hyphen, 1–63).
-fn is_valid_k8s_name(s: &str) -> bool {
-    if s.is_empty() || s.len() > 63 {
-        return false;
-    }
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphanumeric() {
-        return false;
-    }
-    for c in chars {
-        if c != '-' && !c.is_ascii_alphanumeric() {
-            return false;
-        }
-    }
-    s.chars().last().is_some_and(|c| c != '-')
-}
 
 /// Loose validation for a Kubernetes resource quantity (e.g. `10Gi`, `100M`, `1`).
 fn is_valid_k8s_quantity(s: &str) -> bool {
@@ -582,12 +565,9 @@ pub async fn add_pool(
 
     // Validate pool name and quantities
     let pool_name = req.name.trim();
-    if !is_valid_k8s_name(pool_name) {
+    if let Err(message) = validate_pool_name(pool_name) {
         return Err(Error::BadRequest {
-            message: format!(
-                "Invalid pool name '{}': must be 1-63 chars, lowercase alphanumeric and hyphens (RFC 1123)",
-                req.name
-            ),
+            message: format!("Invalid pool name '{}': {}", req.name, message),
         });
     }
     if !is_valid_k8s_quantity(req.storage_size.trim()) {
@@ -689,6 +669,11 @@ pub async fn add_pool(
 
         remove_decommission_request(&mut tenant, pool_name);
         tenant.spec.pools.push(new_pool.clone());
+        if let Err(message) =
+            validate_pool_collection(&tenant.name_any(), &tenant.spec.pools, &tenant.spec.env)
+        {
+            return Err(Error::BadRequest { message });
+        }
 
         match tenant_api
             .replace(&tenant_name, &Default::default(), &tenant)

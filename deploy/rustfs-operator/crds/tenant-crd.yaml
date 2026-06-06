@@ -1043,6 +1043,8 @@ spec:
                       x-kubernetes-validations:
                       - message: pool name must be not empty
                         rule: self != ''
+                      - message: 'pool name must be a valid RFC 1123 label: lowercase alphanumeric or ''-'', start and end with alphanumeric, max 63 characters'
+                        rule: self.size() <= 63 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
                     nodeSelector:
                       additionalProperties:
                         type: string
@@ -1184,6 +1186,8 @@ spec:
                           x-kubernetes-validations:
                           - message: volumesPerServer must be greater than 0
                             rule: self > 0
+                          - message: volumesPerServer is immutable
+                            rule: self == oldSelf
                       required:
                       - volumesPerServer
                       type: object
@@ -1231,6 +1235,8 @@ spec:
                       x-kubernetes-validations:
                       - message: servers must be greater than 0
                         rule: self > 0
+                      - message: servers is immutable
+                        rule: self == oldSelf
                     tolerations:
                       description: Tolerations allow pods to schedule onto nodes with matching taints.
                       items:
@@ -1351,9 +1357,14 @@ spec:
                     reason: FieldValueInvalid
                     rule: self.servers != 3 || self.servers * self.persistence.volumesPerServer >= 6
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
                 x-kubernetes-validations:
                 - message: pools must be configured
                   rule: self.size() > 0
+                - message: pool names must be unique
+                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
               priorityClassName:
                 nullable: true
                 type: string

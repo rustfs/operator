@@ -34,6 +34,10 @@ spec:
           env:
             - name: RUST_LOG
               value: info
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: OPERATOR_STS_ENABLED
               value: "true"
             - name: OPERATOR_STS_AUDIENCE

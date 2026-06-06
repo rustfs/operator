@@ -833,6 +833,16 @@ impl Tenant {
             .unwrap_or(&"<unknown>".to_string())
             .clone();
 
+        // MinIO-compatible expansion model: an existing pool's server count is
+        // immutable. Horizontal capacity expansion must add a new pool.
+        if existing_spec.replicas != desired_spec.replicas {
+            return Err(types::error::Error::ImmutableFieldModified {
+                name: ss_name,
+                field: "spec.replicas".to_string(),
+                message: "Cannot change pool servers for an existing StatefulSet. Add a new pool to expand capacity.".to_string(),
+            });
+        }
+
         // Validate selector is unchanged (immutable field)
         if serde_json::to_value(&existing_spec.selector)?
             != serde_json::to_value(&desired_spec.selector)?
