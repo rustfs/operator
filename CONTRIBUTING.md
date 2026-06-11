@@ -45,8 +45,9 @@ Before every commit, you **MUST** pass the same checks as `make pre-commit` (see
 5. **Console (frontend)** — from repo root:
 
    ```bash
-   cd console-web && npm run lint
-   cd console-web && npx prettier --check "**/*.{ts,tsx,js,jsx,json,css,md}"
+   cd console-web && pnpm run lint
+   cd console-web && pnpm run build
+   cd console-web && pnpm run format:check
    ```
 
 #### Quick Commands
@@ -66,8 +67,9 @@ make clippy
 # Rust tests
 make test
 
-# Frontend: ESLint + Prettier check (requires npm install in console-web/)
+# Frontend: ESLint + build + Prettier check (requires pnpm install in console-web/)
 make console-lint
+make console-build
 make console-fmt-check
 
 # Full gate before push (Rust + console-web): same as project / AGENTS.md rules

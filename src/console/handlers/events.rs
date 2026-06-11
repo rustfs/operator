@@ -37,7 +37,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 /// SSE stream of merged tenant-scoped Kubernetes events (PRD §5.1).
 ///
-/// Uses the same `session` cookie JWT as other console routes. Payloads use named SSE events:
+/// Uses the same encrypted `session` cookie as other console routes. Payloads use named SSE events:
 /// - `snapshot`: JSON [`EventListResponse`]
 /// - `stream_error`: JSON `{"message":"..."}` (watch/snapshot failures)
 pub async fn stream_tenant_events(

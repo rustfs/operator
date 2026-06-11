@@ -56,8 +56,10 @@ pub enum Error {
     #[snafu(display("Kubernetes API error: {}", source))]
     KubeApi { source: kube::Error },
 
-    #[snafu(display("JWT error: {}", source))]
-    Jwt { source: jsonwebtoken::errors::Error },
+    #[snafu(display("Session error: {}", source))]
+    Session {
+        source: crate::console::state::SessionError,
+    },
 
     #[snafu(display("JSON serialization error: {}", source))]
     Json { source: serde_json::Error },
@@ -157,11 +159,11 @@ impl Error {
                 Vec::new(),
                 None,
             ),
-            Error::Jwt { source: _ } => (
-                StatusCode::UNAUTHORIZED,
-                "JwtError".to_string(),
-                "Unauthorized".to_string(),
-                "Invalid or expired token".to_string(),
+            Error::Session { source: _ } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "SessionError".to_string(),
+                "SessionError".to_string(),
+                "Session error".to_string(),
                 Vec::new(),
                 None,
             ),

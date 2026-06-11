@@ -25,6 +25,27 @@ operator:
       cpu: 500m
       memory: 512Mi
 
+  # Basic process probes. Override these for stricter platform-specific checks.
+  livenessProbe:
+    exec:
+      command:
+        - ./operator
+        - --version
+    initialDelaySeconds: 10
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    exec:
+      command:
+        - ./operator
+        - --version
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
   # Environment variables
   env:
     - name: RUST_LOG
@@ -113,8 +134,10 @@ console:
   # Log level for console (trace, debug, info, warn, error)
   logLevel: info
 
-  # JWT secret for session token signing
-  # If not set, a random secret will be generated
+  # Secret used to encrypt Console session cookies.
+  # All Console replicas must use the same secret.
+  # If not set, an existing chart Secret is reused.
+  # On first install, a random secret is generated.
   # Generate with: openssl rand -base64 32
   jwtSecret: ""
 

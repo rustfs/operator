@@ -20,7 +20,6 @@ on:
       - "**.md"
       - "**.txt"
       - "docs/**"
-      - "deploy/**"
       - "LICENSE*"
       - ".gitignore"
       - ".dockerignore"
@@ -38,7 +37,6 @@ on:
       - "**.md"
       - "**.txt"
       - "docs/**"
-      - "deploy/**"
       - "LICENSE*"
       - ".gitignore"
       - ".dockerignore"
@@ -74,7 +72,7 @@ jobs:
         with:
           concurrent_skipping: "same_content_newer"
           cancel_others: true
-          paths_ignore: '["*.md", "docs/**", "deploy/**"]'
+          paths_ignore: '["*.md", "docs/**"]'
           # Never skip release events and tag pushes
           do_not_skip: '["workflow_dispatch", "schedule", "merge_group", "release", "push"]'
 
@@ -109,3 +107,26 @@ jobs:
 
       - name: Check Rust-native e2e harness
         run: make e2e-check
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.1
+
+      - name: Setup Node environment
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: console-web/pnpm-lock.yaml
+
+      - name: Install console dependencies
+        working-directory: console-web
+        run: pnpm install --frozen-lockfile
+
+      - name: Check console frontend
+        working-directory: console-web
+        run: |
+          pnpm run lint
+          pnpm run build
+          pnpm run format:check

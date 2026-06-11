@@ -13,14 +13,13 @@
 // limitations under the License.
 
 use axum::{Extension, Json, extract::State, http::header, response::IntoResponse};
-use jsonwebtoken::{EncodingKey, Header, encode};
 use kube::Client;
 use snafu::ResultExt;
 
 use crate::console::{
     error::{self, Error, Result},
     models::auth::{LoginRequest, LoginResponse, SessionResponse},
-    state::{AppState, Claims},
+    state::{AppState, Claims, SESSION_TTL_SECONDS},
 };
 use crate::types::v1alpha1::tenant::Tenant;
 
@@ -49,21 +48,12 @@ pub async fn login(
             }
         })?;
 
-    // Issue signed session JWT
-    let claims = Claims::new(req.token);
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.jwt_secret.as_bytes()),
-    )
-    .context(error::JwtSnafu)?;
+    let token = state
+        .create_session(req.token)
+        .context(error::SessionSnafu)?;
 
     // HttpOnly session cookie
-    let cookie = format!(
-        "session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
-        token,
-        12 * 3600 // 12 hours
-    );
+    let cookie = session_cookie(&token);
 
     let headers = [(header::SET_COOKIE, cookie)];
 
@@ -78,8 +68,7 @@ pub async fn login(
 
 /// Clear the session cookie.
 pub async fn logout() -> impl IntoResponse {
-    // Expire the session cookie
-    let cookie = "session=; Path=/; HttpOnly; Max-Age=0";
+    let cookie = expired_session_cookie();
     let headers = [(header::SET_COOKIE, cookie)];
 
     (
@@ -91,10 +80,12 @@ pub async fn logout() -> impl IntoResponse {
     )
 }
 
-/// Return session validity and expiry from JWT claims.
+/// Return session validity and expiry from encrypted cookie claims.
 pub async fn session_check(Extension(claims): Extension<Claims>) -> Json<SessionResponse> {
-    let expires_at =
-        chrono::DateTime::from_timestamp(claims.exp as i64, 0).map(|dt| dt.to_rfc3339());
+    let expires_at = i64::try_from(claims.exp)
+        .ok()
+        .and_then(|exp| chrono::DateTime::from_timestamp(exp, 0))
+        .map(|dt| dt.to_rfc3339());
 
     Json(SessionResponse {
         valid: true,
@@ -117,4 +108,34 @@ async fn create_k8s_client(token: &str) -> Result<Client> {
     Client::try_from(config).map_err(|e| Error::InternalServer {
         message: format!("Failed to create K8s client: {}", e),
     })
+}
+
+fn session_cookie(token: &str) -> String {
+    let secure = if console_cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECONDS}{secure}"
+    )
+}
+
+fn expired_session_cookie() -> String {
+    let secure = if console_cookie_secure() {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!("session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}")
+}
+
+fn console_cookie_secure() -> bool {
+    match std::env::var("CONSOLE_COOKIE_SECURE") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
 }
