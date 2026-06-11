@@ -150,7 +150,7 @@ async fn build_snapshot_json(client: &Client, namespace: &str, tenant: &str) -> 
     serde_json::to_string(&body).map_err(|e| Error::Json { source: e })
 }
 
-/// Build a client impersonating the session token.
+/// Build a client using the Kubernetes bearer token from session claims.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

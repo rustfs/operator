@@ -18,6 +18,11 @@ Run the operator console HTTP API (e.g. `CONSOLE_COOKIE_SECURE=false cargo run -
 - Use same-origin: e.g. put frontend and backend behind one dev server that proxies `/api/v1` to the backend, and run the frontend with `NEXT_PUBLIC_API_BASE_URL=` (empty or `/api/v1`), or
 - Use different ports: run frontend on 3000, backend on 9090, set `NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1`, and set `CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000` on the backend.
 
+Login uses a Kubernetes ServiceAccount bearer token. For a local e2e cluster,
+generate one with `kubectl -n rustfs-system create token rustfs-operator-console --duration=24h`
+and paste the printed token into the login form. After login, the backend stores
+it in an encrypted `session` cookie.
+
 ## Build
 
 ```bash
@@ -46,7 +51,8 @@ If the frontend is served from a **different host** than the API, set at build t
 NEXT_PUBLIC_API_BASE_URL=https://api.example.com/api/v1 pnpm build
 ```
 
-Then configure the backend with `CORS_ALLOWED_ORIGINS` (see deploy README).
+Then configure the backend with `CORS_ALLOWED_ORIGINS` and, for cross-site
+frontend/API hosts, `CONSOLE_COOKIE_SAME_SITE=None` (see deploy README).
 
 ## Environment variables
 

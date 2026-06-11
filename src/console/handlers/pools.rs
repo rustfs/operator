@@ -963,7 +963,7 @@ pub async fn delete_pool(
     }))
 }
 
-/// Build a client using the session bearer token.
+/// Build a client using the Kubernetes bearer token from session claims.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

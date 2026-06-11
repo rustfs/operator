@@ -317,10 +317,12 @@ Serve the frontend and the API under **one HTTPS host** so the browser sends req
 
 No CORS configuration is needed on the backend for this setup.
 
-Console sessions are encrypted stateless cookies. If you run multiple Console
-replicas, keep `console.jwtSecret` stable and shared across all replicas. The
-chart reuses the existing generated Secret on upgrade when `console.jwtSecret`
-is not set.
+Console sessions are encrypted stateless cookies. Users paste a Kubernetes
+ServiceAccount bearer token only during login; after validation, the Console
+stores that token inside an encrypted `session` cookie for later API requests.
+If you run multiple Console replicas, keep `console.jwtSecret` stable and shared
+across all replicas. The chart reuses the existing generated Secret on upgrade
+when `console.jwtSecret` is not set.
 
 ### Backend CORS (when frontend is on a different host)
 
@@ -331,9 +333,25 @@ console:
   env:
     - name: CORS_ALLOWED_ORIGINS
       value: "https://ui.example.com"
+    # Required when the frontend and API are cross-site, so browsers send the
+    # encrypted session cookie on credentialed CORS requests.
+    - name: CONSOLE_COOKIE_SAME_SITE
+      value: "None"
 ```
 
 Multiple origins (e.g. dev + prod): comma-separated, e.g. `"https://ui.example.com,http://localhost:3000"`.
+
+### Console login token
+
+The Console login form expects a Kubernetes ServiceAccount bearer token. For
+the chart-managed Console ServiceAccount, generate a short-lived token with:
+
+```bash
+kubectl -n rustfs-system create token rustfs-operator-console --duration=24h
+```
+
+Paste the printed token into the Console login form. Use the namespace and
+ServiceAccount name from your Helm release if they differ from the defaults.
 
 ## Verifying the Installation
 
