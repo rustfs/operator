@@ -131,7 +131,10 @@ Port-forward the operator Console Web UI:
 kubectl --context kind-rustfs-e2e -n rustfs-system port-forward svc/rustfs-operator-console-frontend 18080:80
 ```
 
-Get a login token for the e2e Console:
+Get a login token for the e2e Console. The Console login form expects a
+Kubernetes ServiceAccount bearer token with permissions granted to the Console
+ServiceAccount. After login, the Console stores it in an encrypted session
+cookie; users do not pass this token on later API requests:
 
 ```bash
 TOKEN=$(kubectl --context kind-rustfs-e2e -n rustfs-system create token rustfs-operator-console --duration=24h)

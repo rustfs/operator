@@ -159,7 +159,11 @@ console:
       cpu: 200m
       memory: 256Mi
 
-  # Environment variables
+  # Extra environment variables for the Console API.
+  # For cross-site frontend/API deployments, set:
+  # - CORS_ALLOWED_ORIGINS=https://ui.example.com
+  # - CONSOLE_COOKIE_SAME_SITE=None
+  # Keep CONSOLE_COOKIE_SECURE enabled for production.
   env: []
 
   # Security context for the console pod

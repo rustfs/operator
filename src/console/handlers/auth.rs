@@ -23,8 +23,8 @@ use crate::console::{
 };
 use crate::types::v1alpha1::tenant::Tenant;
 
-/// Exchange a Kubernetes bearer token for a session cookie.
-// TOKEN=$(kubectl create token rustfs-operator -n rustfs-system --duration=24h)
+/// Exchange a Kubernetes bearer token for an encrypted session cookie.
+// TOKEN=$(kubectl create token rustfs-operator-console -n rustfs-system --duration=24h)
 // curl -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \
 //   -d "{\"token\": \"$TOKEN\"}"
@@ -111,23 +111,25 @@ async fn create_k8s_client(token: &str) -> Result<Client> {
 }
 
 fn session_cookie(token: &str) -> String {
-    let secure = if console_cookie_secure() {
+    let same_site = console_cookie_same_site();
+    let secure = if console_cookie_secure() || same_site == "None" {
         "; Secure"
     } else {
         ""
     };
     format!(
-        "session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL_SECONDS}{secure}"
+        "session={token}; Path=/; HttpOnly; SameSite={same_site}; Max-Age={SESSION_TTL_SECONDS}{secure}"
     )
 }
 
 fn expired_session_cookie() -> String {
-    let secure = if console_cookie_secure() {
+    let same_site = console_cookie_same_site();
+    let secure = if console_cookie_secure() || same_site == "None" {
         "; Secure"
     } else {
         ""
     };
-    format!("session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}")
+    format!("session=; Path=/; HttpOnly; SameSite={same_site}; Max-Age=0{secure}")
 }
 
 fn console_cookie_secure() -> bool {
@@ -137,5 +139,16 @@ fn console_cookie_secure() -> bool {
             "0" | "false" | "no" | "off"
         ),
         Err(_) => true,
+    }
+}
+
+fn console_cookie_same_site() -> &'static str {
+    match std::env::var("CONSOLE_COOKIE_SAME_SITE") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "lax" => "Lax",
+            "none" => "None",
+            _ => "Strict",
+        },
+        Err(_) => "Strict",
     }
 }

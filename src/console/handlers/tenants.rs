@@ -602,7 +602,7 @@ pub async fn put_tenant_yaml(
     Ok(Json(TenantYAML { yaml: yaml_str }))
 }
 
-/// Build a client using the session bearer token.
+/// Build a client using the Kubernetes bearer token from session claims.
 async fn create_client(claims: &Claims) -> Result<Client> {
     let mut config = kube::Config::infer()
         .await

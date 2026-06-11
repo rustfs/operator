@@ -19,7 +19,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LoginRequest {
-    /// Kubernetes ServiceAccount Token
+    /// Kubernetes ServiceAccount bearer token
     pub token: String,
 }
 
