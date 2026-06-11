@@ -18,14 +18,13 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use jsonwebtoken::{DecodingKey, Validation, decode};
 
 use crate::console::error::Error;
-use crate::console::state::{AppState, Claims};
+use crate::console::state::AppState;
 
-/// JWT session middleware.
+/// Encrypted cookie session middleware.
 ///
-/// Reads the `session` cookie, validates the JWT, and inserts `Claims` into request extensions.
+/// Reads the `session` cookie, validates the encrypted claims, and inserts `Claims` into request extensions.
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request,
@@ -56,24 +55,9 @@ pub async fn auth_middleware(
     let token = parse_session_cookie(cookies)
         .ok_or_else(|| unauthorized_response("Missing or invalid session"))?;
 
-    // Verify JWT signature and claims
-    let claims = decode::<Claims>(
-        &token,
-        &DecodingKey::from_secret(state.jwt_secret.as_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|e| {
-        tracing::warn!("JWT validation failed: {}", e);
-        unauthorized_response("Missing or invalid session")
-    })?
-    .claims;
-
-    // Reject expired tokens
-    let now = chrono::Utc::now().timestamp() as usize;
-    if claims.exp < now {
-        tracing::warn!("Token expired");
-        return Err(unauthorized_response("Missing or invalid session"));
-    }
+    let claims = state
+        .resolve_session(&token)
+        .ok_or_else(|| unauthorized_response("Missing or invalid session"))?;
 
     // Stash claims for handlers
     request.extensions_mut().insert(claims);
@@ -88,7 +72,7 @@ fn unauthorized_response(message: &str) -> Response {
     .into_response()
 }
 
-/// Extract `session=<jwt>` from a raw `Cookie` header value
+/// Extract `session=<token>` from a raw `Cookie` header value.
 fn parse_session_cookie(cookies: &str) -> Option<String> {
     cookies.split(';').find_map(|cookie| {
         let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();

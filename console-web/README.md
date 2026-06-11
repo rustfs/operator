@@ -13,10 +13,10 @@ Open [http://localhost:3000](http://localhost:3000). The app calls the console A
 
 ### Local dev with backend
 
-Run the operator console HTTP API (e.g. `cargo run -- console`, default port **9090**). Then either:
+Run the operator console HTTP API (e.g. `CONSOLE_COOKIE_SECURE=false cargo run -- console`, default port **9090** for local HTTP-only browser testing). Then either:
 
 - Use same-origin: e.g. put frontend and backend behind one dev server that proxies `/api/v1` to the backend, and run the frontend with `NEXT_PUBLIC_API_BASE_URL=` (empty or `/api/v1`), or
-- Use different ports: run frontend on 3000, backend on 9090, and set `NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1`. The backend allows `http://localhost:3000` by default (CORS).
+- Use different ports: run frontend on 3000, backend on 9090, set `NEXT_PUBLIC_API_BASE_URL=http://localhost:9090/api/v1`, and set `CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000` on the backend.
 
 ## Build
 
@@ -38,7 +38,7 @@ When frontend and backend are deployed in the same cluster and exposed under **o
 
 2. Enable the console frontend in the Helm chart and Ingress (see [deploy/rustfs-operator/README.md](../deploy/rustfs-operator/README.md#console-ui-frontend--backend-in-k8s)). The Ingress will serve `/` from this app and `/api` from the backend.
 
-3. Do **not** set `NEXT_PUBLIC_API_BASE_URL` (or set it to `/api/v1`). The browser will send requests to the same origin, so cookies and CORS work without extra config.
+3. Do **not** set `NEXT_PUBLIC_API_BASE_URL` (or set it to `/api/v1`). The browser will send requests to the same origin, so cookies and CORS work without extra config. Production deployments should serve the host over HTTPS because Console session cookies are `Secure` by default.
 
 If the frontend is served from a **different host** than the API, set at build time:
 

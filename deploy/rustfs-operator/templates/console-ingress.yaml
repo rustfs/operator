@@ -30,7 +30,7 @@ spec:
     - host: {{ .host | quote }}
       http:
         paths:
-          {{- if .Values.console.frontend.enabled }}
+          {{- if $.Values.console.frontend.enabled }}
           # API first so /api/v1/* goes to backend (same-origin for browser)
           - path: /api
             pathType: Prefix

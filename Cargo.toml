@@ -32,6 +32,8 @@ rcgen = "0.13"
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
+base64 = "0.22"
+ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2.5"
 shadow-rs = "1.5.0"
@@ -45,7 +47,6 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
-jsonwebtoken = "9.3"
 http = "1.2"
 utoipa = { version = "5", features = ["chrono"] }
 utoipa-swagger-ui = { version = "8", features = ["axum", "vendored"] }

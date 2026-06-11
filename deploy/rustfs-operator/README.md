@@ -286,7 +286,7 @@ The console has a **backend** (Rust API, `/api/v1/*`) and an optional **frontend
 
 ### Same-origin deployment (recommended)
 
-Serve the frontend and the API under **one host** so the browser sends requests to the same origin (no CORS, cookies work):
+Serve the frontend and the API under **one HTTPS host** so the browser sends requests to the same origin (no CORS, Secure cookies work):
 
 1. Enable the frontend and Ingress in `values.yaml`:
 
@@ -313,9 +313,14 @@ Serve the frontend and the API under **one host** so the browser sends requests 
    docker push your-registry/console-web:latest
    ```
 
-3. Install/upgrade the chart. The Ingress will route **`/api`** to the console backend and **`/`** to the frontend. The frontend is built with `NEXT_PUBLIC_API_BASE_URL=/api/v1` (default), so all API calls are same-origin.
+3. Install/upgrade the chart. The Ingress will route **`/api`** to the console backend and **`/`** to the frontend. The frontend is built with `NEXT_PUBLIC_API_BASE_URL=/api/v1` (default), so all API calls are same-origin. If you intentionally test over plain HTTP, set `CONSOLE_COOKIE_SECURE=false` in `console.env`; do not use that setting for production.
 
 No CORS configuration is needed on the backend for this setup.
+
+Console sessions are encrypted stateless cookies. If you run multiple Console
+replicas, keep `console.jwtSecret` stable and shared across all replicas. The
+chart reuses the existing generated Secret on upgrade when `console.jwtSecret`
+is not set.
 
 ### Backend CORS (when frontend is on a different host)
 

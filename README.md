@@ -2,7 +2,7 @@
 
 A Kubernetes operator for [RustFS](https://rustfs.com/) object storage, written in Rust with [kube-rs](https://github.com/kube-rs/kube). It reconciles a **`Tenant` custom resource** (`rustfs.com/v1alpha1`), validates referenced credential and KMS Secrets, and applies RBAC, Services, and StatefulSets so RustFS runs as an erasure-coded cluster inside your cluster.
 
-**Status:** v0.1.0 pre-release — under active development, **not production-ready**.
+**Status:** v0.1.0 pre-release — under active development.
 
 ## Features
 
@@ -43,6 +43,9 @@ cargo run -- server
 # Run the operator HTTP console API (default :9090)
 cargo run -- console
 
+# For local HTTP-only browser testing with console-web on :3000
+CONSOLE_COOKIE_SECURE=false CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000 cargo run -- console
+
 # Or choose a custom Console API port
 cargo run -- console --port 19090
 ```
@@ -64,7 +67,7 @@ From the repo root:
 
 | Command | Purpose |
 |--------|---------|
-| `make pre-commit` | Full local gate: Rust `fmt` / `clippy` / `test` + `console-web` ESLint and Prettier (run after `pnpm install` in `console-web/`). |
+| `make pre-commit` | Full local gate: Rust `fmt` / `clippy` / `test` + `console-web` ESLint, build, and Prettier (run after `pnpm install` in `console-web/`). |
 | `make fmt` / `make clippy` / `make test` | Individual Rust checks. |
 | `make console-lint` / `make console-fmt-check` | Frontend only. |
 | `make e2e-check` | Validate the e2e harness without creating a live cluster. |
@@ -74,7 +77,7 @@ From the repo root:
 | `make e2e-live-update` | Rebuild images, reload them into Kind, and roll out control-plane deployments. |
 | `make e2e-live-delete` | Delete the dedicated Kind cluster and its local storage. |
 
-CI (`.github/workflows/ci.yml`) runs Rust tests (including `nextest`), `cargo fmt --check`, and `clippy`; it does **not** run `console-web` checks — use **`make pre-commit`** before opening a PR so frontend changes are validated.
+CI (`.github/workflows/ci.yml`) runs Rust tests (including `nextest`), `cargo fmt --check`, `clippy`, the Rust-native e2e harness checks, and `console-web` lint/build/format checks. Use **`make pre-commit`** before opening a PR so local validation stays aligned.
 
 Contribution workflow, commit style, and PR expectations: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
@@ -135,7 +138,7 @@ TOKEN=$(kubectl --context kind-rustfs-e2e -n rustfs-system create token rustfs-o
 printf '%s\n' "$TOKEN"
 ```
 
-Open `http://127.0.0.1:18080` and paste the token into the login form. The frontend proxies `/api/v1` to the Console API inside the cluster, so the Web UI only needs the frontend port-forward above.
+Open `http://127.0.0.1:18080` and paste the token into the login form. The dev/e2e Console deployment sets `CONSOLE_COOKIE_SECURE=false` for HTTP port-forwarding. The frontend proxies `/api/v1` to the Console API inside the cluster, so the Web UI only needs the frontend port-forward above.
 
 Port-forward the e2e Tenant S3 API and Tenant Console:
 

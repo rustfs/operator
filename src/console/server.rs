@@ -21,31 +21,20 @@ use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLay
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-/// Build CORS allowed origins from env or default.
+/// Build CORS allowed origins from env.
 /// Env: CORS_ALLOWED_ORIGINS, comma-separated (e.g. "https://console.example.com,http://localhost:3000").
 /// When frontend and backend are served under the same host (e.g. Ingress path / and /api/v1),
 /// browser requests are same-origin and CORS is not used; this is mainly for dev or split-host deployments.
 fn cors_allowed_origins() -> Vec<HeaderValue> {
-    let default: Vec<HeaderValue> = [
-        "http://localhost:3000",
-        "http://localhost:8080",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:8080",
-    ]
-    .iter()
-    .filter_map(|s| s.parse().ok())
-    .collect();
     let s = match std::env::var("CORS_ALLOWED_ORIGINS") {
         Ok(v) if !v.trim().is_empty() => v,
-        _ => return default,
+        _ => return Vec::new(),
     };
-    let parsed: Vec<HeaderValue> = s
-        .split(',')
+    s.split(',')
         .map(|o| o.trim())
         .filter(|o| !o.is_empty())
         .filter_map(|o| o.parse().ok())
-        .collect();
-    if parsed.is_empty() { default } else { parsed }
+        .collect()
 }
 
 /// Start the Console HTTP server (Axum).
@@ -54,9 +43,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting RustFS Operator Console on port {}", port);
 
-    // JWT signing secret (set JWT_SECRET in production)
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "rustfs-console-secret-change-me-in-production".to_string());
+    let jwt_secret = load_jwt_secret();
 
     let state = match Client::try_default().await {
         Ok(kube_client) => {
@@ -163,4 +150,46 @@ async fn check_k8s_connectivity() -> Result<(), String> {
         .await
         .map_err(|e| format!("API: {}", e))?;
     Ok(())
+}
+
+fn load_jwt_secret() -> String {
+    if let Some(secret) = std::env::var("JWT_SECRET")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return secret;
+    }
+
+    tracing::warn!(
+        "JWT_SECRET is not set; generated an ephemeral Console session key for this process"
+    );
+    generate_ephemeral_jwt_secret()
+}
+
+fn generate_ephemeral_jwt_secret() -> String {
+    use sha2::Digest;
+
+    let mut bytes = [0u8; 32];
+    if read_urandom(&mut bytes).is_ok() {
+        return hex::encode(bytes);
+    }
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+            .to_be_bytes(),
+    );
+    hasher.update(std::process::id().to_be_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn read_urandom(bytes: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open("/dev/urandom")?;
+    file.read_exact(bytes)
 }
