@@ -1,3 +1,8 @@
+{{- $livenessProbe := default dict .Values.operator.livenessProbe -}}
+{{- $readinessProbe := default dict .Values.operator.readinessProbe -}}
+{{- if and (not .Values.operator.metrics.enabled) (or (hasKey $livenessProbe "httpGet") (hasKey $readinessProbe "httpGet")) -}}
+{{- fail "operator.metrics.enabled=false requires overriding operator.livenessProbe and operator.readinessProbe because the chart defaults use the metrics port" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,11 +49,18 @@ spec:
           {{- end }}
           args:
             - --leader-elect={{ ternary "true" "false" $leaderElect }}
-          {{- if .Values.sts.enabled }}
+          {{- if or .Values.sts.enabled .Values.operator.metrics.enabled }}
           ports:
+          {{- if .Values.operator.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.operator.metrics.port }}
+              protocol: TCP
+          {{- end }}
+          {{- if .Values.sts.enabled }}
             - name: sts
               containerPort: {{ .Values.sts.port }}
               protocol: TCP
+          {{- end }}
           {{- end }}
           {{- with .Values.operator.livenessProbe }}
           livenessProbe:
@@ -59,6 +71,14 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           env:
+            - name: OPERATOR_METRICS_ENABLED
+              value: {{ .Values.operator.metrics.enabled | quote }}
+            - name: OPERATOR_METRICS_PORT
+              value: {{ .Values.operator.metrics.port | quote }}
+            - name: OPERATOR_TENANT_MONITOR_ENABLED
+              value: {{ .Values.operator.tenantMonitor.enabled | quote }}
+            - name: OPERATOR_TENANT_MONITOR_INTERVAL_SECONDS
+              value: {{ .Values.operator.tenantMonitor.intervalSeconds | quote }}
             - name: OPERATOR_STS_ENABLED
               value: {{ .Values.sts.enabled | quote }}
             - name: OPERATOR_STS_AUDIENCE

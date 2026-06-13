@@ -30,12 +30,39 @@ spec:
           args:
             - "--leader-elect=false"
           ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
             - name: sts
               containerPort: 4223
               protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           env:
             - name: RUST_LOG
               value: info
+            - name: OPERATOR_METRICS_ENABLED
+              value: "true"
+            - name: OPERATOR_METRICS_PORT
+              value: "8080"
+            - name: OPERATOR_TENANT_MONITOR_ENABLED
+              value: "true"
+            - name: OPERATOR_TENANT_MONITOR_INTERVAL_SECONDS
+              value: "300"
             - name: POD_NAME
               valueFrom:
                 fieldRef:

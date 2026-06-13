@@ -1,0 +1,27 @@
+{{- if .Values.operator.metrics.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-metrics
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator-metrics
+  {{- with .Values.operator.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.operator.metrics.service.type }}
+  {{- if and (eq .Values.operator.metrics.service.type "ClusterIP") .Values.operator.metrics.service.clusterIP }}
+  clusterIP: {{ .Values.operator.metrics.service.clusterIP }}
+  {{- end }}
+  ports:
+    - port: {{ .Values.operator.metrics.service.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "rustfs-operator.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+{{- end }}

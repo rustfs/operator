@@ -1,0 +1,20 @@
+# Copyright 2025 RustFS Team
+# Operator metrics Service (used by the dev and e2e deployment flows)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-operator-metrics
+  namespace: rustfs-system
+  labels:
+    app.kubernetes.io/name: rustfs-operator
+    app.kubernetes.io/component: operator
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: rustfs-operator
+    app.kubernetes.io/component: operator

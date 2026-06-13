@@ -47,6 +47,12 @@ The following table lists the configurable parameters of the RustFS Operator cha
 | `operator.resources.requests.memory` | Memory resource requests | `128Mi` |
 | `operator.resources.limits.cpu` | CPU resource limits | `500m` |
 | `operator.resources.limits.memory` | Memory resource limits | `512Mi` |
+| `operator.metrics.enabled` | Enable operator `/metrics`, `/healthz`, and `/readyz` endpoint | `true` |
+| `operator.metrics.port` | Operator observability container port | `8080` |
+| `operator.serviceMonitor.enabled` | Create a Prometheus Operator ServiceMonitor | `false` |
+| `operator.prometheusRule.enabled` | Create Prometheus alert rules for operator and tenant storage health | `false` |
+| `operator.tenantMonitor.enabled` | Poll RustFS tenant storage health and capacity metrics | `true` |
+| `operator.tenantMonitor.intervalSeconds` | Tenant storage monitor interval | `300` |
 | `operator.env` | Environment variables | `[{name: RUST_LOG, value: info}]` |
 | `operator.nodeSelector` | Node selector for pod placement | `{}` |
 | `operator.tolerations` | Tolerations for pod scheduling | `[]` |
@@ -77,6 +83,8 @@ The STS service is HTTPS by default. When `sts.tls.auto=true`, the operator crea
 STS only issues credentials for TLS-enabled Tenants. For Tenant upstream calls, the operator selects the Tenant HTTPS service endpoint and trusts the CA recorded in `status.certificates.tls.caSecretRef`.
 
 Operator STS does not present a client certificate when calling the Tenant. Tenants configured with `spec.tls.certManager.caTrust.clientCaSecretRef` continue to run with server-side mTLS enabled, but Operator STS rejects those Tenants with HTTP 400 and `TenantTlsClientCertificateUnsupported`.
+
+When `operator.serviceMonitor.enabled=true`, the chart creates scrape targets for both the operator observability endpoint and the Console API `/metrics` endpoint.
 
 ### Tenant Provisioning
 
