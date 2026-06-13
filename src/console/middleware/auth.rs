@@ -38,6 +38,7 @@ pub async fn auth_middleware(
     let path = request.uri().path();
     if path == "/healthz"
         || path == "/readyz"
+        || path == "/metrics"
         || path.starts_with("/api/v1/login")
         || path.starts_with("/swagger-ui")
         || path.starts_with("/api-docs")

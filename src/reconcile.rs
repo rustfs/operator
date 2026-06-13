@@ -511,6 +511,11 @@ fn is_node_down(node: &corev1::Node) -> bool {
     false
 }
 
+fn requeue_after(duration: Duration) -> Action {
+    crate::metrics::record_reconcile_requeue(duration);
+    Action::requeue(duration)
+}
+
 pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
     error!("error_policy: {:?}", error);
 
@@ -532,16 +537,16 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
             | context::Error::CredentialSecretTooShort { .. }
             | context::Error::KmsSecretNotFound { .. }
             | context::Error::KmsSecretMissingKey { .. }
-            | context::Error::KmsConfigInvalid { .. } => Action::requeue(Duration::from_secs(60)),
+            | context::Error::KmsConfigInvalid { .. } => requeue_after(Duration::from_secs(60)),
 
             // Kubernetes API errors - might be transient (network, API server issues)
             // Use shorter requeue for faster recovery
             context::Error::Kube { .. } | context::Error::Record { .. } => {
-                Action::requeue(Duration::from_secs(5))
+                requeue_after(Duration::from_secs(5))
             }
 
             // Other context errors - use moderate requeue
-            _ => Action::requeue(Duration::from_secs(15)),
+            _ => requeue_after(Duration::from_secs(15)),
         },
 
         // Type errors - validation issues, use moderate requeue
@@ -551,15 +556,15 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
             types::error::Error::ImmutableFieldModified { .. }
             | types::error::Error::InvalidTenantName { .. }
             | types::error::Error::PoolDeleteBlocked { .. } => {
-                Action::requeue(Duration::from_secs(60))
+                requeue_after(Duration::from_secs(60))
             }
 
             // Other type errors - use moderate requeue
-            _ => Action::requeue(Duration::from_secs(15)),
+            _ => requeue_after(Duration::from_secs(15)),
         },
 
-        Error::TlsBlocked { .. } => Action::requeue(Duration::from_secs(60)),
-        Error::TlsPending { .. } => Action::requeue(Duration::from_secs(20)),
+        Error::TlsBlocked { .. } => requeue_after(Duration::from_secs(60)),
+        Error::TlsPending { .. } => requeue_after(Duration::from_secs(20)),
     }
 }
 

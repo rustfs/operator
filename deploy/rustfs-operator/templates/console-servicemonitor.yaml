@@ -1,0 +1,30 @@
+{{- if and .Values.console.enabled .Values.operator.serviceMonitor.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-console
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+    {{- with .Values.operator.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.operator.serviceMonitor.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ include "rustfs-operator.namespace" . }}
+  selector:
+    matchLabels:
+      {{- include "rustfs-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: console
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.operator.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.operator.serviceMonitor.scrapeTimeout }}
+{{- end }}

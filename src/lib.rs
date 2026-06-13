@@ -18,7 +18,10 @@ use crate::context::Context;
 use crate::reconcile::{error_policy, reconcile_rustfs};
 use crate::types::v1alpha1::policy_binding::PolicyBinding;
 use crate::types::v1alpha1::tenant::Tenant;
-use axum::{Router, body::Body};
+use axum::{
+    Router, body::Body, extract::State, http::StatusCode, middleware, response::IntoResponse,
+    routing::get,
+};
 use futures::StreamExt;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -30,15 +33,16 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{Controller, watcher};
-use kube::{Api, Client, CustomResourceExt, Resource};
+use kube::{Api, Client, CustomResourceExt, Resource, api::ListParams};
 use kube_leader_election::{
     LeaderCallbacks, LeaderElector, LeaderElectorConfig, LeaseLock, SystemClock,
 };
 use std::collections::BTreeMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
@@ -66,9 +70,24 @@ pub fn install_rustls_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+pub fn init_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_level(true)
+            .with_file(true)
+            .with_line_number(true)
+            .with_target(true)
+            .try_init();
+    });
+}
+
 mod context;
+pub mod metrics;
 pub mod reconcile;
 mod status;
+mod tenant_monitor;
 pub mod types;
 pub mod utils;
 
@@ -81,16 +100,23 @@ pub mod tests;
 
 pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error>> {
     install_rustls_crypto_provider();
-
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_level(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_target(true)
-        .init();
+    init_tracing();
 
     let client = Client::try_default().await?;
+    if operator_metrics_enabled() {
+        let metrics_port = operator_metrics_port();
+        let metrics_client = client.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                run_operator_observability_server(metrics_client, metrics_port).await
+            {
+                warn!(%error, "operator observability server stopped unexpectedly");
+            }
+        });
+    } else {
+        info!("operator metrics server disabled by OPERATOR_METRICS_ENABLED=false");
+    }
+
     if operator_sts_enabled() {
         let sts_port = operator_sts_port();
         let sts_state =
@@ -147,7 +173,9 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         elector.run(callbacks, cancel).await?;
     } else {
         info!("starting with leader election disabled");
-        run_controller(client, CancellationToken::new()).await;
+        metrics::set_operator_leader(true);
+        run_active_leader_tasks(client, CancellationToken::new()).await;
+        metrics::set_operator_leader(false);
     }
 
     Ok(())
@@ -202,7 +230,11 @@ async fn run_controller(client: Client, cancel: CancellationToken) {
     };
 
     let mut reconcile_stream = controller
-        .run(reconcile_rustfs, error_policy, Arc::new(context))
+        .run(
+            instrumented_reconcile_rustfs,
+            error_policy,
+            Arc::new(context),
+        )
         .boxed();
 
     tokio::select! {
@@ -220,6 +252,69 @@ async fn run_controller(client: Client, cancel: CancellationToken) {
     }
 }
 
+async fn instrumented_reconcile_rustfs(
+    tenant: Arc<Tenant>,
+    ctx: Arc<Context>,
+) -> Result<kube::runtime::controller::Action, reconcile::Error> {
+    let started = metrics::reconcile_started();
+    let result = reconcile_rustfs(tenant, ctx).await;
+    metrics::reconcile_finished(result.is_ok(), started.elapsed());
+    result
+}
+
+async fn run_active_leader_tasks(client: Client, cancel: CancellationToken) {
+    let tasks_cancel = CancellationToken::new();
+    let controller_client = client.clone();
+    let controller_cancel = tasks_cancel.clone();
+    let mut controller_handle = tokio::spawn(async move {
+        run_controller(controller_client, controller_cancel).await;
+    });
+
+    let mut monitor_handle = if tenant_monitor::is_enabled() {
+        let monitor_cancel = tasks_cancel.clone();
+        Some(tokio::spawn(async move {
+            tenant_monitor::run(client, monitor_cancel).await;
+        }))
+    } else {
+        info!("tenant storage monitor disabled by OPERATOR_TENANT_MONITOR_ENABLED=false");
+        None
+    };
+
+    let mut controller_finished = false;
+    tokio::select! {
+        result = &mut controller_handle => {
+            controller_finished = true;
+            if let Err(error) = result {
+                warn!(%error, "controller task failed");
+            } else {
+                info!("controller finished");
+            }
+        }
+        _ = cancel.cancelled() => {
+            info!("leader task cancellation requested");
+        }
+    }
+
+    tasks_cancel.cancel();
+    if !controller_finished {
+        stop_task("controller", controller_handle).await;
+    }
+    if let Some(handle) = monitor_handle.take() {
+        stop_task("tenant storage monitor", handle).await;
+    }
+}
+
+async fn stop_task(name: &str, mut handle: JoinHandle<()>) {
+    if tokio::time::timeout(Duration::from_secs(5), &mut handle)
+        .await
+        .is_err()
+    {
+        warn!(task = name, "task stop timed out, forcing shutdown");
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
 /// Callbacks for running the controller inside leader election.
 struct ControllerCallbacks {
     client: Client,
@@ -228,41 +323,109 @@ struct ControllerCallbacks {
 #[async_trait::async_trait]
 impl LeaderCallbacks for ControllerCallbacks {
     async fn on_started_leading(&self, cancel: CancellationToken) {
-        info!("acquired leader lease, starting controller");
-        let client = self.client.clone();
-        let controller_cancel = CancellationToken::new();
-        let run_cancel = controller_cancel.clone();
-        // Run the controller in a separate task so we can select on the cancel token.
-        let controller_handle = tokio::spawn(async move {
-            run_controller(client, run_cancel).await;
-        });
-        tokio::pin!(controller_handle);
-
-        tokio::select! {
-            _ = &mut controller_handle => {
-                info!("controller finished");
-            }
-            _ = cancel.cancelled() => {
-                info!("lost leader lease, stopping controller");
-                controller_cancel.cancel();
-                if tokio::time::timeout(Duration::from_secs(5), &mut controller_handle)
-                    .await
-                    .is_err()
-                {
-                    warn!("controller stop timed out, forcing shutdown");
-                    controller_handle.abort();
-                }
-                let _ = controller_handle.await;
-            }
-        }
+        info!("acquired leader lease, starting active leader tasks");
+        metrics::set_operator_leader(true);
+        run_active_leader_tasks(self.client.clone(), cancel).await;
+        metrics::set_operator_leader(false);
     }
 
     async fn on_stopped_leading(&self) {
+        metrics::set_operator_leader(false);
         warn!("stopped leading");
     }
 
     async fn on_new_leader(&self, identity: String) {
         info!(new_leader = %identity, "observed new leader");
+    }
+}
+
+#[derive(Clone)]
+struct OperatorObservabilityState {
+    client: Client,
+}
+
+async fn run_operator_observability_server(
+    client: Client,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = OperatorObservabilityState { client };
+    let app = Router::new()
+        .route("/metrics", get(metrics::handler))
+        .route("/healthz", get(operator_health_check))
+        .route("/readyz", get(operator_ready_check))
+        .with_state(state)
+        .layer(middleware::from_fn(metrics::record_operator_http));
+
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!("operator observability server listening on http://{}", addr);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn operator_health_check() -> impl IntoResponse {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (StatusCode::OK, format!("OK: {}", since_epoch.as_secs()))
+}
+
+async fn operator_ready_check(
+    State(state): State<OperatorObservabilityState>,
+) -> impl IntoResponse {
+    match check_operator_control_plane(&state.client).await {
+        Ok(()) => (StatusCode::OK, "Ready".to_string()),
+        Err(error) => {
+            warn!(%error, "operator readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Not ready: {error}"),
+            )
+        }
+    }
+}
+
+async fn check_operator_control_plane(client: &Client) -> Result<(), String> {
+    let tenants: Api<Tenant> = Api::all(client.clone());
+    tenants
+        .list(&ListParams::default().limit(1))
+        .await
+        .map_err(|error| format!("Tenant API: {error}"))?;
+    Ok(())
+}
+
+fn operator_metrics_port() -> u16 {
+    let default_port: u16 = 8080;
+    match std::env::var("OPERATOR_METRICS_PORT") {
+        Ok(raw_port) => match raw_port.parse::<u16>() {
+            Ok(port) => port,
+            Err(error) => {
+                warn!(
+                    %error,
+                    raw_port,
+                    "invalid OPERATOR_METRICS_PORT value, using default"
+                );
+                default_port
+            }
+        },
+        Err(_) => default_port,
+    }
+}
+
+fn operator_metrics_enabled() -> bool {
+    match std::env::var("OPERATOR_METRICS_ENABLED") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => {
+                warn!(
+                    value,
+                    "invalid OPERATOR_METRICS_ENABLED value, defaulting to enabled"
+                );
+                true
+            }
+        },
+        Err(_) => true,
     }
 }
 
