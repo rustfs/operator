@@ -25,22 +25,46 @@ operator:
       cpu: 500m
       memory: 512Mi
 
+  metrics:
+    # Enable the operator observability HTTP endpoint.
+    enabled: true
+    port: 8080
+    service:
+      type: ClusterIP
+      port: 8080
+      clusterIP: ""
+      annotations: {}
+
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+
+  prometheusRule:
+    enabled: false
+    labels: {}
+    annotations: {}
+
+  tenantMonitor:
+    enabled: true
+    intervalSeconds: 300
+
   # Basic process probes. Override these for stricter platform-specific checks.
   livenessProbe:
-    exec:
-      command:
-        - ./operator
-        - --version
+    httpGet:
+      path: /healthz
+      port: metrics
     initialDelaySeconds: 10
     periodSeconds: 20
     timeoutSeconds: 5
     failureThreshold: 3
 
   readinessProbe:
-    exec:
-      command:
-        - ./operator
-        - --version
+    httpGet:
+      path: /readyz
+      port: metrics
     initialDelaySeconds: 5
     periodSeconds: 10
     timeoutSeconds: 5

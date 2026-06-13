@@ -40,6 +40,7 @@ fn cors_allowed_origins() -> Vec<HeaderValue> {
 /// Start the Console HTTP server (Axum).
 pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     crate::install_rustls_crypto_provider();
+    crate::init_tracing();
 
     tracing::info!("Starting RustFS Operator Console on port {}", port);
 
@@ -66,6 +67,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         // Liveness (unauthenticated)
         .route("/healthz", get(health_check))
         .route("/readyz", get(ready_check))
+        .route("/metrics", get(crate::metrics::handler))
         // OpenAPI / Swagger (unauthenticated)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         // REST API v1
@@ -91,7 +93,8 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 .allow_credentials(true),
         )
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(crate::metrics::record_console_http));
 
     // Bind and serve
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

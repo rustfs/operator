@@ -1,0 +1,45 @@
+{{- if and .Values.operator.metrics.enabled .Values.operator.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+    {{- with .Values.operator.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.operator.prometheusRule.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: rustfs-operator.rules
+      rules:
+        - alert: RustfsOperatorReconcileErrors
+          expr: sum(increase(rustfs_operator_reconcile_total{result="error"}[10m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: RustFS Operator reconcile errors
+            description: RustFS Operator has reported reconcile errors in the last 10 minutes.
+        - alert: RustfsTenantStorageUnhealthy
+          expr: rustfs_operator_tenant_storage_poll_success == 1 and rustfs_operator_tenant_storage_healthy == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: RustFS tenant storage is unhealthy
+            description: A RustFS tenant has offline, healing, or quorum-risk storage.
+        - alert: RustfsTenantStoragePollFailed
+          expr: rustfs_operator_tenant_storage_poll_success == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: RustFS tenant storage monitor poll failed
+            description: The operator cannot collect storage health for a RustFS tenant.
+{{- end }}

@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 
 use super::{
     ADD_USER_PATH, CreateBucketResult, POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH,
-    RustfsAdminClient, RustfsClientError, SET_POLICY_PATH,
+    RustfsAdminClient, RustfsClientError, SERVER_INFO_PATH, SET_POLICY_PATH,
     helpers::{extract_canned_policy_document, extract_credentials, parse_assume_role_response},
 };
 
@@ -302,6 +302,84 @@ async fn add_canned_policy_uses_expected_path_query_body_and_admin_signing() {
     );
     assert!(capture.query.lock().await.contains("name=tenant-policy"));
     assert_eq!(&*capture.body.lock().await, policy);
+    assert!(
+        capture
+            .authorization
+            .lock()
+            .await
+            .contains("/s3/aws4_request")
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn server_info_uses_expected_path_and_parses_health_fields() {
+    let capture = Capture::default();
+    let route_capture = capture.clone();
+
+    let router = Router::new()
+        .route(
+            SERVER_INFO_PATH,
+            get(
+                move |State(c): State<Capture>, req: Request<Body>| async move {
+                    let path = req.uri().path().to_string();
+                    let authorization = req
+                        .headers()
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+
+                    *c.path.lock().await = path;
+                    *c.authorization.lock().await = authorization;
+
+                    (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "usage": {"size": 42},
+                            "backend": {
+                                "onlineDisks": 3,
+                                "offlineDisks": 1,
+                                "standardSCParity": 2,
+                                "totalSets": [1],
+                                "totalDrivesPerSet": [4]
+                            },
+                            "pools": {
+                                "0": {
+                                    "0": {
+                                        "rawUsage": 100,
+                                        "rawCapacity": 400,
+                                        "usage": 50,
+                                        "objectsCount": 2,
+                                        "healDisks": 1
+                                    }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    )
+                },
+            ),
+        )
+        .with_state(route_capture.clone());
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let info = client.server_info().await.unwrap();
+
+    let backend = info.backend.unwrap();
+    assert_eq!(backend.online_disks, 3);
+    assert_eq!(backend.offline_disks, 1);
+    assert_eq!(backend.standard_sc_parity, Some(2));
+    assert_eq!(info.usage.unwrap().size, 42);
+    assert_eq!(info.pools.unwrap()["0"]["0"].raw_capacity, 400);
+    assert_eq!(&*capture.path.lock().await, SERVER_INFO_PATH);
     assert!(
         capture
             .authorization
