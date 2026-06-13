@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client};
@@ -48,6 +48,7 @@ const SET_POLICY_PATH: &str = "/rustfs/admin/v3/set-policy";
 const LIST_CANNED_POLICIES_PATH: &str = "/rustfs/admin/v3/list-canned-policies";
 const ADD_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/add-canned-policy";
 const INFO_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/info-canned-policy";
+const SERVER_INFO_PATH: &str = "/rustfs/admin/v3/info";
 const POOLS_LIST_PATH: &str = "/rustfs/admin/v3/pools/list";
 const POOLS_STATUS_PATH: &str = "/rustfs/admin/v3/pools/status";
 const POOLS_DECOMMISSION_PATH: &str = "/rustfs/admin/v3/pools/decommission";
@@ -121,6 +122,50 @@ pub struct RustfsPoolDecommissionInfo {
     pub bytes_decommissioned: Option<u64>,
     #[serde(rename = "bytesDecommissionedFailed")]
     pub bytes_decommissioned_failed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+pub struct RustfsServerInfo {
+    #[serde(default)]
+    pub usage: Option<RustfsServerUsage>,
+    #[serde(default)]
+    pub backend: Option<RustfsErasureBackend>,
+    #[serde(default)]
+    pub pools: Option<BTreeMap<String, BTreeMap<String, RustfsErasureSetInfo>>>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+pub struct RustfsServerUsage {
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+pub struct RustfsErasureBackend {
+    #[serde(default, rename = "onlineDisks")]
+    pub online_disks: u64,
+    #[serde(default, rename = "offlineDisks")]
+    pub offline_disks: u64,
+    #[serde(default, rename = "standardSCParity", alias = "StandardSCParity")]
+    pub standard_sc_parity: Option<u64>,
+    #[serde(default, rename = "totalSets")]
+    pub total_sets: Vec<u64>,
+    #[serde(default, rename = "totalDrivesPerSet", alias = "drivesPerSet")]
+    pub drives_per_set: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+pub struct RustfsErasureSetInfo {
+    #[serde(default, rename = "rawUsage")]
+    pub raw_usage: u64,
+    #[serde(default, rename = "rawCapacity")]
+    pub raw_capacity: u64,
+    #[serde(default)]
+    pub usage: u64,
+    #[serde(default, rename = "objectsCount")]
+    pub objects_count: u64,
+    #[serde(default, rename = "healDisks")]
+    pub heal_disks: u64,
 }
 
 /// Error type for RustFS admin/STS client operations.

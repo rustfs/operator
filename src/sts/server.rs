@@ -22,6 +22,7 @@ use axum::{
 };
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
 use kube::{Api, Client, api::ListParams};
+use std::time::Instant;
 
 use crate::console::state::AppState;
 use crate::sts::binding;
@@ -51,7 +52,10 @@ async fn assume_role_with_web_identity_for_tenant(
     Path((tenant_namespace, tenant_name)): Path<(String, String)>,
     Form(form): Form<AssumeRoleWithWebIdentityForm>,
 ) -> Response {
-    assume_role_with_web_identity(state, tenant_namespace, tenant_name, form).await
+    let started = Instant::now();
+    let response = assume_role_with_web_identity(state, tenant_namespace, tenant_name, form).await;
+    crate::metrics::record_sts_request(response.status().is_success(), started.elapsed());
+    response
 }
 
 async fn assume_role_with_web_identity(
