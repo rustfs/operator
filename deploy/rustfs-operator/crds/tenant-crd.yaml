@@ -36,10 +36,13 @@ spec:
                       - Retain
                       type: string
                     name:
+                      maxLength: 63
+                      minLength: 3
+                      pattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
                       type: string
                       x-kubernetes-validations:
                       - message: bucket name must be a valid RustFS/S3 bucket name
-                        rule: self.size() >= 3 && self.size() <= 63 && self != 'rustfs' && !self.matches('^(\\d+\\.){3}\\d+$') && !self.contains('..') && !self.contains('.-') && !self.contains('-.') && self.matches('^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
+                        rule: self != 'rustfs' && !self.matches('^(\\d+\\.){3}\\d+$') && !self.contains('..') && !self.contains('.-') && !self.contains('-.')
                     objectLock:
                       nullable: true
                       type: boolean
@@ -49,10 +52,11 @@ spec:
                   required:
                   - name
                   type: object
+                maxItems: 1024
                 type: array
-                x-kubernetes-validations:
-                - message: bucket names must be unique
-                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               createServiceAccountRbac:
                 nullable: true
                 type: boolean
@@ -461,15 +465,13 @@ spec:
                         configMapKeyRef:
                           properties:
                             key:
+                              maxLength: 253
+                              minLength: 1
                               type: string
-                              x-kubernetes-validations:
-                              - message: configMapKeyRef key must be not empty
-                                rule: self != ''
                             name:
+                              maxLength: 253
+                              minLength: 1
                               type: string
-                              x-kubernetes-validations:
-                              - message: configMapKeyRef name must be not empty
-                                rule: self != ''
                           required:
                           - key
                           - name
@@ -478,18 +480,19 @@ spec:
                       - configMapKeyRef
                       type: object
                     name:
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^\S+$
                       type: string
-                      x-kubernetes-validations:
-                      - message: policy name must be not empty and must not contain whitespace
-                        rule: self != '' && !self.matches('.*\\s.*')
                   required:
                   - document
                   - name
                   type: object
+                maxItems: 256
                 type: array
-                x-kubernetes-validations:
-                - message: policy names must be unique
-                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               poolLifecycle:
                 description: Explicit lifecycle requests for pool decommissioning.
                 nullable: true
@@ -506,11 +509,16 @@ spec:
                           nullable: true
                           type: string
                         poolName:
+                          maxLength: 63
+                          minLength: 1
                           type: string
                         reason:
+                          maxLength: 1024
                           nullable: true
                           type: string
                         requestId:
+                          maxLength: 128
+                          minLength: 1
                           type: string
                         requestedAt:
                           nullable: true
@@ -520,15 +528,16 @@ spec:
                       - poolName
                       - requestId
                       type: object
+                    maxItems: 32
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - poolName
+                    x-kubernetes-list-type: map
                   pvcRetentionPolicy:
                     enum:
                     - Retain
                     type: string
                 type: object
-                x-kubernetes-validations:
-                - message: decommissionRequests must contain at most one entry per poolName
-                  rule: '!has(self.decommissionRequests) || self.decommissionRequests.all(r, self.decommissionRequests.exists_one(other, other.poolName == r.poolName))'
               pools:
                 items:
                   description: |-
@@ -1039,12 +1048,10 @@ spec:
                           type: object
                       type: object
                     name:
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
-                      x-kubernetes-validations:
-                      - message: pool name must be not empty
-                        rule: self != ''
-                      - message: 'pool name must be a valid RFC 1123 label: lowercase alphanumeric or ''-'', start and end with alphanumeric, max 63 characters'
-                        rule: self.size() <= 63 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
                     nodeSelector:
                       additionalProperties:
                         type: string
@@ -1356,15 +1363,12 @@ spec:
                   - messageExpression: '"pool " + self.name + " with 3 servers must have at least 6 volumes in total"'
                     reason: FieldValueInvalid
                     rule: self.servers != 3 || self.servers * self.persistence.volumesPerServer >= 6
+                maxItems: 32
+                minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
-                x-kubernetes-validations:
-                - message: pools must be configured
-                  rule: self.size() > 0
-                - message: pool names must be unique
-                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
               priorityClassName:
                 nullable: true
                 type: string
@@ -1541,27 +1545,30 @@ spec:
                       - Retain
                       type: string
                     name:
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^\S+$
                       type: string
-                      x-kubernetes-validations:
-                      - message: user Secret name must be not empty and must not contain whitespace
-                        rule: self != '' && !self.matches('.*\\s.*')
                     policies:
                       description: Canned policies to map directly to this user.
                       items:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^\S+$
                         type: string
+                      maxItems: 64
+                      minItems: 1
                       type: array
-                      x-kubernetes-validations:
-                      - message: user policy names must be not empty and must not contain whitespace
-                        rule: self.all(x, x != '' && !x.matches('.*\\s.*'))
-                      - message: user policy names must be unique
-                        rule: self.all(x, self.filter(y, y == x).size() == 1)
+                      x-kubernetes-list-type: set
                   required:
                   - name
                   type: object
+                maxItems: 256
                 type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
                 x-kubernetes-validations:
-                - message: user Secret names must be unique
-                  rule: self.all(x, self.filter(y, y.name == x.name).size() == 1)
                 - message: user policies must contain at least one policy
                   rule: self.all(x, has(x.policies) && x.policies.size() > 0)
             required:

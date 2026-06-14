@@ -17,14 +17,21 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
+pub(crate) const MAX_DECOMMISSION_REQUESTS: u32 = 32;
+pub(crate) const MAX_DECOMMISSION_POOL_NAME_LENGTH: u32 = 63;
+pub(crate) const MAX_DECOMMISSION_REQUEST_ID_LENGTH: u32 = 128;
+pub(crate) const MAX_DECOMMISSION_REASON_LENGTH: u32 = 1024;
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("!has(self.decommissionRequests) || self.decommissionRequests.all(r, self.decommissionRequests.exists_one(other, other.poolName == r.poolName))").
-    message("decommissionRequests must contain at most one entry per poolName"))]
 pub struct PoolLifecycleSpec {
     #[serde(default, skip_serializing_if = "is_default_pvc_retention_policy")]
     pub pvc_retention_policy: PvcRetentionPolicy,
 
+    #[schemars(
+        length(max = MAX_DECOMMISSION_REQUESTS),
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["poolName"])
+    )]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decommission_requests: Vec<DecommissionRequest>,
 }
@@ -41,7 +48,9 @@ pub enum PvcRetentionPolicy {
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DecommissionRequest {
+    #[schemars(length(min = 1, max = MAX_DECOMMISSION_POOL_NAME_LENGTH))]
     pub pool_name: String,
+    #[schemars(length(min = 1, max = MAX_DECOMMISSION_REQUEST_ID_LENGTH))]
     pub request_id: String,
     pub action: DecommissionAction,
 
@@ -51,6 +60,7 @@ pub struct DecommissionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_requested_at: Option<String>,
 
+    #[schemars(length(max = MAX_DECOMMISSION_REASON_LENGTH))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

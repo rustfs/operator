@@ -17,6 +17,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+pub(crate) const MAX_CONFIG_MAP_REF_NAME_LENGTH: u32 = 253;
+pub(crate) const MAX_CONFIG_MAP_REF_KEY_LENGTH: u32 = 253;
+pub(crate) const MAX_PROVISIONING_POLICY_NAME_LENGTH: u32 = 253;
+pub(crate) const MAX_PROVISIONING_USER_NAME_LENGTH: u32 = 253;
+pub(crate) const MAX_POLICIES_PER_USER: u32 = 64;
+pub(crate) const MAX_USER_POLICY_NAME_LENGTH: u32 = 253;
+pub(crate) const MIN_BUCKET_NAME_LENGTH: u32 = 3;
+pub(crate) const MAX_BUCKET_NAME_LENGTH: u32 = 63;
+
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum ProvisioningDeletionPolicy {
@@ -31,10 +40,10 @@ pub fn is_retain(policy: &ProvisioningDeletionPolicy) -> bool {
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigMapKeyReference {
-    #[x_kube(validation = Rule::new("self != ''").message("configMapKeyRef name must be not empty"))]
+    #[schemars(length(min = 1, max = MAX_CONFIG_MAP_REF_NAME_LENGTH))]
     pub name: String,
 
-    #[x_kube(validation = Rule::new("self != ''").message("configMapKeyRef key must be not empty"))]
+    #[schemars(length(min = 1, max = MAX_CONFIG_MAP_REF_KEY_LENGTH))]
     pub key: String,
 }
 
@@ -47,7 +56,7 @@ pub struct PolicyDocumentSource {
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningPolicy {
-    #[x_kube(validation = Rule::new("self != '' && !self.matches('.*\\\\s.*')").message("policy name must be not empty and must not contain whitespace"))]
+    #[schemars(length(min = 1, max = MAX_PROVISIONING_POLICY_NAME_LENGTH), regex(pattern = r"^\S+$"))]
     pub name: String,
 
     pub document: PolicyDocumentSource,
@@ -59,12 +68,15 @@ pub struct ProvisioningPolicy {
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningUser {
-    #[x_kube(validation = Rule::new("self != '' && !self.matches('.*\\\\s.*')").message("user Secret name must be not empty and must not contain whitespace"))]
+    #[schemars(length(min = 1, max = MAX_PROVISIONING_USER_NAME_LENGTH), regex(pattern = r"^\S+$"))]
     pub name: String,
 
     /// Canned policies to map directly to this user.
-    #[x_kube(validation = Rule::new("self.all(x, x != '' && !x.matches('.*\\\\s.*'))").message("user policy names must be not empty and must not contain whitespace"))]
-    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y == x).size() == 1)").message("user policy names must be unique"))]
+    #[schemars(
+        length(min = 1, max = MAX_POLICIES_PER_USER),
+        inner(length(min = 1, max = MAX_USER_POLICY_NAME_LENGTH), regex(pattern = r"^\S+$")),
+        extend("x-kubernetes-list-type" = "set")
+    )]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
 
@@ -75,7 +87,11 @@ pub struct ProvisioningUser {
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningBucket {
-    #[x_kube(validation = Rule::new("self.size() >= 3 && self.size() <= 63 && self != 'rustfs' && !self.matches('^(\\\\d+\\\\.){3}\\\\d+$') && !self.contains('..') && !self.contains('.-') && !self.contains('-.') && self.matches('^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')").message("bucket name must be a valid RustFS/S3 bucket name"))]
+    #[schemars(
+        length(min = MIN_BUCKET_NAME_LENGTH, max = MAX_BUCKET_NAME_LENGTH),
+        regex(pattern = r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+    )]
+    #[x_kube(validation = Rule::new("self != 'rustfs' && !self.matches('^(\\\\d+\\\\.){3}\\\\d+$') && !self.contains('..') && !self.contains('.-') && !self.contains('-.')").message("bucket name must be a valid RustFS/S3 bucket name"))]
     pub name: String,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
