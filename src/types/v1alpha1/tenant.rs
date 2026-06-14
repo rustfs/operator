@@ -34,6 +34,11 @@ mod rbac;
 mod services;
 mod workloads;
 
+pub(crate) const MAX_TENANT_POOLS: u32 = 32;
+pub(crate) const MAX_TENANT_POLICIES: u32 = 256;
+pub(crate) const MAX_TENANT_USERS: u32 = 256;
+pub(crate) const MAX_TENANT_BUCKETS: u32 = 1024;
+
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[kube(
     group = "rustfs.com",
@@ -53,9 +58,10 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<String>,
 
-    #[schemars(extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"]))]
-    #[x_kube(validation = Rule::new("self.size() > 0").message("pools must be configured"))]
-    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("pool names must be unique"))]
+    #[schemars(
+        length(min = 1, max = MAX_TENANT_POOLS),
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
+    )]
     pub pools: Vec<Pool>,
 
     /// Explicit lifecycle requests for pool decommissioning.
@@ -157,18 +163,27 @@ pub struct TenantSpec {
     pub creds_secret: Option<corev1::LocalObjectReference>,
 
     /// Canned policies that should be applied to the RustFS tenant.
-    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("policy names must be unique"))]
+    #[schemars(
+        length(max = MAX_TENANT_POLICIES),
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
+    )]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<ProvisioningPolicy>,
 
     /// Regular users that should exist in the RustFS tenant.
-    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("user Secret names must be unique"))]
+    #[schemars(
+        length(max = MAX_TENANT_USERS),
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
+    )]
     #[x_kube(validation = Rule::new("self.all(x, has(x.policies) && x.policies.size() > 0)").message("user policies must contain at least one policy"))]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<ProvisioningUser>,
 
     /// Buckets that should exist in the RustFS tenant.
-    #[x_kube(validation = Rule::new("self.all(x, self.filter(y, y.name == x.name).size() == 1)").message("bucket names must be unique"))]
+    #[schemars(
+        length(max = MAX_TENANT_BUCKETS),
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
+    )]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buckets: Vec<ProvisioningBucket>,
 

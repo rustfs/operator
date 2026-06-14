@@ -67,10 +67,10 @@ pub struct SchedulingConfig {
     reason(Reason::FieldValueInvalid))
 ]
 pub struct Pool {
-    #[x_kube(validation = Rule::new("self != ''").message("pool name must be not empty"))]
-    #[x_kube(validation = Rule::new("self.size() <= 63 && self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')").
-        message("pool name must be a valid RFC 1123 label: lowercase alphanumeric or '-', start and end with alphanumeric, max 63 characters"))
-    ]
+    #[schemars(
+        length(min = 1, max = 63),
+        regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+    )]
     pub name: String,
 
     #[x_kube(validation = Rule::new("self > 0").message("servers must be greater than 0"))]

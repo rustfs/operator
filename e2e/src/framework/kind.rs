@@ -23,6 +23,8 @@ use crate::framework::{
 };
 
 const RUSTFS_FORMAT_MARKER_PATHS: [&str; 2] = [".rustfs.sys/format.json", ".minio.sys/format.json"];
+const DOCKER_ROOT_UID: u32 = 0;
+const CLEANUP_HELPER_FALLBACK_IMAGES: [&str; 2] = ["rustfs/rustfs:latest", "busybox:latest"];
 
 #[derive(Debug, Clone)]
 pub struct KindCluster {
@@ -102,7 +104,8 @@ impl KindCluster {
     }
 
     fn remove_host_storage_dir(&self, dir: &Path) -> Result<()> {
-        ensure_existing_dedicated_host_storage_dir_is_safe(dir)?;
+        let metadata = ensure_existing_dedicated_host_storage_dir_is_safe(dir)?;
+        ensure_host_storage_dir_owner_allows_cleanup(dir, metadata.uid())?;
         println!("removing dedicated e2e storage dir {}", dir.display());
 
         match fs::remove_dir_all(dir) {
@@ -112,7 +115,7 @@ impl KindCluster {
                     "direct removal failed for {}: {error}; retrying through Docker helper as root",
                     dir.display()
                 );
-                self.docker_clean_host_storage_command(dir)?.run_checked()?;
+                self.docker_clean_host_storage(dir)?;
                 fs::remove_dir_all(dir).with_context(|| {
                     format!("remove dedicated e2e host storage dir {}", dir.display())
                 })
@@ -120,7 +123,53 @@ impl KindCluster {
         }
     }
 
-    fn docker_clean_host_storage_command(&self, dir: &Path) -> Result<CommandSpec> {
+    fn docker_clean_host_storage(&self, dir: &Path) -> Result<()> {
+        let uid = current_uid()?;
+        let gid = current_gid()?;
+        let mut last_error = None;
+
+        for image in self.cleanup_helper_images() {
+            if !docker_image_exists(&image) {
+                println!("Docker cleanup helper image {image} is not present locally; skipping");
+                continue;
+            }
+            let command = self.docker_clean_host_storage_command(dir, &image, uid, gid)?;
+            match command.run_checked() {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    println!("Docker cleanup helper image {image} failed: {error}");
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "no local Docker cleanup helper image is available; build rustfs/operator:e2e or ensure rustfs/rustfs:latest is present"
+            )
+        }))
+    }
+
+    fn cleanup_helper_images(&self) -> Vec<String> {
+        let mut images = Vec::new();
+        for image in std::iter::once(self.config.operator_image.as_str())
+            .chain(std::iter::once(self.config.rustfs_image.as_str()))
+            .chain(CLEANUP_HELPER_FALLBACK_IMAGES)
+        {
+            if !images.iter().any(|existing| existing == image) {
+                images.push(image.to_string());
+            }
+        }
+        images
+    }
+
+    fn docker_clean_host_storage_command(
+        &self,
+        dir: &Path,
+        image: &str,
+        uid: u32,
+        gid: u32,
+    ) -> Result<CommandSpec> {
         ensure_dedicated_host_storage_dir(dir)?;
 
         Ok(CommandSpec::new("docker").args([
@@ -128,13 +177,17 @@ impl KindCluster {
             "--rm".to_string(),
             "--pull".to_string(),
             "never".to_string(),
+            "--user".to_string(),
+            "0:0".to_string(),
             "--entrypoint".to_string(),
             "/bin/sh".to_string(),
             "-v".to_string(),
             format!("{}:/e2e-storage", dir.display()),
-            self.config.operator_image.clone(),
+            image.to_string(),
             "-c".to_string(),
-            "find /e2e-storage -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +".to_string(),
+            format!(
+                "find /e2e-storage -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} + && chown {uid}:{gid} /e2e-storage"
+            ),
         ]))
     }
 
@@ -220,7 +273,7 @@ fn ensure_host_storage_dir_is_absent(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_existing_dedicated_host_storage_dir_is_safe(path: &Path) -> Result<()> {
+fn ensure_existing_dedicated_host_storage_dir_is_safe(path: &Path) -> Result<fs::Metadata> {
     ensure_dedicated_host_storage_dir(path)?;
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspect e2e host storage dir {}", path.display()))?;
@@ -239,12 +292,16 @@ fn ensure_existing_dedicated_host_storage_dir_is_safe(path: &Path) -> Result<()>
         );
     }
 
+    Ok(metadata)
+}
+
+fn ensure_host_storage_dir_owner_allows_cleanup(path: &Path, owner_uid: u32) -> Result<()> {
     let current_uid = current_uid()?;
-    if metadata.uid() != current_uid {
+    if owner_uid != current_uid && owner_uid != DOCKER_ROOT_UID {
         bail!(
-            "refusing Docker-root cleanup for e2e host storage dir {} owned by uid {}; current uid is {}",
+            "refusing Docker-root cleanup for e2e host storage dir {} owned by uid {}; current uid is {}; only current-user or root-owned dedicated e2e storage dirs can be cleaned",
             path.display(),
-            metadata.uid(),
+            owner_uid,
             current_uid
         );
     }
@@ -275,11 +332,30 @@ fn current_uid() -> Result<u32> {
         .context("parse current uid from `id -u`")
 }
 
+fn current_gid() -> Result<u32> {
+    let output = CommandSpec::new("id").arg("-g").run_checked()?;
+    output
+        .stdout
+        .trim()
+        .parse::<u32>()
+        .context("parse current gid from `id -g`")
+}
+
+fn docker_image_exists(image: &str) -> bool {
+    match CommandSpec::new("docker")
+        .args(["image", "inspect", image])
+        .run()
+    {
+        Ok(output) => output.code == Some(0),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         KindCluster, ensure_dedicated_host_storage_dir, ensure_host_storage_dir_is_absent,
-        ensure_host_storage_dir_is_empty,
+        ensure_host_storage_dir_is_empty, ensure_host_storage_dir_owner_allows_cleanup,
     };
     use crate::framework::config::E2eConfig;
 
@@ -331,16 +407,64 @@ mod tests {
     fn docker_cleanup_command_mounts_only_dedicated_storage_dir() {
         let kind = KindCluster::new(E2eConfig::defaults());
         let command = kind
-            .docker_clean_host_storage_command(std::path::Path::new("/tmp/rustfs-e2e-storage-1"))
+            .docker_clean_host_storage_command(
+                std::path::Path::new("/tmp/rustfs-e2e-storage-1"),
+                "rustfs/rustfs:latest",
+                1000,
+                1000,
+            )
             .expect("dedicated storage dir should be accepted");
 
         assert_eq!(
             command.display(),
-            "docker run --rm --pull never --entrypoint /bin/sh -v /tmp/rustfs-e2e-storage-1:/e2e-storage rustfs/operator:e2e -c find /e2e-storage -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +"
+            "docker run --rm --pull never --user 0:0 --entrypoint /bin/sh -v /tmp/rustfs-e2e-storage-1:/e2e-storage rustfs/rustfs:latest -c find /e2e-storage -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && chown 1000:1000 /e2e-storage"
         );
         assert!(
-            kind.docker_clean_host_storage_command(std::path::Path::new("/tmp/other"))
-                .is_err()
+            kind.docker_clean_host_storage_command(
+                std::path::Path::new("/tmp/other"),
+                "rustfs/rustfs:latest",
+                1000,
+                1000,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn host_storage_owner_guard_accepts_current_user_and_docker_root() {
+        let current_uid = super::current_uid().expect("current uid is available");
+
+        ensure_host_storage_dir_owner_allows_cleanup(
+            std::path::Path::new("/tmp/rustfs-e2e-storage-1"),
+            current_uid,
+        )
+        .expect("current user-owned storage should be accepted");
+        ensure_host_storage_dir_owner_allows_cleanup(
+            std::path::Path::new("/tmp/rustfs-e2e-storage-1"),
+            0,
+        )
+        .expect("Docker root-owned storage should be accepted");
+
+        let other_uid = if current_uid == 1 { 2 } else { 1 };
+        let error = ensure_host_storage_dir_owner_allows_cleanup(
+            std::path::Path::new("/tmp/rustfs-e2e-storage-1"),
+            other_uid,
+        )
+        .expect_err("other user-owned storage should be rejected");
+        assert!(error.to_string().contains("owned by uid"));
+    }
+
+    #[test]
+    fn cleanup_helper_images_prefer_configured_images_and_deduplicate_defaults() {
+        let kind = KindCluster::new(E2eConfig::defaults());
+
+        assert_eq!(
+            kind.cleanup_helper_images(),
+            vec![
+                "rustfs/operator:e2e".to_string(),
+                "rustfs/rustfs:latest".to_string(),
+                "busybox:latest".to_string(),
+            ]
         );
     }
 

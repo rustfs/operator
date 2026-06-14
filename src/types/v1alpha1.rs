@@ -137,12 +137,18 @@ mod policy_binding_tests {
 
 #[cfg(test)]
 mod tenant_provisioning_crd_tests {
-    use super::tenant::Tenant;
+    use super::{
+        pool_lifecycle::MAX_DECOMMISSION_REQUESTS,
+        provisioning::MAX_POLICIES_PER_USER,
+        tenant::{
+            MAX_TENANT_BUCKETS, MAX_TENANT_POLICIES, MAX_TENANT_POOLS, MAX_TENANT_USERS, Tenant,
+        },
+    };
     use kube::CustomResourceExt;
     use serde_json::json;
 
     #[test]
-    fn tenant_crd_includes_provisioning_spec_status_and_uniqueness_rules() {
+    fn tenant_crd_includes_provisioning_spec_status_and_bounded_list_rules() {
         let crd = serde_json::to_value(Tenant::crd()).expect("Tenant CRD serializes");
         let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"];
         let spec = &schema["properties"]["spec"];
@@ -152,6 +158,74 @@ mod tenant_provisioning_crd_tests {
         assert_eq!(spec["properties"]["users"]["type"], json!("array"));
         assert_eq!(spec["properties"]["buckets"]["type"], json!("array"));
         assert_eq!(
+            spec["properties"]["pools"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            spec["properties"]["pools"]["x-kubernetes-list-map-keys"],
+            json!(["name"])
+        );
+        assert_eq!(
+            spec["properties"]["pools"]["maxItems"],
+            json!(MAX_TENANT_POOLS)
+        );
+        assert_eq!(
+            spec["properties"]["policies"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            spec["properties"]["policies"]["x-kubernetes-list-map-keys"],
+            json!(["name"])
+        );
+        assert_eq!(
+            spec["properties"]["policies"]["maxItems"],
+            json!(MAX_TENANT_POLICIES)
+        );
+        assert_eq!(
+            spec["properties"]["users"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            spec["properties"]["users"]["x-kubernetes-list-map-keys"],
+            json!(["name"])
+        );
+        assert_eq!(
+            spec["properties"]["users"]["maxItems"],
+            json!(MAX_TENANT_USERS)
+        );
+        assert_eq!(
+            spec["properties"]["users"]["items"]["properties"]["policies"]["x-kubernetes-list-type"],
+            json!("set")
+        );
+        assert_eq!(
+            spec["properties"]["users"]["items"]["properties"]["policies"]["maxItems"],
+            json!(MAX_POLICIES_PER_USER)
+        );
+        assert_eq!(
+            spec["properties"]["buckets"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            spec["properties"]["buckets"]["x-kubernetes-list-map-keys"],
+            json!(["name"])
+        );
+        assert_eq!(
+            spec["properties"]["buckets"]["maxItems"],
+            json!(MAX_TENANT_BUCKETS)
+        );
+        assert_eq!(
+            spec["properties"]["poolLifecycle"]["properties"]["decommissionRequests"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            spec["properties"]["poolLifecycle"]["properties"]["decommissionRequests"]["x-kubernetes-list-map-keys"],
+            json!(["poolName"])
+        );
+        assert_eq!(
+            spec["properties"]["poolLifecycle"]["properties"]["decommissionRequests"]["maxItems"],
+            json!(MAX_DECOMMISSION_REQUESTS)
+        );
+        assert_eq!(
             status["properties"]["provisioning"]["properties"]["policies"]["type"],
             json!("array")
         );
@@ -160,9 +234,9 @@ mod tenant_provisioning_crd_tests {
             json!(["Pending", "Ready", "Failed", null])
         );
 
-        assert_eq!(
-            spec["properties"]["policies"]["x-kubernetes-validations"][0]["message"],
-            json!("policy names must be unique")
+        assert!(
+            spec["properties"]["policies"]["x-kubernetes-validations"].is_null(),
+            "policy name uniqueness should use x-kubernetes-list-type=map"
         );
         let user_validations = &spec["properties"]["users"]["x-kubernetes-validations"];
         assert!(
@@ -176,11 +250,8 @@ mod tenant_provisioning_crd_tests {
         let user_policy_validations = &spec["properties"]["users"]["items"]["properties"]["policies"]
             ["x-kubernetes-validations"];
         assert!(
-            user_policy_validations
-                .as_array()
-                .expect("user policy validations are present")
-                .iter()
-                .any(|rule| rule["message"] == json!("user policy names must be unique"))
+            user_policy_validations.is_null(),
+            "user policy uniqueness should use x-kubernetes-list-type=set"
         );
         assert_eq!(
             spec["properties"]["buckets"]["items"]["properties"]["name"]["x-kubernetes-validations"]
