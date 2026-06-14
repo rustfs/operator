@@ -13,13 +13,31 @@
 // limitations under the License.
 
 use crate::console::{openapi::ApiDoc, routes, state::AppState};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::body::Body;
+use axum::http::{HeaderValue, Method, Request, Response, StatusCode, header};
 use axum::{Router, middleware, response::IntoResponse, routing::get};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, api::ListParams};
-use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
+use std::{
+    convert::Infallible,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tower::Service;
+use tower_http::{
+    compression::CompressionLayer,
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile, fs::ServeFileSystemResponseBody},
+    trace::TraceLayer,
+};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+
+const CONSOLE_STATIC_DIR_ENV: &str = "CONSOLE_STATIC_DIR";
+const IMAGE_CONSOLE_STATIC_DIR: &str = "/app/console-web";
+const LOCAL_CONSOLE_STATIC_DIR: &str = "console-web/out";
 
 /// Build CORS allowed origins from env.
 /// Env: CORS_ALLOWED_ORIGINS, comma-separated (e.g. "https://console.example.com,http://localhost:3000").
@@ -73,7 +91,8 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         // REST API v1
         .nest("/api/v1", api_routes())
         // Shared state
-        .with_state(state.clone())
+        .with_state(state.clone());
+    let app = with_static_frontend(app)
         // Middleware runs in reverse order: Trace -> Compression -> Cors -> auth
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -121,6 +140,77 @@ fn api_routes() -> Router<AppState> {
         .merge(routes::event_routes())
         .merge(routes::cluster_routes())
         .merge(routes::topology_routes())
+}
+
+fn with_static_frontend(app: Router) -> Router {
+    let Some(static_dir) = static_frontend_dir() else {
+        tracing::warn!(
+            "Console frontend static files not found; serving API only. Set {} to enable static UI serving.",
+            CONSOLE_STATIC_DIR_ENV
+        );
+        return app;
+    };
+
+    tracing::info!("Serving Console frontend from {}", static_dir.display());
+    app.fallback_service(static_frontend_service(static_dir))
+}
+
+fn static_frontend_service(static_dir: PathBuf) -> StaticFrontendService {
+    let index_path = static_dir.join("index.html");
+    let static_service = ServeDir::new(static_dir)
+        .append_index_html_on_directories(true)
+        .fallback(ServeFile::new(index_path));
+
+    StaticFrontendService { static_service }
+}
+
+#[derive(Clone)]
+struct StaticFrontendService {
+    static_service: ServeDir<ServeFile>,
+}
+
+impl Service<Request<Body>> for StaticFrontendService {
+    type Response = Response<ServeFileSystemResponseBody>;
+    type Error = Infallible;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <ServeDir<ServeFile> as Service<Request<Body>>>::poll_ready(&mut self.static_service, cx)
+    }
+
+    fn call(&mut self, request: Request<Body>) -> Self::Future {
+        if is_api_path(request.uri().path()) {
+            return Box::pin(async { Ok(api_not_found_response()) });
+        }
+
+        let mut static_service = self.static_service.clone();
+        Box::pin(async move { static_service.call(request).await })
+    }
+}
+
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
+fn api_not_found_response() -> Response<ServeFileSystemResponseBody> {
+    let mut response = Response::new(ServeFileSystemResponseBody::default());
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
+}
+
+fn static_frontend_dir() -> Option<PathBuf> {
+    let candidates = match std::env::var(CONSOLE_STATIC_DIR_ENV) {
+        Ok(value) if !value.trim().is_empty() => vec![PathBuf::from(value.trim())],
+        _ => vec![
+            PathBuf::from(IMAGE_CONSOLE_STATIC_DIR),
+            PathBuf::from(LOCAL_CONSOLE_STATIC_DIR),
+        ],
+    };
+
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("index.html").is_file())
 }
 
 /// Liveness probe: always OK if process runs.
@@ -195,4 +285,57 @@ fn read_urandom(bytes: &mut [u8]) -> std::io::Result<()> {
 
     let mut file = std::fs::File::open("/dev/urandom")?;
     file.read_exact(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    fn temp_static_dir() -> std::io::Result<PathBuf> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rustfs-console-static-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("index.html"), "console")?;
+        Ok(dir)
+    }
+
+    #[tokio::test]
+    async fn static_frontend_fallback_does_not_handle_api_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_static_dir()?;
+
+        let response = static_frontend_service(dir.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/missing")
+                    .body(Body::empty())?,
+            )
+            .await
+            .map_err(|error| match error {})?;
+
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn static_frontend_fallback_serves_spa_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = temp_static_dir()?;
+
+        let response = static_frontend_service(dir.clone())
+            .oneshot(Request::builder().uri("/tenants").body(Body::empty())?)
+            .await
+            .map_err(|error| match error {})?;
+
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
 }
