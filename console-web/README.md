@@ -33,17 +33,17 @@ Static output is in `out/`. The default API base URL is **`/api/v1`** (relative)
 
 ## Deployment (Kubernetes)
 
-When frontend and backend are deployed in the same cluster and exposed under **one host** (recommended):
+The default `rustfs/operator` image embeds this static frontend and the Rust
+Console API. Enable the Console and Ingress in the Helm chart; the Console
+service serves both `/` and `/api/v1` from one pod.
 
-1. Build the Docker image (from repo root):
+Do **not** set `NEXT_PUBLIC_API_BASE_URL` (or set it to `/api/v1`). The browser
+will send requests to the same origin, so cookies and CORS work without extra
+config. Production deployments should serve the host over HTTPS because Console
+session cookies are `Secure` by default.
 
-   ```bash
-   docker build -t your-registry/console-web:latest console-web/
-   ```
-
-2. Enable the console frontend in the Helm chart and Ingress (see [deploy/rustfs-operator/README.md](../deploy/rustfs-operator/README.md#console-ui-frontend--backend-in-k8s)). The Ingress will serve `/` from this app and `/api` from the backend.
-
-3. Do **not** set `NEXT_PUBLIC_API_BASE_URL` (or set it to `/api/v1`). The browser will send requests to the same origin, so cookies and CORS work without extra config. Production deployments should serve the host over HTTPS because Console session cookies are `Secure` by default.
+The standalone `console-web/Dockerfile` remains available for legacy split
+frontend deployments that intentionally use a separate frontend image.
 
 If the frontend is served from a **different host** than the API, set at build time:
 

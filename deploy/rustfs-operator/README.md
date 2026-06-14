@@ -288,40 +288,34 @@ To upgrade the operator:
 helm upgrade rustfs-operator deploy/rustfs-operator/
 ```
 
-## Console UI (Frontend + Backend in K8s)
+## Console UI
 
-The console has a **backend** (Rust API, `/api/v1/*`) and an optional **frontend** (static web app, `console-web`). To have the browser reach the API correctly when both run in Kubernetes:
+The published `rustfs/operator` image contains both the Console backend (Rust API,
+`/api/v1/*`) and the exported `console-web` static frontend. By default the chart
+deploys one Console service that serves both `/` and `/api/v1` from the same pod,
+so browser requests are same-origin and do not need CORS.
 
 ### Same-origin deployment (recommended)
 
-Serve the frontend and the API under **one HTTPS host** so the browser sends requests to the same origin (no CORS, Secure cookies work):
+Serve the Console service under **one HTTPS host**:
 
-1. Enable the frontend and Ingress in `values.yaml`:
+1. Enable the Console and Ingress in `values.yaml`:
 
    ```yaml
    console:
      enabled: true
-     frontend:
-       enabled: true
-       image:
-         repository: your-registry/console-web
-         tag: latest
      ingress:
        enabled: true
        className: nginx
        hosts:
          - host: console.example.com
-           paths: []   # ignored when frontend.enabled; / and /api are used
    ```
 
-2. Build and push the frontend image from the repo root:
-
-   ```bash
-   docker build -t your-registry/console-web:latest console-web/
-   docker push your-registry/console-web:latest
-   ```
-
-3. Install/upgrade the chart. The Ingress will route **`/api`** to the console backend and **`/`** to the frontend. The frontend is built with `NEXT_PUBLIC_API_BASE_URL=/api/v1` (default), so all API calls are same-origin. If you intentionally test over plain HTTP, set `CONSOLE_COOKIE_SECURE=false` in `console.env`; do not use that setting for production.
+2. Install/upgrade the chart. The Ingress routes `/` and `/api/v1` to the Console
+   service. The embedded frontend is built with `NEXT_PUBLIC_API_BASE_URL=/api/v1`
+   by default. If you intentionally test over plain HTTP, set
+   `CONSOLE_COOKIE_SECURE=false` in `console.env`; do not use that setting for
+   production.
 
 No CORS configuration is needed on the backend for this setup.
 
@@ -348,6 +342,13 @@ console:
 ```
 
 Multiple origins (e.g. dev + prod): comma-separated, e.g. `"https://ui.example.com,http://localhost:3000"`.
+
+### Legacy Split Frontend
+
+`console.frontend.enabled=true` still deploys a separate `console-web` image for
+installations that intentionally keep frontend and backend images separate. In
+that mode the Ingress routes `/api` to the Console backend and `/` to the split
+frontend service.
 
 ### Console login token
 

@@ -238,7 +238,9 @@ console:
     # Specifies whether RBAC resources should be created
     create: true
 
-  # Frontend (console-web) deployment. When enabled, Ingress serves / from frontend and /api from backend (same host = same-origin, no CORS).
+  # Legacy split frontend deployment. The default operator image already embeds
+  # console-web static files, so the Console service serves both / and /api/v1.
+  # Enable this only when you intentionally deploy a separate frontend image.
   frontend:
     enabled: false
     replicas: 1
@@ -266,7 +268,9 @@ console:
     service:
       port: 80
 
-  # Ingress configuration. When frontend.enabled is true, / is served by frontend and /api by backend (same origin).
+  # Ingress configuration. By default, / and /api/v1 are served by the Console
+  # service from the unified operator image. When frontend.enabled=true, / is
+  # routed to the legacy split frontend service and /api to the Console backend.
   ingress:
     enabled: false
     className: ""

@@ -43,6 +43,7 @@ pub async fn auth_middleware(
         || path.starts_with("/api/v1/logout")
         || path.starts_with("/swagger-ui")
         || path.starts_with("/api-docs")
+        || !path.starts_with("/api/v1")
     {
         return Ok(next.run(request).await);
     }
@@ -142,6 +143,22 @@ mod tests {
                 "message": "Missing or invalid session"
             })
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn static_paths_do_not_require_session() -> Result<(), Box<dyn std::error::Error>> {
+        let state = AppState::new("test-secret".to_string());
+        let app = Router::new()
+            .route("/", get(|| async { "ui" }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, auth_middleware));
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
         Ok(())
     }
 }

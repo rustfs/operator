@@ -46,7 +46,7 @@ axum = { version = "0.7", features = ["macros", "json"] }
 hyper = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "fs"] }
 http = "1.2"
 utoipa = { version = "5", features = ["chrono"] }
 utoipa-swagger-ui = { version = "8", features = ["axum", "vendored"] }

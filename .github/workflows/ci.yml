@@ -130,3 +130,18 @@ jobs:
           pnpm run lint
           pnpm run build
           pnpm run format:check
+
+  docker-build:
+    name: Docker Build
+    needs: skip-check
+    if: needs.skip-check.outputs.should_skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build unified operator image
+        env:
+          DOCKER_BUILDKIT: 1
+        run: docker build -t rustfs/operator:ci .

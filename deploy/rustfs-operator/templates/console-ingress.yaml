@@ -31,7 +31,7 @@ spec:
       http:
         paths:
           {{- if $.Values.console.frontend.enabled }}
-          # API first so /api/v1/* goes to backend (same-origin for browser)
+          # Legacy split frontend mode: API first so /api/v1/* goes to backend.
           - path: /api
             pathType: Prefix
             backend:
@@ -39,7 +39,7 @@ spec:
                 name: {{ include "rustfs-operator.fullname" $ }}-console
                 port:
                   number: {{ $.Values.console.service.port }}
-          # Frontend serves UI at /
+          # Legacy split frontend service serves UI at /.
           - path: /
             pathType: Prefix
             backend:
@@ -48,6 +48,7 @@ spec:
                 port:
                   number: {{ $.Values.console.frontend.service.port }}
           {{- else }}
+          # Unified console mode: the Console service serves both UI and API.
           - path: /
             pathType: Prefix
             backend:

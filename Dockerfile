@@ -4,8 +4,12 @@ ARG BASE_IMAGE=debian:bookworm-slim
 # Use rust:bookworm so the binary is linked against glibc 2.36, matching final image.
 ARG RUST_BUILD_IMAGE=rust:bookworm
 
+# Build image for the static Console frontend.
+ARG NODE_BUILD_IMAGE=node:24-alpine
+
 # cargo-chef version (pin for reproducible builds; override if needed)
 ARG CARGO_CHEF_VERSION=0.1.77
+ARG PNPM_VERSION=10.28.1
 
 # When Docker build cannot reach crates.io (DNS/network), try:
 #   docker build --network=host -t rustfs/operator:dev .
@@ -51,9 +55,22 @@ COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
 RUN cargo build --release
 
+# Stage 4: Build the static Console frontend
+FROM ${NODE_BUILD_IMAGE} AS console-web-builder
+ARG PNPM_VERSION
+WORKDIR /app/console-web
+RUN npm install -g pnpm@${PNPM_VERSION}
+COPY console-web/package.json console-web/pnpm-lock.yaml console-web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY console-web/ ./
+ARG NEXT_PUBLIC_API_BASE_URL=
+ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+RUN pnpm build
+
 # Final image
 FROM ${BASE_IMAGE}
 
 WORKDIR /app
 COPY --from=builder /app/target/release/operator .
+COPY --from=console-web-builder /app/console-web/out ./console-web
 ENTRYPOINT ["./operator"]

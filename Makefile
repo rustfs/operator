@@ -33,9 +33,9 @@ help:
 	@echo "  make clippy           - Run clippy checks"
 	@echo "  make test             - Run Rust tests"
 	@echo "  make build            - Build the project"
-	@echo "  make docker-build-operator  - Build the operator image (IMAGE_REPO?=rustfs/operator IMAGE_TAG?=dev)"
-	@echo "  make docker-build-console-web - Build the console-web frontend image (CONSOLE_WEB_IMAGE_REPO?=rustfs/console-web CONSOLE_WEB_IMAGE_TAG?=dev)"
-	@echo "  make docker-build-all       - Build both operator and console-web images"
+	@echo "  make docker-build-operator  - Build the unified operator + console image (IMAGE_REPO?=rustfs/operator IMAGE_TAG?=dev)"
+	@echo "  make docker-build-console-web - Build the legacy split console-web image (CONSOLE_WEB_IMAGE_REPO?=rustfs/console-web CONSOLE_WEB_IMAGE_TAG?=dev)"
+	@echo "  make docker-build-all       - Build both unified operator and legacy console-web images"
 	@echo "  make console-lint     - Run frontend ESLint checks (console-web)"
 	@echo "  make console-build    - Build frontend static assets (console-web)"
 	@echo "  make console-fmt     - Format frontend code with Prettier (console-web)"
@@ -144,8 +144,9 @@ e2e-live-delete:
 	$(E2E_LIVE_ENV) $(E2E_BIN) kind-delete
 
 
-# Build Docker images. The operator image includes the controller and Console API;
-# the console-web image contains the frontend static assets.
+# Build Docker images. The operator image includes the controller, Console API,
+# and embedded console-web static assets. The console-web image is retained for
+# legacy split frontend deployments.
 docker-build-operator:
 	docker build -t $(IMAGE_REPO):$(IMAGE_TAG) .
 
