@@ -13,6 +13,10 @@ class ApiClient {
     return typeof window !== "undefined" ? getApiBaseUrl() : config.apiBaseUrl
   }
 
+  private shouldHandleUnauthorized(endpoint: string): boolean {
+    return !["/login", "/logout", "/session"].includes(endpoint)
+  }
+
   private async handleUnauthorized(): Promise<void> {
     if (typeof window === "undefined" || this.unauthorizedHandling) return
 
@@ -61,7 +65,7 @@ class ApiClient {
         // ignore parse errors
       }
 
-      if (response.status === 401) {
+      if (response.status === 401 && this.shouldHandleUnauthorized(endpoint)) {
         await this.handleUnauthorized()
       }
 
@@ -80,7 +84,7 @@ class ApiClient {
     })
     if (!response.ok) {
       const text = await response.text()
-      if (response.status === 401) {
+      if (response.status === 401 && this.shouldHandleUnauthorized(endpoint)) {
         await this.handleUnauthorized()
       }
       throw { message: text || response.statusText, statusCode: response.status }

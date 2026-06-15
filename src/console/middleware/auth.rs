@@ -40,6 +40,7 @@ pub async fn auth_middleware(
         || path == "/readyz"
         || path == "/metrics"
         || path.starts_with("/api/v1/login")
+        || path.starts_with("/api/v1/logout")
         || path.starts_with("/swagger-ui")
         || path.starts_with("/api-docs")
     {
