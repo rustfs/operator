@@ -146,6 +146,7 @@
   "YAML bucket provisioning fields are invalid": "YAML 中 bucket provisioning 字段不合法",
   "Tenant name is required": "请输入租户名称",
   "Namespace is required": "请输入命名空间",
+  "Image is required": "请输入镜像名称",
   "Delete tenant \"{{name}}\"? This cannot be undone.": "确定删除租户「{{name}}」？此操作不可恢复。",
   "Overview": "概览",
   "Events": "事件",

@@ -27,6 +27,8 @@ import { ApiError } from "@/lib/api-client"
 
 type CreateMode = "form" | "yaml"
 
+const DEFAULT_RUSTFS_IMAGE = "rustfs/rustfs:latest"
+
 const defaultPool: CreatePoolRequest = {
   name: "pool-0",
   servers: 2,
@@ -41,7 +43,7 @@ metadata:
   name: my-tenant
   namespace: default
 spec:
-  image: rustfs/rustfs:latest
+  image: ${DEFAULT_RUSTFS_IMAGE}
   credsSecret:
     name: rustfs-creds
   pools:
@@ -95,7 +97,7 @@ export default function TenantCreatePage() {
   const [name, setName] = useState("")
   const [namespace, setNamespace] = useState("default")
   const [pools, setPools] = useState<CreatePoolRequest[]>([{ ...defaultPool }])
-  const [image, setImage] = useState("")
+  const [image, setImage] = useState(DEFAULT_RUSTFS_IMAGE)
   const [credsSecret, setCredsSecret] = useState("")
   const [securityContext, setSecurityContext] = useState({
     runAsUser: "",
@@ -300,6 +302,11 @@ export default function TenantCreatePage() {
           toast.warning(t("Namespace is required"))
           return
         }
+        const trimmedImage = image.trim()
+        if (!trimmedImage) {
+          toast.warning(t("Image is required"))
+          return
+        }
         requestBody = {
           name: name.trim(),
           namespace: namespace.trim(),
@@ -307,7 +314,7 @@ export default function TenantCreatePage() {
             ...p,
             storage_class: p.storage_class || undefined,
           })),
-          image: image.trim() || undefined,
+          image: trimmedImage,
           creds_secret: credsSecret.trim() || undefined,
           security_context: {
             runAsUser: securityContext.runAsUser ? parseInt(securityContext.runAsUser, 10) : undefined,
@@ -388,11 +395,10 @@ export default function TenantCreatePage() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="image">
-                    {t("Image")} ({t("Optional")})
-                  </Label>
+                  <Label htmlFor="image">{t("Image")}</Label>
                   <Input
                     id="image"
+                    required
                     value={image}
                     onChange={(e) => setImage(e.target.value)}
                     placeholder="rustfs/rustfs:latest"
