@@ -57,4 +57,3 @@ FROM ${BASE_IMAGE}
 WORKDIR /app
 COPY --from=builder /app/target/release/operator .
 ENTRYPOINT ["./operator"]
-CMD ["-h"]
