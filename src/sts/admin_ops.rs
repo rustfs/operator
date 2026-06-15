@@ -130,6 +130,13 @@ impl RustfsAdminClient {
         policies
             .into_iter()
             .map(|(name, policy)| {
+                let raw = serde_json::to_string(&policy)
+                    .map_err(|_| RustfsClientError::ParseResponseFailed)?;
+                let policy = extract_canned_policy_document(&raw)
+                    .map_err(|_| RustfsClientError::ParseResponseFailed)?;
+                let policy = serde_json::from_str::<Value>(&policy)
+                    .map_err(|_| RustfsClientError::ParseResponseFailed)?;
+
                 serde_json::to_string(&policy)
                     .map(|document| (name, document))
                     .map_err(|_| RustfsClientError::ParseResponseFailed)
