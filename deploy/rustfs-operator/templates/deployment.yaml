@@ -47,8 +47,10 @@ spec:
           {{- $leaderElect = .Values.operator.leaderElect }}
           {{- end }}
           {{- end }}
+          {{- if $leaderElect }}
           args:
-            - --leader-elect={{ ternary "true" "false" $leaderElect }}
+            - --leader-elect
+          {{- end }}
           {{- if or .Values.sts.enabled .Values.operator.metrics.enabled }}
           ports:
           {{- if .Values.operator.metrics.enabled }}
