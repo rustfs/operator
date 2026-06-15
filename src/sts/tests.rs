@@ -27,8 +27,8 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use super::{
-    ADD_USER_PATH, CreateBucketResult, POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH,
-    LIST_CANNED_POLICIES_PATH, RustfsAdminClient, RustfsClientError, SERVER_INFO_PATH,
+    ADD_USER_PATH, CreateBucketResult, LIST_CANNED_POLICIES_PATH, POOLS_DECOMMISSION_PATH,
+    POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient, RustfsClientError, SERVER_INFO_PATH,
     SET_POLICY_PATH,
     helpers::{extract_canned_policy_document, extract_credentials, parse_assume_role_response},
 };
@@ -255,46 +255,46 @@ async fn list_canned_policies_extracts_policy_document_and_canonicalizes_json() 
     let route_capture = capture.clone();
 
     let router = Router::new()
-            .route(
-                LIST_CANNED_POLICIES_PATH,
-                get(
-                    move |State(c): State<Capture>, req: Request<Body>| async move {
-                        let path = req.uri().path().to_string();
-                        let query = req.uri().query().unwrap_or("").to_string();
+        .route(
+            LIST_CANNED_POLICIES_PATH,
+            get(
+                move |State(c): State<Capture>, req: Request<Body>| async move {
+                    let path = req.uri().path().to_string();
+                    let query = req.uri().query().unwrap_or("").to_string();
 
-                        *c.path.lock().await = path;
-                        *c.query.lock().await = query;
+                    *c.path.lock().await = path;
+                    *c.query.lock().await = query;
 
-                        (
-                            StatusCode::OK,
-                            serde_json::json!({
-                                "tenant-policy": {
-                                    "policy_name":"tenant-policy",
-                                    "policy":{
-                                        "Statement": [{
-                                            "Resource": "arn:aws:s3:::tenant",
-                                            "Effect": "Allow",
-                                            "Action": "s3:GetObject"
-                                        }],
-                                        "Version":"2012-10-17"
-                                    }
-                                },
-                                "inline-policy": {
-                                    "Version": "2012-10-17",
+                    (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "tenant-policy": {
+                                "policy_name":"tenant-policy",
+                                "policy":{
                                     "Statement": [{
-                                        "Sid": "inline",
-                                        "Action": "s3:ListBucket",
+                                        "Resource": "arn:aws:s3:::tenant",
                                         "Effect": "Allow",
-                                        "Resource": ["arn:aws:s3:::tenant*"]
-                                    }]
+                                        "Action": "s3:GetObject"
+                                    }],
+                                    "Version":"2012-10-17"
                                 }
-                            })
-                            .to_string(),
-                        )
-                    },
-                ),
-            )
-            .with_state(route_capture.clone());
+                            },
+                            "inline-policy": {
+                                "Version": "2012-10-17",
+                                "Statement": [{
+                                    "Sid": "inline",
+                                    "Action": "s3:ListBucket",
+                                    "Effect": "Allow",
+                                    "Resource": ["arn:aws:s3:::tenant*"]
+                                }]
+                            }
+                        })
+                        .to_string(),
+                    )
+                },
+            ),
+        )
+        .with_state(route_capture.clone());
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
