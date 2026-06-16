@@ -39,6 +39,15 @@ pub fn current_context() -> Result<String> {
     Ok(output.stdout.trim().to_string())
 }
 
+pub fn use_current_context(config: &mut E2eConfig) -> Result<String> {
+    let actual = current_context()?;
+    config.context = actual.clone();
+    if let Some(kind_cluster) = actual.strip_prefix("kind-") {
+        config.cluster_name = kind_cluster.to_string();
+    }
+    Ok(actual)
+}
+
 pub fn ensure_dedicated_context(config: &E2eConfig) -> Result<String> {
     let actual = current_context()?;
     ensure!(

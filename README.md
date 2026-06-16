@@ -73,7 +73,7 @@ From the repo root:
 | `make e2e-check` | Validate the e2e harness without creating a live cluster. |
 | `make e2e-live-create` | Build e2e images, recreate the dedicated Kind cluster, install cert-manager, and load images. |
 | `make e2e-live-run` | Deploy the dev control plane and run all non-destructive live suites. |
-| `make e2e-live-faults` | Run destructive live fault suites with `RUSTFS_E2E_DESTRUCTIVE=1`. |
+| `make e2e-live-faults` | Run destructive fault suites against the current kubectl context. |
 | `make e2e-live-update` | Rebuild images, reload them into Kind, and roll out control-plane deployments. |
 | `make e2e-live-delete` | Delete the dedicated Kind cluster and its local storage. |
 

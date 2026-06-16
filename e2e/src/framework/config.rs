@@ -41,6 +41,13 @@ pub struct E2eConfig {
     pub artifacts_dir: PathBuf,
     pub live_enabled: bool,
     pub destructive_enabled: bool,
+    pub fault_scenario: String,
+    pub fault_duration: Duration,
+    pub fault_percent: u8,
+    pub fault_workload_objects: usize,
+    pub fault_request_timeout: Duration,
+    pub fault_require_client_disruption: bool,
+    pub chaos_namespace: String,
     pub timeout: Duration,
 }
 
@@ -93,6 +100,24 @@ impl E2eConfig {
             pod_management_policy: parse_pod_management_policy(&get_env),
             live_enabled: env_bool(&get_env, "RUSTFS_E2E_LIVE"),
             destructive_enabled: env_bool(&get_env, "RUSTFS_E2E_DESTRUCTIVE"),
+            fault_scenario: env_or(&get_env, "RUSTFS_E2E_FAULT_SCENARIO", "io-eio"),
+            fault_duration: Duration::from_secs(env_u64(
+                &get_env,
+                "RUSTFS_E2E_FAULT_DURATION_SECONDS",
+                180,
+            )),
+            fault_percent: env_u8(&get_env, "RUSTFS_E2E_FAULT_PERCENT", 20),
+            fault_workload_objects: env_usize(&get_env, "RUSTFS_E2E_WORKLOAD_OBJECTS", 40),
+            fault_request_timeout: Duration::from_secs(env_u64(
+                &get_env,
+                "RUSTFS_E2E_FAULT_REQUEST_TIMEOUT_SECONDS",
+                3,
+            )),
+            fault_require_client_disruption: env_bool(
+                &get_env,
+                "RUSTFS_E2E_FAULT_REQUIRE_CLIENT_DISRUPTION",
+            ),
+            chaos_namespace: env_or(&get_env, "RUSTFS_E2E_CHAOS_NAMESPACE", "chaos-mesh"),
             timeout: Duration::from_secs(env_u64(&get_env, "RUSTFS_E2E_TIMEOUT_SECONDS", 300)),
         }
     }
@@ -136,6 +161,15 @@ where
         .unwrap_or(default)
 }
 
+fn env_u8<F>(get_env: &F, name: &str, default: u8) -> u8
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get_env(name)
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(default)
+}
+
 fn parse_pod_management_policy<F>(get_env: &F) -> Option<PodManagementPolicy>
 where
     F: Fn(&str) -> Option<String>,
@@ -165,6 +199,16 @@ mod tests {
         assert_eq!(config.storage_class, "local-storage");
         assert_eq!(config.pv_count, 12);
         assert_eq!(config.rustfs_image, DEFAULT_RUSTFS_IMAGE);
+        assert_eq!(config.fault_scenario, "io-eio");
+        assert_eq!(config.fault_duration, std::time::Duration::from_secs(180));
+        assert_eq!(config.fault_percent, 20);
+        assert_eq!(config.fault_workload_objects, 40);
+        assert_eq!(
+            config.fault_request_timeout,
+            std::time::Duration::from_secs(3)
+        );
+        assert!(!config.fault_require_client_disruption);
+        assert_eq!(config.chaos_namespace, "chaos-mesh");
         assert_eq!(config.cert_manager_version, "v1.16.2");
         assert_eq!(
             config.kind_config,

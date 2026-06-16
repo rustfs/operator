@@ -43,7 +43,7 @@ help:
 	@echo "  make e2e-check        - Check Rust-native e2e harness (fmt + test + clippy)"
 	@echo "  make e2e-live-create  - Clean dedicated storage, recreate live Kind environment, install cert-manager, and load e2e image"
 	@echo "  make e2e-live-run     - Run all non-destructive live suites in the existing live environment"
-	@echo "  make e2e-live-faults  - Run destructive live fault suites with RUSTFS_E2E_DESTRUCTIVE=1"
+	@echo "  make e2e-live-faults  - Run destructive fault suites against the current kubectl context"
 	@echo "  make e2e-live-update  - Rebuild image and update the live environment (load + rollout)"
 	@echo "  make e2e-live-delete  - Delete live Kind environment and clean dedicated storage"
 
@@ -131,6 +131,7 @@ e2e-live-run:
 	@echo "configured live e2e suites passed."
 
 e2e-live-faults:
+	@echo "running destructive fault e2e against current kubectl context: $$(kubectl config current-context)"
 	RUSTFS_E2E_LIVE=1 RUSTFS_E2E_DESTRUCTIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test faults -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
 
 e2e-live-update:
