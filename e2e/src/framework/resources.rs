@@ -33,6 +33,10 @@ pub fn credential_secret_name(config: &E2eConfig) -> String {
     format!("{}-credentials", config.tenant_name)
 }
 
+pub fn e2e_credentials() -> (&'static str, &'static str) {
+    (E2E_ACCESS_KEY, E2E_SECRET_KEY)
+}
+
 pub fn namespace_manifest(namespace: &str) -> String {
     format!(
         r#"apiVersion: v1
