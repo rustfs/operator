@@ -77,7 +77,7 @@ impl TenantTemplate {
             storage_class: storage_class.into(),
             credential_secret_name: credential_secret_name.into(),
             servers: 4,
-            volumes_per_server: 2,
+            volumes_per_server: 1,
             pod_management_policy: Some(PodManagementPolicy::Parallel),
             unsafe_bypass_disk_check: false,
             node_selector: None,
@@ -207,6 +207,7 @@ mod tests {
         )
         .build();
 
+        assert_eq!(tenant.spec.pools[0].persistence.volumes_per_server, 1);
         assert!(tenant.spec.pools[0].scheduling.node_selector.is_none());
         assert!(
             tenant
