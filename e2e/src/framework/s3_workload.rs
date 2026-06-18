@@ -44,8 +44,12 @@ pub struct GetObjectResult {
 }
 
 impl ObjectSpec {
+    pub fn key_prefix(run_id: &str) -> String {
+        format!("fault-test/{run_id}/")
+    }
+
     pub fn deterministic(run_id: &str, index: usize, size_bytes: usize) -> Self {
-        let key = format!("fault-test/{run_id}/object-{index:06}");
+        let key = format!("{}object-{index:06}", Self::key_prefix(run_id));
         let body = deterministic_bytes(index, size_bytes);
         let sha256 = sha256_hex(&body);
 
@@ -438,6 +442,7 @@ mod tests {
         let object = ObjectSpec::deterministic("run-1", 7, 4096);
         let same = ObjectSpec::deterministic("run-1", 7, 4096);
 
+        assert_eq!(ObjectSpec::key_prefix("run-1"), "fault-test/run-1/");
         assert_eq!(object.key, "fault-test/run-1/object-000007");
         assert_eq!(object.size_bytes, 4096);
         assert_eq!(object.sha256, same.sha256);
