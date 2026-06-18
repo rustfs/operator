@@ -15,7 +15,7 @@
 .PHONY: pre-commit fmt fmt-check clippy test build help
 .PHONY: docker-build-operator docker-build-console-web docker-build-all
 .PHONY: console-lint console-build console-fmt console-fmt-check
-.PHONY: e2e-check e2e-live-create .e2e-live-install-cert-manager e2e-live-run e2e-live-faults e2e-live-update e2e-live-delete
+.PHONY: e2e-check e2e-live-create .e2e-live-install-cert-manager e2e-live-run e2e-live-update e2e-live-delete fault-test
 
 # Default target
 IMAGE_REPO ?= rustfs/operator
@@ -43,7 +43,7 @@ help:
 	@echo "  make e2e-check        - Check Rust-native e2e harness (fmt + test + clippy)"
 	@echo "  make e2e-live-create  - Clean dedicated storage, recreate live Kind environment, install cert-manager, and load e2e image"
 	@echo "  make e2e-live-run     - Run all non-destructive live suites in the existing live environment"
-	@echo "  make e2e-live-faults  - Run destructive fault suites against the current kubectl context"
+	@echo "  make fault-test       - Run destructive fault tests against the current real Kubernetes context"
 	@echo "  make e2e-live-update  - Rebuild image and update the live environment (load + rollout)"
 	@echo "  make e2e-live-delete  - Delete live Kind environment and clean dedicated storage"
 
@@ -96,6 +96,8 @@ CERT_MANAGER_VERSION ?= v1.16.2
 CERT_MANAGER_MANIFEST_URL ?= https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
 CERT_MANAGER_ROLLOUT_TIMEOUT ?= 180s
 E2E_LIVE_ENV ?= RUSTFS_E2E_LIVE=1 RUSTFS_E2E_CERT_MANAGER_VERSION=$(CERT_MANAGER_VERSION)
+FAULT_TEST_MANIFEST ?= e2e/Cargo.toml
+FAULT_TEST_THREADS ?= 1
 
 # Rust-native e2e harness checks (non-live; ignored live tests remain opt-in)
 e2e-check:
@@ -130,9 +132,10 @@ e2e-live-run:
 	RUSTFS_E2E_LIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test cert_manager_tls -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
 	@echo "configured live e2e suites passed."
 
-e2e-live-faults:
-	@echo "running destructive fault e2e against current kubectl context: $$(kubectl config current-context)"
-	RUSTFS_E2E_LIVE=1 RUSTFS_E2E_DESTRUCTIVE=1 cargo test --manifest-path $(E2E_MANIFEST) --test faults -- --ignored --test-threads=$(E2E_TEST_THREADS) --nocapture
+fault-test:
+	@test -n "$(RUSTFS_FAULT_TEST_STORAGE_CLASS)" || (echo "RUSTFS_FAULT_TEST_STORAGE_CLASS is required" && exit 1)
+	@echo "running destructive RustFS fault tests against current Kubernetes context: $$(kubectl config current-context)"
+	RUSTFS_FAULT_TEST_DESTRUCTIVE=1 cargo test --manifest-path $(FAULT_TEST_MANIFEST) --test faults -- --ignored --test-threads=$(FAULT_TEST_THREADS) --nocapture
 
 e2e-live-update:
 	docker build --network host -t rustfs/operator:e2e .

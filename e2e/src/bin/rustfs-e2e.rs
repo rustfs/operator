@@ -110,7 +110,7 @@ fn sanitize_live_storage(config: &E2eConfig) -> Result<()> {
 fn reset_live_fixtures(config: &E2eConfig) -> Result<()> {
     live::require_live_enabled(config)?;
     live::ensure_dedicated_context(config)?;
-    resources::reset_smoke_tenant_resources(config)?;
+    resources::reset_tenant_resources(config)?;
     storage::reset_default_local_storage(config)?;
     cert_manager_tls::reset_positive_case_resources(config)?;
     Ok(())

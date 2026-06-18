@@ -15,7 +15,7 @@
 use anyhow::{Result, ensure};
 use std::time::Duration;
 
-use crate::framework::config::E2eConfig;
+use crate::framework::fault_config::FaultTestConfig;
 
 pub const IO_EIO_SCENARIO: &str = "io-eio";
 
@@ -28,31 +28,31 @@ pub struct FaultScenario {
 }
 
 impl FaultScenario {
-    pub fn from_config(config: &E2eConfig) -> Result<Self> {
+    pub fn from_config(config: &FaultTestConfig) -> Result<Self> {
         ensure!(
-            config.fault_scenario == IO_EIO_SCENARIO,
+            config.scenario == IO_EIO_SCENARIO,
             "unsupported fault scenario {:?}; first implementation supports only {IO_EIO_SCENARIO:?}",
-            config.fault_scenario
+            config.scenario
         );
         ensure!(
-            (1..=100).contains(&config.fault_percent),
-            "RUSTFS_E2E_FAULT_PERCENT must be in 1..=100, got {}",
-            config.fault_percent
+            (1..=100).contains(&config.percent),
+            "RUSTFS_FAULT_TEST_PERCENT must be in 1..=100, got {}",
+            config.percent
         );
         ensure!(
-            config.fault_duration > Duration::ZERO,
-            "RUSTFS_E2E_FAULT_DURATION_SECONDS must be greater than zero"
+            config.duration > Duration::ZERO,
+            "RUSTFS_FAULT_TEST_DURATION_SECONDS must be greater than zero"
         );
         ensure!(
-            config.fault_workload_objects >= 4,
-            "RUSTFS_E2E_WORKLOAD_OBJECTS must be at least 4"
+            config.workload_objects >= 4,
+            "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 4"
         );
 
         Ok(Self {
-            name: config.fault_scenario.clone(),
-            duration: config.fault_duration,
-            percent: config.fault_percent,
-            object_count: config.fault_workload_objects,
+            name: config.scenario.clone(),
+            duration: config.duration,
+            percent: config.percent,
+            object_count: config.workload_objects,
         })
     }
 
@@ -68,12 +68,13 @@ impl FaultScenario {
 #[cfg(test)]
 mod tests {
     use super::{FaultScenario, IO_EIO_SCENARIO};
-    use crate::framework::config::E2eConfig;
+    use crate::framework::fault_config::FaultTestConfig;
     use std::time::Duration;
 
     #[test]
     fn default_fault_scenario_is_io_eio_with_split_workload() {
-        let scenario = FaultScenario::from_config(&E2eConfig::defaults()).expect("valid scenario");
+        let config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        let scenario = FaultScenario::from_config(&config).expect("valid scenario");
 
         assert_eq!(scenario.name, IO_EIO_SCENARIO);
         assert_eq!(scenario.duration, Duration::from_secs(180));
@@ -84,8 +85,8 @@ mod tests {
 
     #[test]
     fn unsupported_fault_scenario_is_rejected() {
-        let mut config = E2eConfig::defaults();
-        config.fault_scenario = "operator-restart".to_string();
+        let mut config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        config.scenario = "operator-restart".to_string();
 
         assert!(FaultScenario::from_config(&config).is_err());
     }

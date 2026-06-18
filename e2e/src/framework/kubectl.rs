@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::framework::{command::CommandSpec, config::E2eConfig};
+use crate::framework::{command::CommandSpec, config::ClusterTestConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Kubectl {
@@ -21,7 +21,7 @@ pub struct Kubectl {
 }
 
 impl Kubectl {
-    pub fn new(config: &E2eConfig) -> Self {
+    pub fn new(config: &ClusterTestConfig) -> Self {
         Self {
             context: config.context.clone(),
             namespace: None,
@@ -50,6 +50,10 @@ impl Kubectl {
     pub fn apply_yaml_command(&self, yaml: impl Into<String>) -> CommandSpec {
         self.command(["apply", "-f", "-"]).stdin(yaml)
     }
+
+    pub fn create_yaml_command(&self, yaml: impl Into<String>) -> CommandSpec {
+        self.command(["create", "-f", "-"]).stdin(yaml)
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +80,17 @@ mod tests {
         assert_eq!(
             command.display(),
             "kubectl --context kind-rustfs-e2e apply -f -"
+        );
+    }
+
+    #[test]
+    fn kubectl_create_yaml_uses_stdin_without_exposing_payload() {
+        let kubectl = Kubectl::new(&E2eConfig::defaults());
+        let command = kubectl.create_yaml_command("kind: Namespace");
+
+        assert_eq!(
+            command.display(),
+            "kubectl --context kind-rustfs-e2e create -f -"
         );
     }
 }

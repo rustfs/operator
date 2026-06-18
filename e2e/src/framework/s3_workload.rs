@@ -45,7 +45,7 @@ pub struct GetObjectResult {
 
 impl ObjectSpec {
     pub fn deterministic(run_id: &str, index: usize, size_bytes: usize) -> Self {
-        let key = format!("fault-e2e/{run_id}/object-{index:06}");
+        let key = format!("fault-test/{run_id}/object-{index:06}");
         let body = deterministic_bytes(index, size_bytes);
         let sha256 = sha256_hex(&body);
 
@@ -71,7 +71,7 @@ impl S3WorkloadClient {
             secret_key.into(),
             None,
             None,
-            "rustfs-e2e-static-credentials",
+            "rustfs-fault-test-static-credentials",
         );
         let shared_config = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new("us-east-1"))
@@ -438,7 +438,7 @@ mod tests {
         let object = ObjectSpec::deterministic("run-1", 7, 4096);
         let same = ObjectSpec::deterministic("run-1", 7, 4096);
 
-        assert_eq!(object.key, "fault-e2e/run-1/object-000007");
+        assert_eq!(object.key, "fault-test/run-1/object-000007");
         assert_eq!(object.size_bytes, 4096);
         assert_eq!(object.sha256, same.sha256);
         assert_eq!(object.sha256, sha256_hex(&same.body));

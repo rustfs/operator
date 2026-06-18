@@ -73,11 +73,22 @@ From the repo root:
 | `make e2e-check` | Validate the e2e harness without creating a live cluster. |
 | `make e2e-live-create` | Build e2e images, recreate the dedicated Kind cluster, install cert-manager, and load images. |
 | `make e2e-live-run` | Deploy the dev control plane and run all non-destructive live suites. |
-| `make e2e-live-faults` | Run destructive fault suites against the current kubectl context. |
+| `make fault-test` | Run destructive RustFS fault tests against the current real Kubernetes context. |
 | `make e2e-live-update` | Rebuild images, reload them into Kind, and roll out control-plane deployments. |
 | `make e2e-live-delete` | Delete the dedicated Kind cluster and its local storage. |
 
 CI (`.github/workflows/ci.yml`) runs Rust tests (including `nextest`), `cargo fmt --check`, `clippy`, the Rust-native e2e harness checks, and `console-web` lint/build/format checks. Use **`make pre-commit`** before opening a PR so local validation stays aligned.
+
+### Run fault tests on a real Kubernetes cluster
+
+Fault tests are separate from the Kind e2e workflow. They use the current kubectl context, reject `kind-*` contexts, reset a dedicated fault-test Tenant, and require Chaos Mesh plus a dynamic StorageClass:
+
+```bash
+kubectl config use-context <real-test-cluster>
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
+```
+
+The test runner creates the default `rustfs-fault-test` namespace with ownership metadata before creating the credential Secret and Tenant. Override it only with another dedicated test namespace using `RUSTFS_FAULT_TEST_NAMESPACE`. If the namespace already exists, destructive reset is allowed only when its `app.kubernetes.io/managed-by` label and `rustfs.com/fault-test-tenant` annotation match the configured fault-test Tenant. The runner never adds these ownership markers to an existing namespace.
 
 Contribution workflow, commit style, and PR expectations: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
@@ -160,7 +171,7 @@ Then use `http://127.0.0.1:19000` for the Tenant S3 API and `http://127.0.0.1:19
   - `deploy/rustfs-operator/` — Helm chart, templates, values, and packaged CRDs.
   - `deploy/k8s-dev/` — Development manifests used by the dev/e2e deployment flows.
   - `deploy/kind/` — Kind cluster configuration for local development.
-- **e2e/** — Rust-native Kind e2e harness, live test suites, and dedicated manifests.
+- **e2e/** — Rust-native Kind e2e harness plus shared implementation modules for the separate real-cluster fault-test runner.
 - **examples/** — Sample `Tenant` custom resources and usage notes.
 - **docs/** — Design notes, GA planning material, and supporting images.
 - **assets/** — README and documentation images.
