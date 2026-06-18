@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::framework::{
     history::{OperationKind, OperationOutcome, OperationRecord, Recorder},
-    s3_workload::{S3WorkloadClient, sha256_hex},
+    s3_workload::{ObjectSpec, S3WorkloadClient, sha256_hex},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ pub async fn check_s3_history(
         }
     }
 
-    let prefix = format!("fault-e2e/{}/", recorder.run_id());
+    let prefix = ObjectSpec::key_prefix(recorder.run_id());
     match s3.list_prefix(&prefix, recorder).await? {
         Some(keys) => {
             let listed = keys.into_iter().collect::<BTreeSet<_>>();
