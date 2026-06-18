@@ -14,7 +14,6 @@
 
 pub mod cert_manager_tls;
 pub mod console;
-pub mod faults;
 pub mod operator;
 pub mod smoke;
 pub mod sts;
@@ -26,7 +25,6 @@ pub enum Suite {
     Console,
     Sts,
     CertManagerTls,
-    Faults,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +61,6 @@ pub fn all_cases() -> Vec<CaseSpec> {
     cases.extend(sts::cases());
     cases.extend(console::cases());
     cases.extend(cert_manager_tls::cases());
-    cases.extend(faults::cases());
     cases
 }
 
@@ -82,7 +79,6 @@ mod tests {
         assert!(suites.contains(&Suite::Sts));
         assert!(suites.contains(&Suite::Console));
         assert!(suites.contains(&Suite::CertManagerTls));
-        assert!(suites.contains(&Suite::Faults));
     }
 
     #[test]
@@ -131,6 +127,5 @@ mod tests {
                 .unwrap_or_default(),
             9
         );
-        assert_eq!(counts.get(&Suite::Faults).copied().unwrap_or_default(), 1);
     }
 }

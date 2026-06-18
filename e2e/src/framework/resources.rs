@@ -12,29 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
+use serde_json::Value;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crate::framework::{
     command::{CommandOutput, CommandSpec},
-    config::E2eConfig,
+    config::ClusterTestConfig,
     kubectl::Kubectl,
     tenant_factory::TenantTemplate,
 };
 use operator::types::v1alpha1::k8s::PodManagementPolicy;
 
-const E2E_ACCESS_KEY: &str = "e2eaccess";
-const E2E_SECRET_KEY: &str = "e2esecret";
+const TEST_ACCESS_KEY: &str = "testaccess";
+const TEST_SECRET_KEY: &str = "testsecret";
 const RESOURCE_RESET_TIMEOUT: Duration = Duration::from_secs(120);
 const RESOURCE_RESET_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+const FAULT_TEST_MANAGER: &str = "rustfs-operator-fault-test";
+const FAULT_TEST_TENANT_ANNOTATION: &str = "rustfs.com/fault-test-tenant";
 
-pub fn credential_secret_name(config: &E2eConfig) -> String {
+pub fn credential_secret_name(config: &ClusterTestConfig) -> String {
     format!("{}-credentials", config.tenant_name)
 }
 
-pub fn e2e_credentials() -> (&'static str, &'static str) {
-    (E2E_ACCESS_KEY, E2E_SECRET_KEY)
+pub fn test_credentials() -> (&'static str, &'static str) {
+    (TEST_ACCESS_KEY, TEST_SECRET_KEY)
 }
 
 pub fn namespace_manifest(namespace: &str) -> String {
@@ -47,7 +51,26 @@ metadata:
     )
 }
 
-pub fn credential_secret_manifest(config: &E2eConfig) -> String {
+pub fn fault_namespace_manifest(config: &ClusterTestConfig) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {namespace}
+  labels:
+    {managed_by_label}: {manager}
+  annotations:
+    {tenant_annotation}: {tenant_name}
+"#,
+        namespace = config.test_namespace,
+        managed_by_label = MANAGED_BY_LABEL,
+        manager = FAULT_TEST_MANAGER,
+        tenant_annotation = FAULT_TEST_TENANT_ANNOTATION,
+        tenant_name = config.tenant_name,
+    )
+}
+
+pub fn credential_secret_manifest(config: &ClusterTestConfig) -> String {
     format!(
         r#"apiVersion: v1
 kind: Secret
@@ -61,12 +84,12 @@ stringData:
 "#,
         secret_name = credential_secret_name(config),
         namespace = config.test_namespace,
-        access_key = E2E_ACCESS_KEY,
-        secret_key = E2E_SECRET_KEY
+        access_key = TEST_ACCESS_KEY,
+        secret_key = TEST_SECRET_KEY
     )
 }
 
-pub fn smoke_tenant_template(config: &E2eConfig) -> TenantTemplate {
+pub fn smoke_tenant_template(config: &ClusterTestConfig) -> TenantTemplate {
     let mut template = TenantTemplate::kind_local(
         &config.test_namespace,
         &config.tenant_name,
@@ -85,13 +108,24 @@ pub fn smoke_tenant_template(config: &E2eConfig) -> TenantTemplate {
     template
 }
 
-pub fn smoke_tenant_manifest(config: &E2eConfig) -> Result<String> {
+pub fn smoke_tenant_manifest(config: &ClusterTestConfig) -> Result<String> {
     Ok(serde_yaml_ng::to_string(
         &smoke_tenant_template(config).build(),
     )?)
 }
 
-pub fn apply_smoke_tenant_resources(config: &E2eConfig) -> Result<()> {
+pub fn fault_tenant_manifest(config: &ClusterTestConfig) -> Result<String> {
+    let template = TenantTemplate::real_cluster(
+        &config.test_namespace,
+        &config.tenant_name,
+        &config.rustfs_image,
+        &config.storage_class,
+        credential_secret_name(config),
+    );
+    Ok(serde_yaml_ng::to_string(&template.build())?)
+}
+
+pub fn apply_smoke_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
     let kubectl = Kubectl::new(config);
     kubectl
         .apply_yaml_command(namespace_manifest(&config.test_namespace))
@@ -105,12 +139,41 @@ pub fn apply_smoke_tenant_resources(config: &E2eConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn reset_and_apply_smoke_tenant_resources(config: &E2eConfig) -> Result<()> {
-    reset_smoke_tenant_resources(config)?;
+pub fn apply_fault_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
+    let kubectl = Kubectl::new(config);
+    if !ensure_fault_namespace_owned_or_absent(config)? {
+        kubectl
+            .create_yaml_command(fault_namespace_manifest(config))
+            .run_checked()
+            .with_context(|| {
+                format!(
+                    "create dedicated fault-test namespace {:?}",
+                    config.test_namespace
+                )
+            })?;
+    }
+    kubectl
+        .apply_yaml_command(credential_secret_manifest(config))
+        .run_checked()?;
+    kubectl
+        .apply_yaml_command(fault_tenant_manifest(config)?)
+        .run_checked()?;
+    Ok(())
+}
+
+pub fn reset_fault_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
+    if !ensure_fault_namespace_owned_or_absent(config)? {
+        return Ok(());
+    }
+    reset_tenant_resources(config)
+}
+
+pub fn reset_and_apply_smoke_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
+    reset_tenant_resources(config)?;
     apply_smoke_tenant_resources(config)
 }
 
-pub fn reset_smoke_tenant_resources(config: &E2eConfig) -> Result<()> {
+pub fn reset_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
     let kubectl = Kubectl::new(config);
     if !namespace_exists(&kubectl, &config.test_namespace)? {
         return Ok(());
@@ -173,7 +236,7 @@ pub fn reset_smoke_tenant_resources(config: &E2eConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn cleanup_smoke_tenant_resources(config: &E2eConfig) -> Result<()> {
+pub fn cleanup_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
     let kubectl = Kubectl::new(config).namespaced(&config.test_namespace);
     let selector = format!("rustfs.tenant={}", config.tenant_name);
 
@@ -221,6 +284,52 @@ fn run_best_effort(command: crate::framework::command::CommandSpec, resource_des
 fn namespace_exists(kubectl: &Kubectl, namespace: &str) -> Result<bool> {
     let output = kubectl.command(["get", "namespace", namespace]).run()?;
     Ok(output.code == Some(0))
+}
+
+fn ensure_fault_namespace_owned_or_absent(config: &ClusterTestConfig) -> Result<bool> {
+    let output = Kubectl::new(config)
+        .command(["get", "namespace", &config.test_namespace, "-o", "json"])
+        .run()?;
+
+    match output.code {
+        Some(0) => {
+            validate_fault_namespace_ownership(
+                &output.stdout,
+                &config.test_namespace,
+                &config.tenant_name,
+            )?;
+            Ok(true)
+        }
+        _ if is_not_found(&output) => Ok(false),
+        _ => bail!(
+            "failed to inspect fault-test namespace {:?} before destructive operation\nexit: {:?}\nstdout:\n{}\nstderr:\n{}",
+            config.test_namespace,
+            output.code,
+            output.stdout,
+            output.stderr
+        ),
+    }
+}
+
+fn validate_fault_namespace_ownership(raw: &str, namespace: &str, tenant_name: &str) -> Result<()> {
+    let value = serde_json::from_str::<Value>(raw)
+        .with_context(|| format!("parse namespace {namespace:?} json"))?;
+    let manager = value
+        .pointer("/metadata/labels/app.kubernetes.io~1managed-by")
+        .and_then(Value::as_str);
+    let owned_tenant = value
+        .pointer("/metadata/annotations/rustfs.com~1fault-test-tenant")
+        .and_then(Value::as_str);
+
+    ensure!(
+        manager == Some(FAULT_TEST_MANAGER) && owned_tenant == Some(tenant_name),
+        "refusing destructive fault-test operation in namespace {namespace:?}: expected label \
+         {MANAGED_BY_LABEL}={FAULT_TEST_MANAGER:?} and annotation \
+         {FAULT_TEST_TENANT_ANNOTATION}={tenant_name:?}, got manager={manager:?}, \
+         tenant={owned_tenant:?}; use a dedicated namespace or explicitly label and annotate it \
+         only after verifying that it contains no non-test workloads"
+    );
+    Ok(())
 }
 
 fn run_delete(command: CommandSpec) -> Result<()> {
@@ -304,8 +413,12 @@ fn is_not_found(output: &CommandOutput) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{credential_secret_manifest, credential_secret_name, smoke_tenant_manifest};
+    use super::{
+        credential_secret_manifest, credential_secret_name, fault_namespace_manifest,
+        fault_tenant_manifest, smoke_tenant_manifest, validate_fault_namespace_ownership,
+    };
     use crate::framework::config::E2eConfig;
+    use crate::framework::fault_config::FaultTestConfig;
 
     #[test]
     fn smoke_tenant_manifest_wires_secret_storage_and_image() {
@@ -328,5 +441,55 @@ mod tests {
         assert!(manifest.contains("namespace: rustfs-e2e-smoke"));
         assert!(manifest.contains("accesskey:"));
         assert!(manifest.contains("secretkey:"));
+    }
+
+    #[test]
+    fn fault_tenant_manifest_uses_real_cluster_defaults() {
+        let config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        let manifest = fault_tenant_manifest(&config.cluster).expect("fault tenant manifest");
+
+        assert!(manifest.contains("namespace: rustfs-fault-test"));
+        assert!(manifest.contains("storageClassName: fast-csi"));
+        assert!(!manifest.contains("rustfs-storage"));
+        assert!(!manifest.contains("RUSTFS_UNSAFE_BYPASS_DISK_CHECK"));
+    }
+
+    #[test]
+    fn fault_namespace_manifest_records_destructive_test_ownership() {
+        let config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        let manifest = fault_namespace_manifest(&config.cluster);
+
+        assert!(manifest.contains("name: rustfs-fault-test"));
+        assert!(manifest.contains("app.kubernetes.io/managed-by: rustfs-operator-fault-test"));
+        assert!(manifest.contains("rustfs.com/fault-test-tenant: fault-test-tenant"));
+    }
+
+    #[test]
+    fn fault_namespace_ownership_requires_matching_manager_and_tenant() {
+        let owned = r#"{
+            "metadata": {
+                "labels": {
+                    "app.kubernetes.io/managed-by": "rustfs-operator-fault-test"
+                },
+                "annotations": {
+                    "rustfs.com/fault-test-tenant": "fault-test-tenant"
+                }
+            }
+        }"#;
+        assert!(
+            validate_fault_namespace_ownership(owned, "rustfs-fault-test", "fault-test-tenant")
+                .is_ok()
+        );
+
+        let unowned = r#"{"metadata":{"labels":{},"annotations":{}}}"#;
+        assert!(
+            validate_fault_namespace_ownership(unowned, "rustfs-fault-test", "fault-test-tenant")
+                .is_err()
+        );
+
+        assert!(
+            validate_fault_namespace_ownership(owned, "rustfs-fault-test", "another-tenant")
+                .is_err()
+        );
     }
 }

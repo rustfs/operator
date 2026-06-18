@@ -16,7 +16,7 @@ use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::framework::{command::CommandSpec, config::E2eConfig, kubectl::Kubectl};
+use crate::framework::{command::CommandSpec, config::ClusterTestConfig, kubectl::Kubectl};
 
 const ERASURE_READ_QUORUM: &str = "erasure read quorum";
 const DNS_LOOKUP_FAILURE: &str = "failed to lookup address information";
@@ -62,7 +62,7 @@ impl ArtifactCollector {
     pub fn collect_kubernetes_snapshot(
         &self,
         case_name: &str,
-        config: &E2eConfig,
+        config: &ClusterTestConfig,
     ) -> Result<SnapshotReport> {
         let mut combined_output = String::new();
 
@@ -90,7 +90,7 @@ impl ArtifactCollector {
     }
 }
 
-fn kubernetes_snapshot_commands(config: &E2eConfig) -> Vec<SnapshotCommand> {
+fn kubernetes_snapshot_commands(config: &ClusterTestConfig) -> Vec<SnapshotCommand> {
     let kubectl = Kubectl::new(config);
     let operator_kubectl = Kubectl::new(config).namespaced(&config.operator_namespace);
     let test_kubectl = Kubectl::new(config).namespaced(&config.test_namespace);
@@ -193,7 +193,7 @@ fn kubernetes_snapshot_commands(config: &E2eConfig) -> Vec<SnapshotCommand> {
 
 fn diagnose_snapshot(snapshot: &str) -> String {
     let mut lines = vec![
-        "RustFS Operator e2e diagnostic summary".to_string(),
+        "RustFS Operator test diagnostic summary".to_string(),
         String::new(),
     ];
     let mut matched = false;
@@ -203,9 +203,8 @@ fn diagnose_snapshot(snapshot: &str) -> String {
         lines.extend([
             format!("Detected `{ERASURE_READ_QUORUM}` in RustFS pod logs."),
             "Meaning: RustFS ECStore could not read a majority of matching erasure format metadata during startup.".to_string(),
-            "Most likely live-e2e causes: stale or partially initialized data in dedicated local PV host paths, peer startup/DNS timing, or a RustFS bootstrap retry window that ended before quorum converged.".to_string(),
+            "Most likely test causes: stale or partially initialized volumes, peer startup/DNS timing, or a RustFS bootstrap retry window that ended before quorum converged.".to_string(),
             "Inspect: rustfs-pods-current.log, rustfs-pods-previous.log, tenant-describe.txt, rustfs-pods-describe.txt, and pv-paths.txt.".to_string(),
-            "Recovery for the dedicated e2e cluster: RUSTFS_E2E_LIVE=1 make e2e-live-delete && RUSTFS_E2E_LIVE=1 make e2e-live-create && RUSTFS_E2E_LIVE=1 make e2e-live-run".to_string(),
             String::new(),
         ]);
     }
@@ -293,7 +292,7 @@ mod tests {
 
         assert!(diagnosis.contains("Detected `erasure read quorum`"));
         assert!(diagnosis.contains("ECStore could not read a majority"));
-        assert!(diagnosis.contains("e2e-live-delete"));
+        assert!(diagnosis.contains("stale or partially initialized volumes"));
     }
 
     #[test]

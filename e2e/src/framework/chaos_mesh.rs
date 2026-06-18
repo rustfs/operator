@@ -17,12 +17,13 @@ use serde_json::Value;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use crate::framework::{config::E2eConfig, kubectl::Kubectl};
+use crate::framework::{config::ClusterTestConfig, kubectl::Kubectl};
 
 const IOCHAOS_CRD: &str = "iochaos.chaos-mesh.org";
-const RUN_ID_LABEL: &str = "rustfs-e2e/run-id";
-const SCENARIO_LABEL: &str = "rustfs-e2e/scenario";
+const RUN_ID_LABEL: &str = "rustfs-fault-test/run-id";
+const SCENARIO_LABEL: &str = "rustfs-fault-test/scenario";
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+const MANAGED_BY_VALUE: &str = "rustfs-operator-fault-test";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IoChaosSpec {
@@ -42,7 +43,7 @@ pub struct IoChaosSpec {
 
 #[derive(Debug, Clone)]
 pub struct ChaosGuard {
-    config: E2eConfig,
+    config: ClusterTestConfig,
     kind: &'static str,
     namespace: String,
     name: String,
@@ -51,7 +52,8 @@ pub struct ChaosGuard {
 
 impl IoChaosSpec {
     pub fn eio_on_rustfs_volume(
-        config: &E2eConfig,
+        config: &ClusterTestConfig,
+        chaos_namespace: impl Into<String>,
         run_id: impl Into<String>,
         scenario: impl Into<String>,
         volume_path: impl Into<String>,
@@ -72,8 +74,8 @@ impl IoChaosSpec {
         let scenario = scenario.into();
 
         Ok(Self {
-            name: format!("rustfs-e2e-io-eio-{short_run_id}"),
-            namespace: config.chaos_namespace.clone(),
+            name: format!("rustfs-fault-io-eio-{short_run_id}"),
+            namespace: chaos_namespace.into(),
             run_id,
             scenario,
             target_namespace: config.test_namespace.clone(),
@@ -105,7 +107,7 @@ metadata:
   labels:
     {run_id_label}: "{run_id}"
     {scenario_label}: "{scenario}"
-    {managed_by_label}: rustfs-operator-e2e
+    {managed_by_label}: {managed_by_value}
 spec:
   action: fault
   mode: one
@@ -131,6 +133,7 @@ spec:
             scenario_label = SCENARIO_LABEL,
             scenario = self.scenario,
             managed_by_label = MANAGED_BY_LABEL,
+            managed_by_value = MANAGED_BY_VALUE,
             target_namespace = self.target_namespace,
             tenant_name = self.tenant_name,
             container_name = self.container_name,
@@ -142,20 +145,20 @@ spec:
     }
 }
 
-pub fn require_iochaos_crd(config: &E2eConfig) -> Result<()> {
+pub fn require_iochaos_crd(config: &ClusterTestConfig) -> Result<()> {
     let output = Kubectl::new(config)
         .command(["get", "crd", IOCHAOS_CRD])
         .run()?;
     ensure!(
         output.code == Some(0),
-        "Chaos Mesh IOChaos CRD {IOCHAOS_CRD} is required for fault e2e; install Chaos Mesh before running faults\nstdout:\n{}\nstderr:\n{}",
+        "Chaos Mesh IOChaos CRD {IOCHAOS_CRD} is required for fault tests; install Chaos Mesh before running faults\nstdout:\n{}\nstderr:\n{}",
         output.stdout,
         output.stderr
     );
     Ok(())
 }
 
-pub fn cleanup_run(config: &E2eConfig, namespace: &str, run_id: &str) -> Result<()> {
+pub fn cleanup_run(config: &ClusterTestConfig, namespace: &str, run_id: &str) -> Result<()> {
     let selector = format!("{RUN_ID_LABEL}={run_id}");
     Kubectl::new(config)
         .namespaced(namespace)
@@ -164,8 +167,8 @@ pub fn cleanup_run(config: &E2eConfig, namespace: &str, run_id: &str) -> Result<
     Ok(())
 }
 
-pub fn cleanup_managed_iochaos(config: &E2eConfig, namespace: &str) -> Result<()> {
-    let selector = format!("{MANAGED_BY_LABEL}=rustfs-operator-e2e");
+pub fn cleanup_managed_iochaos(config: &ClusterTestConfig, namespace: &str) -> Result<()> {
+    let selector = format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}");
     Kubectl::new(config)
         .namespaced(namespace)
         .command(["delete", "iochaos", "-l", &selector, "--ignore-not-found"])
@@ -173,7 +176,7 @@ pub fn cleanup_managed_iochaos(config: &E2eConfig, namespace: &str) -> Result<()
     Ok(())
 }
 
-pub fn apply_iochaos(config: &E2eConfig, spec: &IoChaosSpec) -> Result<ChaosGuard> {
+pub fn apply_iochaos(config: &ClusterTestConfig, spec: &IoChaosSpec) -> Result<ChaosGuard> {
     cleanup_run(config, &spec.namespace, &spec.run_id)?;
     Kubectl::new(config)
         .namespaced(&spec.namespace)
@@ -302,14 +305,15 @@ impl Drop for ChaosGuard {
 #[cfg(test)]
 mod tests {
     use super::{IoChaosSpec, iochaos_is_active};
-    use crate::framework::config::E2eConfig;
+    use crate::framework::fault_config::FaultTestConfig;
     use std::time::Duration;
 
     #[test]
     fn iochaos_manifest_targets_rustfs_workload_only() {
-        let config = E2eConfig::defaults();
+        let config = FaultTestConfig::for_test("real-cluster", "fast-csi");
         let spec = IoChaosSpec::eio_on_rustfs_volume(
-            &config,
+            &config.cluster,
+            "chaos-mesh",
             "run-1234567890",
             "io-eio",
             "/data/rustfs0",
@@ -321,7 +325,9 @@ mod tests {
 
         assert!(manifest.contains("kind: IOChaos"));
         assert!(manifest.contains("namespace: chaos-mesh"));
-        assert!(manifest.contains("rustfs.tenant: e2e-tenant"));
+        assert!(manifest.contains("rustfs.tenant: fault-test-tenant"));
+        assert!(manifest.contains("rustfs-fault-test/run-id"));
+        assert!(manifest.contains("rustfs-operator-fault-test"));
         assert!(manifest.contains("containerNames:\n    - rustfs"));
         assert!(manifest.contains("volumePath: /data/rustfs0"));
         assert!(manifest.contains("errno: 5"));

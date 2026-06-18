@@ -1,6 +1,6 @@
 # RustFS Operator E2E Harness
 
-This crate is the Rust-native integration-test harness for release-grade validation of the RustFS Operator and its Console API.
+This crate provides the Rust-native Kind e2e harness and shared primitives used by the separate real-cluster fault-test runner.
 
 The harness is intentionally separated from the main operator crate so e2e-only dependencies stay scoped to the `e2e/` manifest while still being validated by `make e2e-check` and the default `make pre-commit` path. It is driven through the reduced live entrypoints `e2e-live-create`, `e2e-live-run`, `e2e-live-update`, and `e2e-live-delete`.
 
@@ -22,7 +22,8 @@ e2e/
     lib.rs
     bin/rustfs-e2e.rs  Makefile-internal helper for live workflow steps
     framework/
-      config.rs          environment and CI knobs
+      config.rs          dedicated Kind e2e configuration
+      fault_config.rs    real-cluster fault-test configuration and safety checks
       command.rs         safe subprocess wrapper for kind/docker/kubectl
       kind.rs            Kind cluster lifecycle and host mount preparation
       kubectl.rs         kubectl command construction boundary
@@ -37,7 +38,7 @@ e2e/
       resources.rs       namespace/Secret/Tenant apply boundary
       storage.rs         local StorageClass/PV preparation boundary
       assertions.rs      Kubernetes and Tenant status assertions
-      tenant_factory.rs  reusable Tenant manifests for e2e
+      tenant_factory.rs  Kind-local and real-cluster Tenant templates
     cases/
       smoke.rs           install and readiness checks
       operator.rs        Tenant status and observed-generation checks
@@ -46,7 +47,7 @@ e2e/
     smoke.rs             ignored live smoke entrypoints
     operator.rs          ignored live Operator assertion
     console.rs           ignored live Console API assertion
-    faults.rs            non-live destructive opt-in guard
+    faults.rs            real-cluster destructive fault-test runner; not part of e2e case inventory
 ```
 
 ## Boundary rules
@@ -55,10 +56,12 @@ e2e/
 2. `framework::kubectl` is the shell/Kubernetes YAML boundary and must always pin `--context`.
 3. `framework::kube_client` is the typed Kubernetes API boundary.
 4. `framework::console_client` is the HTTP boundary for Console API tests.
-5. `framework::storage` owns e2e local PV setup; `framework::resources` owns e2e namespace/Secret/Tenant setup.
+5. `framework::storage` owns Kind local PV setup; `framework::resources` owns shared namespace/Secret/Tenant lifecycle.
 6. `framework::live` owns live-run opt-in and dedicated-context checks.
 7. `cases/*` should describe behavior and call framework helpers; avoid shell details there.
-8. Destructive tests must use dedicated e2e namespaces and must never run against an arbitrary current context.
+8. Kind e2e cases remain in `cases/*`; real-cluster fault tests are intentionally excluded from that inventory.
+9. Fault tests use `FaultTestConfig`, reject Kind contexts, require a dedicated namespace and StorageClass, and never use Kind local-volume assumptions.
+10. The fault-test runner creates its namespace with ownership metadata. Existing namespaces must already have the matching manager label and Tenant annotation before destructive reset is allowed.
 
 ## Safety defaults
 
@@ -84,6 +87,29 @@ make e2e-live-run
 ```
 
 The harness refuses to run live tests unless the active Kubernetes context matches the configured dedicated Kind context.
+
+Fault tests have separate safety defaults and environment variables:
+
+```text
+context:          current non-Kind kubectl context
+test namespace:   rustfs-fault-test
+tenant name:      fault-test-tenant
+storage class:    required via RUSTFS_FAULT_TEST_STORAGE_CLASS
+artifacts:        target/fault-tests/artifacts
+```
+
+Run them independently from the Kind lifecycle:
+
+```bash
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
+```
+
+The runner creates an absent namespace through `kubectl create` before applying the credential Secret and Tenant. It refuses to reset or claim an existing namespace unless these values already match:
+
+```text
+app.kubernetes.io/managed-by=rustfs-operator-fault-test
+rustfs.com/fault-test-tenant=<configured-tenant>
+```
 
 ## Non-live validation
 

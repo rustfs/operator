@@ -21,6 +21,7 @@ pub mod command;
 pub mod config;
 pub mod console_client;
 pub mod deploy;
+pub mod fault_config;
 pub mod fault_scenarios;
 pub mod history;
 pub mod images;
@@ -36,4 +37,4 @@ pub mod tenant_factory;
 pub mod tools;
 pub mod wait;
 
-pub use config::E2eConfig;
+pub use config::{ClusterTestConfig, E2eConfig};

@@ -34,6 +34,7 @@ pub struct TenantTemplate {
     pub volumes_per_server: i32,
     pub pod_management_policy: Option<PodManagementPolicy>,
     pub unsafe_bypass_disk_check: bool,
+    pub node_selector: Option<BTreeMap<String, String>>,
 }
 
 impl TenantTemplate {
@@ -54,6 +55,32 @@ impl TenantTemplate {
             volumes_per_server: 2,
             pod_management_policy: Some(PodManagementPolicy::Parallel),
             unsafe_bypass_disk_check: true,
+            node_selector: Some(
+                [("rustfs-storage".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+        }
+    }
+
+    pub fn real_cluster(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        image: impl Into<String>,
+        storage_class: impl Into<String>,
+        credential_secret_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            namespace: namespace.into(),
+            name: name.into(),
+            image: image.into(),
+            storage_class: storage_class.into(),
+            credential_secret_name: credential_secret_name.into(),
+            servers: 4,
+            volumes_per_server: 2,
+            pod_management_policy: Some(PodManagementPolicy::Parallel),
+            unsafe_bypass_disk_check: false,
+            node_selector: None,
         }
     }
 
@@ -79,11 +106,7 @@ impl TenantTemplate {
                 ..PersistenceConfig::default()
             },
             scheduling: SchedulingConfig {
-                node_selector: Some(
-                    [("rustfs-storage".to_string(), "true".to_string())]
-                        .into_iter()
-                        .collect::<BTreeMap<_, _>>(),
-                ),
+                node_selector: self.node_selector.clone(),
                 ..SchedulingConfig::default()
             },
         };
@@ -161,6 +184,36 @@ mod tests {
                 .iter()
                 .any(|env| env.name == "RUSTFS_UNSAFE_BYPASS_DISK_CHECK"
                     && env.value.as_deref() == Some("true"))
+        );
+        assert_eq!(
+            tenant.spec.pools[0]
+                .scheduling
+                .node_selector
+                .as_ref()
+                .and_then(|selector| selector.get("rustfs-storage"))
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn real_cluster_tenant_uses_scheduler_defaults_and_disk_checks() {
+        let tenant = TenantTemplate::real_cluster(
+            "rustfs-fault-test",
+            "fault-test-tenant",
+            "rustfs/rustfs:latest",
+            "fast-csi",
+            "fault-test-tenant-credentials",
+        )
+        .build();
+
+        assert!(tenant.spec.pools[0].scheduling.node_selector.is_none());
+        assert!(
+            tenant
+                .spec
+                .env
+                .iter()
+                .all(|env| env.name != "RUSTFS_UNSAFE_BYPASS_DISK_CHECK")
         );
     }
 }

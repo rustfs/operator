@@ -24,28 +24,11 @@ pub fn require_live_enabled(config: &E2eConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn require_destructive_enabled(config: &E2eConfig) -> Result<()> {
-    ensure!(
-        config.destructive_enabled,
-        "destructive e2e faults are disabled; set RUSTFS_E2E_DESTRUCTIVE=1 explicitly"
-    );
-    Ok(())
-}
-
 pub fn current_context() -> Result<String> {
     let output = CommandSpec::new("kubectl")
         .args(["config", "current-context"])
         .run_checked()?;
     Ok(output.stdout.trim().to_string())
-}
-
-pub fn use_current_context(config: &mut E2eConfig) -> Result<String> {
-    let actual = current_context()?;
-    config.context = actual.clone();
-    if let Some(kind_cluster) = actual.strip_prefix("kind-") {
-        config.cluster_name = kind_cluster.to_string();
-    }
-    Ok(actual)
 }
 
 pub fn ensure_dedicated_context(config: &E2eConfig) -> Result<String> {
@@ -60,14 +43,13 @@ pub fn ensure_dedicated_context(config: &E2eConfig) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{require_destructive_enabled, require_live_enabled};
+    use super::require_live_enabled;
     use crate::framework::config::E2eConfig;
 
     #[test]
-    fn live_and_destructive_guards_are_disabled_by_default() {
+    fn live_guard_is_disabled_by_default() {
         let config = E2eConfig::defaults();
 
         assert!(require_live_enabled(&config).is_err());
-        assert!(require_destructive_enabled(&config).is_err());
     }
 }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use operator::types::v1alpha1::k8s::PodManagementPolicy;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,32 +24,43 @@ pub const DEFAULT_CERT_MANAGER_VERSION: &str = "v1.16.2";
 pub const KIND_WORKER_COUNT: usize = 3;
 
 #[derive(Debug, Clone)]
-pub struct E2eConfig {
-    pub cluster_name: String,
+pub struct ClusterTestConfig {
     pub context: String,
     pub operator_namespace: String,
     pub test_namespace_prefix: String,
     pub test_namespace: String,
     pub tenant_name: String,
     pub storage_class: String,
+    pub rustfs_image: String,
+    pub pod_management_policy: Option<PodManagementPolicy>,
+    pub artifacts_dir: PathBuf,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct E2eConfig {
+    pub cluster: ClusterTestConfig,
+    pub cluster_name: String,
     pub pv_count: usize,
     pub operator_image: String,
     pub console_web_image: String,
-    pub rustfs_image: String,
     pub cert_manager_version: String,
-    pub pod_management_policy: Option<PodManagementPolicy>,
     pub kind_config: PathBuf,
-    pub artifacts_dir: PathBuf,
     pub live_enabled: bool,
-    pub destructive_enabled: bool,
-    pub fault_scenario: String,
-    pub fault_duration: Duration,
-    pub fault_percent: u8,
-    pub fault_workload_objects: usize,
-    pub fault_request_timeout: Duration,
-    pub fault_require_client_disruption: bool,
-    pub chaos_namespace: String,
-    pub timeout: Duration,
+}
+
+impl Deref for E2eConfig {
+    type Target = ClusterTestConfig;
+
+    fn deref(&self) -> &Self::Target {
+        &self.cluster
+    }
+}
+
+impl DerefMut for E2eConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cluster
+    }
 }
 
 impl E2eConfig {
@@ -71,17 +83,30 @@ impl E2eConfig {
         let test_namespace = env_or(&get_env, "RUSTFS_E2E_NAMESPACE", &test_namespace_default);
 
         Self {
+            cluster: ClusterTestConfig {
+                context,
+                operator_namespace: env_or(
+                    &get_env,
+                    "RUSTFS_E2E_OPERATOR_NAMESPACE",
+                    "rustfs-system",
+                ),
+                test_namespace_prefix,
+                test_namespace,
+                tenant_name: env_or(&get_env, "RUSTFS_E2E_TENANT", "e2e-tenant"),
+                storage_class: env_or(&get_env, "RUSTFS_E2E_STORAGE_CLASS", "local-storage"),
+                rustfs_image: env_or(&get_env, "RUSTFS_E2E_SERVER_IMAGE", DEFAULT_RUSTFS_IMAGE),
+                artifacts_dir: PathBuf::from(env_or(
+                    &get_env,
+                    "RUSTFS_E2E_ARTIFACTS",
+                    "target/e2e/artifacts",
+                )),
+                pod_management_policy: parse_pod_management_policy(&get_env),
+                timeout: Duration::from_secs(env_u64(&get_env, "RUSTFS_E2E_TIMEOUT_SECONDS", 300)),
+            },
             cluster_name,
-            context,
-            operator_namespace: env_or(&get_env, "RUSTFS_E2E_OPERATOR_NAMESPACE", "rustfs-system"),
-            test_namespace_prefix,
-            test_namespace,
-            tenant_name: env_or(&get_env, "RUSTFS_E2E_TENANT", "e2e-tenant"),
-            storage_class: env_or(&get_env, "RUSTFS_E2E_STORAGE_CLASS", "local-storage"),
             pv_count: env_usize(&get_env, "RUSTFS_E2E_PV_COUNT", 12),
             operator_image: "rustfs/operator:e2e".to_string(),
             console_web_image: "rustfs/console-web:e2e".to_string(),
-            rustfs_image: env_or(&get_env, "RUSTFS_E2E_SERVER_IMAGE", DEFAULT_RUSTFS_IMAGE),
             cert_manager_version: env_or(
                 &get_env,
                 "RUSTFS_E2E_CERT_MANAGER_VERSION",
@@ -92,33 +117,7 @@ impl E2eConfig {
                 "RUSTFS_E2E_KIND_CONFIG",
                 "e2e/manifests/kind-rustfs-e2e.yaml",
             )),
-            artifacts_dir: PathBuf::from(env_or(
-                &get_env,
-                "RUSTFS_E2E_ARTIFACTS",
-                "target/e2e/artifacts",
-            )),
-            pod_management_policy: parse_pod_management_policy(&get_env),
             live_enabled: env_bool(&get_env, "RUSTFS_E2E_LIVE"),
-            destructive_enabled: env_bool(&get_env, "RUSTFS_E2E_DESTRUCTIVE"),
-            fault_scenario: env_or(&get_env, "RUSTFS_E2E_FAULT_SCENARIO", "io-eio"),
-            fault_duration: Duration::from_secs(env_u64(
-                &get_env,
-                "RUSTFS_E2E_FAULT_DURATION_SECONDS",
-                180,
-            )),
-            fault_percent: env_u8(&get_env, "RUSTFS_E2E_FAULT_PERCENT", 20),
-            fault_workload_objects: env_usize(&get_env, "RUSTFS_E2E_WORKLOAD_OBJECTS", 40),
-            fault_request_timeout: Duration::from_secs(env_u64(
-                &get_env,
-                "RUSTFS_E2E_FAULT_REQUEST_TIMEOUT_SECONDS",
-                3,
-            )),
-            fault_require_client_disruption: env_bool(
-                &get_env,
-                "RUSTFS_E2E_FAULT_REQUIRE_CLIENT_DISRUPTION",
-            ),
-            chaos_namespace: env_or(&get_env, "RUSTFS_E2E_CHAOS_NAMESPACE", "chaos-mesh"),
-            timeout: Duration::from_secs(env_u64(&get_env, "RUSTFS_E2E_TIMEOUT_SECONDS", 300)),
         }
     }
 
@@ -161,15 +160,6 @@ where
         .unwrap_or(default)
 }
 
-fn env_u8<F>(get_env: &F, name: &str, default: u8) -> u8
-where
-    F: Fn(&str) -> Option<String>,
-{
-    get_env(name)
-        .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(default)
-}
-
 fn parse_pod_management_policy<F>(get_env: &F) -> Option<PodManagementPolicy>
 where
     F: Fn(&str) -> Option<String>,
@@ -199,16 +189,6 @@ mod tests {
         assert_eq!(config.storage_class, "local-storage");
         assert_eq!(config.pv_count, 12);
         assert_eq!(config.rustfs_image, DEFAULT_RUSTFS_IMAGE);
-        assert_eq!(config.fault_scenario, "io-eio");
-        assert_eq!(config.fault_duration, std::time::Duration::from_secs(180));
-        assert_eq!(config.fault_percent, 20);
-        assert_eq!(config.fault_workload_objects, 40);
-        assert_eq!(
-            config.fault_request_timeout,
-            std::time::Duration::from_secs(3)
-        );
-        assert!(!config.fault_require_client_disruption);
-        assert_eq!(config.chaos_namespace, "chaos-mesh");
         assert_eq!(config.cert_manager_version, "v1.16.2");
         assert_eq!(
             config.kind_config,
