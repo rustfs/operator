@@ -450,6 +450,7 @@ mod tests {
 
         assert!(manifest.contains("namespace: rustfs-fault-test"));
         assert!(manifest.contains("storageClassName: fast-csi"));
+        assert!(manifest.contains("storage: 80Gi"));
         assert!(!manifest.contains("rustfs-storage"));
         assert!(!manifest.contains("RUSTFS_UNSAFE_BYPASS_DISK_CHECK"));
     }

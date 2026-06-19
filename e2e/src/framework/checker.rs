@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Result, ensure};
+use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,15 +51,16 @@ impl CheckerReport {
 
 pub async fn check_s3_history(
     s3: &S3WorkloadClient,
-    recorder: &mut Recorder,
+    recorder: &Recorder,
     tenant_recovered: bool,
+    concurrency: usize,
 ) -> Result<CheckerReport> {
-    let initial_records = recorder.records().to_vec();
+    let initial_records = recorder.records();
     let committed = committed_puts(&initial_records);
     let unknown_writes = unknown_puts(&initial_records);
     let mut report = CheckerReport {
-        scenario: recorder.scenario().to_string(),
-        run_id: recorder.run_id().to_string(),
+        scenario: recorder.scenario(),
+        run_id: recorder.run_id(),
         committed_puts: committed.len(),
         missing_committed_objects: Vec::new(),
         hash_mismatches: Vec::new(),
@@ -69,22 +71,44 @@ pub async fn check_s3_history(
         passed: false,
     };
 
-    for (key, expected_hash) in &committed {
-        match s3.get_object(key, recorder).await? {
+    let mut committed_results =
+        stream::iter(committed.clone().into_iter().map(|(key, expected_hash)| {
+            let s3 = s3.clone();
+            let recorder = recorder.clone();
+            async move {
+                let body = s3.get_object(&key, &recorder).await?;
+                Ok::<_, anyhow::Error>((key, expected_hash, body))
+            }
+        }))
+        .buffer_unordered(concurrency);
+    while let Some(result) = committed_results.next().await {
+        let (key, expected_hash, body) = result?;
+        match body {
             Some(body) => {
                 let actual_hash = sha256_hex(&body);
-                if actual_hash != *expected_hash {
+                if actual_hash != expected_hash {
                     report.hash_mismatches.push(format!(
                         "{key}: expected {expected_hash}, got {actual_hash}"
                     ));
                 }
             }
-            None => report.missing_committed_objects.push(key.clone()),
+            None => report.missing_committed_objects.push(key),
         }
     }
 
-    for (key, attempted_hash) in &unknown_writes {
-        if let Some(body) = s3.get_object(key, recorder).await? {
+    let mut unknown_results =
+        stream::iter(unknown_writes.into_iter().map(|(key, attempted_hash)| {
+            let s3 = s3.clone();
+            let recorder = recorder.clone();
+            async move {
+                let body = s3.get_object(&key, &recorder).await?;
+                Ok::<_, anyhow::Error>((key, attempted_hash, body))
+            }
+        }))
+        .buffer_unordered(concurrency);
+    while let Some(result) = unknown_results.next().await {
+        let (key, attempted_hash, body) = result?;
+        if let Some(body) = body {
             let actual_hash = sha256_hex(&body);
             report.unknown_writes_materialized.push(format!(
                 "{key}: attempted {attempted_hash}, got {actual_hash}"
@@ -92,7 +116,8 @@ pub async fn check_s3_history(
         }
     }
 
-    let prefix = ObjectSpec::key_prefix(recorder.run_id());
+    let run_id = recorder.run_id();
+    let prefix = ObjectSpec::key_prefix(&run_id);
     match s3.list_prefix(&prefix, recorder).await? {
         Some(keys) => {
             let listed = keys.into_iter().collect::<BTreeSet<_>>();
@@ -109,10 +134,15 @@ pub async fn check_s3_history(
             .push(format!("LIST prefix {prefix} did not complete")),
     }
 
+    report.missing_committed_objects.sort();
+    report.hash_mismatches.sort();
+    report.unknown_writes_materialized.sort();
+    report.list_warnings.sort();
     report.passed = report.tenant_recovered
         && report.missing_committed_objects.is_empty()
         && report.hash_mismatches.is_empty()
-        && report.successful_corrupted_reads.is_empty();
+        && report.successful_corrupted_reads.is_empty()
+        && report.list_warnings.is_empty();
 
     Ok(report)
 }

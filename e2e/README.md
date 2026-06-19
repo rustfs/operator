@@ -88,7 +88,7 @@ make e2e-live-run
 
 The harness refuses to run live tests unless the active Kubernetes context matches the configured dedicated Kind context.
 
-Fault tests have separate safety defaults and environment variables:
+Fault tests have separate safety defaults and run exactly one selected scenario per invocation:
 
 ```text
 context:          current non-Kind kubectl context
@@ -96,20 +96,20 @@ test namespace:   rustfs-fault-test
 tenant name:      fault-test-tenant
 storage class:    required via RUSTFS_FAULT_TEST_STORAGE_CLASS
 artifacts:        target/fault-tests/artifacts
+PVCs:             4 × 80Gi
+objects:          4000 with seeded weighted sizes
+concurrency:      50
 ```
 
 Run them independently from the Kind lifecycle:
 
 ```bash
-RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
+RUSTFS_FAULT_TEST_SCENARIO=io-eio \
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<dynamic-storage-class> \
+make fault-test
 ```
 
-The runner creates an absent namespace through `kubectl create` before applying the credential Secret and Tenant. It refuses to reset or claim an existing namespace unless these values already match:
-
-```text
-app.kubernetes.io/managed-by=rustfs-operator-fault-test
-rustfs.com/fault-test-tenant=<configured-tenant>
-```
+The runner creates an absent namespace with ownership metadata and refuses to reset or claim an existing namespace unless its ownership markers match. See the bilingual [Fault Injection Operations Manual](../FAULT_INJECTION_TEST_PLAN.md) for prerequisites, all seven scenarios, the dedicated `dm-flakey` storage procedure, validation, recovery, and cleanup.
 
 ## Non-live validation
 

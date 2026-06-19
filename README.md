@@ -81,14 +81,16 @@ CI (`.github/workflows/ci.yml`) runs Rust tests (including `nextest`), `cargo fm
 
 ### Run fault tests on a real Kubernetes cluster
 
-Fault tests are separate from the Kind e2e workflow. They use the current kubectl context, reject `kind-*` contexts, reset a dedicated fault-test Tenant, and require Chaos Mesh plus a dynamic StorageClass:
+Fault tests are separate from the Kind e2e workflow. They use the current kubectl context, reject `kind-*` contexts, and run one explicitly selected destructive scenario at a time:
 
 ```bash
 kubectl config use-context <real-test-cluster>
-RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
+RUSTFS_FAULT_TEST_SCENARIO=io-eio \
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<dynamic-storage-class> \
+make fault-test
 ```
 
-The test runner creates the default `rustfs-fault-test` namespace with ownership metadata before creating the credential Secret and Tenant. Override it only with another dedicated test namespace using `RUSTFS_FAULT_TEST_NAMESPACE`. If the namespace already exists, destructive reset is allowed only when its `app.kubernetes.io/managed-by` label and `rustfs.com/fault-test-tenant` annotation match the configured fault-test Tenant. The runner never adds these ownership markers to an existing namespace.
+See the bilingual [Fault Injection Operations Manual](FAULT_INJECTION_TEST_PLAN.md) for cluster preparation, Chaos Mesh installation, all seven scenarios, the dedicated `dm-flakey` Local PV procedure, acceptance criteria, emergency recovery, and cleanup.
 
 Contribution workflow, commit style, and PR expectations: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

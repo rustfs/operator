@@ -27,6 +27,8 @@ pub struct FaultTestConfig {
     pub duration: Duration,
     pub percent: u8,
     pub workload_objects: usize,
+    pub workload_concurrency: usize,
+    pub workload_seed: Option<u64>,
     pub request_timeout: Duration,
     pub require_client_disruption: bool,
     pub dm_name: Option<String>,
@@ -94,14 +96,16 @@ impl FaultTestConfig {
             duration: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_DURATION_SECONDS",
-                180,
+                900,
             )),
             percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", default_percent),
-            workload_objects: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS", 40),
+            workload_objects: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS", 4000),
+            workload_concurrency: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY", 50),
+            workload_seed: env_optional_u64(&get_env, "RUSTFS_FAULT_TEST_SEED")?,
             request_timeout: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS",
-                3,
+                30,
             )),
             require_client_disruption: env_bool(
                 &get_env,
@@ -236,6 +240,19 @@ where
         .unwrap_or(default)
 }
 
+fn env_optional_u64<F>(get_env: &F, name: &str) -> Result<Option<u64>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get_env(name)
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .with_context(|| format!("{name} must be an unsigned 64-bit integer"))
+        })
+        .transpose()
+}
+
 fn env_usize<F>(get_env: &F, name: &str, default: usize) -> usize
 where
     F: Fn(&str) -> Option<String>,
@@ -278,10 +295,12 @@ mod tests {
             std::path::PathBuf::from("target/fault-tests/artifacts")
         );
         assert_eq!(config.scenario, "io-eio");
-        assert_eq!(config.duration, std::time::Duration::from_secs(180));
+        assert_eq!(config.duration, std::time::Duration::from_secs(900));
         assert_eq!(config.percent, 20);
-        assert_eq!(config.workload_objects, 40);
-        assert_eq!(config.request_timeout, std::time::Duration::from_secs(3));
+        assert_eq!(config.workload_objects, 4000);
+        assert_eq!(config.workload_concurrency, 50);
+        assert_eq!(config.workload_seed, None);
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
         assert!(config.dm_name.is_none());
         assert!(config.dm_node.is_none());
         assert!(config.dm_mount_path.is_none());
@@ -305,6 +324,8 @@ mod tests {
                 "RUSTFS_FAULT_TEST_DURATION_SECONDS" => Some("45".to_string()),
                 "RUSTFS_FAULT_TEST_PERCENT" => Some("35".to_string()),
                 "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("64".to_string()),
+                "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY" => Some("8".to_string()),
+                "RUSTFS_FAULT_TEST_SEED" => Some("4242".to_string()),
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS" => Some("7".to_string()),
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION" => Some("true".to_string()),
                 "RUSTFS_FAULT_TEST_DM_NAME" => Some("rustfs-test".to_string()),
@@ -328,6 +349,8 @@ mod tests {
         assert_eq!(config.duration, std::time::Duration::from_secs(45));
         assert_eq!(config.percent, 35);
         assert_eq!(config.workload_objects, 64);
+        assert_eq!(config.workload_concurrency, 8);
+        assert_eq!(config.workload_seed, Some(4242));
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(7));
         assert!(config.require_client_disruption);
         assert_eq!(config.dm_name.as_deref(), Some("rustfs-test"));
@@ -353,6 +376,20 @@ mod tests {
                 _ => None,
             },
             "kind-rustfs-e2e".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_workload_seed_is_rejected() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SEED" => Some("not-a-number".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
         );
 
         assert!(result.is_err());

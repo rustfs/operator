@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use k8s_openapi::api::core::v1::{
-    EnvVar, LocalObjectReference, PersistentVolumeClaimSpec, VolumeResourceRequirements,
+    Affinity, EnvVar, LocalObjectReference, PersistentVolumeClaimSpec, PodAffinityTerm,
+    PodAntiAffinity, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use operator::types::v1alpha1::k8s::ImagePullPolicy;
 use operator::types::v1alpha1::k8s::PodManagementPolicy;
 use operator::types::v1alpha1::persistence::PersistenceConfig;
@@ -32,9 +34,11 @@ pub struct TenantTemplate {
     pub credential_secret_name: String,
     pub servers: i32,
     pub volumes_per_server: i32,
+    pub storage_request: String,
     pub pod_management_policy: Option<PodManagementPolicy>,
     pub unsafe_bypass_disk_check: bool,
     pub node_selector: Option<BTreeMap<String, String>>,
+    pub affinity: Option<Affinity>,
 }
 
 impl TenantTemplate {
@@ -53,6 +57,7 @@ impl TenantTemplate {
             credential_secret_name: credential_secret_name.into(),
             servers: 4,
             volumes_per_server: 2,
+            storage_request: "10Gi".to_string(),
             pod_management_policy: Some(PodManagementPolicy::Parallel),
             unsafe_bypass_disk_check: true,
             node_selector: Some(
@@ -60,6 +65,7 @@ impl TenantTemplate {
                     .into_iter()
                     .collect(),
             ),
+            affinity: None,
         }
     }
 
@@ -70,17 +76,20 @@ impl TenantTemplate {
         storage_class: impl Into<String>,
         credential_secret_name: impl Into<String>,
     ) -> Self {
+        let name = name.into();
         Self {
             namespace: namespace.into(),
-            name: name.into(),
+            name: name.clone(),
             image: image.into(),
             storage_class: storage_class.into(),
             credential_secret_name: credential_secret_name.into(),
             servers: 4,
             volumes_per_server: 1,
+            storage_request: "80Gi".to_string(),
             pod_management_policy: Some(PodManagementPolicy::Parallel),
             unsafe_bypass_disk_check: false,
             node_selector: None,
+            affinity: Some(fault_tenant_pod_anti_affinity(&name)),
         }
     }
 
@@ -94,9 +103,12 @@ impl TenantTemplate {
                     access_modes: Some(vec!["ReadWriteOnce".to_string()]),
                     resources: Some(VolumeResourceRequirements {
                         requests: Some(
-                            [("storage".to_string(), Quantity("10Gi".to_string()))]
-                                .into_iter()
-                                .collect(),
+                            [(
+                                "storage".to_string(),
+                                Quantity(self.storage_request.clone()),
+                            )]
+                            .into_iter()
+                            .collect(),
                         ),
                         ..Default::default()
                     }),
@@ -107,6 +119,7 @@ impl TenantTemplate {
             },
             scheduling: SchedulingConfig {
                 node_selector: self.node_selector.clone(),
+                affinity: self.affinity.clone(),
                 ..SchedulingConfig::default()
             },
         };
@@ -140,6 +153,27 @@ impl TenantTemplate {
         let mut tenant = Tenant::new(&self.name, spec);
         tenant.metadata.namespace = Some(self.namespace.clone());
         tenant
+    }
+}
+
+fn fault_tenant_pod_anti_affinity(tenant_name: &str) -> Affinity {
+    Affinity {
+        pod_anti_affinity: Some(PodAntiAffinity {
+            required_during_scheduling_ignored_during_execution: Some(vec![PodAffinityTerm {
+                label_selector: Some(LabelSelector {
+                    match_labels: Some(
+                        [("rustfs.tenant".to_string(), tenant_name.to_string())]
+                            .into_iter()
+                            .collect(),
+                    ),
+                    ..LabelSelector::default()
+                }),
+                topology_key: "kubernetes.io/hostname".to_string(),
+                ..PodAffinityTerm::default()
+            }]),
+            ..PodAntiAffinity::default()
+        }),
+        ..Affinity::default()
     }
 }
 
@@ -197,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn real_cluster_tenant_uses_scheduler_defaults_and_disk_checks() {
+    fn real_cluster_tenant_uses_fault_storage_spread_and_disk_checks() {
         let tenant = TenantTemplate::real_cluster(
             "rustfs-fault-test",
             "fault-test-tenant",
@@ -208,6 +242,32 @@ mod tests {
         .build();
 
         assert_eq!(tenant.spec.pools[0].persistence.volumes_per_server, 1);
+        assert_eq!(
+            tenant.spec.pools[0]
+                .scheduling
+                .affinity
+                .as_ref()
+                .and_then(|affinity| affinity.pod_anti_affinity.as_ref())
+                .and_then(|anti_affinity| {
+                    anti_affinity
+                        .required_during_scheduling_ignored_during_execution
+                        .as_ref()
+                })
+                .and_then(|terms| terms.first())
+                .map(|term| term.topology_key.as_str()),
+            Some("kubernetes.io/hostname")
+        );
+        assert_eq!(
+            tenant.spec.pools[0]
+                .persistence
+                .volume_claim_template
+                .as_ref()
+                .and_then(|claim| claim.resources.as_ref())
+                .and_then(|resources| resources.requests.as_ref())
+                .and_then(|requests| requests.get("storage"))
+                .map(|quantity| quantity.0.as_str()),
+            Some("80Gi")
+        );
         assert!(tenant.spec.pools[0].scheduling.node_selector.is_none());
         assert!(
             tenant
