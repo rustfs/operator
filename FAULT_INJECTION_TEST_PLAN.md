@@ -198,6 +198,10 @@ export RUSTFS_FAULT_TEST_CHAOS_NAMESPACE=chaos-mesh
 export RUN_ROOT="target/fault-tests/$(date -u +%Y%m%dT%H%M%SZ)"
 ```
 
+如果 runner 位于集群节点或 Pod 内，并且能够访问 Service ClusterIP，建议设置
+`RUSTFS_FAULT_TEST_USE_CLUSTER_IP=1`。50 并发 workload 不应经过 `kubectl port-forward`；
+port-forward 仅适合从集群外执行的低并发控制和调试流量。
+
 运行一个场景：
 
 ```bash
@@ -487,6 +491,7 @@ kubectl get iochaos,podchaos,networkchaos -A
 | `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `50` | prefill、故障 workload、恢复重写和 checker 的最大并发。 |
 | `RUSTFS_FAULT_TEST_SEED` | 随机生成 | 可选 u64 seed；设置后可重放尺寸顺序和对象内容。 |
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `30` | 单个 S3 操作超时。 |
+| `RUSTFS_FAULT_TEST_USE_CLUSTER_IP` | `false` | 从可访问 ClusterIP 的节点/Pod 运行时直连本测试 Tenant Service，避免 port-forward 成为高并发瓶颈。 |
 | `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | 是否强制要求客户端看到故障。 |
 | `RUSTFS_FAULT_TEST_CHAOS_NAMESPACE` | `chaos-mesh` | Chaos Mesh resource namespace。 |
 | `RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS` | `60` | Warp mixed workload 时间。 |
@@ -652,6 +657,10 @@ export RUSTFS_FAULT_TEST_TENANT=fault-test-tenant
 export RUSTFS_FAULT_TEST_CHAOS_NAMESPACE=chaos-mesh
 export RUN_ROOT="target/fault-tests/$(date -u +%Y%m%dT%H%M%SZ)"
 ```
+
+If the runner is on a cluster node or in a Pod and can reach Service ClusterIPs, set
+`RUSTFS_FAULT_TEST_USE_CLUSTER_IP=1`. The 50-concurrency workload should not traverse
+`kubectl port-forward`; port-forward is intended only for low-concurrency control and debugging traffic from outside the cluster.
 
 Run one scenario:
 
@@ -875,6 +884,7 @@ Finally verify nodes, the Operator, Chaos Mesh, PVs, and remaining Chaos resourc
 | `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `50` | Maximum concurrency for prefill, fault workload, recovery writes, and checker reads. |
 | `RUSTFS_FAULT_TEST_SEED` | generated randomly | Optional u64 seed for replaying the size order and object content. |
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `30` | S3 operation timeout. |
+| `RUSTFS_FAULT_TEST_USE_CLUSTER_IP` | `false` | Directly use this test Tenant's Service from a node/Pod that can reach ClusterIP, avoiding port-forward as a high-concurrency bottleneck. |
 | `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | Require client-visible disruption when enabled. |
 | `RUSTFS_FAULT_TEST_CHAOS_NAMESPACE` | `chaos-mesh` | Namespace for Chaos resources. |
 | `RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS` | `60` | Warp mixed workload duration. |
