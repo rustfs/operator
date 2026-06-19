@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Context, Result, bail, ensure};
-use futures::{StreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use kube::Api;
 use operator::types::v1alpha1::tenant::Tenant;
 use rustfs_operator_e2e::framework::{
@@ -31,6 +31,7 @@ use rustfs_operator_e2e::framework::{
     history::Recorder,
     host_faults::{self, DmFlakeyGuard, DmFlakeySpec, DmStatusSnapshot},
     kube_client,
+    kubectl::Kubectl,
     port_forward::{PortForwardGuard, PortForwardSpec},
     resources,
     s3_workload::{ObjectSpec, S3WorkloadClient, WorkloadPlan, wait_for_s3_endpoint},
@@ -115,11 +116,8 @@ async fn run_fault_case(
     );
 
     let cluster = &config.cluster;
-    let port_forward_spec =
-        PortForwardSpec::tenant_io(&cluster.test_namespace, &cluster.tenant_name);
-    let endpoint = port_forward_spec.local_base_url();
-    let mut port_forward = PortForwardSpec::start_tenant_io(cluster)?;
-    wait_for_tenant_s3(&mut port_forward, &endpoint, cluster.timeout).await?;
+    let (endpoint, mut port_forward) = s3_access(config)?;
+    ensure_s3_access(&mut port_forward, cluster, &endpoint).await?;
 
     let (access_key, secret_key) = resources::test_credentials();
     let s3 = S3WorkloadClient::new(
@@ -153,7 +151,7 @@ async fn run_fault_case(
     }
     let active_snapshot = fault.snapshot("active")?;
 
-    if let Err(error) = ensure_port_forward(&mut port_forward, cluster, &endpoint).await {
+    if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "port-forward-failed")?;
         return Err(error);
     }
@@ -173,7 +171,7 @@ async fn run_fault_case(
             return Err(error);
         }
 
-        if let Err(error) = ensure_port_forward(&mut port_forward, cluster, &endpoint).await {
+        if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
             collect_fault_artifacts(
                 collector,
                 scenario.case_name,
@@ -236,7 +234,7 @@ async fn run_fault_case(
 
     wait_for_ready_tenant(cluster).await?;
     let pods_after = rustfs_pod_identities(cluster)?;
-    ensure_port_forward(&mut port_forward, cluster, &endpoint).await?;
+    ensure_s3_access(&mut port_forward, cluster, &endpoint).await?;
     workload.summary.recommitted_after_recovery = recommit_unconfirmed_objects(
         &s3,
         &history,
@@ -808,15 +806,52 @@ async fn wait_for_ready_tenant(config: &ClusterTestConfig) -> Result<Tenant> {
     wait::wait_for_tenant_ready(tenants, &config.tenant_name, config.timeout).await
 }
 
-async fn ensure_port_forward(
-    port_forward: &mut PortForwardGuard,
+fn s3_access(config: &FaultTestConfig) -> Result<(String, Option<PortForwardGuard>)> {
+    let cluster = &config.cluster;
+    if config.use_cluster_ip {
+        let service = format!("{}-io", cluster.tenant_name);
+        let output = Kubectl::new(cluster)
+            .namespaced(&cluster.test_namespace)
+            .command([
+                "get".to_string(),
+                "service".to_string(),
+                service.clone(),
+                "-o".to_string(),
+                "jsonpath={.spec.clusterIP}".to_string(),
+            ])
+            .run_checked()
+            .with_context(|| format!("read ClusterIP for fault-test service {service:?}"))?;
+        let cluster_ip = output.stdout.trim();
+        ensure!(
+            !cluster_ip.is_empty() && cluster_ip != "None",
+            "fault-test service {service:?} does not have a ClusterIP"
+        );
+        let host = if cluster_ip.contains(':') {
+            format!("[{cluster_ip}]")
+        } else {
+            cluster_ip.to_string()
+        };
+        return Ok((format!("http://{host}:9000"), None));
+    }
+
+    let spec = PortForwardSpec::tenant_io(&cluster.test_namespace, &cluster.tenant_name);
+    let endpoint = spec.local_base_url();
+    Ok((endpoint, Some(PortForwardSpec::start_tenant_io(cluster)?)))
+}
+
+async fn ensure_s3_access(
+    port_forward: &mut Option<PortForwardGuard>,
     config: &ClusterTestConfig,
     endpoint: &str,
 ) -> Result<()> {
-    if port_forward.ensure_running().is_err() {
-        *port_forward = PortForwardSpec::start_tenant_io(config)?;
+    if let Some(guard) = port_forward {
+        if guard.ensure_running().is_err() {
+            *guard = PortForwardSpec::start_tenant_io(config)?;
+        }
+        return wait_for_tenant_s3(guard, endpoint, config.timeout).await;
     }
-    wait_for_tenant_s3(port_forward, endpoint, config.timeout).await
+
+    wait_for_s3_endpoint(endpoint, config.timeout).await
 }
 
 async fn wait_for_tenant_s3(
@@ -868,14 +903,10 @@ async fn prefill_objects(
             Ok::<_, anyhow::Error>((index, spec))
         }
     });
-    let results = stream::iter(tasks)
+    let mut objects = stream::iter(tasks)
         .buffer_unordered(plan.concurrency)
-        .collect::<Vec<_>>()
-        .await;
-    let mut objects = Vec::with_capacity(count);
-    for result in results {
-        objects.push(result?);
-    }
+        .try_collect::<Vec<_>>()
+        .await?;
     objects.sort_by_key(|(index, _)| *index);
 
     Ok(objects.into_iter().map(|(_, object)| object).collect())

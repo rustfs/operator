@@ -30,6 +30,7 @@ pub struct FaultTestConfig {
     pub workload_concurrency: usize,
     pub workload_seed: Option<u64>,
     pub request_timeout: Duration,
+    pub use_cluster_ip: bool,
     pub require_client_disruption: bool,
     pub dm_name: Option<String>,
     pub dm_node: Option<String>,
@@ -107,6 +108,7 @@ impl FaultTestConfig {
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS",
                 30,
             )),
+            use_cluster_ip: env_bool(&get_env, "RUSTFS_FAULT_TEST_USE_CLUSTER_IP"),
             require_client_disruption: env_bool(
                 &get_env,
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION",
@@ -301,6 +303,7 @@ mod tests {
         assert_eq!(config.workload_concurrency, 50);
         assert_eq!(config.workload_seed, None);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
+        assert!(!config.use_cluster_ip);
         assert!(config.dm_name.is_none());
         assert!(config.dm_node.is_none());
         assert!(config.dm_mount_path.is_none());
@@ -327,6 +330,7 @@ mod tests {
                 "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY" => Some("8".to_string()),
                 "RUSTFS_FAULT_TEST_SEED" => Some("4242".to_string()),
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS" => Some("7".to_string()),
+                "RUSTFS_FAULT_TEST_USE_CLUSTER_IP" => Some("true".to_string()),
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION" => Some("true".to_string()),
                 "RUSTFS_FAULT_TEST_DM_NAME" => Some("rustfs-test".to_string()),
                 "RUSTFS_FAULT_TEST_DM_NODE" => Some("worker-a".to_string()),
@@ -352,6 +356,7 @@ mod tests {
         assert_eq!(config.workload_concurrency, 8);
         assert_eq!(config.workload_seed, Some(4242));
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(7));
+        assert!(config.use_cluster_ip);
         assert!(config.require_client_disruption);
         assert_eq!(config.dm_name.as_deref(), Some("rustfs-test"));
         assert_eq!(config.dm_node.as_deref(), Some("worker-a"));
