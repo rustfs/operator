@@ -22,15 +22,12 @@ pub const POD_KILL_ONE_SCENARIO: &str = "pod-kill-one";
 pub const NETWORK_PARTITION_ONE_SCENARIO: &str = "network-partition-one";
 pub const IO_READ_MISTAKE_SCENARIO: &str = "io-read-mistake";
 pub const DISK_FULL_SCENARIO: &str = "disk-full";
-pub const DIRECT_PV_CORRUPTION_SCENARIO: &str = "direct-pv-corruption";
-pub const WORKER_RESTART_SCENARIO: &str = "worker-restart";
 pub const DM_FLAKEY_SCENARIO: &str = "dm-flakey";
 pub const WARP_UNDER_CHAOS_SCENARIO: &str = "warp-under-chaos";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultScenarioStatus {
     Executable,
-    Planned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +44,6 @@ pub enum FaultBackend {
     ChaosMeshPodChaos,
     ChaosMeshNetworkChaos,
     LocalPvFill,
-    KindWorkerFileCorruption,
-    KindWorkerRestart,
     DeviceMapper,
     MinioWarpWithChaos,
 }
@@ -57,7 +52,6 @@ pub enum FaultBackend {
 pub enum FaultIsolation {
     FreshTenant,
     ReusableTenant,
-    DedicatedKindWorker,
     DedicatedLinuxBlockDevice,
     PerformanceOnly,
 }
@@ -156,36 +150,6 @@ pub const FAULT_SCENARIO_CATALOG: &[FaultScenarioSpec] = &[
         conflict_domain: "fresh Tenant/PVC/PV fixture and a uniquely named filler file cleaned before any subsequent case",
     },
     FaultScenarioSpec {
-        scenario: DIRECT_PV_CORRUPTION_SCENARIO,
-        case_name: "fault_direct_pv_corruption_detects_or_repairs_bad_data",
-        description: "Corrupt one e2e-owned Kind local PV file after data is committed and verify RustFS detects, repairs, or fails instead of returning bad bytes.",
-        priority: FaultPriority::P2,
-        backend: FaultBackend::KindWorkerFileCorruption,
-        status: FaultScenarioStatus::Executable,
-        isolation: FaultIsolation::FreshTenant,
-        boundary: "rustfs-workload/data-integrity",
-        ci_phase: "faults",
-        target: "one file under an e2e-owned Kind worker local PV backing a RustFS data volume",
-        validation: "after direct corruption, successful GET responses must match committed hashes; missing or failed reads are reported separately from corrupt success",
-        observability: "history.jsonl, checker-report.json, selected PV path, before/after file hash, docker exec command display, events, RustFS logs",
-        conflict_domain: "dedicated Kind worker storage and fresh fixture because the case intentionally mutates persisted data",
-    },
-    FaultScenarioSpec {
-        scenario: WORKER_RESTART_SCENARIO,
-        case_name: "fault_worker_restart_preserves_committed_objects",
-        description: "Restart one Kind worker that hosts RustFS data and verify Kubernetes and RustFS recovery preserve committed objects.",
-        priority: FaultPriority::P2,
-        backend: FaultBackend::KindWorkerRestart,
-        status: FaultScenarioStatus::Executable,
-        isolation: FaultIsolation::DedicatedKindWorker,
-        boundary: "rustfs-workload/node-recovery",
-        ci_phase: "faults",
-        target: "one e2e Kind worker hosting RustFS Pods or local PVs",
-        validation: "affected Pods reschedule or recover, Tenant returns Ready, and committed PUTs remain readable with matching hashes",
-        observability: "history.jsonl, checker-report.json, docker restart timing, node conditions, Pod placement before/after, events, RustFS logs",
-        conflict_domain: "dedicated Kind cluster case; must not run concurrently with other live suites",
-    },
-    FaultScenarioSpec {
         scenario: DM_FLAKEY_SCENARIO,
         case_name: "fault_dm_flakey_preserves_committed_objects",
         description: "Use a device-mapper flakey or error target for a dedicated test volume and verify RustFS handles block-device instability without data corruption.",
@@ -198,7 +162,7 @@ pub const FAULT_SCENARIO_CATALOG: &[FaultScenarioSpec] = &[
         target: "one dedicated Linux block-device-backed PV used only by the e2e Tenant",
         validation: "committed objects remain readable after the device fault is removed, and successful reads never return corrupt bytes",
         observability: "history.jsonl, checker-report.json, dmsetup table/status, kernel logs, PV mapping, events, RustFS logs",
-        conflict_domain: "dedicated Linux runner or lab host; never part of the default Kind flow",
+        conflict_domain: "dedicated Linux runner or lab host with an explicitly assigned block device; never part of shared test storage",
     },
     FaultScenarioSpec {
         scenario: WARP_UNDER_CHAOS_SCENARIO,
@@ -326,8 +290,14 @@ mod tests {
             config.scenario = spec.scenario.to_string();
 
             assert_eq!(spec.status, FaultScenarioStatus::Executable);
-            assert!(FaultScenario::from_config(&config).is_ok());
+            assert!(
+                FaultScenario::from_config(&config).is_ok(),
+                "{} should be selectable through the real-cluster fault-test entrypoint",
+                spec.scenario
+            );
         }
+
+        assert_eq!(scenario_catalog().len(), 7);
     }
 
     #[test]
