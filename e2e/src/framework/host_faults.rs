@@ -263,7 +263,7 @@ impl DmFlakeyGuard {
     fn load_table(&self, table: &str) -> Result<()> {
         self.dmsetup(["suspend", self.dm_name.as_str()])?;
         let load = self.dmsetup(["load", self.dm_name.as_str(), "--table", table]);
-        let resume = self.dmsetup(["resume", self.dm_name.as_str()]);
+        let resume = self.dmsetup(dm_resume_args(&self.dm_name));
         load?;
         resume?;
         Ok(())
@@ -360,6 +360,10 @@ fn validate_dm_spec(spec: &DmFlakeySpec<'_>) -> Result<()> {
         "RUSTFS_FAULT_TEST_DM_HELPER_IMAGE must be a non-empty image reference"
     );
     Ok(())
+}
+
+fn dm_resume_args(name: &str) -> [&str; 3] {
+    ["resume", "--noudevsync", name]
 }
 
 fn verify_dm_volume_mapping(
@@ -501,7 +505,8 @@ spec:
 #[cfg(test)]
 mod tests {
     use super::{
-        DmFlakeySpec, dm_helper_manifest, helper_pod_name, pv_targets_node, validate_dm_spec,
+        DmFlakeySpec, dm_helper_manifest, dm_resume_args, helper_pod_name, pv_targets_node,
+        validate_dm_spec,
     };
     use crate::framework::fault_config::FaultTestConfig;
 
@@ -520,6 +525,14 @@ mod tests {
         assert!(manifest.contains("mountPath: /host"));
         assert!(manifest.contains("path: /"));
         assert!(manifest.contains("rustfs-operator-fault-test"));
+    }
+
+    #[test]
+    fn dm_resume_disables_udev_synchronization() {
+        assert_eq!(
+            dm_resume_args("rustfs-fault-dm"),
+            ["resume", "--noudevsync", "rustfs-fault-dm"]
+        );
     }
 
     #[test]
