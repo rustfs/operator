@@ -406,7 +406,7 @@ fault-test/<run-id>/large/<uuid>
 | P2 | `direct-volume-corruption` | 存储后端专用测试环境 | 模拟已经落盘的数据被破坏。 |
 | P2 | `node-restart` | 集群节点运维接口 | 模拟节点重启。 |
 | P3 | `dm-flakey` | device mapper / loop device | 更接近真实块设备故障。 |
-| P3 | `warp-under-chaos` | MinIO Warp + chaos | 故障期间性能退化分析。 |
+| P3 | `warp-under-chaos` | MinIO Warp + chaos | 使用独立 benchmark bucket 分析故障期间性能，避免影响 correctness 对象。 |
 
 `operator-restart` 可以作为独立 Operator 控制面韧性测试，但不放入本方案第一阶段的 RustFS workload fault matrix，避免混淆测试对象。
 
