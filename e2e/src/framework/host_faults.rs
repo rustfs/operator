@@ -114,7 +114,7 @@ pub fn apply_dm_flakey(
         spec.name
     );
 
-    guard.load_table(spec.fault_table)?;
+    guard.load_table(spec.fault_table, false)?;
     let active = guard.snapshot("active")?;
     ensure!(
         active.table.split_whitespace().nth(2) == spec.fault_table.split_whitespace().nth(2),
@@ -202,7 +202,7 @@ impl DmFlakeyGuard {
 
     pub fn restore(&mut self) -> Result<()> {
         let recovery_table = self.recovery_table.clone();
-        self.load_table(&recovery_table)?;
+        self.load_table(&recovery_table, true)?;
         self.recovery_snapshot = Some(self.snapshot("recovered")?);
         self.delete_helper()?;
         self.restored = true;
@@ -260,8 +260,8 @@ impl DmFlakeyGuard {
         Ok(())
     }
 
-    fn load_table(&self, table: &str) -> Result<()> {
-        self.dmsetup(["suspend", self.dm_name.as_str()])?;
+    fn load_table(&self, table: &str, noflush: bool) -> Result<()> {
+        self.dmsetup(dm_suspend_args(&self.dm_name, noflush))?;
         let load = self.dmsetup(["load", self.dm_name.as_str(), "--table", table]);
         let resume = self.dmsetup(dm_resume_args(&self.dm_name));
         load?;
@@ -318,7 +318,7 @@ impl Drop for DmFlakeyGuard {
         if !self.restored {
             let recovery_table = self.recovery_table.clone();
             if !recovery_table.is_empty() {
-                let _ = self.load_table(&recovery_table);
+                let _ = self.load_table(&recovery_table, true);
             }
             let _ = self.delete_helper();
         }
@@ -364,6 +364,14 @@ fn validate_dm_spec(spec: &DmFlakeySpec<'_>) -> Result<()> {
 
 fn dm_resume_args(name: &str) -> [&str; 3] {
     ["resume", "--noudevsync", name]
+}
+
+fn dm_suspend_args(name: &str, noflush: bool) -> Vec<&str> {
+    if noflush {
+        vec!["suspend", "--noflush", name]
+    } else {
+        vec!["suspend", name]
+    }
 }
 
 fn verify_dm_volume_mapping(
@@ -505,8 +513,8 @@ spec:
 #[cfg(test)]
 mod tests {
     use super::{
-        DmFlakeySpec, dm_helper_manifest, dm_resume_args, helper_pod_name, pv_targets_node,
-        validate_dm_spec,
+        DmFlakeySpec, dm_helper_manifest, dm_resume_args, dm_suspend_args, helper_pod_name,
+        pv_targets_node, validate_dm_spec,
     };
     use crate::framework::fault_config::FaultTestConfig;
 
@@ -532,6 +540,18 @@ mod tests {
         assert_eq!(
             dm_resume_args("rustfs-fault-dm"),
             ["resume", "--noudevsync", "rustfs-fault-dm"]
+        );
+    }
+
+    #[test]
+    fn dm_recovery_suspend_does_not_flush_faulting_io() {
+        assert_eq!(
+            dm_suspend_args("rustfs-fault-dm", true),
+            ["suspend", "--noflush", "rustfs-fault-dm"]
+        );
+        assert_eq!(
+            dm_suspend_args("rustfs-fault-dm", false),
+            ["suspend", "rustfs-fault-dm"]
         );
     }
 
