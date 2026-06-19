@@ -23,13 +23,12 @@ use rustfs_operator_e2e::framework::{
     config::ClusterTestConfig,
     fault_config::FaultTestConfig,
     fault_scenarios::{
-        self, DISK_FULL_SCENARIO, DM_FLAKEY_SCENARIO, FaultBackend, FaultScenario, IO_EIO_SCENARIO,
-        IO_READ_MISTAKE_SCENARIO, NETWORK_PARTITION_ONE_SCENARIO, POD_KILL_ONE_SCENARIO,
-        WARP_UNDER_CHAOS_SCENARIO,
+        self, DISK_FULL_SCENARIO, FaultBackend, FaultIsolation, FaultScenario,
+        IO_READ_MISTAKE_SCENARIO,
     },
     history::OperationOutcome,
     history::Recorder,
-    host_faults::{self, DiskFillGuard, DmFlakeyGuard},
+    host_faults::{self, DmFlakeyGuard, DmFlakeySpec, DmStatusSnapshot},
     kube_client,
     port_forward::{PortForwardGuard, PortForwardSpec},
     resources,
@@ -46,60 +45,14 @@ const RUSTFS_DATA_VOLUME: &str = "/data/rustfs0";
 const SMALL_OBJECT_SIZE_BYTES: usize = 4 * 1024;
 
 #[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=io-eio"]
-async fn fault_io_eio_preserves_committed_objects() -> Result<()> {
-    run_selected_fault_case(IO_EIO_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=pod-kill-one"]
-async fn fault_pod_kill_one_preserves_committed_objects() -> Result<()> {
-    run_selected_fault_case(POD_KILL_ONE_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=network-partition-one"]
-async fn fault_network_partition_one_preserves_committed_objects() -> Result<()> {
-    run_selected_fault_case(NETWORK_PARTITION_ONE_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=io-read-mistake"]
-async fn fault_io_read_mistake_rejects_corrupt_reads() -> Result<()> {
-    run_selected_fault_case(IO_READ_MISTAKE_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=disk-full"]
-async fn fault_disk_full_preserves_committed_objects() -> Result<()> {
-    run_selected_fault_case(DISK_FULL_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=dm-flakey"]
-async fn fault_dm_flakey_preserves_committed_objects() -> Result<()> {
-    run_selected_fault_case(DM_FLAKEY_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=warp-under-chaos"]
-async fn fault_warp_under_chaos_reports_performance_separately() -> Result<()> {
-    run_selected_fault_case(WARP_UNDER_CHAOS_SCENARIO).await
-}
-
-async fn run_selected_fault_case(expected_scenario: &str) -> Result<()> {
+#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO"]
+async fn fault_selected_scenario() -> Result<()> {
     let config = FaultTestConfig::from_env()?;
     let scenario = FaultScenario::from_config(&config)?;
-    if scenario.name != expected_scenario {
-        eprintln!(
-            "skipping fault scenario {expected_scenario}; selected scenario is {}",
-            scenario.name
-        );
-        return Ok(());
-    }
+    let spec = fault_scenarios::scenario_spec(&scenario.name)?;
 
     config.require_destructive_enabled()?;
-    config.validate_cluster()?;
+    config.validate_cluster(spec.backend == FaultBackend::DeviceMapper)?;
     eprintln!(
         "running destructive RustFS fault scenario {} against real Kubernetes context: {}",
         scenario.name, config.cluster.context
@@ -135,7 +88,7 @@ async fn run_fault_case(
     require_fault_backend(config, spec.backend)?;
     cleanup_fault_backend(config, spec.backend)?;
 
-    reset_fault_fixture(&config.cluster)?;
+    prepare_fault_fixture(&config.cluster, spec.isolation)?;
     wait_for_ready_tenant(&config.cluster).await?;
 
     let run_id = format!("run-{}", Uuid::new_v4());
@@ -166,12 +119,14 @@ async fn run_fault_case(
     );
 
     let prefilled = prefill_objects(&s3, &mut history, &run_id, scenario.prefill_count()).await?;
+    let pods_before = rustfs_pod_identities(cluster)?;
     let mut fault = AppliedFault::apply(config, collector, scenario, spec.backend, &run_id)?;
 
     if let Err(error) = fault.wait_active(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "wait-active-failed")?;
         return Err(error);
     }
+    let active_snapshot = fault.snapshot("active")?;
 
     if let Err(error) = ensure_port_forward(&mut port_forward, cluster, &endpoint).await {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "port-forward-failed")?;
@@ -242,19 +197,40 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    let workload_snapshot = fault.snapshot("after-workload")?;
 
-    if let Err(error) = fault.delete() {
+    if let Err(error) = fault.delete(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "delete-failed")?;
         return Err(error);
     }
 
     wait_for_ready_tenant(cluster).await?;
+    let pods_after = rustfs_pod_identities(cluster)?;
     ensure_port_forward(&mut port_forward, cluster, &endpoint).await?;
     let report = checker::check_s3_history(&s3, &mut history, true).await?;
     collector.write_text(
         scenario.case_name,
         "checker-report.json",
         &serde_json::to_string_pretty(&report)?,
+    )?;
+    let evidence = FaultEvidence {
+        scenario: scenario.name.clone(),
+        backend: format!("{:?}", spec.backend),
+        target: spec.target.to_string(),
+        injected: true,
+        active_during_workload: true,
+        recovered: report.tenant_recovered,
+        client_disruptions: workload_summary.disrupted(),
+        pods_before,
+        pods_after,
+        active_snapshot,
+        workload_snapshot,
+        dm_recovery_snapshot: fault.recovery_dm_snapshot(),
+    };
+    collector.write_text(
+        scenario.case_name,
+        "fault-evidence.json",
+        &serde_json::to_string_pretty(&evidence)?,
     )?;
     report.require_success()?;
 
@@ -271,7 +247,6 @@ fn require_fault_backend(config: &FaultTestConfig, backend: FaultBackend) -> Res
         }
         FaultBackend::ChaosMeshPodChaos => chaos_mesh::require_podchaos_crd(cluster),
         FaultBackend::ChaosMeshNetworkChaos => chaos_mesh::require_networkchaos_crd(cluster),
-        FaultBackend::LocalPvFill => Ok(()),
         FaultBackend::DeviceMapper => require_dm_flakey_preflight(config),
     }
 }
@@ -289,20 +264,22 @@ where
 }
 
 fn require_dm_flakey_preflight(config: &FaultTestConfig) -> Result<()> {
-    let name = config
+    config
         .dm_name
         .as_deref()
         .context("RUSTFS_FAULT_TEST_DM_NAME is required for dm-flakey")?;
     config
+        .dm_node
+        .as_deref()
+        .context("RUSTFS_FAULT_TEST_DM_NODE is required for dm-flakey")?;
+    config
+        .dm_mount_path
+        .as_deref()
+        .context("RUSTFS_FAULT_TEST_DM_MOUNT_PATH is required for dm-flakey")?;
+    config
         .dm_fault_table
         .as_deref()
         .context("RUSTFS_FAULT_TEST_DM_FAULT_TABLE is required for dm-flakey")?;
-
-    require_tool("dmsetup", ["version"])?;
-    CommandSpec::new("dmsetup")
-        .args(["table", name])
-        .run_checked()
-        .with_context(|| format!("dm-flakey target {name:?} must exist before fixture reset"))?;
     Ok(())
 }
 
@@ -317,13 +294,18 @@ fn cleanup_fault_backend(config: &FaultTestConfig, backend: FaultBackend) -> Res
         FaultBackend::ChaosMeshNetworkChaos => {
             chaos_mesh::cleanup_managed_networkchaos(&config.cluster, &config.chaos_namespace)
         }
-        FaultBackend::LocalPvFill | FaultBackend::DeviceMapper => Ok(()),
+        FaultBackend::DeviceMapper => Ok(()),
     }
 }
 
-fn reset_fault_fixture(config: &ClusterTestConfig) -> Result<()> {
-    resources::reset_fault_tenant_resources(config)?;
-    resources::apply_fault_tenant_resources(config)?;
+fn prepare_fault_fixture(config: &ClusterTestConfig, isolation: FaultIsolation) -> Result<()> {
+    match isolation {
+        FaultIsolation::ReusableTenant => resources::apply_fault_tenant_resources(config)?,
+        FaultIsolation::FreshTenant | FaultIsolation::DedicatedLinuxBlockDevice => {
+            resources::reset_fault_tenant_resources(config)?;
+            resources::apply_fault_tenant_resources(config)?;
+        }
+    }
     Ok(())
 }
 
@@ -337,7 +319,6 @@ enum AppliedFault {
         before_pods: Vec<PodIdentity>,
         config: Box<ClusterTestConfig>,
     },
-    DiskFill(Box<DiskFillGuard>),
     DmFlakey(Box<DmFlakeyGuard>),
 }
 
@@ -351,6 +332,26 @@ impl AppliedFault {
     ) -> Result<Self> {
         let cluster = &config.cluster;
         match backend {
+            FaultBackend::ChaosMeshIoChaos if scenario.name == DISK_FULL_SCENARIO => {
+                let chaos = IoChaosSpec::enospc_on_rustfs_volume(
+                    cluster,
+                    &config.chaos_namespace,
+                    run_id,
+                    &scenario.name,
+                    RUSTFS_DATA_VOLUME,
+                    scenario.percent,
+                    scenario.duration,
+                )?;
+                collector.write_text(
+                    scenario.case_name,
+                    "chaos-manifest.yaml",
+                    &chaos.manifest(),
+                )?;
+                Ok(Self::Chaos {
+                    guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
+                    active_required: true,
+                })
+            }
             FaultBackend::ChaosMeshIoChaos if scenario.name == IO_READ_MISTAKE_SCENARIO => {
                 let chaos = IoChaosSpec::read_mistake_on_rustfs_volume(
                     cluster,
@@ -428,15 +429,6 @@ impl AppliedFault {
                     active_required: true,
                 })
             }
-            FaultBackend::LocalPvFill => Ok(Self::DiskFill(Box::new(
-                host_faults::fill_rustfs_data_volume(
-                    cluster,
-                    config.disk_fill_mib,
-                    collector,
-                    scenario.case_name,
-                    run_id,
-                )?,
-            ))),
             FaultBackend::DeviceMapper => {
                 let name = config
                     .dm_name
@@ -446,10 +438,25 @@ impl AppliedFault {
                     .dm_fault_table
                     .as_deref()
                     .context("RUSTFS_FAULT_TEST_DM_FAULT_TABLE is required for dm-flakey")?;
+                let node = config
+                    .dm_node
+                    .as_deref()
+                    .context("RUSTFS_FAULT_TEST_DM_NODE is required for dm-flakey")?;
+                let mount_path = config
+                    .dm_mount_path
+                    .as_deref()
+                    .context("RUSTFS_FAULT_TEST_DM_MOUNT_PATH is required for dm-flakey")?;
                 Ok(Self::DmFlakey(Box::new(host_faults::apply_dm_flakey(
-                    name,
-                    fault_table,
-                    config.dm_recovery_table.as_deref(),
+                    cluster,
+                    &DmFlakeySpec {
+                        node,
+                        mount_path,
+                        helper_image: &config.dm_helper_image,
+                        name,
+                        fault_table,
+                        recovery_table: config.dm_recovery_table.as_deref(),
+                        run_id,
+                    },
                     collector,
                     scenario.case_name,
                 )?)))
@@ -488,8 +495,8 @@ impl AppliedFault {
                 before_pods,
                 config,
                 ..
-            } => wait_for_rustfs_pod_replacement(config, before_pods, timeout),
-            Self::Chaos { .. } | Self::DiskFill(_) | Self::DmFlakey(_) => Ok(()),
+            } => wait_for_rustfs_pod_deletion(config, before_pods, timeout),
+            Self::Chaos { .. } | Self::DmFlakey(_) => Ok(()),
         }
     }
 
@@ -499,17 +506,25 @@ impl AppliedFault {
                 guard,
                 active_required,
             } if *active_required => guard.ensure_active(stage),
-            Self::PodKill { .. } | Self::Chaos { .. } | Self::DiskFill(_) | Self::DmFlakey(_) => {
+            Self::PodKill { .. } | Self::Chaos { .. } => Ok(()),
+            Self::DmFlakey(guard) => {
+                guard.ensure_active("after fault workload")?;
                 Ok(())
             }
         }
     }
 
-    fn delete(&mut self) -> Result<()> {
+    fn delete(&mut self, timeout: Duration) -> Result<()> {
         match self {
             Self::Chaos { guard, .. } => guard.delete(),
-            Self::PodKill { guard, .. } => guard.delete(),
-            Self::DiskFill(guard) => guard.delete(),
+            Self::PodKill {
+                guard,
+                before_pods,
+                config,
+            } => {
+                guard.delete()?;
+                wait_for_rustfs_pod_replacement(config, before_pods, timeout)
+            }
             Self::DmFlakey(guard) => guard.restore(),
         }
     }
@@ -517,9 +532,60 @@ impl AppliedFault {
     fn chaos_guard(&self) -> Option<&ChaosGuard> {
         match self {
             Self::Chaos { guard, .. } | Self::PodKill { guard, .. } => Some(guard.as_ref()),
-            Self::DiskFill(_) | Self::DmFlakey(_) => None,
+            Self::DmFlakey(_) => None,
         }
     }
+
+    fn snapshot(&self, stage: &str) -> Result<FaultStatusSnapshot> {
+        match self {
+            Self::Chaos { guard, .. } | Self::PodKill { guard, .. } => Ok(FaultStatusSnapshot {
+                stage: stage.to_string(),
+                resource_kind: Some(guard.kind().to_string()),
+                resource_name: Some(guard.name().to_string()),
+                chaos_status: Some(serde_json::from_str(&guard.json()?)?),
+                dm_status: None,
+            }),
+            Self::DmFlakey(guard) => Ok(FaultStatusSnapshot {
+                stage: stage.to_string(),
+                resource_kind: Some("device-mapper".to_string()),
+                resource_name: None,
+                chaos_status: None,
+                dm_status: Some(guard.snapshot(stage)?),
+            }),
+        }
+    }
+
+    fn recovery_dm_snapshot(&self) -> Option<DmStatusSnapshot> {
+        match self {
+            Self::DmFlakey(guard) => guard.recovery_snapshot().cloned(),
+            Self::Chaos { .. } | Self::PodKill { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FaultStatusSnapshot {
+    stage: String,
+    resource_kind: Option<String>,
+    resource_name: Option<String>,
+    chaos_status: Option<serde_json::Value>,
+    dm_status: Option<DmStatusSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FaultEvidence {
+    scenario: String,
+    backend: String,
+    target: String,
+    injected: bool,
+    active_during_workload: bool,
+    recovered: bool,
+    client_disruptions: usize,
+    pods_before: Vec<PodIdentity>,
+    pods_after: Vec<PodIdentity>,
+    active_snapshot: FaultStatusSnapshot,
+    workload_snapshot: FaultStatusSnapshot,
+    dm_recovery_snapshot: Option<DmStatusSnapshot>,
 }
 
 fn collect_fault_artifacts(
@@ -528,6 +594,12 @@ fn collect_fault_artifacts(
     fault: &AppliedFault,
     suffix: &str,
 ) -> Result<()> {
+    let status = fault
+        .snapshot(suffix)
+        .and_then(|snapshot| serde_json::to_string_pretty(&snapshot).map_err(Into::into))
+        .unwrap_or_else(|error| format!("failed to collect fault status: {error}"));
+    collector.write_text(case_name, &format!("fault-status-{suffix}.json"), &status)?;
+
     if let Some(guard) = fault.chaos_guard() {
         let describe = guard
             .describe()
@@ -547,7 +619,7 @@ fn collect_fault_artifacts(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PodIdentity {
     name: String,
     uid: String,
@@ -614,6 +686,50 @@ fn wait_for_rustfs_pod_replacement(
 
         sleep(Duration::from_secs(1));
     }
+}
+
+fn wait_for_rustfs_pod_deletion(
+    config: &ClusterTestConfig,
+    before: &[PodIdentity],
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut last_snapshot = Vec::new();
+    let mut last_error = "not checked yet".to_string();
+
+    loop {
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out waiting for PodChaos to delete a RustFS pod after {timeout:?}\nbefore: {before:?}\nlast: {last_snapshot:?}\nlast error: {last_error}",
+            );
+        }
+
+        match rustfs_pod_identities(config) {
+            Ok(current) => {
+                if pod_deletion_observed(before, &current) {
+                    return Ok(());
+                }
+                last_snapshot = current;
+                last_error = "none".to_string();
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+
+        sleep(Duration::from_millis(250));
+    }
+}
+
+fn pod_deletion_observed(before: &[PodIdentity], current: &[PodIdentity]) -> bool {
+    let current_uids = current
+        .iter()
+        .map(|pod| pod.uid.as_str())
+        .collect::<BTreeSet<_>>();
+    !before.is_empty()
+        && before
+            .iter()
+            .any(|pod| !current_uids.contains(pod.uid.as_str()))
 }
 
 fn pod_replacement_observed(before: &[PodIdentity], current: &[PodIdentity]) -> bool {
@@ -798,7 +914,8 @@ fn bucket_name(run_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OutcomeCounts, PodIdentity, WorkloadSummary, bucket_name, pod_replacement_observed,
+        OutcomeCounts, PodIdentity, WorkloadSummary, bucket_name, pod_deletion_observed,
+        pod_replacement_observed,
     };
     use rustfs_operator_e2e::framework::history::OperationOutcome;
 
@@ -855,6 +972,8 @@ mod tests {
 
         assert!(!pod_replacement_observed(&before, &before));
         assert!(!pod_replacement_observed(&before, &before[..1]));
+        assert!(!pod_deletion_observed(&before, &before));
+        assert!(pod_deletion_observed(&before, &before[..1]));
         assert!(pod_replacement_observed(
             &before,
             &[

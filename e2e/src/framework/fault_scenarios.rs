@@ -43,7 +43,6 @@ pub enum FaultBackend {
     ChaosMeshIoChaos,
     ChaosMeshPodChaos,
     ChaosMeshNetworkChaos,
-    LocalPvFill,
     DeviceMapper,
     MinioWarpWithChaos,
 }
@@ -53,7 +52,6 @@ pub enum FaultIsolation {
     FreshTenant,
     ReusableTenant,
     DedicatedLinuxBlockDevice,
-    PerformanceOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,17 +135,17 @@ pub const FAULT_SCENARIO_CATALOG: &[FaultScenarioSpec] = &[
     FaultScenarioSpec {
         scenario: DISK_FULL_SCENARIO,
         case_name: "fault_disk_full_preserves_committed_objects",
-        description: "Fill one RustFS local PV or equivalent data path and verify committed objects survive ENOSPC-style pressure and recovery.",
+        description: "Inject ENOSPC on writes to one RustFS data volume and verify committed objects survive storage pressure and recovery.",
         priority: FaultPriority::P1,
-        backend: FaultBackend::LocalPvFill,
+        backend: FaultBackend::ChaosMeshIoChaos,
         status: FaultScenarioStatus::Executable,
         isolation: FaultIsolation::FreshTenant,
         boundary: "rustfs-workload/storage-pressure",
         ci_phase: "faults",
-        target: "one RustFS data volume with bounded filler data in the e2e-owned storage path",
-        validation: "new writes may fail under space pressure, but previously committed PUTs remain readable after filler cleanup and Tenant recovery",
-        observability: "history.jsonl, checker-report.json, filler file path and size, df output before/during/after, events, RustFS logs",
-        conflict_domain: "fresh Tenant/PVC/PV fixture and a uniquely named filler file cleaned before any subsequent case",
+        target: "one RustFS data volume selected by tenant label with WRITE operations returning ENOSPC",
+        validation: "new writes may fail with ENOSPC, but previously committed PUTs remain readable after IOChaos recovery",
+        observability: "history.jsonl, checker-report.json, fault-evidence.json, IOChaos manifest/status, events, RustFS logs",
+        conflict_domain: "fresh Tenant/PVC/PV fixture and run-scoped IOChaos cleanup without consuming node disk capacity",
     },
     FaultScenarioSpec {
         scenario: DM_FLAKEY_SCENARIO,
@@ -171,7 +169,7 @@ pub const FAULT_SCENARIO_CATALOG: &[FaultScenarioSpec] = &[
         priority: FaultPriority::P3,
         backend: FaultBackend::MinioWarpWithChaos,
         status: FaultScenarioStatus::Executable,
-        isolation: FaultIsolation::PerformanceOnly,
+        isolation: FaultIsolation::FreshTenant,
         boundary: "rustfs-workload/performance-under-chaos",
         ci_phase: "faults",
         target: "RustFS S3 endpoint under an explicitly selected fault backend",

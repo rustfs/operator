@@ -94,7 +94,7 @@ limitations under the License.
 - RustFS Pod selector 可使用 `rustfs.tenant=<tenant-name>`。
 - RustFS 容器名是 `rustfs`。
 - RustFS 数据卷路径遵循 `/data/rustfs0`、`/data/rustfs1`。
-- 故障测试要求真实集群提供动态 StorageClass，不操作 Kind hostPath 或 local PV。
+- 常规场景要求真实集群提供动态 StorageClass；`dm-flakey` 只允许使用显式配置的专用静态 Local PV。
 
 因此推荐方案是：
 
@@ -113,7 +113,7 @@ limitations under the License.
 make fault-test -> e2e/tests/faults.rs
   |
   +-- 环境保护：destructive opt-in / current real Kubernetes context / required StorageClass
-  +-- 环境准备：强故障 case reset；真实集群使用配置的动态 StorageClass
+  +-- 环境准备：按 isolation reset 或复用 Tenant；DM 场景验证专用 PV 拓扑
   +-- S3 workload：持续读写对象
   +-- history recorder：记录每次操作的开始、结束、结果、hash
   +-- nemesis：通过 Chaos Mesh 对 RustFS workload 注入故障
@@ -201,7 +201,7 @@ Jepsen-like 的含义是：
 
 1. 必须设置 `RUSTFS_FAULT_TEST_DESTRUCTIVE=1`；`make fault-test` 会显式设置。
 2. fault runner 使用当前 `kubectl config current-context`，并拒绝 `kind-*` context。
-3. 必须显式提供 `RUSTFS_FAULT_TEST_STORAGE_CLASS`，目标 StorageClass 应支持动态供给。
+3. 必须显式提供 `RUSTFS_FAULT_TEST_STORAGE_CLASS`；除 `dm-flakey` 的专用静态 Local PV 外，目标 StorageClass 必须支持动态供给。
 4. 目标 namespace 必须来自 fault-test 配置，默认 `rustfs-fault-test`；runner 创建 namespace 时必须写入 `app.kubernetes.io/managed-by=rustfs-operator-fault-test` label 和匹配 Tenant 的 `rustfs.com/fault-test-tenant` annotation。
 5. 已存在 namespace 只有在上述所有权标记完全匹配时才允许 reset；runner 不得自动认领未标记 namespace。
 6. 所有故障资源必须带唯一 run id label。
@@ -216,19 +216,21 @@ Jepsen-like 的含义是：
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `RUSTFS_FAULT_TEST_STORAGE_CLASS` | required | 真实集群动态 StorageClass。 |
+| `RUSTFS_FAULT_TEST_STORAGE_CLASS` | required | 常规场景使用动态 StorageClass；`dm-flakey` 使用专用静态 Local PV StorageClass。 |
 | `RUSTFS_FAULT_TEST_NAMESPACE` | `rustfs-fault-test` | 专用测试 namespace。 |
 | `RUSTFS_FAULT_TEST_TENANT` | `fault-test-tenant` | 专用测试 Tenant。 |
 | `RUSTFS_FAULT_TEST_SCENARIO` | `io-eio` | 选择故障场景。 |
 | `RUSTFS_FAULT_TEST_DURATION_SECONDS` | `180` | 故障持续时间，默认覆盖串行小对象 workload。 |
-| `RUSTFS_FAULT_TEST_PERCENT` | `20` | 支持百分比注入的场景使用。 |
+| `RUSTFS_FAULT_TEST_PERCENT` | `20`；`disk-full` 为 `100` | 支持百分比注入的场景使用。 |
 | `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40` | 写入或校验对象数量。 |
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `3` | 单次 S3 请求超时时间。 |
 | `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | 是否要求故障期间至少出现一次客户端可见失败/超时/unknown。 |
-| `RUSTFS_FAULT_TEST_DISK_FILL_MIB` | `12288` | `disk-full` 场景在 RustFS 数据路径写入的 filler 大小。 |
 | `RUSTFS_FAULT_TEST_DM_NAME` | empty | `dm-flakey` 场景要切换的 device-mapper 设备名，必填。 |
+| `RUSTFS_FAULT_TEST_DM_NODE` | empty | device-mapper 设备与目标 Local PV 所在 Kubernetes 节点，必填。 |
+| `RUSTFS_FAULT_TEST_DM_MOUNT_PATH` | empty | 目标 PV 在节点上的 Local PV 挂载路径，必填。 |
 | `RUSTFS_FAULT_TEST_DM_FAULT_TABLE` | empty | `dm-flakey` 场景注入故障时加载的 dmsetup table，必填。 |
 | `RUSTFS_FAULT_TEST_DM_RECOVERY_TABLE` | current table | `dm-flakey` 场景恢复时加载的 dmsetup table；不填则使用注入前 table。 |
+| `RUSTFS_FAULT_TEST_DM_HELPER_IMAGE` | `rancher/mirrored-library-busybox:1.37.0` | 目标节点 privileged helper Pod 镜像。 |
 | `RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS` | `60` | `warp-under-chaos` 场景中 Warp mixed workload 的运行时间。 |
 | `RUSTFS_FAULT_TEST_CHAOS_NAMESPACE` | `chaos-mesh` | Chaos Mesh 资源所在 namespace。 |
 
@@ -400,7 +402,7 @@ fault-test/<run-id>/large/<uuid>
 | P0 | `pod-kill-one` | Chaos Mesh `PodChaos` | 模拟一个 RustFS Pod 死亡和 StatefulSet 恢复。 |
 | P1 | `network-partition-one` | Chaos Mesh `NetworkChaos` | 模拟一个 RustFS Pod 与集群网络分区。 |
 | P1 | `io-read-mistake` | Chaos Mesh `IOChaos` | 模拟读路径返回错误字节，即静默坏块。 |
-| P1 | `disk-full` | IOChaos 或 CSI 后端专用工具 | 验证单盘空间耗尽行为。 |
+| P1 | `disk-full` | Chaos Mesh `IOChaos` errno 28 | 在不消耗节点磁盘的情况下验证 ENOSPC 行为。 |
 | P2 | `direct-volume-corruption` | 存储后端专用测试环境 | 模拟已经落盘的数据被破坏。 |
 | P2 | `node-restart` | 集群节点运维接口 | 模拟节点重启。 |
 | P3 | `dm-flakey` | device mapper / loop device | 更接近真实块设备故障。 |
@@ -536,7 +538,7 @@ spec:
 5. 根据 RUSTFS_FAULT_TEST_SCENARIO 解析 FaultScenarioSpec
 6. 按场景检查 Chaos Mesh CRD 或专用 host-side 工具配置
 7. 检查 fault-test namespace 不存在，或所有权标记与配置完全匹配
-8. reset 专用 fault-test Tenant/PVC
+8. 根据 `FaultIsolation` reset 或复用专用 fault-test Tenant/PVC
 9. namespace 不存在时由 runner 使用 create 创建带所有权标记的 fault-test namespace；不得通过 apply 认领竞态中出现的同名 namespace
 10. 创建真实集群 fault-test Tenant
 11. 等待 Tenant Ready
@@ -548,12 +550,12 @@ spec:
 17. 故障期间执行 PUT/GET mixed workload，并输出 workload-summary.json
 18. 如果要求 client-visible disruption，则确认 workload 观察到了失败、超时或 unknown
 19. 确认持续型 Chaos 没有早于 workload 结束恢复
-20. 删除 Chaos、清理 filler 文件或恢复 dmsetup table
+20. 删除 Chaos 或通过目标节点 helper Pod 恢复 dmsetup table
 21. 等待 Tenant 再次 Ready
 22. 对所有成功 PUT 对象做最终 GET + sha256 校验
 23. 执行 prefix LIST 并记录 warning
-24. 写入 checker-report.json
-25. 失败时收集 Kubernetes artifacts 和故障资源 describe/yaml
+24. 写入 checker-report.json 和 fault-evidence.json
+25. 失败时收集 Kubernetes artifacts、故障状态和故障资源 describe/yaml
 ```
 
 伪代码：
@@ -780,9 +782,9 @@ pods-describe.txt
 RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
 ```
 
-该入口使用当前 `kubectl` context，拒绝 Kind，并使用 `RUSTFS_FAULT_TEST_STORAGE_CLASS` 指向的真实集群动态 StorageClass。
+该入口使用当前 `kubectl` context，拒绝 Kind，并使用 `RUSTFS_FAULT_TEST_STORAGE_CLASS` 指向的真实集群测试存储。
 
-`e2e/tests/faults.rs` 中每个 destructive 场景都有同名 ignored runner。运行时通过 `RUSTFS_FAULT_TEST_SCENARIO` 选择一个真实执行的场景；未选中的 ignored runner 会快速返回，避免一次 `make fault-test` 串行跑完整个破坏性矩阵。故障测试只面向真实 Kubernetes 测试集群，不保留 Kind 后端；Kind e2e 生命周期测试是独立部分。
+`e2e/tests/faults.rs` 只有一个 ignored dispatcher。运行时通过 `RUSTFS_FAULT_TEST_SCENARIO` 从 7 个 catalog 场景中选择并执行一个，因此测试结果不会把未选中的场景计为通过。故障测试只面向真实 Kubernetes 测试集群，不保留 Kind 后端；Kind e2e 生命周期测试是独立部分。
 
 示例：
 
@@ -828,34 +830,34 @@ fault_warp_under_chaos_reports_performance_separately
 2. 按场景检查 Chaos Mesh CRD 或专用 host-side 工具配置。
 3. 启动前按 `app.kubernetes.io/managed-by=rustfs-operator-fault-test` 清理上次异常残留的 Chaos 资源。
 4. reset 前验证 namespace 所有权标记；未标记或 Tenant 不匹配时 fail closed。
-5. 每个 case 前 reset Tenant/PVC；真实集群使用配置的动态 StorageClass。
+5. Fresh/Dedicated 场景 reset Tenant/PVC；Pod Kill 和网络分区可复用已验证所有权的 Tenant。
 6. Tenant 创建和 Ready 等待。
 7. S3 bucket 创建。
 8. S3 prefill 对象并记录 hash；prefill 阶段必须明确成功，避免空用例通过。
-9. apply 对应故障：Chaos Mesh `IOChaos` / `PodChaos` / `NetworkChaos`，或 host-side disk fill、dm-flakey、Warp under chaos。
+9. apply 对应故障：Chaos Mesh `IOChaos` / `PodChaos` / `NetworkChaos`，或目标节点 helper Pod 执行 dm-flakey、Warp under chaos。
 10. 对持续型 Chaos 资源等待进入 active，再开始故障 workload。
 11. 故障期间持续读写并输出 `workload-summary.json`。
 12. 对持续型故障确认 workload 没有跑出故障窗口。
 13. 故障 workload 失败、故障证据不足或 Chaos 删除失败时，先保存 describe/yaml 或 host fault 输出，再触发 cleanup。
-14. 删除 Chaos 资源、清理 filler 文件或恢复 dmsetup table。
+14. 删除 Chaos 资源，或恢复 dmsetup table 并删除 helper Pod。
 15. Tenant 恢复 Ready 等待。
 16. 所有成功 `PUT` 对象最终 `GET + sha256` 校验。
 17. 恢复后执行 `LIST prefix`，缺失项先作为 warning。
 17. AWS SDK error 按 service failure / timeout / dispatch-response unknown 分类写入 history。
-18. history、workload summary 和 checker report 输出。
+18. history、workload summary、fault evidence 和 checker report 输出。
 19. 失败时 artifacts 收集。
 
 这个版本已经能证明系统从“占位骨架”升级为“真实故障注入 + 数据正确性校验”。
 
 ## 后续增强计划
 
-当前 7 个 real-cluster runner 已经落到代码里。后续工作不再是补这些入口，而是提高故障强度、判定模型和长稳覆盖。
+当前 catalog 包含 7 个 real-cluster scenario，由一个 dispatcher 精确选择执行。后续工作重点是提高故障强度、判定模型和长稳覆盖。
 
 ### Phase 1：runner hardening
 
 - 在测试环境逐个验证 7 个 executable scenario 的前置条件、故障注入、清理和 artifacts 输出。
 - 为 PodChaos、NetworkChaos、IOChaos mistake 补充更细的 CRD status 断言。
-- 将 host-side 故障的输出结构化，便于 CI artifact 聚合和历史对比。
+- 保持 `fault-evidence.json` 的后端状态结构稳定，便于 CI artifact 聚合和历史对比。
 - 保持每个 scenario 独立选择执行，避免多个故障在同一次测试中相互污染。
 
 验收：
@@ -867,7 +869,7 @@ fault_warp_under_chaos_reports_performance_separately
 - 如果 workload 跑出 IOChaos active 窗口，测试失败。
 - fault runner 不进入 Kind e2e case inventory；其边界是 `rustfs-workload/fault-injection`。
 - 每个 scenario 都能在失败时留下足够定位信息。
-- 每个 scenario 结束后能清理自己创建的 Chaos 资源、filler 文件或 dmsetup table。
+- 每个 scenario 结束后能清理自己创建的 Chaos 资源、helper Pod 或恢复 dmsetup table。
 
 ### Phase 2：一致性模型增强
 
