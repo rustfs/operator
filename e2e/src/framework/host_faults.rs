@@ -16,10 +16,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::time::Duration;
 
 use crate::framework::{
-    artifacts::ArtifactCollector,
-    command::CommandSpec,
-    config::{ClusterTestConfig, KIND_WORKER_COUNT},
-    kubectl::Kubectl,
+    artifacts::ArtifactCollector, command::CommandSpec, config::ClusterTestConfig, kubectl::Kubectl,
 };
 
 const RUSTFS_DATA_VOLUME: &str = "/data/rustfs0";
@@ -49,6 +46,12 @@ pub fn fill_rustfs_data_volume(
     let pod = first_rustfs_pod(config)?;
     let filler_path = format!("{RUSTFS_DATA_VOLUME}/.rustfs-e2e-disk-full-{run_id}");
     let fill_mib = fill_mib.to_string();
+    let guard = DiskFillGuard {
+        config: config.clone(),
+        pod: pod.clone(),
+        filler_path,
+        deleted: false,
+    };
     let script = r#"set -eu
 filler="$1"
 fill_mib="$2"
@@ -80,15 +83,15 @@ fi
         config,
         &pod,
         script,
-        [filler_path.as_str(), fill_mib.as_str()],
+        [guard.filler_path.as_str(), fill_mib.as_str()],
     )
     .run()?;
     collector.write_text(
         case_name,
         "disk-fill.txt",
         &format!(
-            "pod: {pod}\nfiller: {filler_path}\ncommand output:\nstdout:\n{}\nstderr:\n{}",
-            output.stdout, output.stderr
+            "pod: {pod}\nfiller: {}\ncommand output:\nstdout:\n{}\nstderr:\n{}",
+            guard.filler_path, output.stdout, output.stderr
         ),
     )?;
     ensure!(
@@ -97,110 +100,7 @@ fi
         output.code
     );
 
-    Ok(DiskFillGuard {
-        config: config.clone(),
-        pod,
-        filler_path,
-        deleted: false,
-    })
-}
-
-pub fn corrupt_one_kind_local_pv_file(
-    config: &ClusterTestConfig,
-    collector: &ArtifactCollector,
-    case_name: &str,
-) -> Result<()> {
-    ensure!(
-        config.context.starts_with("kind-"),
-        "direct PV corruption requires a dedicated Kind context, got {}",
-        config.context
-    );
-
-    let script = r#"set -eu
-root="$1"
-file="$(find "$root" -type f -size +4096c ! -name '.rustfs-e2e-*' | head -n 1)"
-if [ -z "$file" ]; then
-  echo "no candidate file under $root" >&2
-  exit 2
-fi
-before="$(sha256sum "$file" | awk '{print $1}')"
-dd if=/dev/urandom of="$file" bs=4096 count=1 seek=1 conv=notrunc status=none
-sync
-after="$(sha256sum "$file" | awk '{print $1}')"
-printf 'file=%s\nbefore=%s\nafter=%s\n' "$file" "$before" "$after"
-"#;
-
-    let mut attempts = String::new();
-    for node in kind_worker_node_names(config)? {
-        let command = CommandSpec::new("docker").args([
-            "exec".to_string(),
-            node.clone(),
-            "sh".to_string(),
-            "-c".to_string(),
-            script.to_string(),
-            "sh".to_string(),
-            "/mnt/data".to_string(),
-        ]);
-        let output = command.run()?;
-        attempts.push_str(&format!(
-            "$ {}\nexit: {:?}\nstdout:\n{}\nstderr:\n{}\n\n",
-            command.display(),
-            output.code,
-            output.stdout,
-            output.stderr
-        ));
-        if output.code == Some(0) {
-            collector.write_text(case_name, "direct-pv-corruption.txt", &attempts)?;
-            return Ok(());
-        }
-    }
-
-    collector.write_text(case_name, "direct-pv-corruption-failed.txt", &attempts)?;
-    bail!("failed to find and corrupt a candidate local PV file on any Kind worker")
-}
-
-pub fn restart_one_kind_worker(
-    config: &ClusterTestConfig,
-    collector: &ArtifactCollector,
-    case_name: &str,
-) -> Result<()> {
-    ensure!(
-        config.context.starts_with("kind-"),
-        "worker restart fault requires a dedicated Kind context, got {}",
-        config.context
-    );
-
-    let node = kind_worker_node_names(config)?
-        .into_iter()
-        .next()
-        .context("no Kind worker nodes configured")?;
-    let before = Kubectl::new(config)
-        .command(["get", "pods", "-A", "-o", "wide"])
-        .run_checked()?;
-    let restart = CommandSpec::new("docker")
-        .args(["restart".to_string(), node.clone()])
-        .run_checked()?;
-    let wait = Kubectl::new(config)
-        .command(vec![
-            "wait".to_string(),
-            "--for=condition=Ready".to_string(),
-            format!("node/{node}"),
-            "--timeout=300s".to_string(),
-        ])
-        .run_checked()?;
-    let after = Kubectl::new(config)
-        .command(["get", "pods", "-A", "-o", "wide"])
-        .run_checked()?;
-
-    collector.write_text(
-        case_name,
-        "worker-restart.txt",
-        &format!(
-            "node: {node}\n\nbefore pods:\n{}\nrestart stdout:\n{}\nrestart stderr:\n{}\nwait stdout:\n{}\nwait stderr:\n{}\nafter pods:\n{}",
-            before.stdout, restart.stdout, restart.stderr, wait.stdout, wait.stderr, after.stdout
-        ),
-    )?;
-    Ok(())
+    Ok(guard)
 }
 
 pub fn apply_dm_flakey(
@@ -218,7 +118,6 @@ pub fn apply_dm_flakey(
         .map(str::to_string)
         .unwrap_or_else(|| original.trim().to_string());
 
-    dmsetup_load_table(name, fault_table)?;
     collector.write_text(
         case_name,
         "dm-flakey.txt",
@@ -226,12 +125,14 @@ pub fn apply_dm_flakey(
             "target: {name}\noriginal table:\n{original}\nfault table:\n{fault_table}\nrecovery table:\n{recovery_table}\n"
         ),
     )?;
-
-    Ok(DmFlakeyGuard {
+    let guard = DmFlakeyGuard {
         name: name.to_string(),
         recovery_table,
         restored: false,
-    })
+    };
+    dmsetup_load_table(name, fault_table)?;
+
+    Ok(guard)
 }
 
 pub fn run_warp_mixed(
@@ -374,22 +275,6 @@ fn rustfs_pod_names(config: &ClusterTestConfig) -> Result<Vec<String>> {
         config.test_namespace
     );
     Ok(pods)
-}
-
-fn kind_worker_node_names(config: &ClusterTestConfig) -> Result<Vec<String>> {
-    let cluster_name = config.context.strip_prefix("kind-").with_context(|| {
-        format!(
-            "Kind worker fault requires a Kind context, got {}",
-            config.context
-        )
-    })?;
-
-    Ok((1..=KIND_WORKER_COUNT)
-        .map(|index| match index {
-            1 => format!("{cluster_name}-worker"),
-            _ => format!("{cluster_name}-worker{index}"),
-        })
-        .collect())
 }
 
 fn rustfs_pod_shell<'a, I>(

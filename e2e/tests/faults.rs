@@ -23,9 +23,9 @@ use rustfs_operator_e2e::framework::{
     config::ClusterTestConfig,
     fault_config::FaultTestConfig,
     fault_scenarios::{
-        self, DIRECT_PV_CORRUPTION_SCENARIO, DISK_FULL_SCENARIO, DM_FLAKEY_SCENARIO, FaultBackend,
-        FaultScenario, IO_EIO_SCENARIO, IO_READ_MISTAKE_SCENARIO, NETWORK_PARTITION_ONE_SCENARIO,
-        POD_KILL_ONE_SCENARIO, WARP_UNDER_CHAOS_SCENARIO, WORKER_RESTART_SCENARIO,
+        self, DISK_FULL_SCENARIO, DM_FLAKEY_SCENARIO, FaultBackend, FaultScenario, IO_EIO_SCENARIO,
+        IO_READ_MISTAKE_SCENARIO, NETWORK_PARTITION_ONE_SCENARIO, POD_KILL_ONE_SCENARIO,
+        WARP_UNDER_CHAOS_SCENARIO,
     },
     history::OperationOutcome,
     history::Recorder,
@@ -73,18 +73,6 @@ async fn fault_io_read_mistake_rejects_corrupt_reads() -> Result<()> {
 #[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=disk-full"]
 async fn fault_disk_full_preserves_committed_objects() -> Result<()> {
     run_selected_fault_case(DISK_FULL_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=direct-pv-corruption"]
-async fn fault_direct_pv_corruption_detects_or_repairs_bad_data() -> Result<()> {
-    run_selected_fault_case(DIRECT_PV_CORRUPTION_SCENARIO).await
-}
-
-#[tokio::test]
-#[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO=worker-restart"]
-async fn fault_worker_restart_preserves_committed_objects() -> Result<()> {
-    run_selected_fault_case(WORKER_RESTART_SCENARIO).await
 }
 
 #[tokio::test]
@@ -178,24 +166,42 @@ async fn run_fault_case(
     );
 
     let prefilled = prefill_objects(&s3, &mut history, &run_id, scenario.prefill_count()).await?;
-    let mut fault = AppliedFault::apply(
-        config,
-        collector,
-        scenario,
-        spec.backend,
-        &run_id,
-        &endpoint,
-        &bucket,
-        access_key,
-        secret_key,
-    )?;
+    let mut fault = AppliedFault::apply(config, collector, scenario, spec.backend, &run_id)?;
 
     if let Err(error) = fault.wait_active(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "wait-active-failed")?;
         return Err(error);
     }
 
-    ensure_port_forward(&mut port_forward, cluster, &endpoint).await?;
+    if let Err(error) = ensure_port_forward(&mut port_forward, cluster, &endpoint).await {
+        collect_fault_artifacts(collector, scenario.case_name, &fault, "port-forward-failed")?;
+        return Err(error);
+    }
+
+    if spec.backend == FaultBackend::MinioWarpWithChaos {
+        if let Err(error) = host_faults::run_warp_mixed(
+            config.warp_duration,
+            collector,
+            scenario.case_name,
+            &endpoint,
+            &bucket,
+            access_key,
+            secret_key,
+        ) {
+            collect_fault_artifacts(collector, scenario.case_name, &fault, "warp-failed")?;
+            return Err(error);
+        }
+
+        if let Err(error) = ensure_port_forward(&mut port_forward, cluster, &endpoint).await {
+            collect_fault_artifacts(
+                collector,
+                scenario.case_name,
+                &fault,
+                "post-warp-port-forward-failed",
+            )?;
+            return Err(error);
+        }
+    }
 
     let workload_summary = match run_mixed_workload(
         &s3,
@@ -218,9 +224,7 @@ async fn run_fault_case(
         "workload-summary.json",
         &serde_json::to_string_pretty(&workload_summary)?,
     )?;
-    if let Err(error) =
-        workload_summary.require_fault_evidence(config.require_client_disruption)
-    {
+    if let Err(error) = workload_summary.require_fault_evidence(config.require_client_disruption) {
         collect_fault_artifacts(
             collector,
             scenario.case_name,
@@ -268,9 +272,6 @@ fn require_fault_backend(config: &FaultTestConfig, backend: FaultBackend) -> Res
         FaultBackend::ChaosMeshPodChaos => chaos_mesh::require_podchaos_crd(cluster),
         FaultBackend::ChaosMeshNetworkChaos => chaos_mesh::require_networkchaos_crd(cluster),
         FaultBackend::LocalPvFill => Ok(()),
-        FaultBackend::KindWorkerFileCorruption | FaultBackend::KindWorkerRestart => {
-            require_tool("docker", ["version"])
-        }
         FaultBackend::DeviceMapper => require_dm_flakey_preflight(config),
     }
 }
@@ -316,10 +317,7 @@ fn cleanup_fault_backend(config: &FaultTestConfig, backend: FaultBackend) -> Res
         FaultBackend::ChaosMeshNetworkChaos => {
             chaos_mesh::cleanup_managed_networkchaos(&config.cluster, &config.chaos_namespace)
         }
-        FaultBackend::LocalPvFill
-        | FaultBackend::KindWorkerFileCorruption
-        | FaultBackend::KindWorkerRestart
-        | FaultBackend::DeviceMapper => Ok(()),
+        FaultBackend::LocalPvFill | FaultBackend::DeviceMapper => Ok(()),
     }
 }
 
@@ -341,21 +339,15 @@ enum AppliedFault {
     },
     DiskFill(Box<DiskFillGuard>),
     DmFlakey(Box<DmFlakeyGuard>),
-    Completed,
 }
 
 impl AppliedFault {
-    #[allow(clippy::too_many_arguments)]
     fn apply(
         config: &FaultTestConfig,
         collector: &ArtifactCollector,
         scenario: &FaultScenario,
         backend: FaultBackend,
         run_id: &str,
-        endpoint: &str,
-        bucket: &str,
-        access_key: &str,
-        secret_key: &str,
     ) -> Result<Self> {
         let cluster = &config.cluster;
         match backend {
@@ -445,18 +437,6 @@ impl AppliedFault {
                     run_id,
                 )?,
             ))),
-            FaultBackend::KindWorkerFileCorruption => {
-                host_faults::corrupt_one_kind_local_pv_file(
-                    cluster,
-                    collector,
-                    scenario.case_name,
-                )?;
-                Ok(Self::Completed)
-            }
-            FaultBackend::KindWorkerRestart => {
-                host_faults::restart_one_kind_worker(cluster, collector, scenario.case_name)?;
-                Ok(Self::Completed)
-            }
             FaultBackend::DeviceMapper => {
                 let name = config
                     .dm_name
@@ -490,16 +470,6 @@ impl AppliedFault {
                     &chaos.manifest(),
                 )?;
                 let guard = chaos_mesh::apply_iochaos(cluster, &chaos)?;
-                guard.wait_active(cluster.timeout)?;
-                host_faults::run_warp_mixed(
-                    config.warp_duration,
-                    collector,
-                    scenario.case_name,
-                    endpoint,
-                    bucket,
-                    access_key,
-                    secret_key,
-                )?;
                 Ok(Self::Chaos {
                     guard: Box::new(guard),
                     active_required: true,
@@ -519,7 +489,7 @@ impl AppliedFault {
                 config,
                 ..
             } => wait_for_rustfs_pod_replacement(config, before_pods, timeout),
-            Self::Chaos { .. } | Self::DiskFill(_) | Self::DmFlakey(_) | Self::Completed => Ok(()),
+            Self::Chaos { .. } | Self::DiskFill(_) | Self::DmFlakey(_) => Ok(()),
         }
     }
 
@@ -529,11 +499,9 @@ impl AppliedFault {
                 guard,
                 active_required,
             } if *active_required => guard.ensure_active(stage),
-            Self::PodKill { .. }
-            | Self::Chaos { .. }
-            | Self::DiskFill(_)
-            | Self::DmFlakey(_)
-            | Self::Completed => Ok(()),
+            Self::PodKill { .. } | Self::Chaos { .. } | Self::DiskFill(_) | Self::DmFlakey(_) => {
+                Ok(())
+            }
         }
     }
 
@@ -543,14 +511,13 @@ impl AppliedFault {
             Self::PodKill { guard, .. } => guard.delete(),
             Self::DiskFill(guard) => guard.delete(),
             Self::DmFlakey(guard) => guard.restore(),
-            Self::Completed => Ok(()),
         }
     }
 
     fn chaos_guard(&self) -> Option<&ChaosGuard> {
         match self {
             Self::Chaos { guard, .. } | Self::PodKill { guard, .. } => Some(guard.as_ref()),
-            Self::DiskFill(_) | Self::DmFlakey(_) | Self::Completed => None,
+            Self::DiskFill(_) | Self::DmFlakey(_) => None,
         }
     }
 }

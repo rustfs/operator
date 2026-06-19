@@ -782,7 +782,7 @@ RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
 
 该入口使用当前 `kubectl` context，拒绝 Kind，并使用 `RUSTFS_FAULT_TEST_STORAGE_CLASS` 指向的真实集群动态 StorageClass。
 
-`e2e/tests/faults.rs` 中每个 destructive 场景都有同名 ignored runner。运行时通过 `RUSTFS_FAULT_TEST_SCENARIO` 选择一个真实执行的场景；未选中的 ignored runner 会快速返回，避免一次 `make fault-test` 串行跑完整个破坏性矩阵。
+`e2e/tests/faults.rs` 中每个 destructive 场景都有同名 ignored runner。运行时通过 `RUSTFS_FAULT_TEST_SCENARIO` 选择一个真实执行的场景；未选中的 ignored runner 会快速返回，避免一次 `make fault-test` 串行跑完整个破坏性矩阵。故障测试只面向真实 Kubernetes 测试集群，不保留 Kind 后端；Kind e2e 生命周期测试是独立部分。
 
 示例：
 
@@ -795,8 +795,6 @@ RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=pod-k
 RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=network-partition-one make fault-test
 RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=io-read-mistake make fault-test
 RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=disk-full make fault-test
-RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=direct-pv-corruption make fault-test
-RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=worker-restart make fault-test
 RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=dm-flakey make fault-test
 RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=warp-under-chaos make fault-test
 ```
@@ -812,7 +810,7 @@ make pre-commit
 
 ## 当前可交付范围
 
-当前 fault suite 实现 9 个真实 runner：
+当前 fault suite 实现 7 个真实集群 runner：
 
 ```text
 fault_io_eio_preserves_committed_objects
@@ -820,8 +818,6 @@ fault_pod_kill_one_preserves_committed_objects
 fault_network_partition_one_preserves_committed_objects
 fault_io_read_mistake_rejects_corrupt_reads
 fault_disk_full_preserves_committed_objects
-fault_direct_pv_corruption_detects_or_repairs_bad_data
-fault_worker_restart_preserves_committed_objects
 fault_dm_flakey_preserves_committed_objects
 fault_warp_under_chaos_reports_performance_separately
 ```
@@ -836,7 +832,7 @@ fault_warp_under_chaos_reports_performance_separately
 6. Tenant 创建和 Ready 等待。
 7. S3 bucket 创建。
 8. S3 prefill 对象并记录 hash；prefill 阶段必须明确成功，避免空用例通过。
-9. apply 对应故障：Chaos Mesh `IOChaos` / `PodChaos` / `NetworkChaos`，或 host-side disk fill、direct PV corruption、Kind worker restart、dm-flakey、Warp under chaos。
+9. apply 对应故障：Chaos Mesh `IOChaos` / `PodChaos` / `NetworkChaos`，或 host-side disk fill、dm-flakey、Warp under chaos。
 10. 对持续型 Chaos 资源等待进入 active，再开始故障 workload。
 11. 故障期间持续读写并输出 `workload-summary.json`。
 12. 对持续型故障确认 workload 没有跑出故障窗口。
@@ -853,11 +849,11 @@ fault_warp_under_chaos_reports_performance_separately
 
 ## 后续增强计划
 
-当前 9 个 runner 已经落到代码里。后续工作不再是补入口，而是提高故障强度、判定模型和长稳覆盖。
+当前 7 个 real-cluster runner 已经落到代码里。后续工作不再是补这些入口，而是提高故障强度、判定模型和长稳覆盖。
 
 ### Phase 1：runner hardening
 
-- 在测试环境逐个验证 9 个 scenario 的前置条件、故障注入、清理和 artifacts 输出。
+- 在测试环境逐个验证 7 个 executable scenario 的前置条件、故障注入、清理和 artifacts 输出。
 - 为 PodChaos、NetworkChaos、IOChaos mistake 补充更细的 CRD status 断言。
 - 将 host-side 故障的输出结构化，便于 CI artifact 聚合和历史对比。
 - 保持每个 scenario 独立选择执行，避免多个故障在同一次测试中相互污染。
@@ -865,7 +861,7 @@ fault_warp_under_chaos_reports_performance_separately
 验收：
 
 - `make e2e-check` 通过。
-- `RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=<scenario> make fault-test` 可在当前真实 Kubernetes 测试集群逐个运行，并拒绝 Kind。
+- `RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=<scenario> make fault-test` 可在当前真实 Kubernetes 测试集群逐个运行 scenario，并拒绝 Kind。
 - 如果 committed object 丢失，测试失败。
 - 如果 successful GET 返回错误字节，测试失败。
 - 如果 workload 跑出 IOChaos active 窗口，测试失败。
