@@ -552,10 +552,11 @@ spec:
 19. 确认持续型 Chaos 没有早于 workload 结束恢复
 20. 删除 Chaos 或通过目标节点 helper Pod 恢复 dmsetup table
 21. 等待 Tenant 再次 Ready
-22. 对所有成功 PUT 对象做最终 GET + sha256 校验
-23. 执行 prefix LIST 并记录 warning
-24. 写入 checker-report.json 和 fault-evidence.json
-25. 失败时收集 Kubernetes artifacts、故障状态和故障资源 describe/yaml
+22. 对故障期间失败、超时或 unknown 的 PUT 使用相同 key 和内容做幂等重提交
+23. 对全部预期 committed PUT 对象做最终 GET + sha256 校验
+24. 执行 prefix LIST 并记录 warning
+25. 写入 checker-report.json 和 fault-evidence.json
+26. 失败时收集 Kubernetes artifacts、故障状态和故障资源 describe/yaml
 ```
 
 伪代码：
@@ -841,11 +842,12 @@ fault_warp_under_chaos_reports_performance_separately
 13. 故障 workload 失败、故障证据不足或 Chaos 删除失败时，先保存 describe/yaml 或 host fault 输出，再触发 cleanup。
 14. 删除 Chaos 资源，或恢复 dmsetup table 并删除 helper Pod。
 15. Tenant 恢复 Ready 等待。
-16. 所有成功 `PUT` 对象最终 `GET + sha256` 校验。
-17. 恢复后执行 `LIST prefix`，缺失项先作为 warning。
-17. AWS SDK error 按 service failure / timeout / dispatch-response unknown 分类写入 history。
-18. history、workload summary、fault evidence 和 checker report 输出。
-19. 失败时 artifacts 收集。
+16. 恢复后幂等重提交未确认 PUT，并要求全部预期对象进入 committed 集合。
+17. 所有 committed `PUT` 对象最终 `GET + sha256` 校验。
+18. 恢复后执行 `LIST prefix`，缺失项先作为 warning。
+19. AWS SDK error 按 service failure / timeout / dispatch-response unknown 分类写入 history。
+20. history、workload summary、fault evidence 和 checker report 输出。
+21. 失败时 artifacts 收集。
 
 这个版本已经能证明系统从“占位骨架”升级为“真实故障注入 + 数据正确性校验”。
 

@@ -158,7 +158,7 @@ async fn run_fault_case(
         }
     }
 
-    let workload_summary = match run_mixed_workload(
+    let mut workload = match run_mixed_workload(
         &s3,
         &mut history,
         &run_id,
@@ -168,7 +168,7 @@ async fn run_fault_case(
     )
     .await
     {
-        Ok(summary) => summary,
+        Ok(workload) => workload,
         Err(error) => {
             collect_fault_artifacts(collector, scenario.case_name, &fault, "workload-failed")?;
             return Err(error);
@@ -177,9 +177,12 @@ async fn run_fault_case(
     collector.write_text(
         scenario.case_name,
         "workload-summary.json",
-        &serde_json::to_string_pretty(&workload_summary)?,
+        &serde_json::to_string_pretty(&workload.summary)?,
     )?;
-    if let Err(error) = workload_summary.require_fault_evidence(config.require_client_disruption) {
+    if let Err(error) = workload
+        .summary
+        .require_fault_evidence(config.require_client_disruption)
+    {
         collect_fault_artifacts(
             collector,
             scenario.case_name,
@@ -207,6 +210,13 @@ async fn run_fault_case(
     wait_for_ready_tenant(cluster).await?;
     let pods_after = rustfs_pod_identities(cluster)?;
     ensure_port_forward(&mut port_forward, cluster, &endpoint).await?;
+    workload.summary.recommitted_after_recovery =
+        recommit_unconfirmed_objects(&s3, &mut history, &workload.unconfirmed_puts).await?;
+    collector.write_text(
+        scenario.case_name,
+        "workload-summary.json",
+        &serde_json::to_string_pretty(&workload.summary)?,
+    )?;
     let report = checker::check_s3_history(&s3, &mut history, true).await?;
     collector.write_text(
         scenario.case_name,
@@ -220,7 +230,7 @@ async fn run_fault_case(
         injected: true,
         active_during_workload: true,
         recovered: report.tenant_recovered,
-        client_disruptions: workload_summary.disrupted(),
+        client_disruptions: workload.summary.disrupted(),
         pods_before,
         pods_after,
         active_snapshot,
@@ -232,6 +242,13 @@ async fn run_fault_case(
         "fault-evidence.json",
         &serde_json::to_string_pretty(&evidence)?,
     )?;
+    ensure!(
+        report.committed_puts == scenario.object_count,
+        "fault scenario {} expected {} committed objects after recovery reconciliation, got {}",
+        scenario.name,
+        scenario.object_count,
+        report.committed_puts
+    );
     report.require_success()?;
 
     Ok(())
@@ -821,14 +838,18 @@ async fn run_mixed_workload(
     prefilled: &[ObjectSpec],
     start_index: usize,
     count: usize,
-) -> Result<WorkloadSummary> {
+) -> Result<MixedWorkloadResult> {
     let mut summary = WorkloadSummary::default();
+    let mut unconfirmed_puts = Vec::new();
 
     for offset in 0..count {
         let object =
             ObjectSpec::deterministic(run_id, start_index + offset, SMALL_OBJECT_SIZE_BYTES);
         let put_outcome = s3.put_object(&object, history).await?;
         summary.puts.record(put_outcome);
+        if put_outcome != OperationOutcome::Ok {
+            unconfirmed_puts.push(object.clone());
+        }
 
         if let Some(existing) = prefilled.get(offset % prefilled.len()) {
             let get_result = s3.get_object_result(&existing.key, history).await?;
@@ -837,13 +858,39 @@ async fn run_mixed_workload(
     }
 
     summary.require_exercised()?;
-    Ok(summary)
+    Ok(MixedWorkloadResult {
+        summary,
+        unconfirmed_puts,
+    })
+}
+
+async fn recommit_unconfirmed_objects(
+    s3: &S3WorkloadClient,
+    history: &mut Recorder,
+    objects: &[ObjectSpec],
+) -> Result<usize> {
+    for object in objects {
+        let outcome = s3.put_object(object, history).await?;
+        ensure!(
+            outcome == OperationOutcome::Ok,
+            "PUT for previously unconfirmed object {} did not commit after recovery: {outcome:?}",
+            object.key
+        );
+    }
+    Ok(objects.len())
+}
+
+#[derive(Debug)]
+struct MixedWorkloadResult {
+    summary: WorkloadSummary,
+    unconfirmed_puts: Vec<ObjectSpec>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 struct WorkloadSummary {
     puts: OutcomeCounts,
     gets: OutcomeCounts,
+    recommitted_after_recovery: usize,
 }
 
 impl WorkloadSummary {
@@ -951,6 +998,7 @@ mod tests {
                 ok: 1,
                 ..OutcomeCounts::default()
             },
+            recommitted_after_recovery: 0,
         };
 
         assert!(summary.require_fault_evidence(false).is_ok());
