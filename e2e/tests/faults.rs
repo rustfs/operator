@@ -134,12 +134,13 @@ async fn run_fault_case(
     }
 
     if spec.backend == FaultBackend::MinioWarpWithChaos {
+        let warp_bucket = warp_bucket_name(&run_id);
         if let Err(error) = host_faults::run_warp_mixed(
             config.warp_duration,
             collector,
             scenario.case_name,
             &endpoint,
-            &bucket,
+            &warp_bucket,
             access_key,
             secret_key,
         ) {
@@ -958,11 +959,15 @@ fn bucket_name(run_id: &str) -> String {
     format!("rustfs-fault-{suffix}")
 }
 
+fn warp_bucket_name(run_id: &str) -> String {
+    format!("{}-warp", bucket_name(run_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         OutcomeCounts, PodIdentity, WorkloadSummary, bucket_name, pod_deletion_observed,
-        pod_replacement_observed,
+        pod_replacement_observed, warp_bucket_name,
     };
     use rustfs_operator_e2e::framework::history::OperationOutcome;
 
@@ -971,6 +976,10 @@ mod tests {
         assert_eq!(
             bucket_name("run-12345678-abcd-efgh"),
             "rustfs-fault-run12345678abcde"
+        );
+        assert_eq!(
+            warp_bucket_name("run-12345678-abcd-efgh"),
+            "rustfs-fault-run12345678abcde-warp"
         );
     }
 
