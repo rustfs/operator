@@ -24,6 +24,7 @@ pub mod deploy;
 pub mod fault_config;
 pub mod fault_scenarios;
 pub mod history;
+pub mod host_faults;
 pub mod images;
 pub mod kind;
 pub mod kube_client;

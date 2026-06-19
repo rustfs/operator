@@ -83,7 +83,7 @@ limitations under the License.
 | 能力 | 当前位置 | 用途 |
 | --- | --- | --- |
 | destructive 入口 | `make fault-test` | 专门在真实 Kubernetes 测试集群运行破坏性故障测试。 |
-| fault runner | `e2e/tests/faults.rs` | 真实集群故障测试入口，不属于 e2e case inventory。 |
+| fault suite runners | `e2e/tests/faults.rs` | 真实集群 scenario-selected destructive runner，不属于 e2e case inventory。 |
 | fault config/context guard | `e2e/src/framework/fault_config.rs` | 读取独立 fault-test 配置、绑定当前 context，并拒绝 Kind。 |
 | Tenant/Secret 创建 | `e2e/src/framework/resources.rs` | 创建 fault-test namespace、凭据和真实集群 Tenant。 |
 | S3 port-forward | `e2e/src/framework/port_forward.rs` | 将 Tenant S3 服务暴露到本地。 |
@@ -212,7 +212,7 @@ Jepsen-like 的含义是：
 11. 测试失败时必须先收集 artifacts，再清理会影响诊断的信息。
 12. destructive 场景保持 `#[ignore]`，只能通过显式 Make 目标执行。
 
-建议增加环境变量：
+当前使用的故障测试环境变量：
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
@@ -225,6 +225,11 @@ Jepsen-like 的含义是：
 | `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40` | 写入或校验对象数量。 |
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `3` | 单次 S3 请求超时时间。 |
 | `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | 是否要求故障期间至少出现一次客户端可见失败/超时/unknown。 |
+| `RUSTFS_FAULT_TEST_DISK_FILL_MIB` | `12288` | `disk-full` 场景在 RustFS 数据路径写入的 filler 大小。 |
+| `RUSTFS_FAULT_TEST_DM_NAME` | empty | `dm-flakey` 场景要切换的 device-mapper 设备名，必填。 |
+| `RUSTFS_FAULT_TEST_DM_FAULT_TABLE` | empty | `dm-flakey` 场景注入故障时加载的 dmsetup table，必填。 |
+| `RUSTFS_FAULT_TEST_DM_RECOVERY_TABLE` | current table | `dm-flakey` 场景恢复时加载的 dmsetup table；不填则使用注入前 table。 |
+| `RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS` | `60` | `warp-under-chaos` 场景中 Warp mixed workload 的运行时间。 |
 | `RUSTFS_FAULT_TEST_CHAOS_NAMESPACE` | `chaos-mesh` | Chaos Mesh 资源所在 namespace。 |
 
 ## 操作历史模型
@@ -521,31 +526,34 @@ spec:
 
 ## 测试流程
 
-第一版完整流程建议如下：
+当前 runner 使用如下流程：
 
 ```text
 1. 读取 FaultTestConfig
 2. 检查 RUSTFS_FAULT_TEST_DESTRUCTIVE=1
 3. 读取当前 kube context 并拒绝 kind-* context
 4. 检查 RUSTFS_FAULT_TEST_STORAGE_CLASS 已配置
-5. 检查 Chaos Mesh CRD 存在
-6. 检查 fault-test namespace 不存在，或所有权标记与配置完全匹配
-7. reset 专用 fault-test Tenant/PVC
-8. namespace 不存在时由 runner 使用 create 创建带所有权标记的 fault-test namespace；不得通过 apply 认领竞态中出现的同名 namespace
-9. 创建真实集群 fault-test Tenant
-10. 等待 Tenant Ready
-11. 启动 Tenant S3 port-forward
-12. 创建测试 bucket
-13. 预写入一批对象，记录 key 和 sha256
-14. 启动后台 verifier 持续读取已提交对象
-15. apply Chaos Mesh 故障资源
-16. 故障期间继续执行混合 S3 workload
-17. delete Chaos Mesh 故障资源
-18. 等待 Tenant 再次 Ready
-19. 对所有成功 PUT 对象做最终 GET + sha256 校验
-20. 生成 checker report
-21. 成功则清理测试资源
-22. 失败则收集 Kubernetes artifacts
+5. 根据 RUSTFS_FAULT_TEST_SCENARIO 解析 FaultScenarioSpec
+6. 按场景检查 Chaos Mesh CRD 或专用 host-side 工具配置
+7. 检查 fault-test namespace 不存在，或所有权标记与配置完全匹配
+8. reset 专用 fault-test Tenant/PVC
+9. namespace 不存在时由 runner 使用 create 创建带所有权标记的 fault-test namespace；不得通过 apply 认领竞态中出现的同名 namespace
+10. 创建真实集群 fault-test Tenant
+11. 等待 Tenant Ready
+12. 启动 Tenant S3 port-forward，等待 S3 endpoint 可用
+13. 创建 run-scoped bucket
+14. prefill 一批对象，记录 key、size、sha256；prefill 必须成功
+15. apply 当前 scenario 的 Chaos Mesh 资源或 host-side fault
+16. 对持续型 Chaos 等待 active
+17. 故障期间执行 PUT/GET mixed workload，并输出 workload-summary.json
+18. 如果要求 client-visible disruption，则确认 workload 观察到了失败、超时或 unknown
+19. 确认持续型 Chaos 没有早于 workload 结束恢复
+20. 删除 Chaos、清理 filler 文件或恢复 dmsetup table
+21. 等待 Tenant 再次 Ready
+22. 对所有成功 PUT 对象做最终 GET + sha256 校验
+23. 执行 prefix LIST 并记录 warning
+24. 写入 checker-report.json
+25. 失败时收集 Kubernetes artifacts 和故障资源 describe/yaml
 ```
 
 伪代码：
@@ -615,31 +623,34 @@ async fn fault_io_eio_preserves_committed_objects() -> Result<()> {
 
     result
 }
-```
-
 ## Chaos Mesh 模块设计
 
-`chaos_mesh.rs` 建议提供这些能力：
+`chaos_mesh.rs` 当前提供这些能力：
 
 ```rust
 pub fn require_iochaos_crd(config: &ClusterTestConfig) -> Result<()>;
 pub fn require_podchaos_crd(config: &ClusterTestConfig) -> Result<()>;
 pub fn require_networkchaos_crd(config: &ClusterTestConfig) -> Result<()>;
+pub fn cleanup_managed_iochaos(config: &ClusterTestConfig, namespace: &str) -> Result<()>;
+pub fn cleanup_managed_podchaos(config: &ClusterTestConfig, namespace: &str) -> Result<()>;
+pub fn cleanup_managed_networkchaos(config: &ClusterTestConfig, namespace: &str) -> Result<()>;
+pub fn apply_iochaos(config: &ClusterTestConfig, spec: &IoChaosSpec) -> Result<ChaosGuard>;
+pub fn apply_podchaos(config: &ClusterTestConfig, spec: &PodChaosSpec) -> Result<ChaosGuard>;
+pub fn apply_networkchaos(config: &ClusterTestConfig, spec: &NetworkChaosSpec) -> Result<ChaosGuard>;
 
-pub struct ChaosGuard {
-    name: String,
-    namespace: String,
-    kind: String,
+pub enum IoChaosAction {
+    Fault { errno: u8 },
+    Mistake {
+        filling: String,
+        max_occurrences: u8,
+        max_length: usize,
+    },
 }
-
-impl Drop for ChaosGuard {
-    fn drop(&mut self) {
-        // best-effort kubectl delete
-    }
-}
-
 pub struct IoChaosSpec {
     pub name: String,
+    pub namespace: String,
+    pub run_id: String,
+    pub scenario: String,
     pub target_namespace: String,
     pub tenant_name: String,
     pub container_name: String,
@@ -655,34 +666,36 @@ pub struct IoChaosSpec {
 
 - 所有 `kubectl` 命令必须通过现有 `framework::kubectl` 和 `framework::command` 边界。
 - apply 前检查 CRD 是否存在。
-- apply 后可以 `kubectl describe` 保存到 artifacts。
-- 删除时必须 best-effort，不应 panic。
+- apply 后保存 manifest；失败时可以 `kubectl describe/get yaml` 保存到 artifacts。
+- `ChaosGuard::delete()` 必须明确返回结果；`Drop` 只做 best-effort cleanup，不应 panic。
 - 每个资源都带 `rustfs-fault-test/run-id` label。
+- 每个资源都带 `rustfs-fault-test/scenario` label。
+- 每个资源都带 `app.kubernetes.io/managed-by=rustfs-operator-fault-test` label，便于按 suite 清理残留。
 - 允许按 label 清理上一次异常残留。
 
 ## S3 workload 模块设计
 
-`s3_workload.rs` 建议提供：
+`s3_workload.rs` 当前提供：
 
 ```rust
 pub struct S3WorkloadClient {
     bucket: String,
-    endpoint: String,
-    timeout: Duration,
+    request_timeout: Duration,
 }
 
 pub struct ObjectSpec {
-    key: String,
-    size_bytes: usize,
-    sha256: String,
+    pub key: String,
+    pub size_bytes: usize,
+    pub sha256: String,
 }
 
 impl S3WorkloadClient {
-    pub async fn create_bucket(&self) -> Result<()>;
-    pub async fn put_object(&self, object: &ObjectSpec, history: &mut Recorder) -> Result<()>;
-    pub async fn get_object(&self, key: &str, history: &mut Recorder) -> Result<Option<Vec<u8>>>;
-    pub async fn head_object(&self, key: &str, history: &mut Recorder) -> Result<()>;
-    pub async fn list_prefix(&self, prefix: &str, history: &mut Recorder) -> Result<Vec<String>>;
+    pub async fn new(...) -> Result<Self>;
+    pub async fn create_bucket(&self, recorder: &mut Recorder) -> Result<OperationOutcome>;
+    pub async fn put_object(&self, object: &ObjectSpec, recorder: &mut Recorder) -> Result<OperationOutcome>;
+    pub async fn get_object_result(&self, key: &str, recorder: &mut Recorder) -> Result<GetObjectResult>;
+    pub async fn head_object(&self, key: &str, recorder: &mut Recorder) -> Result<OperationOutcome>;
+    pub async fn list_prefix(&self, prefix: &str, recorder: &mut Recorder) -> Result<Option<Vec<String>>>;
 }
 ```
 
@@ -769,16 +782,23 @@ RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
 
 该入口使用当前 `kubectl` context，拒绝 Kind，并使用 `RUSTFS_FAULT_TEST_STORAGE_CLASS` 指向的真实集群动态 StorageClass。
 
-后续可以增加聚焦入口，方便本地调试：
+`e2e/tests/faults.rs` 中每个 destructive 场景都有同名 ignored runner。运行时通过 `RUSTFS_FAULT_TEST_SCENARIO` 选择一个真实执行的场景；未选中的 ignored runner 会快速返回，避免一次 `make fault-test` 串行跑完整个破坏性矩阵。
 
-```makefile
-fault-test-io:
-	RUSTFS_FAULT_TEST_DESTRUCTIVE=1 RUSTFS_FAULT_TEST_SCENARIO=io-eio \
-	cargo test --manifest-path $(E2E_MANIFEST) --test faults -- --ignored --nocapture
+示例：
 
-fault-test-pod:
-	RUSTFS_FAULT_TEST_DESTRUCTIVE=1 RUSTFS_FAULT_TEST_SCENARIO=pod-kill-one \
-	cargo test --manifest-path $(E2E_MANIFEST) --test faults -- --ignored --nocapture
+```bash
+# 默认场景：io-eio；make fault-test 会注入 RUSTFS_FAULT_TEST_DESTRUCTIVE=1
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test
+
+# 运行其他场景
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=pod-kill-one make fault-test
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=network-partition-one make fault-test
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=io-read-mistake make fault-test
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=disk-full make fault-test
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=direct-pv-corruption make fault-test
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=worker-restart make fault-test
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=dm-flakey make fault-test
+RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=warp-under-chaos make fault-test
 ```
 
 普通开发检查仍然使用：
@@ -790,30 +810,38 @@ make pre-commit
 
 不要把 destructive 场景混进普通 `make e2e-live-run`。
 
-## 第一版最小可交付范围
+## 当前可交付范围
 
-建议第一版只交付一个真实场景：
+当前 fault suite 实现 9 个真实 runner：
 
 ```text
 fault_io_eio_preserves_committed_objects
+fault_pod_kill_one_preserves_committed_objects
+fault_network_partition_one_preserves_committed_objects
+fault_io_read_mistake_rejects_corrupt_reads
+fault_disk_full_preserves_committed_objects
+fault_direct_pv_corruption_detects_or_repairs_bad_data
+fault_worker_restart_preserves_committed_objects
+fault_dm_flakey_preserves_committed_objects
+fault_warp_under_chaos_reports_performance_separately
 ```
 
-它应该包含：
+这些 runner 共享同一条 correctness 验证链路：
 
 1. destructive/current real Kubernetes context guard。
-2. Chaos Mesh `IOChaos` CRD 检查。
-3. 启动前按 `app.kubernetes.io/managed-by=rustfs-operator-fault-test` 清理上次异常残留的 `IOChaos`。
+2. 按场景检查 Chaos Mesh CRD 或专用 host-side 工具配置。
+3. 启动前按 `app.kubernetes.io/managed-by=rustfs-operator-fault-test` 清理上次异常残留的 Chaos 资源。
 4. reset 前验证 namespace 所有权标记；未标记或 Tenant 不匹配时 fail closed。
-5. `io-eio` case 前 reset Tenant/PVC；真实集群使用配置的动态 StorageClass。
+5. 每个 case 前 reset Tenant/PVC；真实集群使用配置的动态 StorageClass。
 6. Tenant 创建和 Ready 等待。
 7. S3 bucket 创建。
 8. S3 prefill 对象并记录 hash；prefill 阶段必须明确成功，避免空用例通过。
-9. apply `IOChaos fault errno=5`。
-10. 等待 `IOChaos` 进入已选择目标且已注入状态，再开始故障 workload。
+9. apply 对应故障：Chaos Mesh `IOChaos` / `PodChaos` / `NetworkChaos`，或 host-side disk fill、direct PV corruption、Kind worker restart、dm-flakey、Warp under chaos。
+10. 对持续型 Chaos 资源等待进入 active，再开始故障 workload。
 11. 故障期间持续读写并输出 `workload-summary.json`。
-12. workload 结束后确认 `IOChaos` 仍处于 active，避免 workload 跑出故障窗口。
-13. 故障 workload 失败、故障证据不足或 Chaos 删除失败时，先保存 Chaos Mesh describe/yaml，再触发 cleanup。
-14. delete `IOChaos`。
+12. 对持续型故障确认 workload 没有跑出故障窗口。
+13. 故障 workload 失败、故障证据不足或 Chaos 删除失败时，先保存 describe/yaml 或 host fault 输出，再触发 cleanup。
+14. 删除 Chaos 资源、清理 filler 文件或恢复 dmsetup table。
 15. Tenant 恢复 Ready 等待。
 16. 所有成功 `PUT` 对象最终 `GET + sha256` 校验。
 17. 恢复后执行 `LIST prefix`，缺失项先作为 warning。
@@ -823,57 +851,45 @@ fault_io_eio_preserves_committed_objects
 
 这个版本已经能证明系统从“占位骨架”升级为“真实故障注入 + 数据正确性校验”。
 
-当前可执行用例只包含 `io-eio`。上面的故障矩阵保留为后续路线图，不表示 Phase 1 已经实现所有矩阵项。
+## 后续增强计划
 
-## 分阶段实施计划
+当前 9 个 runner 已经落到代码里。后续工作不再是补入口，而是提高故障强度、判定模型和长稳覆盖。
 
-### Phase 1：磁盘 EIO 基线
+### Phase 1：runner hardening
 
-- 新增 `chaos_mesh`。
-- 新增 `history`。
-- 新增 `checker`。
-- 新增 `s3_workload`。
-- 实现 `io-eio`。
-- 使用唯一对象 key。
-- 默认小对象数、短持续时间、低故障比例。
+- 在测试环境逐个验证 9 个 scenario 的前置条件、故障注入、清理和 artifacts 输出。
+- 为 PodChaos、NetworkChaos、IOChaos mistake 补充更细的 CRD status 断言。
+- 将 host-side 故障的输出结构化，便于 CI artifact 聚合和历史对比。
+- 保持每个 scenario 独立选择执行，避免多个故障在同一次测试中相互污染。
 
 验收：
 
 - `make e2e-check` 通过。
-- `RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> make fault-test` 可在当前真实 Kubernetes 测试集群运行 `io-eio`，并拒绝 Kind。
+- `RUSTFS_FAULT_TEST_STORAGE_CLASS=<storage-class> RUSTFS_FAULT_TEST_SCENARIO=<scenario> make fault-test` 可在当前真实 Kubernetes 测试集群逐个运行，并拒绝 Kind。
 - 如果 committed object 丢失，测试失败。
 - 如果 successful GET 返回错误字节，测试失败。
 - 如果 workload 跑出 IOChaos active 窗口，测试失败。
 - fault runner 不进入 Kind e2e case inventory；其边界是 `rustfs-workload/fault-injection`。
+- 每个 scenario 都能在失败时留下足够定位信息。
+- 每个 scenario 结束后能清理自己创建的 Chaos 资源、filler 文件或 dmsetup table。
 
-### Phase 2：进程和网络故障
+### Phase 2：一致性模型增强
 
-- 新增 `pod-kill-one`。
-- 新增 `network-partition-one`。
-- 复用同一套 workload/history/checker。
-
-验收：
-
-- Pod 死亡后 StatefulSet 能恢复。
-- 网络分区期间可以失败，但不能返回错误数据。
-- 网络恢复后 committed object 可读回。
-
-### Phase 3：静默损坏
-
-- 新增 `io-read-mistake`。
-- 新增 direct local-PV corruption。
-- 强化 hash mismatch 和 repair behavior 报告。
+- 引入 same-key overwrite、delete、multipart、prefix/list 等更接近 Jepsen register/set 模型的 workload。
+- 将 operation history 扩展成可回放的事件日志，明确 invoke/ok/fail/info。
+- 在 checker 中区分 linearizable、eventual recovery、data corruption、availability degradation。
 
 验收：
 
-- RustFS 对错误字节返回错误或修复。
-- 不允许 `200 OK` 返回错误对象内容。
+- 成功写入的对象不得丢失。
+- 成功读取不得返回错误字节。
+- List 缺失、陈旧读、超时、服务错误分别记录，不能混成同一种 failure。
 
-### Phase 4：长稳和性能
+### Phase 3：长稳和性能
 
-- 增加随机组合故障。
-- 增加长时间 soak。
-- 可选接入 MinIO Warp 或 COSBench。
+- 增加长时间 soak runner。
+- 增加随机但可复现的故障调度。
+- 将 Warp 结果固定为性能/压力信号，不作为 correctness verdict。
 
 注意：
 
@@ -881,13 +897,16 @@ fault_io_eio_preserves_committed_objects
 - 压测失败不等于数据错误。
 - 数据错误永远是 hard fail。
 
-### Phase 5：块设备级故障
+### Phase 4：块设备级故障实验室
 
 - 研究 `dm-flakey`、`dm-error`、loop device-backed PV。
 - 只在 Linux runner 或专用环境启用。
 - 不进入默认 fault-test 流程。
+- 现有 dm-flakey runner 通过 `RUSTFS_FAULT_TEST_DM_*` 显式接入专用设备映射。
+- 后续可以在专用 Linux runner 上扩展 `dm-error`、loop device-backed PV 和更细粒度的 I/O 延迟/丢写模型。
+- 这些场景只进入明确标记的专用环境，不进入默认 fault-test 流程。
 
-这个阶段更接近真实磁盘坏块，但环境成本明显更高。
+这个方向更接近真实磁盘坏块，但环境成本明显更高，必须保持强隔离。
 
 ## 与其他测试框架的关系
 
@@ -897,7 +916,7 @@ fault_io_eio_preserves_committed_objects
 | Chaos Mesh | Kubernetes-native nemesis，负责制造故障。 |
 | Jepsen-like checker | 判断对象存储 correctness，不制造故障。 |
 | MinIO Mint | 后续用于 S3 API 兼容性，不作为故障 checker。 |
-| MinIO Warp | 后续用于故障期间性能压测，不作为 correctness verdict。 |
+| MinIO Warp | 用于故障期间性能压测，不作为 correctness verdict。 |
 | COSBench | 后续用于大规模对象存储压测。 |
 | Ceph s3-tests | 后续用于 S3 行为兼容性参考。 |
 | Ceph Teuthology | 借鉴大规模编排思想，当前不直接引入。 |

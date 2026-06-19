@@ -47,7 +47,7 @@ e2e/
     smoke.rs             ignored live smoke entrypoints
     operator.rs          ignored live Operator assertion
     console.rs           ignored live Console API assertion
-    faults.rs            real-cluster destructive fault-test runner; not part of e2e case inventory
+    faults.rs            real-cluster destructive fault-injection suite with scenario-selected runners; not part of e2e case inventory
 ```
 
 ## Boundary rules
