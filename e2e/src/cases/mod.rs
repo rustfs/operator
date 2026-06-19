@@ -28,12 +28,19 @@ pub enum Suite {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseStatus {
+    Executable,
+    Planned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaseSpec {
     pub suite: Suite,
     pub name: &'static str,
     pub description: &'static str,
     pub boundary: &'static str,
     pub ci_phase: &'static str,
+    pub status: CaseStatus,
 }
 
 impl CaseSpec {
@@ -50,6 +57,24 @@ impl CaseSpec {
             description,
             boundary,
             ci_phase,
+            status: CaseStatus::Executable,
+        }
+    }
+
+    pub const fn planned(
+        suite: Suite,
+        name: &'static str,
+        description: &'static str,
+        boundary: &'static str,
+        ci_phase: &'static str,
+    ) -> Self {
+        Self {
+            suite,
+            name,
+            description,
+            boundary,
+            ci_phase,
+            status: CaseStatus::Planned,
         }
     }
 }
@@ -66,7 +91,7 @@ pub fn all_cases() -> Vec<CaseSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Suite, all_cases};
+    use super::{CaseStatus, Suite, all_cases};
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -97,13 +122,15 @@ mod tests {
     fn cases_are_mapped_to_ci_phases_and_architecture_boundaries() {
         let missing = all_cases()
             .into_iter()
-            .filter(|case| case.boundary.is_empty() || case.ci_phase.is_empty())
+            .filter(|case| {
+                case.description.is_empty() || case.boundary.is_empty() || case.ci_phase.is_empty()
+            })
             .map(|case| case.name)
             .collect::<Vec<_>>();
 
         assert!(
             missing.is_empty(),
-            "cases missing boundary/ci phase: {missing:?}"
+            "cases missing description/boundary/ci phase: {missing:?}"
         );
     }
 
@@ -111,6 +138,7 @@ mod tests {
     fn executable_cases_are_present_for_each_suite() {
         let counts = all_cases()
             .into_iter()
+            .filter(|case| case.status == CaseStatus::Executable)
             .fold(HashMap::new(), |mut acc, case| {
                 *acc.entry(case.suite).or_insert(0usize) += 1;
                 acc

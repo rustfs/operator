@@ -29,6 +29,11 @@ pub struct FaultTestConfig {
     pub workload_objects: usize,
     pub request_timeout: Duration,
     pub require_client_disruption: bool,
+    pub disk_fill_mib: u64,
+    pub dm_name: Option<String>,
+    pub dm_fault_table: Option<String>,
+    pub dm_recovery_table: Option<String>,
+    pub warp_duration: Duration,
     pub chaos_namespace: String,
 }
 
@@ -98,6 +103,15 @@ impl FaultTestConfig {
                 &get_env,
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION",
             ),
+            disk_fill_mib: env_u64(&get_env, "RUSTFS_FAULT_TEST_DISK_FILL_MIB", 12 * 1024),
+            dm_name: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_NAME"),
+            dm_fault_table: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_FAULT_TABLE"),
+            dm_recovery_table: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_RECOVERY_TABLE"),
+            warp_duration: Duration::from_secs(env_u64(
+                &get_env,
+                "RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS",
+                60,
+            )),
             chaos_namespace: env_or(&get_env, "RUSTFS_FAULT_TEST_CHAOS_NAMESPACE", "chaos-mesh"),
         })
     }
@@ -187,6 +201,13 @@ where
     get_env(name).unwrap_or_else(|| default.to_string())
 }
 
+fn env_optional<F>(get_env: &F, name: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    get_env(name).filter(|value| !value.trim().is_empty())
+}
+
 fn env_bool<F>(get_env: &F, name: &str) -> bool
 where
     F: Fn(&str) -> Option<String>,
@@ -246,8 +267,58 @@ mod tests {
             config.cluster.artifacts_dir,
             std::path::PathBuf::from("target/fault-tests/artifacts")
         );
+        assert_eq!(config.scenario, "io-eio");
+        assert_eq!(config.duration, std::time::Duration::from_secs(180));
+        assert_eq!(config.percent, 20);
+        assert_eq!(config.workload_objects, 40);
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(3));
+        assert_eq!(config.disk_fill_mib, 12 * 1024);
+        assert!(config.dm_name.is_none());
+        assert!(config.dm_fault_table.is_none());
+        assert!(config.dm_recovery_table.is_none());
+        assert_eq!(config.warp_duration, std::time::Duration::from_secs(60));
         assert!(!config.destructive_enabled);
         assert!(config.require_destructive_enabled().is_err());
+    }
+
+    #[test]
+    fn fault_scenario_env_overrides_are_parsed() {
+        let config = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SCENARIO" => Some("dm-flakey".to_string()),
+                "RUSTFS_FAULT_TEST_DURATION_SECONDS" => Some("45".to_string()),
+                "RUSTFS_FAULT_TEST_PERCENT" => Some("35".to_string()),
+                "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("64".to_string()),
+                "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS" => Some("7".to_string()),
+                "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION" => Some("true".to_string()),
+                "RUSTFS_FAULT_TEST_DISK_FILL_MIB" => Some("1024".to_string()),
+                "RUSTFS_FAULT_TEST_DM_NAME" => Some("rustfs-test".to_string()),
+                "RUSTFS_FAULT_TEST_DM_FAULT_TABLE" => Some("0 1024 error".to_string()),
+                "RUSTFS_FAULT_TEST_DM_RECOVERY_TABLE" => {
+                    Some("0 1024 linear /dev/loop0 0".to_string())
+                }
+                "RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS" => Some("30".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        )
+        .expect("fault config");
+
+        assert_eq!(config.scenario, "dm-flakey");
+        assert_eq!(config.duration, std::time::Duration::from_secs(45));
+        assert_eq!(config.percent, 35);
+        assert_eq!(config.workload_objects, 64);
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(7));
+        assert!(config.require_client_disruption);
+        assert_eq!(config.disk_fill_mib, 1024);
+        assert_eq!(config.dm_name.as_deref(), Some("rustfs-test"));
+        assert_eq!(config.dm_fault_table.as_deref(), Some("0 1024 error"));
+        assert_eq!(
+            config.dm_recovery_table.as_deref(),
+            Some("0 1024 linear /dev/loop0 0")
+        );
+        assert_eq!(config.warp_duration, std::time::Duration::from_secs(30));
     }
 
     #[test]
