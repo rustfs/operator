@@ -166,6 +166,44 @@ impl IoChaosSpec {
         })
     }
 
+    pub fn enospc_on_rustfs_volume(
+        config: &ClusterTestConfig,
+        chaos_namespace: impl Into<String>,
+        run_id: impl Into<String>,
+        scenario: impl Into<String>,
+        volume_path: impl Into<String>,
+        percent: u8,
+        duration: Duration,
+    ) -> Result<Self> {
+        ensure!(
+            (1..=100).contains(&percent),
+            "IOChaos percent must be in 1..=100, got {percent}"
+        );
+        ensure!(
+            duration > Duration::ZERO,
+            "IOChaos duration must be positive"
+        );
+
+        let run_id = run_id.into();
+        let short_run_id = run_id.chars().take(12).collect::<String>();
+        let scenario = scenario.into();
+
+        Ok(Self {
+            name: format!("rustfs-fault-enospc-{short_run_id}"),
+            namespace: chaos_namespace.into(),
+            run_id,
+            scenario,
+            target_namespace: config.test_namespace.clone(),
+            tenant_name: config.tenant_name.clone(),
+            container_name: "rustfs".to_string(),
+            volume_path: volume_path.into(),
+            methods: vec!["WRITE".to_string()],
+            action: IoChaosAction::Fault { errno: 28 },
+            percent,
+            duration,
+        })
+    }
+
     pub fn manifest(&self) -> String {
         let methods = self
             .methods
@@ -485,6 +523,14 @@ pub fn apply_networkchaos(
 }
 
 impl ChaosGuard {
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub fn wait_active(&self, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
 
@@ -553,7 +599,7 @@ impl ChaosGuard {
         Ok(())
     }
 
-    fn json(&self) -> Result<String> {
+    pub fn json(&self) -> Result<String> {
         let output = Kubectl::new(&self.config)
             .namespaced(&self.namespace)
             .command(["get", self.kind, &self.name, "-o", "json"])
@@ -630,6 +676,27 @@ mod tests {
         assert!(manifest.contains("volumePath: /data/rustfs0"));
         assert!(manifest.contains("errno: 5"));
         assert!(manifest.contains("percent: 20"));
+    }
+
+    #[test]
+    fn enospc_manifest_targets_only_volume_writes() {
+        let config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        let spec = IoChaosSpec::enospc_on_rustfs_volume(
+            &config.cluster,
+            "chaos-mesh",
+            "run-1234567890",
+            "disk-full",
+            "/data/rustfs0",
+            100,
+            Duration::from_secs(60),
+        )
+        .expect("valid enospc chaos");
+        let manifest = spec.manifest();
+
+        assert!(manifest.contains("errno: 28"));
+        assert!(manifest.contains("methods:\n    - WRITE"));
+        assert!(manifest.contains("percent: 100"));
+        assert!(!manifest.contains("    - READ"));
     }
 
     #[test]

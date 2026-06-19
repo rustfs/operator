@@ -29,10 +29,12 @@ pub struct FaultTestConfig {
     pub workload_objects: usize,
     pub request_timeout: Duration,
     pub require_client_disruption: bool,
-    pub disk_fill_mib: u64,
     pub dm_name: Option<String>,
+    pub dm_node: Option<String>,
+    pub dm_mount_path: Option<String>,
     pub dm_fault_table: Option<String>,
     pub dm_recovery_table: Option<String>,
+    pub dm_helper_image: String,
     pub warp_duration: Duration,
     pub chaos_namespace: String,
 }
@@ -54,6 +56,8 @@ impl FaultTestConfig {
 
         let storage_class = required_env(&get_env, "RUSTFS_FAULT_TEST_STORAGE_CLASS")?;
         let namespace = env_or(&get_env, "RUSTFS_FAULT_TEST_NAMESPACE", "rustfs-fault-test");
+        let scenario = env_or(&get_env, "RUSTFS_FAULT_TEST_SCENARIO", "io-eio");
+        let default_percent = if scenario == "disk-full" { 100 } else { 20 };
         let cluster = ClusterTestConfig {
             context,
             operator_namespace: env_or(
@@ -86,13 +90,13 @@ impl FaultTestConfig {
         Ok(Self {
             cluster,
             destructive_enabled: env_bool(&get_env, "RUSTFS_FAULT_TEST_DESTRUCTIVE"),
-            scenario: env_or(&get_env, "RUSTFS_FAULT_TEST_SCENARIO", "io-eio"),
+            scenario,
             duration: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_DURATION_SECONDS",
                 180,
             )),
-            percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", 20),
+            percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", default_percent),
             workload_objects: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS", 40),
             request_timeout: Duration::from_secs(env_u64(
                 &get_env,
@@ -103,10 +107,16 @@ impl FaultTestConfig {
                 &get_env,
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION",
             ),
-            disk_fill_mib: env_u64(&get_env, "RUSTFS_FAULT_TEST_DISK_FILL_MIB", 12 * 1024),
             dm_name: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_NAME"),
+            dm_node: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_NODE"),
+            dm_mount_path: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_MOUNT_PATH"),
             dm_fault_table: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_FAULT_TABLE"),
             dm_recovery_table: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_RECOVERY_TABLE"),
+            dm_helper_image: env_or(
+                &get_env,
+                "RUSTFS_FAULT_TEST_DM_HELPER_IMAGE",
+                "rancher/mirrored-library-busybox:1.37.0",
+            ),
             warp_duration: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS",
@@ -124,7 +134,7 @@ impl FaultTestConfig {
         Ok(())
     }
 
-    pub fn validate_cluster(&self) -> Result<()> {
+    pub fn validate_cluster(&self, allow_static_storage: bool) -> Result<()> {
         Kubectl::new(&self.cluster)
             .command(["get", "crd", "tenants.rustfs.com"])
             .run_checked()
@@ -145,7 +155,7 @@ impl FaultTestConfig {
                     self.cluster.storage_class
                 )
             })?;
-        validate_storage_class(&output.stdout)
+        validate_storage_class(&output.stdout, allow_static_storage)
     }
 
     #[cfg(test)]
@@ -161,7 +171,7 @@ impl FaultTestConfig {
     }
 }
 
-fn validate_storage_class(raw: &str) -> Result<()> {
+fn validate_storage_class(raw: &str, allow_static: bool) -> Result<()> {
     let value = serde_json::from_str::<Value>(raw).context("parse StorageClass json")?;
     let provisioner = value
         .get("provisioner")
@@ -172,8 +182,8 @@ fn validate_storage_class(raw: &str) -> Result<()> {
         "StorageClass provisioner is missing"
     );
     ensure!(
-        provisioner != "kubernetes.io/no-provisioner",
-        "fault tests require a dynamically provisioned StorageClass, got {provisioner}"
+        allow_static || provisioner != "kubernetes.io/no-provisioner",
+        "fault tests require a dynamically provisioned StorageClass unless the selected scenario explicitly requires dedicated static local PVs, got {provisioner}"
     );
     Ok(())
 }
@@ -272,10 +282,15 @@ mod tests {
         assert_eq!(config.percent, 20);
         assert_eq!(config.workload_objects, 40);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(3));
-        assert_eq!(config.disk_fill_mib, 12 * 1024);
         assert!(config.dm_name.is_none());
+        assert!(config.dm_node.is_none());
+        assert!(config.dm_mount_path.is_none());
         assert!(config.dm_fault_table.is_none());
         assert!(config.dm_recovery_table.is_none());
+        assert_eq!(
+            config.dm_helper_image,
+            "rancher/mirrored-library-busybox:1.37.0"
+        );
         assert_eq!(config.warp_duration, std::time::Duration::from_secs(60));
         assert!(!config.destructive_enabled);
         assert!(config.require_destructive_enabled().is_err());
@@ -292,13 +307,17 @@ mod tests {
                 "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("64".to_string()),
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS" => Some("7".to_string()),
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION" => Some("true".to_string()),
-                "RUSTFS_FAULT_TEST_DISK_FILL_MIB" => Some("1024".to_string()),
                 "RUSTFS_FAULT_TEST_DM_NAME" => Some("rustfs-test".to_string()),
+                "RUSTFS_FAULT_TEST_DM_NODE" => Some("worker-a".to_string()),
+                "RUSTFS_FAULT_TEST_DM_MOUNT_PATH" => {
+                    Some("/data/rustfs-fault/dm-volume".to_string())
+                }
                 "RUSTFS_FAULT_TEST_DM_FAULT_TABLE" => Some("0 1024 error".to_string()),
                 "RUSTFS_FAULT_TEST_DM_RECOVERY_TABLE" => {
                     Some("0 1024 linear /dev/loop0 0".to_string())
                 }
                 "RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS" => Some("30".to_string()),
+                "RUSTFS_FAULT_TEST_DM_HELPER_IMAGE" => Some("busybox:test".to_string()),
                 _ => None,
             },
             "production-test-cluster".to_string(),
@@ -311,14 +330,19 @@ mod tests {
         assert_eq!(config.workload_objects, 64);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(7));
         assert!(config.require_client_disruption);
-        assert_eq!(config.disk_fill_mib, 1024);
         assert_eq!(config.dm_name.as_deref(), Some("rustfs-test"));
+        assert_eq!(config.dm_node.as_deref(), Some("worker-a"));
+        assert_eq!(
+            config.dm_mount_path.as_deref(),
+            Some("/data/rustfs-fault/dm-volume")
+        );
         assert_eq!(config.dm_fault_table.as_deref(), Some("0 1024 error"));
         assert_eq!(
             config.dm_recovery_table.as_deref(),
             Some("0 1024 linear /dev/loop0 0")
         );
         assert_eq!(config.warp_duration, std::time::Duration::from_secs(30));
+        assert_eq!(config.dm_helper_image, "busybox:test");
     }
 
     #[test]
@@ -336,9 +360,29 @@ mod tests {
 
     #[test]
     fn dynamic_storage_class_is_required() {
-        assert!(validate_storage_class(r#"{"provisioner":"ebs.csi.aws.com"}"#).is_ok());
+        assert!(validate_storage_class(r#"{"provisioner":"ebs.csi.aws.com"}"#, false).is_ok());
         assert!(
-            validate_storage_class(r#"{"provisioner":"kubernetes.io/no-provisioner"}"#).is_err()
+            validate_storage_class(r#"{"provisioner":"kubernetes.io/no-provisioner"}"#, false)
+                .is_err()
         );
+        assert!(
+            validate_storage_class(r#"{"provisioner":"kubernetes.io/no-provisioner"}"#, true)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn disk_full_defaults_to_full_enospc_injection() {
+        let config = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SCENARIO" => Some("disk-full".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        )
+        .expect("fault config");
+
+        assert_eq!(config.percent, 100);
     }
 }
