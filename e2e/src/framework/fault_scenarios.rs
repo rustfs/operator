@@ -213,6 +213,11 @@ impl FaultScenario {
             config.workload_objects >= 4,
             "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 4"
         );
+        ensure!(
+            (1..=config.workload_objects).contains(&config.workload_concurrency),
+            "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY must be between 1 and RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS ({})",
+            config.workload_objects
+        );
 
         Ok(Self {
             name: spec.scenario.to_string(),
@@ -266,16 +271,25 @@ mod tests {
             scenario.case_name,
             "fault_io_eio_preserves_committed_objects"
         );
-        assert_eq!(scenario.duration, Duration::from_secs(180));
+        assert_eq!(scenario.duration, Duration::from_secs(900));
         assert_eq!(scenario.percent, 20);
-        assert_eq!(scenario.prefill_count(), 20);
-        assert_eq!(scenario.mixed_workload_count(), 20);
+        assert_eq!(scenario.prefill_count(), 2000);
+        assert_eq!(scenario.mixed_workload_count(), 2000);
     }
 
     #[test]
     fn unsupported_fault_scenario_is_rejected() {
         let mut config = FaultTestConfig::for_test("real-cluster", "fast-csi");
         config.scenario = "operator-restart".to_string();
+
+        assert!(FaultScenario::from_config(&config).is_err());
+    }
+
+    #[test]
+    fn workload_concurrency_must_fit_the_object_count() {
+        let mut config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        config.workload_objects = 4;
+        config.workload_concurrency = 5;
 
         assert!(FaultScenario::from_config(&config).is_err());
     }

@@ -16,7 +16,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,8 +56,13 @@ pub struct OperationRecord {
     pub error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Recorder {
+    inner: Arc<Mutex<RecorderState>>,
+}
+
+#[derive(Debug)]
+struct RecorderState {
     path: PathBuf,
     scenario: String,
     run_id: String,
@@ -77,30 +83,33 @@ impl Recorder {
         }
         let writer = BufWriter::new(File::create(&path)?);
         Ok(Self {
-            path,
-            scenario: scenario.into(),
-            run_id: run_id.into(),
-            next_id: 1,
-            records: Vec::new(),
-            writer,
+            inner: Arc::new(Mutex::new(RecorderState {
+                path,
+                scenario: scenario.into(),
+                run_id: run_id.into(),
+                next_id: 1,
+                records: Vec::new(),
+                writer,
+            })),
         })
     }
 
     pub fn begin(
-        &mut self,
+        &self,
         kind: OperationKind,
         bucket: impl Into<String>,
         key: Option<String>,
         value_sha256: Option<String>,
         size_bytes: Option<usize>,
     ) -> OperationRecord {
-        let id = format!("op-{:06}", self.next_id);
-        self.next_id += 1;
+        let mut state = self.state();
+        let id = format!("op-{:06}", state.next_id);
+        state.next_id += 1;
         let started_at_ms = now_ms();
 
         OperationRecord {
             id,
-            scenario: self.scenario.clone(),
+            scenario: state.scenario.clone(),
             kind,
             bucket: bucket.into(),
             key,
@@ -115,7 +124,7 @@ impl Recorder {
     }
 
     pub fn finish(
-        &mut self,
+        &self,
         mut record: OperationRecord,
         outcome: OperationOutcome,
         http_status: Option<u16>,
@@ -126,27 +135,34 @@ impl Recorder {
         record.http_status = http_status;
         record.error = error.map(|message| truncate_error(&message));
 
-        serde_json::to_writer(&mut self.writer, &record)?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
-        self.records.push(record);
+        let mut state = self.state();
+        serde_json::to_writer(&mut state.writer, &record)?;
+        state.writer.write_all(b"\n")?;
+        state.writer.flush()?;
+        state.records.push(record);
         Ok(())
     }
 
-    pub fn records(&self) -> &[OperationRecord] {
-        &self.records
+    pub fn records(&self) -> Vec<OperationRecord> {
+        self.state().records.clone()
     }
 
-    pub fn scenario(&self) -> &str {
-        &self.scenario
+    pub fn scenario(&self) -> String {
+        self.state().scenario.clone()
     }
 
-    pub fn run_id(&self) -> &str {
-        &self.run_id
+    pub fn run_id(&self) -> String {
+        self.state().run_id.clone()
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.state().path.clone()
+    }
+
+    fn state(&self) -> MutexGuard<'_, RecorderState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -169,12 +185,13 @@ fn truncate_error(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{OperationKind, OperationOutcome, Recorder};
+    use std::collections::BTreeSet;
 
     #[test]
     fn recorder_writes_jsonl_records() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("history.jsonl");
-        let mut recorder = Recorder::create(&path, "io-eio", "run-1").expect("recorder");
+        let recorder = Recorder::create(&path, "io-eio", "run-1").expect("recorder");
         let record = recorder.begin(
             OperationKind::Put,
             "bucket",
@@ -187,9 +204,47 @@ mod tests {
             .finish(record, OperationOutcome::Ok, Some(200), None)
             .expect("finish");
 
-        let content = std::fs::read_to_string(path).expect("history");
+        let content = std::fs::read_to_string(&path).expect("history");
         assert!(content.contains("\"scenario\":\"io-eio\""));
         assert!(content.contains("\"kind\":\"put\""));
         assert_eq!(recorder.records().len(), 1);
+        assert_eq!(recorder.path(), path);
+    }
+
+    #[test]
+    fn recorder_assigns_unique_ids_across_concurrent_writers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recorder = Recorder::create(dir.path().join("history.jsonl"), "io-eio", "run-1")
+            .expect("recorder");
+        let writers = (0..8)
+            .map(|writer| {
+                let recorder = recorder.clone();
+                std::thread::spawn(move || {
+                    for operation in 0..25 {
+                        let record = recorder.begin(
+                            OperationKind::Put,
+                            "bucket",
+                            Some(format!("{writer}-{operation}")),
+                            Some("hash".to_string()),
+                            Some(4),
+                        );
+                        recorder
+                            .finish(record, OperationOutcome::Ok, Some(200), None)
+                            .expect("finish");
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+
+        let records = recorder.records();
+        let ids = records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(records.len(), 200);
+        assert_eq!(ids.len(), 200);
     }
 }

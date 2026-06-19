@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{Client, config::Region, error::SdkError, primitives::ByteStream};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -27,7 +28,32 @@ pub struct ObjectSpec {
     pub key: String,
     pub size_bytes: usize,
     pub sha256: String,
+    seed: u64,
+    index: usize,
+}
+
+#[derive(Debug)]
+pub struct PreparedObject {
+    pub spec: ObjectSpec,
     body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkloadSizeClass {
+    pub size_bytes: usize,
+    pub object_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkloadPlan {
+    pub seed: u64,
+    pub generator: &'static str,
+    pub object_count: usize,
+    pub concurrency: usize,
+    pub total_payload_bytes: u64,
+    pub size_distribution: Vec<WorkloadSizeClass>,
+    #[serde(skip)]
+    sizes: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -48,17 +74,79 @@ impl ObjectSpec {
         format!("fault-test/{run_id}/")
     }
 
-    pub fn deterministic(run_id: &str, index: usize, size_bytes: usize) -> Self {
+    pub fn prepare_seeded(
+        run_id: &str,
+        index: usize,
+        size_bytes: usize,
+        seed: u64,
+    ) -> PreparedObject {
         let key = format!("{}object-{index:06}", Self::key_prefix(run_id));
-        let body = deterministic_bytes(index, size_bytes);
+        let body = seeded_bytes(seed, index, size_bytes);
         let sha256 = sha256_hex(&body);
 
-        Self {
-            key,
-            size_bytes,
-            sha256,
+        PreparedObject {
+            spec: Self {
+                key,
+                size_bytes,
+                sha256,
+                seed,
+                index,
+            },
             body,
         }
+    }
+
+    pub fn prepare(&self) -> PreparedObject {
+        let body = seeded_bytes(self.seed, self.index, self.size_bytes);
+        debug_assert_eq!(sha256_hex(&body), self.sha256);
+        PreparedObject {
+            spec: self.clone(),
+            body,
+        }
+    }
+}
+
+impl WorkloadPlan {
+    pub fn seeded(seed: u64, object_count: usize, concurrency: usize) -> Self {
+        const SIZE_CLASSES: &[(usize, usize)] = &[
+            (4 * 1024, 85),
+            (16 * 1024, 10),
+            (8 * 1024 * 1024, 4),
+            (16 * 1024 * 1024, 1),
+        ];
+
+        let mut sizes = Vec::with_capacity(object_count);
+        let mut size_distribution = Vec::with_capacity(SIZE_CLASSES.len());
+        let mut assigned = 0;
+        for (position, (size_bytes, weight)) in SIZE_CLASSES.iter().copied().enumerate() {
+            let count = if position + 1 == SIZE_CLASSES.len() {
+                object_count.saturating_sub(assigned)
+            } else {
+                object_count.saturating_mul(weight) / 100
+            };
+            sizes.extend(std::iter::repeat_n(size_bytes, count));
+            size_distribution.push(WorkloadSizeClass {
+                size_bytes,
+                object_count: count,
+            });
+            assigned += count;
+        }
+
+        shuffle_sizes(&mut sizes, seed);
+        let total_payload_bytes = sizes.iter().map(|size| *size as u64).sum();
+        Self {
+            seed,
+            generator: "splitmix64-v1",
+            object_count,
+            concurrency,
+            total_payload_bytes,
+            size_distribution,
+            sizes,
+        }
+    }
+
+    pub fn size_at(&self, index: usize) -> usize {
+        self.sizes[index]
     }
 }
 
@@ -94,7 +182,7 @@ impl S3WorkloadClient {
         })
     }
 
-    pub async fn create_bucket(&self, recorder: &mut Recorder) -> Result<OperationOutcome> {
+    pub async fn create_bucket(&self, recorder: &Recorder) -> Result<OperationOutcome> {
         let record = recorder.begin(
             OperationKind::CreateBucket,
             self.bucket.clone(),
@@ -137,22 +225,23 @@ impl S3WorkloadClient {
 
     pub async fn put_object(
         &self,
-        object: &ObjectSpec,
-        recorder: &mut Recorder,
+        object: &PreparedObject,
+        recorder: &Recorder,
     ) -> Result<OperationOutcome> {
+        let spec = &object.spec;
         let record = recorder.begin(
             OperationKind::Put,
             self.bucket.clone(),
-            Some(object.key.clone()),
-            Some(object.sha256.clone()),
-            Some(object.size_bytes),
+            Some(spec.key.clone()),
+            Some(spec.sha256.clone()),
+            Some(spec.size_bytes),
         );
         let result = timeout(
             self.request_timeout,
             self.client
                 .put_object()
                 .bucket(&self.bucket)
-                .key(&object.key)
+                .key(&spec.key)
                 .body(ByteStream::from(object.body.clone()))
                 .send(),
         )
@@ -185,14 +274,14 @@ impl S3WorkloadClient {
         }
     }
 
-    pub async fn get_object(&self, key: &str, recorder: &mut Recorder) -> Result<Option<Vec<u8>>> {
+    pub async fn get_object(&self, key: &str, recorder: &Recorder) -> Result<Option<Vec<u8>>> {
         Ok(self.get_object_result(key, recorder).await?.body)
     }
 
     pub async fn get_object_result(
         &self,
         key: &str,
-        recorder: &mut Recorder,
+        recorder: &Recorder,
     ) -> Result<GetObjectResult> {
         let record = recorder.begin(
             OperationKind::Get,
@@ -280,11 +369,7 @@ impl S3WorkloadClient {
         }
     }
 
-    pub async fn head_object(
-        &self,
-        key: &str,
-        recorder: &mut Recorder,
-    ) -> Result<OperationOutcome> {
+    pub async fn head_object(&self, key: &str, recorder: &Recorder) -> Result<OperationOutcome> {
         let record = recorder.begin(
             OperationKind::Head,
             self.bucket.clone(),
@@ -332,7 +417,7 @@ impl S3WorkloadClient {
     pub async fn list_prefix(
         &self,
         prefix: &str,
-        recorder: &mut Recorder,
+        recorder: &Recorder,
     ) -> Result<Option<Vec<String>>> {
         let record = recorder.begin(
             OperationKind::List,
@@ -341,48 +426,65 @@ impl S3WorkloadClient {
             None,
             None,
         );
-        let response = timeout(
-            self.request_timeout,
-            self.client
+        let mut keys = Vec::new();
+        let mut continuation_token = None;
+        loop {
+            let mut request = self
+                .client
                 .list_objects_v2()
                 .bucket(&self.bucket)
-                .prefix(prefix)
-                .send(),
-        )
-        .await;
-
-        match response {
-            Ok(Ok(output)) => {
-                let keys = output
+                .prefix(prefix);
+            if let Some(token) = continuation_token.as_deref() {
+                request = request.continuation_token(token);
+            }
+            let response = timeout(self.request_timeout, request.send()).await;
+            let output = match response {
+                Ok(Ok(output)) => output,
+                Ok(Err(error)) => {
+                    let outcome = classify_sdk_error(&error);
+                    recorder.finish(
+                        record,
+                        outcome,
+                        sdk_error_status(&error),
+                        Some(format!("list prefix failed: {error}")),
+                    )?;
+                    return Ok(None);
+                }
+                Err(_) => {
+                    recorder.finish(
+                        record,
+                        OperationOutcome::Timeout,
+                        None,
+                        Some("list prefix timed out".to_string()),
+                    )?;
+                    return Ok(None);
+                }
+            };
+            keys.extend(
+                output
                     .contents()
                     .iter()
-                    .filter_map(|object| object.key().map(str::to_string))
-                    .collect::<Vec<_>>();
-                let mut record = record;
-                record.size_bytes = Some(keys.len());
-                recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
-                Ok(Some(keys))
+                    .filter_map(|object| object.key().map(str::to_string)),
+            );
+            if !output.is_truncated().unwrap_or(false) {
+                break;
             }
-            Ok(Err(error)) => {
-                let outcome = classify_sdk_error(&error);
+            continuation_token = output.next_continuation_token().map(str::to_string);
+            if continuation_token.is_none() {
                 recorder.finish(
                     record,
-                    outcome,
-                    sdk_error_status(&error),
-                    Some(format!("list prefix failed: {error}")),
+                    OperationOutcome::Unknown,
+                    Some(200),
+                    Some("truncated LIST response omitted continuation token".to_string()),
                 )?;
-                Ok(None)
-            }
-            Err(_) => {
-                recorder.finish(
-                    record,
-                    OperationOutcome::Timeout,
-                    None,
-                    Some("list prefix timed out".to_string()),
-                )?;
-                Ok(None)
+                return Ok(None);
             }
         }
+
+        let mut record = record;
+        record.size_bytes = Some(keys.len());
+        recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
+        Ok(Some(keys))
     }
 }
 
@@ -410,10 +512,40 @@ pub async fn wait_for_s3_endpoint(endpoint: &str, timeout_duration: Duration) ->
     }
 }
 
-fn deterministic_bytes(index: usize, size_bytes: usize) -> Vec<u8> {
-    (0..size_bytes)
-        .map(|offset| ((offset + index * 31) % 251) as u8)
-        .collect()
+fn seeded_bytes(seed: u64, index: usize, size_bytes: usize) -> Vec<u8> {
+    let mut generator = SplitMix64::new(seed ^ (index as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93));
+    let mut body = vec![0; size_bytes];
+    for chunk in body.chunks_mut(8) {
+        let bytes = generator.next_u64().to_le_bytes();
+        chunk.copy_from_slice(&bytes[..chunk.len()]);
+    }
+    body
+}
+
+fn shuffle_sizes(sizes: &mut [usize], seed: u64) {
+    let mut generator = SplitMix64::new(seed ^ 0xA076_1D64_78BD_642F);
+    for index in (1..sizes.len()).rev() {
+        let swap_with = (generator.next_u64() % (index as u64 + 1)) as usize;
+        sizes.swap(index, swap_with);
+    }
+}
+
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        value ^ (value >> 31)
+    }
 }
 
 fn classify_sdk_error<E>(error: &SdkError<E>) -> OperationOutcome {
@@ -435,17 +567,44 @@ fn sdk_error_status<E>(error: &SdkError<E>) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectSpec, sha256_hex};
+    use super::{ObjectSpec, WorkloadPlan, sha256_hex};
 
     #[test]
-    fn deterministic_objects_have_stable_keys_sizes_and_hashes() {
-        let object = ObjectSpec::deterministic("run-1", 7, 4096);
-        let same = ObjectSpec::deterministic("run-1", 7, 4096);
+    fn seeded_objects_have_stable_keys_sizes_and_hashes() {
+        let object = ObjectSpec::prepare_seeded("run-1", 7, 4096, 42);
+        let same = ObjectSpec::prepare_seeded("run-1", 7, 4096, 42);
 
         assert_eq!(ObjectSpec::key_prefix("run-1"), "fault-test/run-1/");
-        assert_eq!(object.key, "fault-test/run-1/object-000007");
-        assert_eq!(object.size_bytes, 4096);
-        assert_eq!(object.sha256, same.sha256);
-        assert_eq!(object.sha256, sha256_hex(&same.body));
+        assert_eq!(object.spec.key, "fault-test/run-1/object-000007");
+        assert_eq!(object.spec.size_bytes, 4096);
+        assert_eq!(object.spec.sha256, same.spec.sha256);
+        assert_eq!(object.spec.sha256, sha256_hex(&same.body));
+        assert_ne!(
+            object.spec.sha256,
+            ObjectSpec::prepare_seeded("run-1", 7, 4096, 43).spec.sha256
+        );
+    }
+
+    #[test]
+    fn workload_plan_is_weighted_shuffled_and_reproducible() {
+        let plan = WorkloadPlan::seeded(42, 4000, 50);
+        let same = WorkloadPlan::seeded(42, 4000, 50);
+        let different = WorkloadPlan::seeded(43, 4000, 50);
+
+        assert_eq!(plan, same);
+        assert_ne!(plan.sizes, different.sizes);
+        assert_eq!(
+            plan.size_distribution
+                .iter()
+                .map(|class| (class.size_bytes, class.object_count))
+                .collect::<Vec<_>>(),
+            vec![
+                (4 * 1024, 3400),
+                (16 * 1024, 400),
+                (8 * 1024 * 1024, 160),
+                (16 * 1024 * 1024, 40),
+            ]
+        );
+        assert_eq!(plan.total_payload_bytes, 2_033_745_920);
     }
 }
