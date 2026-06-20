@@ -587,9 +587,9 @@ mod tests {
 
     #[test]
     fn workload_plan_is_weighted_shuffled_and_reproducible() {
-        let plan = WorkloadPlan::seeded(42, 4000, 50);
-        let same = WorkloadPlan::seeded(42, 4000, 50);
-        let different = WorkloadPlan::seeded(43, 4000, 50);
+        let plan = WorkloadPlan::seeded(42, 40000, 100);
+        let same = WorkloadPlan::seeded(42, 40000, 100);
+        let different = WorkloadPlan::seeded(43, 40000, 100);
 
         assert_eq!(plan, same);
         assert_ne!(plan.sizes, different.sizes);
@@ -599,12 +599,12 @@ mod tests {
                 .map(|class| (class.size_bytes, class.object_count))
                 .collect::<Vec<_>>(),
             vec![
-                (4 * 1024, 3400),
-                (16 * 1024, 400),
-                (8 * 1024 * 1024, 160),
-                (16 * 1024 * 1024, 40),
+                (4 * 1024, 34000),
+                (16 * 1024, 4000),
+                (8 * 1024 * 1024, 1600),
+                (16 * 1024 * 1024, 400),
             ]
         );
-        assert_eq!(plan.total_payload_bytes, 2_033_745_920);
+        assert_eq!(plan.total_payload_bytes, 20_337_459_200);
     }
 }

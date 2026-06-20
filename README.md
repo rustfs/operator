@@ -73,24 +73,10 @@ From the repo root:
 | `make e2e-check` | Validate the e2e harness without creating a live cluster. |
 | `make e2e-live-create` | Build e2e images, recreate the dedicated Kind cluster, install cert-manager, and load images. |
 | `make e2e-live-run` | Deploy the dev control plane and run all non-destructive live suites. |
-| `make fault-test` | Run destructive RustFS fault tests against the current real Kubernetes context. |
 | `make e2e-live-update` | Rebuild images, reload them into Kind, and roll out control-plane deployments. |
 | `make e2e-live-delete` | Delete the dedicated Kind cluster and its local storage. |
 
 CI (`.github/workflows/ci.yml`) runs Rust tests (including `nextest`), `cargo fmt --check`, `clippy`, the Rust-native e2e harness checks, and `console-web` lint/build/format checks. Use **`make pre-commit`** before opening a PR so local validation stays aligned.
-
-### Run fault tests on a real Kubernetes cluster
-
-Fault tests are separate from the Kind e2e workflow. They use the current kubectl context, reject `kind-*` contexts, and run one explicitly selected destructive scenario at a time:
-
-```bash
-kubectl config use-context <real-test-cluster>
-RUSTFS_FAULT_TEST_SCENARIO=io-eio \
-RUSTFS_FAULT_TEST_STORAGE_CLASS=<dynamic-storage-class> \
-make fault-test
-```
-
-See the bilingual [Fault Injection Operations Manual](FAULT_INJECTION_TEST_PLAN.md) for cluster preparation, Chaos Mesh installation, all seven scenarios, the dedicated `dm-flakey` Local PV procedure, acceptance criteria, emergency recovery, and cleanup.
 
 Contribution workflow, commit style, and PR expectations: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

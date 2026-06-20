@@ -97,11 +97,15 @@ impl FaultTestConfig {
             duration: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_DURATION_SECONDS",
-                900,
+                7200,
             )),
             percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", default_percent),
-            workload_objects: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS", 4000),
-            workload_concurrency: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY", 50),
+            workload_objects: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS", 40000),
+            workload_concurrency: env_usize(
+                &get_env,
+                "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY",
+                100,
+            ),
             workload_seed: env_optional_u64(&get_env, "RUSTFS_FAULT_TEST_SEED")?,
             request_timeout: Duration::from_secs(env_u64(
                 &get_env,
@@ -135,7 +139,7 @@ impl FaultTestConfig {
     pub fn require_destructive_enabled(&self) -> Result<()> {
         ensure!(
             self.destructive_enabled,
-            "destructive fault tests are disabled; run through `make fault-test` or set RUSTFS_FAULT_TEST_DESTRUCTIVE=1 explicitly"
+            "destructive fault tests are disabled; run through an e2e package fault Make target or set RUSTFS_FAULT_TEST_DESTRUCTIVE=1 explicitly"
         );
         Ok(())
     }
@@ -297,10 +301,10 @@ mod tests {
             std::path::PathBuf::from("target/fault-tests/artifacts")
         );
         assert_eq!(config.scenario, "io-eio");
-        assert_eq!(config.duration, std::time::Duration::from_secs(900));
+        assert_eq!(config.duration, std::time::Duration::from_secs(7200));
         assert_eq!(config.percent, 20);
-        assert_eq!(config.workload_objects, 4000);
-        assert_eq!(config.workload_concurrency, 50);
+        assert_eq!(config.workload_objects, 40000);
+        assert_eq!(config.workload_concurrency, 100);
         assert_eq!(config.workload_seed, None);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
         assert!(!config.use_cluster_ip);

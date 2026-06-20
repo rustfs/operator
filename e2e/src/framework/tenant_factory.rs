@@ -85,7 +85,7 @@ impl TenantTemplate {
             credential_secret_name: credential_secret_name.into(),
             servers: 4,
             volumes_per_server: 1,
-            storage_request: "80Gi".to_string(),
+            storage_request: "100Gi".to_string(),
             pod_management_policy: Some(PodManagementPolicy::Parallel),
             unsafe_bypass_disk_check: false,
             node_selector: None,
@@ -266,7 +266,7 @@ mod tests {
                 .and_then(|resources| resources.requests.as_ref())
                 .and_then(|requests| requests.get("storage"))
                 .map(|quantity| quantity.0.as_str()),
-            Some("80Gi")
+            Some("100Gi")
         );
         assert!(tenant.spec.pools[0].scheduling.node_selector.is_none());
         assert!(
