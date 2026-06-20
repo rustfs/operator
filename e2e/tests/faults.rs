@@ -23,10 +23,8 @@ use rustfs_operator_e2e::framework::{
     command::CommandSpec,
     config::ClusterTestConfig,
     fault_config::FaultTestConfig,
-    fault_scenarios::{
-        self, DISK_FULL_SCENARIO, FaultBackend, FaultIsolation, FaultScenario,
-        IO_READ_MISTAKE_SCENARIO,
-    },
+    fault_plan::{FaultInjection, FaultKind, FaultPlan},
+    fault_scenarios::{self, FaultBackend, FaultIsolation, FaultScenario},
     history::OperationOutcome,
     history::Recorder,
     host_faults::{self, DmFlakeyGuard, DmFlakeySpec, DmStatusSnapshot},
@@ -44,7 +42,6 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep as async_sleep;
 use uuid::Uuid;
 
-const RUSTFS_DATA_VOLUME: &str = "/data/rustfs0";
 const FAULT_TENANT_POD_COUNT: usize = 4;
 const RUSTFS_POD_STABLE_WINDOW: Duration = Duration::from_secs(60);
 
@@ -54,16 +51,17 @@ async fn fault_selected_scenario() -> Result<()> {
     let config = FaultTestConfig::from_env()?;
     let scenario = FaultScenario::from_config(&config)?;
     let spec = fault_scenarios::scenario_spec(&scenario.name)?;
+    let plan = FaultPlan::from_scenario(&scenario, spec)?;
 
     config.require_destructive_enabled()?;
-    config.validate_cluster(spec.backend == FaultBackend::DeviceMapper)?;
+    config.validate_cluster(plan.requires_static_storage())?;
     eprintln!(
         "running destructive RustFS fault scenario {} against real Kubernetes context: {}",
         scenario.name, config.cluster.context
     );
 
     let collector = ArtifactCollector::new(&config.cluster.artifacts_dir);
-    let result = run_fault_case(&config, &collector, &scenario).await;
+    let result = run_fault_case(&config, &collector, &scenario, &plan).await;
 
     if let Err(error) = &result {
         match collector.collect_kubernetes_snapshot(scenario.case_name, &config.cluster) {
@@ -87,10 +85,11 @@ async fn run_fault_case(
     config: &FaultTestConfig,
     collector: &ArtifactCollector,
     scenario: &FaultScenario,
+    plan: &FaultPlan,
 ) -> Result<()> {
     let spec = fault_scenarios::scenario_spec(&scenario.name)?;
-    require_fault_backend(config, spec.backend)?;
-    cleanup_fault_backend(config, spec.backend)?;
+    require_fault_backends(config, plan)?;
+    cleanup_fault_backends(config, plan)?;
 
     prepare_fault_fixture(&config.cluster, spec.isolation)?;
     wait_for_ready_tenant(&config.cluster).await?;
@@ -147,7 +146,7 @@ async fn run_fault_case(
     )
     .await?;
     let pods_before = rustfs_pod_identities(cluster)?;
-    let mut fault = AppliedFault::apply(config, collector, scenario, spec.backend, &run_id)?;
+    let mut fault = AppliedFaults::apply(config, collector, scenario, plan, &run_id)?;
 
     if let Err(error) = fault.wait_active(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "wait-active-failed")?;
@@ -160,7 +159,7 @@ async fn run_fault_case(
         return Err(error);
     }
 
-    if spec.backend == FaultBackend::MinioWarpWithChaos {
+    if plan.workload_mode.runs_warp() {
         let warp_bucket = warp_bucket_name(&run_id);
         if let Err(error) = host_faults::run_warp_mixed(
             config.warp_duration,
@@ -260,8 +259,8 @@ async fn run_fault_case(
     )?;
     let evidence = FaultEvidence {
         scenario: scenario.name.clone(),
-        backend: format!("{:?}", spec.backend),
-        target: spec.target.to_string(),
+        backend: plan.backend_summary(),
+        target: plan.target_summary(),
         injected: true,
         active_during_workload: true,
         recovered: report.tenant_recovered,
@@ -287,6 +286,13 @@ async fn run_fault_case(
     );
     report.require_success()?;
 
+    Ok(())
+}
+
+fn require_fault_backends(config: &FaultTestConfig, plan: &FaultPlan) -> Result<()> {
+    for backend in plan.required_backends() {
+        require_fault_backend(config, backend)?;
+    }
     Ok(())
 }
 
@@ -336,6 +342,13 @@ fn require_dm_flakey_preflight(config: &FaultTestConfig) -> Result<()> {
     Ok(())
 }
 
+fn cleanup_fault_backends(config: &FaultTestConfig, plan: &FaultPlan) -> Result<()> {
+    for backend in plan.required_backends() {
+        cleanup_fault_backend(config, backend)?;
+    }
+    Ok(())
+}
+
 fn cleanup_fault_backend(config: &FaultTestConfig, backend: FaultBackend) -> Result<()> {
     match backend {
         FaultBackend::ChaosMeshIoChaos | FaultBackend::MinioWarpWithChaos => {
@@ -375,77 +388,156 @@ enum AppliedFault {
     DmFlakey(Box<DmFlakeyGuard>),
 }
 
-impl AppliedFault {
+struct AppliedFaults {
+    items: Vec<AppliedFault>,
+}
+
+impl AppliedFaults {
     fn apply(
         config: &FaultTestConfig,
         collector: &ArtifactCollector,
         scenario: &FaultScenario,
-        backend: FaultBackend,
+        plan: &FaultPlan,
         run_id: &str,
     ) -> Result<Self> {
+        ensure!(
+            !plan.faults().is_empty(),
+            "fault plan {} did not contain any faults",
+            plan.scenario
+        );
+
+        let total = plan.faults().len();
+        let mut items = Vec::with_capacity(total);
+        for (index, injection) in plan.faults().iter().enumerate() {
+            let manifest_name = chaos_manifest_artifact_name(total, index, injection);
+            items.push(AppliedFault::apply_one(
+                config,
+                collector,
+                scenario,
+                injection,
+                run_id,
+                &manifest_name,
+            )?);
+        }
+
+        Ok(Self { items })
+    }
+
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    fn wait_active(&self, timeout: Duration) -> Result<()> {
+        for fault in &self.items {
+            fault.wait_active(timeout)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_active(&self, stage: &str) -> Result<()> {
+        for fault in &self.items {
+            fault.ensure_active(stage)?;
+        }
+        Ok(())
+    }
+
+    fn delete(&mut self, timeout: Duration) -> Result<()> {
+        for fault in self.items.iter_mut().rev() {
+            fault.delete(timeout)?;
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self, stage: &str) -> Result<FaultStatusSnapshot> {
+        ensure!(
+            self.items.len() == 1,
+            "single fault snapshot requested for {} applied faults",
+            self.items.len()
+        );
+        self.items[0].snapshot(stage)
+    }
+
+    fn snapshots(&self, stage: &str) -> Result<Vec<FaultStatusSnapshot>> {
+        self.items
+            .iter()
+            .map(|fault| fault.snapshot(stage))
+            .collect()
+    }
+
+    fn recovery_dm_snapshot(&self) -> Option<DmStatusSnapshot> {
+        self.items
+            .iter()
+            .find_map(AppliedFault::recovery_dm_snapshot)
+    }
+
+    fn chaos_guards(&self) -> Vec<&ChaosGuard> {
+        self.items
+            .iter()
+            .filter_map(AppliedFault::chaos_guard)
+            .collect()
+    }
+}
+
+impl AppliedFault {
+    fn apply_one(
+        config: &FaultTestConfig,
+        collector: &ArtifactCollector,
+        scenario: &FaultScenario,
+        injection: &FaultInjection,
+        run_id: &str,
+        manifest_name: &str,
+    ) -> Result<Self> {
         let cluster = &config.cluster;
-        match backend {
-            FaultBackend::ChaosMeshIoChaos if scenario.name == DISK_FULL_SCENARIO => {
+        match injection.kind {
+            FaultKind::RustfsVolumeEnospc => {
                 let chaos = IoChaosSpec::enospc_on_rustfs_volume(
                     cluster,
                     &config.chaos_namespace,
                     run_id,
                     &scenario.name,
-                    RUSTFS_DATA_VOLUME,
-                    scenario.percent,
-                    scenario.duration,
+                    injection.rustfs_volume_path()?,
+                    injection.percent,
+                    injection.duration,
                 )?;
-                collector.write_text(
-                    scenario.case_name,
-                    "chaos-manifest.yaml",
-                    &chaos.manifest(),
-                )?;
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
                     active_required: true,
                 })
             }
-            FaultBackend::ChaosMeshIoChaos if scenario.name == IO_READ_MISTAKE_SCENARIO => {
+            FaultKind::RustfsVolumeReadMistake => {
                 let chaos = IoChaosSpec::read_mistake_on_rustfs_volume(
                     cluster,
                     &config.chaos_namespace,
                     run_id,
                     &scenario.name,
-                    RUSTFS_DATA_VOLUME,
-                    scenario.percent,
-                    scenario.duration,
+                    injection.rustfs_volume_path()?,
+                    injection.percent,
+                    injection.duration,
                 )?;
-                collector.write_text(
-                    scenario.case_name,
-                    "chaos-manifest.yaml",
-                    &chaos.manifest(),
-                )?;
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
                     active_required: true,
                 })
             }
-            FaultBackend::ChaosMeshIoChaos => {
+            FaultKind::RustfsVolumeIoError => {
                 let chaos = IoChaosSpec::eio_on_rustfs_volume(
                     cluster,
                     &config.chaos_namespace,
                     run_id,
                     &scenario.name,
-                    RUSTFS_DATA_VOLUME,
-                    scenario.percent,
-                    scenario.duration,
+                    injection.rustfs_volume_path()?,
+                    injection.percent,
+                    injection.duration,
                 )?;
-                collector.write_text(
-                    scenario.case_name,
-                    "chaos-manifest.yaml",
-                    &chaos.manifest(),
-                )?;
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
                     active_required: true,
                 })
             }
-            FaultBackend::ChaosMeshPodChaos => {
+            FaultKind::RustfsServerPodKill => {
                 let before_pods = rustfs_pod_identities(cluster)?;
                 let chaos = PodChaosSpec::kill_one_rustfs_pod(
                     cluster,
@@ -453,36 +545,28 @@ impl AppliedFault {
                     run_id,
                     &scenario.name,
                 );
-                collector.write_text(
-                    scenario.case_name,
-                    "chaos-manifest.yaml",
-                    &chaos.manifest(),
-                )?;
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::PodKill {
                     guard: Box::new(chaos_mesh::apply_podchaos(cluster, &chaos)?),
                     before_pods,
                     config: Box::new(cluster.clone()),
                 })
             }
-            FaultBackend::ChaosMeshNetworkChaos => {
+            FaultKind::RustfsServerNetworkPartition => {
                 let chaos = NetworkChaosSpec::partition_one_rustfs_pod(
                     cluster,
                     &config.chaos_namespace,
                     run_id,
                     &scenario.name,
-                    scenario.duration,
+                    injection.duration,
                 )?;
-                collector.write_text(
-                    scenario.case_name,
-                    "chaos-manifest.yaml",
-                    &chaos.manifest(),
-                )?;
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_networkchaos(cluster, &chaos)?),
                     active_required: true,
                 })
             }
-            FaultBackend::DeviceMapper => {
+            FaultKind::RustfsBlockDeviceFlakey => {
                 let name = config
                     .dm_name
                     .as_deref()
@@ -513,27 +597,6 @@ impl AppliedFault {
                     collector,
                     scenario.case_name,
                 )?)))
-            }
-            FaultBackend::MinioWarpWithChaos => {
-                let chaos = IoChaosSpec::eio_on_rustfs_volume(
-                    cluster,
-                    &config.chaos_namespace,
-                    run_id,
-                    &scenario.name,
-                    RUSTFS_DATA_VOLUME,
-                    scenario.percent,
-                    scenario.duration,
-                )?;
-                collector.write_text(
-                    scenario.case_name,
-                    "chaos-manifest.yaml",
-                    &chaos.manifest(),
-                )?;
-                let guard = chaos_mesh::apply_iochaos(cluster, &chaos)?;
-                Ok(Self::Chaos {
-                    guard: Box::new(guard),
-                    active_required: true,
-                })
             }
         }
     }
@@ -616,6 +679,14 @@ impl AppliedFault {
     }
 }
 
+fn chaos_manifest_artifact_name(total: usize, index: usize, injection: &FaultInjection) -> String {
+    if total == 1 {
+        "chaos-manifest.yaml".to_string()
+    } else {
+        format!("chaos-manifest-{index:02}-{}.yaml", injection.kind.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct FaultStatusSnapshot {
     stage: String,
@@ -645,32 +716,52 @@ struct FaultEvidence {
 fn collect_fault_artifacts(
     collector: &ArtifactCollector,
     case_name: &str,
-    fault: &AppliedFault,
+    fault: &AppliedFaults,
     suffix: &str,
 ) -> Result<()> {
-    let status = fault
-        .snapshot(suffix)
-        .and_then(|snapshot| serde_json::to_string_pretty(&snapshot).map_err(Into::into))
-        .unwrap_or_else(|error| format!("failed to collect fault status: {error}"));
+    let status = if fault.len() == 1 {
+        fault
+            .snapshot(suffix)
+            .and_then(|snapshot| serde_json::to_string_pretty(&snapshot).map_err(Into::into))
+    } else {
+        fault
+            .snapshots(suffix)
+            .and_then(|snapshots| serde_json::to_string_pretty(&snapshots).map_err(Into::into))
+    }
+    .unwrap_or_else(|error| format!("failed to collect fault status: {error}"));
     collector.write_text(case_name, &format!("fault-status-{suffix}.json"), &status)?;
 
-    if let Some(guard) = fault.chaos_guard() {
+    let guards = fault.chaos_guards();
+    for (index, guard) in guards.iter().enumerate() {
         let describe = guard
             .describe()
             .unwrap_or_else(|error| format!("failed to describe chaos before cleanup: {error}"));
-        collector.write_text(
-            case_name,
-            &format!("chaos-describe-{suffix}.txt"),
-            &describe,
-        )?;
+        let describe_name =
+            chaos_artifact_name(guards.len(), index, "chaos-describe", suffix, "txt");
+        collector.write_text(case_name, &describe_name, &describe)?;
 
         let yaml = guard
             .yaml()
             .unwrap_or_else(|error| format!("failed to get chaos yaml before cleanup: {error}"));
-        collector.write_text(case_name, &format!("chaos-{suffix}.yaml"), &yaml)?;
+        let yaml_name = chaos_artifact_name(guards.len(), index, "chaos", suffix, "yaml");
+        collector.write_text(case_name, &yaml_name, &yaml)?;
     }
 
     Ok(())
+}
+
+fn chaos_artifact_name(
+    total: usize,
+    index: usize,
+    prefix: &str,
+    suffix: &str,
+    extension: &str,
+) -> String {
+    if total == 1 {
+        format!("{prefix}-{suffix}.{extension}")
+    } else {
+        format!("{prefix}-{suffix}-{index:02}.{extension}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
