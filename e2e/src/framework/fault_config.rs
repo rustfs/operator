@@ -12,22 +12,65 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::framework::{command::CommandSpec, config::ClusterTestConfig, kubectl::Kubectl};
 
+pub const DEFAULT_FAULT_NAMESPACE: &str = "rustfs-fault-test";
+pub const DEFAULT_FAULT_TENANT: &str = "fault-test-tenant";
+pub const DEFAULT_CHAOS_NAMESPACE: &str = "chaos-mesh";
+pub const DEFAULT_OPERATOR_NAMESPACE: &str = "rustfs-system";
+pub const DEFAULT_WORKLOAD_OBJECTS: usize = 40_000;
+pub const DEFAULT_WORKLOAD_CONCURRENCY: usize = 80;
+pub const DEFAULT_FAULT_DURATION_SECONDS: u64 = 7_200;
+pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
+pub const DEFAULT_CLUSTER_TIMEOUT_SECONDS: u64 = 300;
+pub const DEFAULT_WARP_DURATION_SECONDS: u64 = 60;
+pub const DEFAULT_DM_HELPER_IMAGE: &str = "rancher/mirrored-library-busybox:1.37.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FaultWorkloadProfile {
+    pub object_count: usize,
+    pub concurrency: usize,
+}
+
+impl FaultWorkloadProfile {
+    pub fn new(object_count: usize, concurrency: usize) -> Result<Self> {
+        let profile = Self {
+            object_count,
+            concurrency,
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            self.object_count >= 4,
+            "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 4"
+        );
+        ensure!(
+            (1..=self.object_count).contains(&self.concurrency),
+            "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY must be between 1 and RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS ({})",
+            self.object_count
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FaultTestConfig {
     pub cluster: ClusterTestConfig,
+    pub expected_context: Option<String>,
     pub destructive_enabled: bool,
     pub scenario: String,
     pub duration: Duration,
     pub percent: u8,
-    pub workload_objects: usize,
-    pub workload_concurrency: usize,
+    pub percent_overridden: bool,
+    pub workload: FaultWorkloadProfile,
     pub workload_seed: Option<u64>,
     pub request_timeout: Duration,
     pub use_cluster_ip: bool,
@@ -52,31 +95,51 @@ impl FaultTestConfig {
     where
         F: Fn(&str) -> Option<String>,
     {
+        let expected_context = env_optional(&get_env, "RUSTFS_FAULT_TEST_EXPECTED_CONTEXT");
+        if let Some(expected) = expected_context.as_deref() {
+            ensure!(
+                context == expected,
+                "current context {context:?} does not match RUSTFS_FAULT_TEST_EXPECTED_CONTEXT {expected:?}"
+            );
+        }
         ensure!(
             !context.starts_with("kind-"),
-            "fault tests require a real Kubernetes cluster; current context {context:?} is a Kind context"
+            "fault tests require a real Kubernetes or K3s cluster; current context {context:?} is a Kind context"
         );
 
         let storage_class = required_env(&get_env, "RUSTFS_FAULT_TEST_STORAGE_CLASS")?;
-        let namespace = env_or(&get_env, "RUSTFS_FAULT_TEST_NAMESPACE", "rustfs-fault-test");
+        let rustfs_image = required_env(&get_env, "RUSTFS_FAULT_TEST_SERVER_IMAGE")?;
+        let namespace = env_or(
+            &get_env,
+            "RUSTFS_FAULT_TEST_NAMESPACE",
+            DEFAULT_FAULT_NAMESPACE,
+        );
         let scenario = env_or(&get_env, "RUSTFS_FAULT_TEST_SCENARIO", "io-eio");
         let default_percent = if scenario == "disk-full" { 100 } else { 20 };
+        let workload = FaultWorkloadProfile::new(
+            env_usize(
+                &get_env,
+                "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS",
+                DEFAULT_WORKLOAD_OBJECTS,
+            )?,
+            env_usize(
+                &get_env,
+                "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY",
+                DEFAULT_WORKLOAD_CONCURRENCY,
+            )?,
+        )?;
         let cluster = ClusterTestConfig {
             context,
             operator_namespace: env_or(
                 &get_env,
                 "RUSTFS_FAULT_TEST_OPERATOR_NAMESPACE",
-                "rustfs-system",
+                DEFAULT_OPERATOR_NAMESPACE,
             ),
             test_namespace_prefix: namespace.clone(),
             test_namespace: namespace,
-            tenant_name: env_or(&get_env, "RUSTFS_FAULT_TEST_TENANT", "fault-test-tenant"),
+            tenant_name: env_or(&get_env, "RUSTFS_FAULT_TEST_TENANT", DEFAULT_FAULT_TENANT),
             storage_class,
-            rustfs_image: env_or(
-                &get_env,
-                "RUSTFS_FAULT_TEST_SERVER_IMAGE",
-                "rustfs/rustfs:latest",
-            ),
+            rustfs_image,
             artifacts_dir: PathBuf::from(env_or(
                 &get_env,
                 "RUSTFS_FAULT_TEST_ARTIFACTS",
@@ -86,33 +149,34 @@ impl FaultTestConfig {
             timeout: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_TIMEOUT_SECONDS",
-                300,
-            )),
+                DEFAULT_CLUSTER_TIMEOUT_SECONDS,
+            )?),
         };
 
         Ok(Self {
             cluster,
-            destructive_enabled: env_bool(&get_env, "RUSTFS_FAULT_TEST_DESTRUCTIVE"),
+            expected_context,
+            destructive_enabled: env_bool(&get_env, "RUSTFS_FAULT_TEST_DESTRUCTIVE")?,
             scenario,
             duration: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_DURATION_SECONDS",
-                7200,
-            )),
-            percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", default_percent),
-            workload_objects: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS", 40000),
-            workload_concurrency: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY", 80),
+                DEFAULT_FAULT_DURATION_SECONDS,
+            )?),
+            percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", default_percent)?,
+            percent_overridden: env_optional(&get_env, "RUSTFS_FAULT_TEST_PERCENT").is_some(),
+            workload,
             workload_seed: env_optional_u64(&get_env, "RUSTFS_FAULT_TEST_SEED")?,
             request_timeout: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS",
-                30,
-            )),
-            use_cluster_ip: env_bool(&get_env, "RUSTFS_FAULT_TEST_USE_CLUSTER_IP"),
+                DEFAULT_REQUEST_TIMEOUT_SECONDS,
+            )?),
+            use_cluster_ip: env_bool(&get_env, "RUSTFS_FAULT_TEST_USE_CLUSTER_IP")?,
             require_client_disruption: env_bool(
                 &get_env,
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION",
-            ),
+            )?,
             dm_name: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_NAME"),
             dm_node: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_NODE"),
             dm_mount_path: env_optional(&get_env, "RUSTFS_FAULT_TEST_DM_MOUNT_PATH"),
@@ -121,14 +185,18 @@ impl FaultTestConfig {
             dm_helper_image: env_or(
                 &get_env,
                 "RUSTFS_FAULT_TEST_DM_HELPER_IMAGE",
-                "rancher/mirrored-library-busybox:1.37.0",
+                DEFAULT_DM_HELPER_IMAGE,
             ),
             warp_duration: Duration::from_secs(env_u64(
                 &get_env,
                 "RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS",
-                60,
-            )),
-            chaos_namespace: env_or(&get_env, "RUSTFS_FAULT_TEST_CHAOS_NAMESPACE", "chaos-mesh"),
+                DEFAULT_WARP_DURATION_SECONDS,
+            )?),
+            chaos_namespace: env_or(
+                &get_env,
+                "RUSTFS_FAULT_TEST_CHAOS_NAMESPACE",
+                DEFAULT_CHAOS_NAMESPACE,
+            ),
         })
     }
 
@@ -169,6 +237,7 @@ impl FaultTestConfig {
         Self::from_env_with(
             |name| match name {
                 "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some(storage_class.to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
                 _ => None,
             },
             context.to_string(),
@@ -221,32 +290,44 @@ fn env_optional<F>(get_env: &F, name: &str) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env(name).filter(|value| !value.trim().is_empty())
+    get_env(name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
-fn env_bool<F>(get_env: &F, name: &str) -> bool
+fn env_bool<F>(get_env: &F, name: &str) -> Result<bool>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env(name)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+    let Some(value) = env_optional(get_env, name) else {
+        return Ok(false);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Ok(true),
+        "0" | "false" | "no" => Ok(false),
+        _ => bail!("{name} must be a boolean: 1/0, true/false, or yes/no"),
+    }
 }
 
-fn env_u64<F>(get_env: &F, name: &str, default: u64) -> u64
+fn env_u64<F>(get_env: &F, name: &str, default: u64) -> Result<u64>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env(name)
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
+    env_optional(get_env, name)
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .with_context(|| format!("{name} must be an unsigned 64-bit integer"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
 }
 
 fn env_optional_u64<F>(get_env: &F, name: &str) -> Result<Option<u64>>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env(name)
+    env_optional(get_env, name)
         .map(|value| {
             value
                 .parse::<u64>()
@@ -255,22 +336,32 @@ where
         .transpose()
 }
 
-fn env_usize<F>(get_env: &F, name: &str, default: usize) -> usize
+fn env_usize<F>(get_env: &F, name: &str, default: usize) -> Result<usize>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env(name)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
+    env_optional(get_env, name)
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .with_context(|| format!("{name} must be an unsigned integer"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
 }
 
-fn env_u8<F>(get_env: &F, name: &str, default: u8) -> u8
+fn env_u8<F>(get_env: &F, name: &str, default: u8) -> Result<u8>
 where
     F: Fn(&str) -> Option<String>,
 {
-    get_env(name)
-        .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(default)
+    env_optional(get_env, name)
+        .map(|value| {
+            value
+                .parse::<u8>()
+                .with_context(|| format!("{name} must be an unsigned 8-bit integer"))
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(default))
 }
 
 #[cfg(test)]
@@ -282,6 +373,7 @@ mod tests {
         let config = FaultTestConfig::from_env_with(
             |name| match name {
                 "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
                 _ => None,
             },
             "production-test-cluster".to_string(),
@@ -289,9 +381,11 @@ mod tests {
         .expect("fault config");
 
         assert_eq!(config.cluster.context, "production-test-cluster");
+        assert_eq!(config.expected_context, None);
         assert_eq!(config.cluster.test_namespace, "rustfs-fault-test");
         assert_eq!(config.cluster.tenant_name, "fault-test-tenant");
         assert_eq!(config.cluster.storage_class, "fast-csi");
+        assert_eq!(config.cluster.rustfs_image, "rustfs/rustfs:test");
         assert_eq!(
             config.cluster.artifacts_dir,
             std::path::PathBuf::from("target/fault-tests/artifacts")
@@ -299,8 +393,9 @@ mod tests {
         assert_eq!(config.scenario, "io-eio");
         assert_eq!(config.duration, std::time::Duration::from_secs(7200));
         assert_eq!(config.percent, 20);
-        assert_eq!(config.workload_objects, 40000);
-        assert_eq!(config.workload_concurrency, 80);
+        assert!(!config.percent_overridden);
+        assert_eq!(config.workload.object_count, 40000);
+        assert_eq!(config.workload.concurrency, 80);
         assert_eq!(config.workload_seed, None);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
         assert!(!config.use_cluster_ip);
@@ -323,6 +418,8 @@ mod tests {
         let config = FaultTestConfig::from_env_with(
             |name| match name {
                 "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_EXPECTED_CONTEXT" => Some("production-test-cluster".to_string()),
                 "RUSTFS_FAULT_TEST_SCENARIO" => Some("dm-flakey".to_string()),
                 "RUSTFS_FAULT_TEST_DURATION_SECONDS" => Some("45".to_string()),
                 "RUSTFS_FAULT_TEST_PERCENT" => Some("35".to_string()),
@@ -349,11 +446,16 @@ mod tests {
         )
         .expect("fault config");
 
+        assert_eq!(
+            config.expected_context.as_deref(),
+            Some("production-test-cluster")
+        );
         assert_eq!(config.scenario, "dm-flakey");
         assert_eq!(config.duration, std::time::Duration::from_secs(45));
         assert_eq!(config.percent, 35);
-        assert_eq!(config.workload_objects, 64);
-        assert_eq!(config.workload_concurrency, 8);
+        assert!(config.percent_overridden);
+        assert_eq!(config.workload.object_count, 64);
+        assert_eq!(config.workload.concurrency, 8);
         assert_eq!(config.workload_seed, Some(4242));
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(7));
         assert!(config.use_cluster_ip);
@@ -378,6 +480,7 @@ mod tests {
         let result = FaultTestConfig::from_env_with(
             |name| match name {
                 "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("local-storage".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
                 _ => None,
             },
             "kind-rustfs-e2e".to_string(),
@@ -391,7 +494,51 @@ mod tests {
         let result = FaultTestConfig::from_env_with(
             |name| match name {
                 "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
                 "RUSTFS_FAULT_TEST_SEED" => Some("not-a-number".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn expected_context_is_optional_but_checked_when_set() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_EXPECTED_CONTEXT" => Some("other-cluster".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn explicit_server_image_is_required() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_workload_numbers_are_rejected() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("not-a-number".to_string()),
                 _ => None,
             },
             "production-test-cluster".to_string(),
@@ -418,6 +565,7 @@ mod tests {
         let config = FaultTestConfig::from_env_with(
             |name| match name {
                 "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
                 "RUSTFS_FAULT_TEST_SCENARIO" => Some("disk-full".to_string()),
                 _ => None,
             },

@@ -23,7 +23,7 @@ use rustfs_operator_e2e::framework::{
     command::CommandSpec,
     config::ClusterTestConfig,
     fault_config::FaultTestConfig,
-    fault_plan::{FaultInjection, FaultKind, FaultPlan},
+    fault_plan::{FaultInjection, FaultKind, FaultPlan, FaultSelection},
     fault_scenarios::{self, FaultBackend, FaultIsolation, FaultScenario},
     history::{OperationOutcome, OperationRecord, Recorder},
     host_faults::{self, DmFlakeyGuard, DmFlakeySpec, DmStatusSnapshot},
@@ -166,7 +166,7 @@ async fn run_fault_case(
     let workload_plan = WorkloadPlan::seeded(
         workload_seed,
         scenario.object_count,
-        config.workload_concurrency,
+        config.workload.concurrency,
     );
     let bucket = bucket_name(&run_id);
     let history_path = collector.case_dir(scenario.case_name).join("history.jsonl");
@@ -864,7 +864,7 @@ impl AppliedFault {
                     run_id,
                     &scenario.name,
                     injection.rustfs_volume_path()?,
-                    injection.percent(),
+                    injection.percent()?,
                     injection.duration(),
                 )?
                 .with_name_suffix(resource_name_suffix);
@@ -881,7 +881,7 @@ impl AppliedFault {
                     run_id,
                     &scenario.name,
                     injection.rustfs_volume_path()?,
-                    injection.percent(),
+                    injection.percent()?,
                     injection.duration(),
                 )?
                 .with_name_suffix(resource_name_suffix);
@@ -898,7 +898,7 @@ impl AppliedFault {
                     run_id,
                     &scenario.name,
                     injection.rustfs_volume_path()?,
-                    injection.percent(),
+                    injection.percent()?,
                     injection.duration(),
                 )?
                 .with_name_suffix(resource_name_suffix);
@@ -1112,7 +1112,8 @@ struct RunMetadata {
     rustfs_image: String,
     artifacts_dir: String,
     duration_seconds: u64,
-    percent: u8,
+    percent: Option<u8>,
+    fault_selection: Vec<String>,
     workload_objects: usize,
     workload_concurrency: usize,
     request_timeout_seconds: u64,
@@ -1143,9 +1144,20 @@ impl RunMetadata {
             rustfs_image: config.cluster.rustfs_image.clone(),
             artifacts_dir: config.cluster.artifacts_dir.display().to_string(),
             duration_seconds: scenario.duration.as_secs(),
-            percent: scenario.percent,
+            percent: plan
+                .faults()
+                .iter()
+                .find_map(|fault| match fault.selection() {
+                    FaultSelection::Percent(percent) => Some(percent),
+                    FaultSelection::FixedTargets(_) => None,
+                }),
+            fault_selection: plan
+                .faults()
+                .iter()
+                .map(|fault| fault.selection().summary())
+                .collect(),
             workload_objects: scenario.object_count,
-            workload_concurrency: config.workload_concurrency,
+            workload_concurrency: config.workload.concurrency,
             request_timeout_seconds: config.request_timeout.as_secs(),
             use_cluster_ip: config.use_cluster_ip,
             require_client_disruption: config.require_client_disruption,
@@ -1976,7 +1988,7 @@ mod tests {
         pod_deletion_observed, pod_replacement_observed, stable_pod_fingerprint, warp_bucket_name,
     };
     use rustfs_operator_e2e::framework::fault_plan::{
-        DEFAULT_RUSTFS_DATA_VOLUME, FaultInjection, FaultKind, FaultTarget,
+        DEFAULT_RUSTFS_DATA_VOLUME, FaultInjection, FaultKind, FaultSelection, FaultTarget,
     };
     use rustfs_operator_e2e::framework::fault_scenarios::FaultBackend;
     use rustfs_operator_e2e::framework::history::OperationOutcome;
@@ -2002,7 +2014,7 @@ mod tests {
             FaultTarget::RustfsVolume {
                 path: DEFAULT_RUSTFS_DATA_VOLUME,
             },
-            20,
+            FaultSelection::Percent(20),
             std::time::Duration::from_secs(60),
         )
         .expect("valid fault");

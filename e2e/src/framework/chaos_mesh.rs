@@ -465,6 +465,13 @@ pub fn cleanup_run_kind(
     Ok(())
 }
 
+pub fn cleanup_managed_chaos(config: &ClusterTestConfig, namespace: &str) -> Result<()> {
+    for kind in ["iochaos", "podchaos", "networkchaos"] {
+        cleanup_managed_kind(config, namespace, kind)?;
+    }
+    Ok(())
+}
+
 pub fn cleanup_managed_iochaos(config: &ClusterTestConfig, namespace: &str) -> Result<()> {
     cleanup_managed_kind(config, namespace, "iochaos")
 }

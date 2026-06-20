@@ -32,9 +32,10 @@ help:
 	@echo "  make -C e2e fault-cleanup"
 	@echo ""
 	@echo "Required runtime environment:"
-	@echo "  RUSTFS_FAULT_TEST_EXPECTED_CONTEXT"
 	@echo "  RUSTFS_FAULT_TEST_STORAGE_CLASS"
 	@echo "  RUSTFS_FAULT_TEST_SERVER_IMAGE"
+	@echo "Optional safety guard:"
+	@echo "  RUSTFS_FAULT_TEST_EXPECTED_CONTEXT"
 	@echo ""
 	@echo "See e2e/FAULT_TESTING.md for cluster preparation and safety requirements."
 
