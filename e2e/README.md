@@ -16,10 +16,9 @@ The harness is split into four top-level domains:
 ```text
 e2e/
   Cargo.toml
-  Makefile             package-local fault-test entrypoints
-  FAULT_TESTING.md     bilingual fault-test operations manual
+  FAULT_TESTING.md     package-local fault-test operations manual
   scripts/
-    fault-test.sh      guarded real-cluster scenario orchestration
+    fault-test.sh      guarded real-cluster fault-test orchestration
   manifests/
     kind-rustfs-e2e.yaml  dedicated 1 control-plane + 3 worker Kind cluster
   src/
@@ -64,8 +63,7 @@ e2e/
 6. `framework::live` owns live-run opt-in and dedicated-context checks.
 7. `cases/*` should describe behavior and call framework helpers; avoid shell details there.
 8. Kind e2e cases remain in `cases/*`; real-cluster fault tests are intentionally excluded from that inventory.
-9. Fault tests use `FaultTestConfig`, reject Kind contexts, require a dedicated namespace and StorageClass, and never use Kind local-volume assumptions.
-10. The fault-test runner creates its namespace with ownership metadata. Existing namespaces must already have the matching manager label and Tenant annotation before destructive reset is allowed.
+9. Destructive real-cluster fault tests are documented only in [`FAULT_TESTING.md`](FAULT_TESTING.md).
 
 ## Safety defaults
 
@@ -91,30 +89,6 @@ make e2e-live-run
 ```
 
 The harness refuses to run live tests unless the active Kubernetes context matches the configured dedicated Kind context.
-
-Fault tests have separate safety defaults and are operated entirely from this package:
-
-```text
-context:          current non-Kind kubectl context
-test namespace:   rustfs-fault-test
-tenant name:      fault-test-tenant
-storage class:    required via RUSTFS_FAULT_TEST_STORAGE_CLASS
-artifacts:        target/fault-tests/artifacts
-PVCs:             4 × 100Gi
-objects:          40000 with seeded weighted sizes
-concurrency:      100
-```
-
-Run them independently from the Kind lifecycle:
-
-```bash
-RUSTFS_FAULT_TEST_EXPECTED_CONTEXT=<real-test-context> \
-RUSTFS_FAULT_TEST_STORAGE_CLASS=<dynamic-storage-class> \
-RUSTFS_FAULT_TEST_SERVER_IMAGE=<pinned-rustfs-image> \
-make -C e2e fault-run SCENARIO=io-eio
-```
-
-The runner creates an absent namespace with ownership metadata and refuses to reset or claim an existing namespace unless its ownership markers match. See the package-local bilingual [Fault-Test Operations Manual](FAULT_TESTING.md) for the Make targets, prerequisites, all seven scenarios, `dm-flakey` storage procedure, evidence, recovery, and cleanup.
 
 ## Non-live validation
 
