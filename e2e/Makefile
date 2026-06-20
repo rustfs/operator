@@ -16,6 +16,7 @@ SHELL := /bin/bash
 
 FAULT_SCRIPT := $(CURDIR)/scripts/fault-test.sh
 MANIFEST := $(CURDIR)/Cargo.toml
+FAULT_BUILD_JOBS ?= 1
 
 .PHONY: help fault-check fault-preflight fault-run fault-run-regular fault-run-dm fault-cleanup
 
@@ -39,9 +40,9 @@ help:
 
 fault-check:
 	bash -n $(FAULT_SCRIPT)
-	cargo fmt --manifest-path $(MANIFEST) --all --check
-	cargo test --manifest-path $(MANIFEST)
-	cargo clippy --manifest-path $(MANIFEST) --all-targets -- -D warnings
+	CARGO_BUILD_JOBS=$(FAULT_BUILD_JOBS) cargo fmt --manifest-path $(MANIFEST) --all --check
+	CARGO_BUILD_JOBS=$(FAULT_BUILD_JOBS) cargo test --manifest-path $(MANIFEST)
+	CARGO_BUILD_JOBS=$(FAULT_BUILD_JOBS) cargo clippy --manifest-path $(MANIFEST) --all-targets -- -D warnings
 
 fault-preflight:
 	@bash $(FAULT_SCRIPT) preflight "$(or $(SCENARIO),io-eio)"
