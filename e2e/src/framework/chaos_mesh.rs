@@ -204,6 +204,11 @@ impl IoChaosSpec {
         })
     }
 
+    pub fn with_name_suffix(mut self, suffix: &str) -> Self {
+        self.name.push_str(suffix);
+        self
+    }
+
     pub fn manifest(&self) -> String {
         let methods = self
             .methods
@@ -298,6 +303,11 @@ impl PodChaosSpec {
         }
     }
 
+    pub fn with_name_suffix(mut self, suffix: &str) -> Self {
+        self.name.push_str(suffix);
+        self
+    }
+
     pub fn manifest(&self) -> String {
         format!(
             r#"apiVersion: chaos-mesh.org/v1alpha1
@@ -356,6 +366,11 @@ impl NetworkChaosSpec {
             tenant_name: config.tenant_name.clone(),
             duration,
         })
+    }
+
+    pub fn with_name_suffix(mut self, suffix: &str) -> Self {
+        self.name.push_str(suffix);
+        self
     }
 
     pub fn manifest(&self) -> String {
@@ -472,7 +487,6 @@ fn cleanup_managed_kind(config: &ClusterTestConfig, namespace: &str, kind: &str)
 }
 
 pub fn apply_iochaos(config: &ClusterTestConfig, spec: &IoChaosSpec) -> Result<ChaosGuard> {
-    cleanup_run_kind(config, &spec.namespace, &spec.run_id, "iochaos")?;
     Kubectl::new(config)
         .namespaced(&spec.namespace)
         .apply_yaml_command(spec.manifest())
@@ -488,7 +502,6 @@ pub fn apply_iochaos(config: &ClusterTestConfig, spec: &IoChaosSpec) -> Result<C
 }
 
 pub fn apply_podchaos(config: &ClusterTestConfig, spec: &PodChaosSpec) -> Result<ChaosGuard> {
-    cleanup_run_kind(config, &spec.namespace, &spec.run_id, "podchaos")?;
     Kubectl::new(config)
         .namespaced(&spec.namespace)
         .apply_yaml_command(spec.manifest())
@@ -507,7 +520,6 @@ pub fn apply_networkchaos(
     config: &ClusterTestConfig,
     spec: &NetworkChaosSpec,
 ) -> Result<ChaosGuard> {
-    cleanup_run_kind(config, &spec.namespace, &spec.run_id, "networkchaos")?;
     Kubectl::new(config)
         .namespaced(&spec.namespace)
         .apply_yaml_command(spec.manifest())
@@ -697,6 +709,27 @@ mod tests {
         assert!(manifest.contains("methods:\n    - WRITE"));
         assert!(manifest.contains("percent: 100"));
         assert!(!manifest.contains("    - READ"));
+    }
+
+    #[test]
+    fn chaos_name_suffix_keeps_run_label_stable() {
+        let config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        let spec = IoChaosSpec::eio_on_rustfs_volume(
+            &config.cluster,
+            "chaos-mesh",
+            "run-1234567890",
+            "io-eio",
+            "/data/rustfs0",
+            20,
+            Duration::from_secs(60),
+        )
+        .expect("valid io chaos")
+        .with_name_suffix("-01");
+        let manifest = spec.manifest();
+
+        assert_eq!(spec.name, "rustfs-fault-io-eio-run-12345678-01");
+        assert!(manifest.contains("name: rustfs-fault-io-eio-run-12345678-01"));
+        assert!(manifest.contains("rustfs-fault-test/run-id: \"run-1234567890\""));
     }
 
     #[test]

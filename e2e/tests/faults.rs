@@ -152,7 +152,7 @@ async fn run_fault_case(
         collect_fault_artifacts(collector, scenario.case_name, &fault, "wait-active-failed")?;
         return Err(error);
     }
-    let active_snapshot = fault.snapshot("active")?;
+    let active_snapshots = fault.snapshots("active")?;
 
     if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "port-forward-failed")?;
@@ -228,7 +228,7 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
-    let workload_snapshot = fault.snapshot("after-workload")?;
+    let workload_snapshots = fault.snapshots("after-workload")?;
 
     if let Err(error) = fault.delete(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "delete-failed")?;
@@ -268,8 +268,8 @@ async fn run_fault_case(
         workload_plan,
         pods_before,
         pods_after,
-        active_snapshot,
-        workload_snapshot,
+        active_snapshots,
+        workload_snapshots,
         dm_recovery_snapshot: fault.recovery_dm_snapshot(),
     };
     collector.write_text(
@@ -410,6 +410,7 @@ impl AppliedFaults {
         let mut items = Vec::with_capacity(total);
         for (index, injection) in plan.faults().iter().enumerate() {
             let manifest_name = chaos_manifest_artifact_name(total, index, injection);
+            let resource_name_suffix = chaos_resource_name_suffix(total, index);
             items.push(AppliedFault::apply_one(
                 config,
                 collector,
@@ -417,6 +418,7 @@ impl AppliedFaults {
                 injection,
                 run_id,
                 &manifest_name,
+                &resource_name_suffix,
             )?);
         }
 
@@ -486,9 +488,10 @@ impl AppliedFault {
         injection: &FaultInjection,
         run_id: &str,
         manifest_name: &str,
+        resource_name_suffix: &str,
     ) -> Result<Self> {
         let cluster = &config.cluster;
-        match injection.kind {
+        match injection.kind() {
             FaultKind::RustfsVolumeEnospc => {
                 let chaos = IoChaosSpec::enospc_on_rustfs_volume(
                     cluster,
@@ -496,9 +499,10 @@ impl AppliedFault {
                     run_id,
                     &scenario.name,
                     injection.rustfs_volume_path()?,
-                    injection.percent,
-                    injection.duration,
-                )?;
+                    injection.percent(),
+                    injection.duration(),
+                )?
+                .with_name_suffix(resource_name_suffix);
                 collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
@@ -512,9 +516,10 @@ impl AppliedFault {
                     run_id,
                     &scenario.name,
                     injection.rustfs_volume_path()?,
-                    injection.percent,
-                    injection.duration,
-                )?;
+                    injection.percent(),
+                    injection.duration(),
+                )?
+                .with_name_suffix(resource_name_suffix);
                 collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
@@ -528,9 +533,10 @@ impl AppliedFault {
                     run_id,
                     &scenario.name,
                     injection.rustfs_volume_path()?,
-                    injection.percent,
-                    injection.duration,
-                )?;
+                    injection.percent(),
+                    injection.duration(),
+                )?
+                .with_name_suffix(resource_name_suffix);
                 collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
@@ -544,7 +550,8 @@ impl AppliedFault {
                     &config.chaos_namespace,
                     run_id,
                     &scenario.name,
-                );
+                )
+                .with_name_suffix(resource_name_suffix);
                 collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::PodKill {
                     guard: Box::new(chaos_mesh::apply_podchaos(cluster, &chaos)?),
@@ -558,8 +565,9 @@ impl AppliedFault {
                     &config.chaos_namespace,
                     run_id,
                     &scenario.name,
-                    injection.duration,
-                )?;
+                    injection.duration(),
+                )?
+                .with_name_suffix(resource_name_suffix);
                 collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_networkchaos(cluster, &chaos)?),
@@ -683,7 +691,18 @@ fn chaos_manifest_artifact_name(total: usize, index: usize, injection: &FaultInj
     if total == 1 {
         "chaos-manifest.yaml".to_string()
     } else {
-        format!("chaos-manifest-{index:02}-{}.yaml", injection.kind.as_str())
+        format!(
+            "chaos-manifest-{index:02}-{}.yaml",
+            injection.kind().as_str()
+        )
+    }
+}
+
+fn chaos_resource_name_suffix(total: usize, index: usize) -> String {
+    if total == 1 {
+        String::new()
+    } else {
+        format!("-{index:02}")
     }
 }
 
@@ -708,8 +727,8 @@ struct FaultEvidence {
     workload_plan: WorkloadPlan,
     pods_before: Vec<PodIdentity>,
     pods_after: Vec<PodIdentity>,
-    active_snapshot: FaultStatusSnapshot,
-    workload_snapshot: FaultStatusSnapshot,
+    active_snapshots: Vec<FaultStatusSnapshot>,
+    workload_snapshots: Vec<FaultStatusSnapshot>,
     dm_recovery_snapshot: Option<DmStatusSnapshot>,
 }
 
@@ -1351,8 +1370,13 @@ fn warp_bucket_name(run_id: &str) -> String {
 mod tests {
     use super::{
         OutcomeCounts, PodIdentity, PodRuntimeState, WorkloadSummary, bucket_name,
-        pod_deletion_observed, pod_replacement_observed, stable_pod_fingerprint, warp_bucket_name,
+        chaos_manifest_artifact_name, chaos_resource_name_suffix, pod_deletion_observed,
+        pod_replacement_observed, stable_pod_fingerprint, warp_bucket_name,
     };
+    use rustfs_operator_e2e::framework::fault_plan::{
+        DEFAULT_RUSTFS_DATA_VOLUME, FaultInjection, FaultKind, FaultTarget,
+    };
+    use rustfs_operator_e2e::framework::fault_scenarios::FaultBackend;
     use rustfs_operator_e2e::framework::history::OperationOutcome;
     use rustfs_operator_e2e::framework::s3_workload::WorkloadPlan;
 
@@ -1366,6 +1390,31 @@ mod tests {
             warp_bucket_name("run-12345678-abcd-efgh"),
             "rustfs-fault-run12345678abcde-warp"
         );
+    }
+
+    #[test]
+    fn composite_fault_artifacts_and_resource_names_are_indexed() {
+        let injection = FaultInjection::new(
+            FaultKind::RustfsVolumeIoError,
+            FaultBackend::ChaosMeshIoChaos,
+            FaultTarget::RustfsVolume {
+                path: DEFAULT_RUSTFS_DATA_VOLUME,
+            },
+            20,
+            std::time::Duration::from_secs(60),
+        )
+        .expect("valid fault");
+
+        assert_eq!(
+            chaos_manifest_artifact_name(1, 0, &injection),
+            "chaos-manifest.yaml"
+        );
+        assert_eq!(chaos_resource_name_suffix(1, 0), "");
+        assert_eq!(
+            chaos_manifest_artifact_name(2, 1, &injection),
+            "chaos-manifest-01-rustfs_volume_io_error.yaml"
+        );
+        assert_eq!(chaos_resource_name_suffix(2, 1), "-01");
     }
 
     #[test]
