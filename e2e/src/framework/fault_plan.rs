@@ -81,11 +81,11 @@ impl FaultTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultInjection {
-    pub kind: FaultKind,
-    pub backend: FaultBackend,
-    pub target: FaultTarget,
-    pub percent: u8,
-    pub duration: Duration,
+    kind: FaultKind,
+    backend: FaultBackend,
+    target: FaultTarget,
+    percent: u8,
+    duration: Duration,
 }
 
 impl FaultInjection {
@@ -96,6 +96,12 @@ impl FaultInjection {
         percent: u8,
         duration: Duration,
     ) -> Result<Self> {
+        ensure!(
+            fault_kind_accepts_backend(kind, backend),
+            "fault kind {} cannot run with backend {:?}",
+            kind.as_str(),
+            backend
+        );
         ensure!(
             (1..=100).contains(&percent),
             "fault percent must be in 1..=100, got {percent}"
@@ -111,6 +117,26 @@ impl FaultInjection {
         })
     }
 
+    pub fn kind(&self) -> FaultKind {
+        self.kind
+    }
+
+    pub fn backend(&self) -> FaultBackend {
+        self.backend
+    }
+
+    pub fn target(&self) -> FaultTarget {
+        self.target
+    }
+
+    pub fn percent(&self) -> u8 {
+        self.percent
+    }
+
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
     pub fn rustfs_volume_path(&self) -> Result<&'static str> {
         match self.target {
             FaultTarget::RustfsVolume { path } => Ok(path),
@@ -121,6 +147,28 @@ impl FaultInjection {
             ),
         }
     }
+}
+
+fn fault_kind_accepts_backend(kind: FaultKind, backend: FaultBackend) -> bool {
+    matches!(
+        (kind, backend),
+        (
+            FaultKind::RustfsVolumeIoError,
+            FaultBackend::ChaosMeshIoChaos | FaultBackend::MinioWarpWithChaos
+        ) | (
+            FaultKind::RustfsVolumeReadMistake | FaultKind::RustfsVolumeEnospc,
+            FaultBackend::ChaosMeshIoChaos
+        ) | (
+            FaultKind::RustfsServerPodKill,
+            FaultBackend::ChaosMeshPodChaos
+        ) | (
+            FaultKind::RustfsServerNetworkPartition,
+            FaultBackend::ChaosMeshNetworkChaos
+        ) | (
+            FaultKind::RustfsBlockDeviceFlakey,
+            FaultBackend::DeviceMapper
+        )
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,8 +260,9 @@ impl FaultPlan {
     pub fn required_backends(&self) -> Vec<FaultBackend> {
         let mut backends = Vec::new();
         for fault in &self.faults {
-            if !backends.contains(&fault.backend) {
-                backends.push(fault.backend);
+            let backend = fault.backend();
+            if !backends.contains(&backend) {
+                backends.push(backend);
             }
         }
         backends
@@ -222,7 +271,7 @@ impl FaultPlan {
     pub fn requires_static_storage(&self) -> bool {
         self.faults
             .iter()
-            .any(|fault| fault.backend == FaultBackend::DeviceMapper)
+            .any(|fault| fault.backend() == FaultBackend::DeviceMapper)
     }
 
     pub fn backend_summary(&self) -> String {
@@ -236,7 +285,7 @@ impl FaultPlan {
     pub fn target_summary(&self) -> String {
         self.faults
             .iter()
-            .map(|fault| fault.target.summary())
+            .map(|fault| fault.target().summary())
             .collect::<Vec<_>>()
             .join(" + ")
     }
@@ -286,9 +335,9 @@ mod tests {
             vec![FaultBackend::ChaosMeshIoChaos]
         );
         assert_eq!(plan.faults().len(), 1);
-        assert_eq!(plan.faults()[0].kind, FaultKind::RustfsVolumeIoError);
+        assert_eq!(plan.faults()[0].kind(), FaultKind::RustfsVolumeIoError);
         assert_eq!(
-            plan.faults()[0].target,
+            plan.faults()[0].target(),
             FaultTarget::RustfsVolume {
                 path: DEFAULT_RUSTFS_DATA_VOLUME
             }
@@ -305,7 +354,7 @@ mod tests {
         let plan = FaultPlan::from_scenario(&scenario, spec).expect("plan");
 
         assert!(plan.workload_mode.runs_warp());
-        assert_eq!(plan.faults()[0].kind, FaultKind::RustfsVolumeIoError);
+        assert_eq!(plan.faults()[0].kind(), FaultKind::RustfsVolumeIoError);
         assert_eq!(
             plan.required_backends(),
             vec![FaultBackend::MinioWarpWithChaos]
@@ -368,5 +417,20 @@ mod tests {
             ]
         );
         assert!(plan.target_summary().contains(" + "));
+    }
+
+    #[test]
+    fn fault_injection_rejects_backend_kind_mismatch() {
+        let result = FaultInjection::new(
+            FaultKind::RustfsVolumeIoError,
+            FaultBackend::ChaosMeshNetworkChaos,
+            FaultTarget::RustfsVolume {
+                path: DEFAULT_RUSTFS_DATA_VOLUME,
+            },
+            20,
+            Duration::from_secs(60),
+        );
+
+        assert!(result.is_err());
     }
 }
