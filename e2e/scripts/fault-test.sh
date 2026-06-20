@@ -179,14 +179,29 @@ prepare_fault_binary() {
   echo "fault-test binary ready; pre-existing RustFS Pods remained unchanged for ${BUILD_SETTLE_SECONDS}s"
 }
 
+chaos_deployment_ready() {
+  kubectl_ns "$CHAOS_NAMESPACE" get deployment chaos-controller-manager -o json | jq -r '
+    (.status.readyReplicas // 0) == (.spec.replicas // 0) and (.spec.replicas // 0) > 0
+  '
+}
+
+chaos_daemon_ready() {
+  kubectl_ns "$CHAOS_NAMESPACE" get daemonset chaos-daemon -o json | jq -r '
+    (.status.numberReady // 0) == (.status.desiredNumberScheduled // 0) and (.status.desiredNumberScheduled // 0) > 0
+  '
+}
+
+chaos_is_ready() {
+  local deployment_ready daemon_ready
+  deployment_ready="$(chaos_deployment_ready 2>/dev/null)" || return 1
+  daemon_ready="$(chaos_daemon_ready 2>/dev/null)" || return 1
+  [[ "$deployment_ready" == "true" && "$daemon_ready" == "true" ]]
+}
+
 require_chaos_ready() {
   local deployment_ready daemon_ready
-  deployment_ready="$(kubectl_ns "$CHAOS_NAMESPACE" get deployment chaos-controller-manager -o json | jq -r '
-    (.status.readyReplicas // 0) == (.spec.replicas // 0) and (.spec.replicas // 0) > 0
-  ')"
-  daemon_ready="$(kubectl_ns "$CHAOS_NAMESPACE" get daemonset chaos-daemon -o json | jq -r '
-    (.status.numberReady // 0) == (.status.desiredNumberScheduled // 0) and (.status.desiredNumberScheduled // 0) > 0
-  ')"
+  deployment_ready="$(chaos_deployment_ready)"
+  daemon_ready="$(chaos_daemon_ready)"
   [[ "$deployment_ready" == "true" ]] || die "Chaos Mesh controller-manager is not fully Ready"
   [[ "$daemon_ready" == "true" ]] || die "Chaos Mesh chaos-daemon is not fully Ready"
 }
@@ -320,10 +335,11 @@ capture_fault_logs() {
 }
 
 health_is_safe() {
-  local baseline_nodes="$1" baseline_tenants="$2"
-  local current_nodes namespace tenant state
-  current_nodes="$(kubectl_cluster get nodes -o json 2>/dev/null | jq -r '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length' 2>/dev/null || echo 0)"
-  [[ "$current_nodes" -eq "$baseline_nodes" ]] || return 1
+  local baseline_ready_nodes="$1" baseline_tenants="$2" require_chaos="$3"
+  local current_ready_nodes namespace tenant state
+  current_ready_nodes="$(kubectl_cluster get nodes -o json 2>/dev/null | jq -r '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length' 2>/dev/null || echo 0)"
+  [[ "$current_ready_nodes" -ge "$baseline_ready_nodes" ]] || return 1
+  [[ "$require_chaos" != "true" ]] || chaos_is_ready || return 1
 
   while IFS=$'\t' read -r namespace tenant; do
     [[ -n "$namespace" ]] || continue
@@ -361,6 +377,7 @@ validate_scenario_artifacts() {
     ]
   ' "$plan" >/dev/null || die "$scenario workload plan does not match the required profile"
   jq -e '.injected == true and .active_during_workload == true and .recovered == true' "$evidence" >/dev/null || die "$scenario fault evidence is incomplete"
+  jq -e '(.active_snapshots | length) > 0 and (.workload_snapshots | length) > 0' "$evidence" >/dev/null || die "$scenario fault evidence snapshots are missing"
   jq -e --argjson objects "$EXPECTED_OBJECTS" '
     .committed_puts == $objects
     and (.missing_committed_objects | length) == 0
@@ -382,11 +399,16 @@ validate_scenario_artifacts() {
 run_scenario() {
   local scenario="$1" run_root="$2"
   local artifacts="$run_root/$scenario"
-  local baseline_nodes baseline_tenants test_pid rc current_time health_checks
+  local baseline_ready_nodes baseline_tenants test_pid rc current_time health_checks require_chaos
   preflight "$scenario"
   mkdir -p "$artifacts"
-  baseline_nodes="$(kubectl_cluster get nodes -o json | jq -r '.items | length')"
+  baseline_ready_nodes="$(kubectl_cluster get nodes -o json | jq -r '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length')"
   baseline_tenants="$artifacts/baseline-tenants.tsv"
+  if [[ "$scenario" == "dm-flakey" ]]; then
+    require_chaos=false
+  else
+    require_chaos=true
+  fi
   kubectl_cluster get tenants -A -o json | jq -r --arg namespace "$FAULT_NAMESPACE" '
     .items[] | select(.metadata.namespace != $namespace) | [.metadata.namespace,.metadata.name] | @tsv
   ' >"$baseline_tenants"
@@ -413,7 +435,7 @@ run_scenario() {
   while kill -0 "$test_pid" 2>/dev/null; do
     current_time="$(date -u +%FT%TZ)"
     health_checks=$((health_checks + 1))
-    if health_is_safe "$baseline_nodes" "$baseline_tenants"; then
+    if health_is_safe "$baseline_ready_nodes" "$baseline_tenants" "$require_chaos"; then
       echo "$current_time safe=true" >>"$artifacts/health-watch.log"
       if (( health_checks % 6 == 0 )); then
         echo "scenario=$scenario running safe=true time=$current_time"
