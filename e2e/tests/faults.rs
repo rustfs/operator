@@ -64,6 +64,12 @@ async fn fault_selected_scenario() -> Result<()> {
     let result = run_fault_case(&config, &collector, &scenario, &plan).await;
 
     if let Err(error) = &result {
+        write_failure_summary_if_absent(
+            &collector,
+            scenario.case_name,
+            FailureSummary::new(&scenario.name, "scenario", "unknown", error.to_string()),
+        )
+        .ok();
         match collector.collect_kubernetes_snapshot(scenario.case_name, &config.cluster) {
             Ok(report) => {
                 eprintln!(
@@ -105,6 +111,13 @@ async fn run_fault_case(
     let bucket = bucket_name(&run_id);
     let history_path = collector.case_dir(scenario.case_name).join("history.jsonl");
     let history = Recorder::create(history_path, &scenario.name, &run_id)?;
+    collector.write_text(
+        scenario.case_name,
+        "run-metadata.json",
+        &serde_json::to_string_pretty(&RunMetadata::from_case(
+            config, scenario, plan, &run_id, &bucket,
+        ))?,
+    )?;
     collector.write_text(
         scenario.case_name,
         "workload-plan.json",
@@ -150,12 +163,32 @@ async fn run_fault_case(
 
     if let Err(error) = fault.wait_active(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "wait-active-failed")?;
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "wait-active",
+                "environment_or_fault_backend",
+                error.to_string(),
+            ),
+        )?;
         return Err(error);
     }
     let active_snapshots = fault.snapshots("active")?;
 
     if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "port-forward-failed")?;
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "s3-access-under-fault",
+                "environment_or_workload",
+                error.to_string(),
+            ),
+        )?;
         return Err(error);
     }
 
@@ -171,6 +204,16 @@ async fn run_fault_case(
             secret_key,
         ) {
             collect_fault_artifacts(collector, scenario.case_name, &fault, "warp-failed")?;
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "warp-workload",
+                    "workload_or_product",
+                    error.to_string(),
+                ),
+            )?;
             return Err(error);
         }
 
@@ -180,6 +223,16 @@ async fn run_fault_case(
                 scenario.case_name,
                 &fault,
                 "post-warp-port-forward-failed",
+            )?;
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "post-warp-s3-access",
+                    "environment_or_workload",
+                    error.to_string(),
+                ),
             )?;
             return Err(error);
         }
@@ -199,6 +252,16 @@ async fn run_fault_case(
         Ok(workload) => workload,
         Err(error) => {
             collect_fault_artifacts(collector, scenario.case_name, &fault, "workload-failed")?;
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "mixed-workload",
+                    "workload_or_product",
+                    error.to_string(),
+                ),
+            )?;
             return Err(error);
         }
     };
@@ -217,6 +280,16 @@ async fn run_fault_case(
             &fault,
             "workload-no-fault-evidence",
         )?;
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "fault-evidence",
+                "test_or_environment",
+                error.to_string(),
+            ),
+        )?;
         return Err(error);
     }
     if let Err(error) = fault.ensure_active("after fault workload") {
@@ -226,19 +299,75 @@ async fn run_fault_case(
             &fault,
             "workload-outlived-fault",
         )?;
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "fault-still-active",
+                "test_or_environment",
+                error.to_string(),
+            ),
+        )?;
         return Err(error);
     }
     let workload_snapshots = fault.snapshots("after-workload")?;
 
     if let Err(error) = fault.delete(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "delete-failed")?;
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "fault-delete",
+                "environment_or_fault_backend",
+                error.to_string(),
+            ),
+        )?;
         return Err(error);
     }
 
-    wait_for_ready_tenant(cluster).await?;
-    wait_for_stable_rustfs_pods(cluster, RUSTFS_POD_STABLE_WINDOW).await?;
+    if let Err(error) = wait_for_ready_tenant(cluster).await {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "tenant-recovery",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = wait_for_stable_rustfs_pods(cluster, RUSTFS_POD_STABLE_WINDOW).await {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "pod-stability-after-recovery",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
     let pods_after = rustfs_pod_identities(cluster)?;
-    ensure_s3_access(&mut port_forward, cluster, &endpoint).await?;
+    if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "s3-access-after-recovery",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
     let recovered_evidence = FaultEvidence {
         scenario: scenario.name.clone(),
         backend: plan.backend_summary(),
@@ -259,18 +388,38 @@ async fn run_fault_case(
         "fault-evidence.json",
         &serde_json::to_string_pretty(&recovered_evidence)?,
     )?;
-    workload.summary.recommitted_after_recovery = recommit_unconfirmed_objects(
+    let recommit_report = recommit_unconfirmed_objects(
         &s3,
         &history,
         &workload.unconfirmed_puts,
         workload_plan.concurrency,
     )
-    .await?;
+    .await;
+    collector.write_text(
+        scenario.case_name,
+        "recommit-report.json",
+        &serde_json::to_string_pretty(&recommit_report)?,
+    )?;
+    workload.summary.recommitted_after_recovery = recommit_report.committed;
     collector.write_text(
         scenario.case_name,
         "workload-summary.json",
         &serde_json::to_string_pretty(&workload.summary)?,
     )?;
+    if recommit_report.has_failures() {
+        let message = recommit_report.failure_message();
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "recommit-unconfirmed",
+                "product_or_environment",
+                message.clone(),
+            ),
+        )?;
+        bail!("{message}");
+    }
     let report = checker::check_s3_history(&s3, &history, true, workload_plan.concurrency).await?;
     collector.write_text(
         scenario.case_name,
@@ -297,14 +446,36 @@ async fn run_fault_case(
         "fault-evidence.json",
         &serde_json::to_string_pretty(&evidence)?,
     )?;
-    ensure!(
-        report.committed_puts == scenario.object_count,
-        "fault scenario {} expected {} committed objects after recovery reconciliation, got {}",
-        scenario.name,
-        scenario.object_count,
-        report.committed_puts
-    );
-    report.require_success()?;
+    if report.committed_puts != scenario.object_count {
+        let message = format!(
+            "fault scenario {} expected {} committed objects after recovery reconciliation, got {}",
+            scenario.name, scenario.object_count, report.committed_puts
+        );
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "checker-committed-count",
+                "product_or_environment",
+                message.clone(),
+            ),
+        )?;
+        bail!("{message}");
+    }
+    if let Err(error) = report.require_success() {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "checker-verdict",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
 
     Ok(())
 }
@@ -750,6 +921,112 @@ struct FaultEvidence {
     active_snapshots: Vec<FaultStatusSnapshot>,
     workload_snapshots: Vec<FaultStatusSnapshot>,
     dm_recovery_snapshot: Option<DmStatusSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunMetadata {
+    scenario: String,
+    case_name: String,
+    run_id: String,
+    bucket: String,
+    backend: String,
+    target: String,
+    context: String,
+    namespace: String,
+    tenant: String,
+    storage_class: String,
+    rustfs_image: String,
+    artifacts_dir: String,
+    duration_seconds: u64,
+    percent: u8,
+    workload_objects: usize,
+    workload_concurrency: usize,
+    request_timeout_seconds: u64,
+    use_cluster_ip: bool,
+    require_client_disruption: bool,
+    chaos_namespace: String,
+}
+
+impl RunMetadata {
+    fn from_case(
+        config: &FaultTestConfig,
+        scenario: &FaultScenario,
+        plan: &FaultPlan,
+        run_id: &str,
+        bucket: &str,
+    ) -> Self {
+        Self {
+            scenario: scenario.name.clone(),
+            case_name: scenario.case_name.to_string(),
+            run_id: run_id.to_string(),
+            bucket: bucket.to_string(),
+            backend: plan.backend_summary(),
+            target: plan.target_summary(),
+            context: config.cluster.context.clone(),
+            namespace: config.cluster.test_namespace.clone(),
+            tenant: config.cluster.tenant_name.clone(),
+            storage_class: config.cluster.storage_class.clone(),
+            rustfs_image: config.cluster.rustfs_image.clone(),
+            artifacts_dir: config.cluster.artifacts_dir.display().to_string(),
+            duration_seconds: scenario.duration.as_secs(),
+            percent: scenario.percent,
+            workload_objects: scenario.object_count,
+            workload_concurrency: config.workload_concurrency,
+            request_timeout_seconds: config.request_timeout.as_secs(),
+            use_cluster_ip: config.use_cluster_ip,
+            require_client_disruption: config.require_client_disruption,
+            chaos_namespace: config.chaos_namespace.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FailureSummary {
+    scenario: String,
+    stage: String,
+    classification: String,
+    message: String,
+}
+
+impl FailureSummary {
+    fn new(
+        scenario: impl Into<String>,
+        stage: impl Into<String>,
+        classification: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            scenario: scenario.into(),
+            stage: stage.into(),
+            classification: classification.into(),
+            message: message.into(),
+        }
+    }
+}
+
+fn write_failure_summary(
+    collector: &ArtifactCollector,
+    case_name: &str,
+    summary: FailureSummary,
+) -> Result<()> {
+    collector.write_text(
+        case_name,
+        "failure-summary.json",
+        &serde_json::to_string_pretty(&summary)?,
+    )?;
+    Ok(())
+}
+
+fn write_failure_summary_if_absent(
+    collector: &ArtifactCollector,
+    case_name: &str,
+    summary: FailureSummary,
+) -> Result<()> {
+    let path = collector.case_dir(case_name).join("failure-summary.json");
+    if path.exists() {
+        return Ok(());
+    }
+    write_failure_summary(collector, case_name, summary)
 }
 
 fn collect_fault_artifacts(
@@ -1248,29 +1525,93 @@ async fn recommit_unconfirmed_objects(
     history: &Recorder,
     objects: &[ObjectSpec],
     concurrency: usize,
-) -> Result<usize> {
+) -> RecommitReport {
     let tasks = objects.iter().cloned().map(|object| {
         let s3 = s3.clone();
         let history = history.clone();
         async move {
             let prepared = object.prepare();
-            let outcome = s3.put_object(&prepared, &history).await?;
-            Ok::<_, anyhow::Error>((object.key, outcome))
+            match s3.put_object(&prepared, &history).await {
+                Ok(outcome) => RecommitAttempt {
+                    key: object.key,
+                    size_bytes: object.size_bytes,
+                    sha256: object.sha256,
+                    outcome,
+                    error: None,
+                },
+                Err(error) => RecommitAttempt {
+                    key: object.key,
+                    size_bytes: object.size_bytes,
+                    sha256: object.sha256,
+                    outcome: OperationOutcome::Unknown,
+                    error: Some(error.to_string()),
+                },
+            }
         }
     });
-    let results = stream::iter(tasks)
+    let mut attempts = stream::iter(tasks)
         .buffer_unordered(concurrency)
         .collect::<Vec<_>>()
         .await;
-    for result in results {
-        let (key, outcome) = result?;
-        ensure!(
-            outcome == OperationOutcome::Ok,
-            "PUT for previously unconfirmed object {} did not commit after recovery: {outcome:?}",
-            key
-        );
+    attempts.sort_by(|left, right| left.key.cmp(&right.key));
+    RecommitReport::from_attempts(attempts)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RecommitReport {
+    attempted: usize,
+    committed: usize,
+    failed: usize,
+    attempts: Vec<RecommitAttempt>,
+}
+
+impl RecommitReport {
+    fn from_attempts(attempts: Vec<RecommitAttempt>) -> Self {
+        let committed = attempts
+            .iter()
+            .filter(|attempt| attempt.outcome == OperationOutcome::Ok)
+            .count();
+        Self {
+            attempted: attempts.len(),
+            committed,
+            failed: attempts.len() - committed,
+            attempts,
+        }
     }
-    Ok(objects.len())
+
+    fn has_failures(&self) -> bool {
+        self.failed > 0
+    }
+
+    fn failure_message(&self) -> String {
+        let sample = self
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.outcome != OperationOutcome::Ok)
+            .take(5)
+            .map(|attempt| format!("{}={:?}", attempt.key, attempt.outcome))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} of {} previously unconfirmed PUTs did not commit after recovery{}",
+            self.failed,
+            self.attempted,
+            if sample.is_empty() {
+                String::new()
+            } else {
+                format!("; sample: {sample}")
+            }
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RecommitAttempt {
+    key: String,
+    size_bytes: usize,
+    sha256: String,
+    outcome: OperationOutcome,
+    error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1389,9 +1730,9 @@ fn warp_bucket_name(run_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OutcomeCounts, PodIdentity, PodRuntimeState, WorkloadSummary, bucket_name,
-        chaos_manifest_artifact_name, chaos_resource_name_suffix, pod_deletion_observed,
-        pod_replacement_observed, stable_pod_fingerprint, warp_bucket_name,
+        OutcomeCounts, PodIdentity, PodRuntimeState, RecommitAttempt, RecommitReport,
+        WorkloadSummary, bucket_name, chaos_manifest_artifact_name, chaos_resource_name_suffix,
+        pod_deletion_observed, pod_replacement_observed, stable_pod_fingerprint, warp_bucket_name,
     };
     use rustfs_operator_e2e::framework::fault_plan::{
         DEFAULT_RUSTFS_DATA_VOLUME, FaultInjection, FaultKind, FaultTarget,
@@ -1470,6 +1811,32 @@ mod tests {
 
         assert!(summary.require_fault_evidence(false).is_ok());
         assert!(summary.require_fault_evidence(true).is_err());
+    }
+
+    #[test]
+    fn recommit_report_counts_and_summarizes_failed_attempts() {
+        let report = RecommitReport::from_attempts(vec![
+            RecommitAttempt {
+                key: "object-a".to_string(),
+                size_bytes: 4096,
+                sha256: "sha-a".to_string(),
+                outcome: OperationOutcome::Ok,
+                error: None,
+            },
+            RecommitAttempt {
+                key: "object-b".to_string(),
+                size_bytes: 4096,
+                sha256: "sha-b".to_string(),
+                outcome: OperationOutcome::Failed,
+                error: Some("service unavailable".to_string()),
+            },
+        ]);
+
+        assert_eq!(report.attempted, 2);
+        assert_eq!(report.committed, 1);
+        assert_eq!(report.failed, 1);
+        assert!(report.has_failures());
+        assert!(report.failure_message().contains("object-b=Failed"));
     }
 
     #[test]

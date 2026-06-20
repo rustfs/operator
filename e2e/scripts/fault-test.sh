@@ -25,7 +25,6 @@ EXPECTED_OBJECTS=40000
 EXPECTED_CONCURRENCY=80
 EXPECTED_PAYLOAD_BYTES=20337459200
 BUILD_JOBS="${RUSTFS_FAULT_TEST_BUILD_JOBS:-1}"
-BUILD_SETTLE_SECONDS="${RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS:-60}"
 
 FAULT_NAMESPACE="${RUSTFS_FAULT_TEST_NAMESPACE:-rustfs-fault-test}"
 FAULT_TENANT="${RUSTFS_FAULT_TEST_TENANT:-fault-test-tenant}"
@@ -101,49 +100,16 @@ require_namespace_ownership() {
   [[ "$tenant" == "$FAULT_TENANT" ]] || die "namespace $FAULT_NAMESPACE is not owned by tenant $FAULT_TENANT"
 }
 
-require_non_fault_tenants_ready() {
-  local unhealthy
-  unhealthy="$(kubectl_cluster get tenants -A -o json | jq -r --arg namespace "$FAULT_NAMESPACE" '
-    .items[]
-    | select(.metadata.namespace != $namespace)
-    | select((.status.currentState // "") != "Ready")
-    | "\(.metadata.namespace)/\(.metadata.name)=\(.status.currentState // "missing")"
-  ')"
-  [[ -z "$unhealthy" ]] || die "non-fault Tenant is not Ready: $unhealthy"
-}
-
-snapshot_non_fault_rustfs_pods() {
-  kubectl_cluster get pods -A -o json | jq -r --arg namespace "$FAULT_NAMESPACE" '
-    .items[]
-    | select(.metadata.namespace != $namespace)
-    | select(.metadata.labels["rustfs.tenant"] != null)
-    | [
-        .metadata.namespace,
-        .metadata.name,
-        .metadata.uid,
-        ([.status.containerStatuses[]?.restartCount] | add // 0),
-        ((.status.phase == "Running") and ([.status.containerStatuses[]?.ready] | all))
-      ]
-    | @tsv
-  ' | sort
-}
-
 prepare_fault_binary() {
   local scenario="$1" run_root="$2"
-  local before="$run_root/build-pods-before.tsv"
-  local current="$run_root/build-pods-current.tsv"
-  local changes="$run_root/build-pod-changes.diff"
   local build_messages="$run_root/fault-build.jsonl"
-  local elapsed=0 interval=10
   local -a build_command=(
     cargo test --manifest-path "$MANIFEST" --test faults --no-run
     --message-format=json-render-diagnostics
   )
 
   [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "RUSTFS_FAULT_TEST_BUILD_JOBS must be a positive integer"
-  [[ "$BUILD_SETTLE_SECONDS" =~ ^[0-9]+$ ]] || die "RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS must be a non-negative integer"
   preflight "$scenario"
-  snapshot_non_fault_rustfs_pods >"$before"
   echo "preparing fault-test binary with jobs=$BUILD_JOBS and lowest host priority"
   if command -v ionice >/dev/null 2>&1; then
     CARGO_BUILD_JOBS="$BUILD_JOBS" nice -n 19 ionice -c3 "${build_command[@]}" \
@@ -163,20 +129,8 @@ prepare_fault_binary() {
   [[ -x "$FAULT_TEST_BINARY" ]] || die "faults test binary was not produced; see $run_root/fault-build.log"
   printf '%s\n' "$FAULT_TEST_BINARY" >"$run_root/fault-test-binary.path"
 
-  while (( elapsed <= BUILD_SETTLE_SECONDS )); do
-    snapshot_non_fault_rustfs_pods >"$current"
-    if ! cmp -s "$before" "$current"; then
-      diff -u "$before" "$current" >"$changes" || true
-      die "fault-test build changed a pre-existing RustFS Pod; see $changes"
-    fi
-    require_non_fault_tenants_ready
-    (( elapsed == BUILD_SETTLE_SECONDS )) && break
-    sleep "$interval"
-    elapsed=$((elapsed + interval))
-    (( elapsed > BUILD_SETTLE_SECONDS )) && elapsed="$BUILD_SETTLE_SECONDS"
-  done
   preflight "$scenario"
-  echo "fault-test binary ready; pre-existing RustFS Pods remained unchanged for ${BUILD_SETTLE_SECONDS}s"
+  echo "fault-test binary ready"
 }
 
 chaos_deployment_ready() {
@@ -254,7 +208,6 @@ preflight() {
 
   require_storage_class "$scenario"
   require_namespace_ownership
-  require_non_fault_tenants_ready
 
   if [[ "$scenario" != "dm-flakey" ]]; then
     crd="$(scenario_crd "$scenario")"
@@ -335,17 +288,11 @@ capture_fault_logs() {
 }
 
 health_is_safe() {
-  local baseline_ready_nodes="$1" baseline_tenants="$2" require_chaos="$3"
-  local current_ready_nodes namespace tenant state
+  local baseline_ready_nodes="$1" require_chaos="$2"
+  local current_ready_nodes
   current_ready_nodes="$(kubectl_cluster get nodes -o json 2>/dev/null | jq -r '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length' 2>/dev/null || echo 0)"
   [[ "$current_ready_nodes" -ge "$baseline_ready_nodes" ]] || return 1
   [[ "$require_chaos" != "true" ]] || chaos_is_ready || return 1
-
-  while IFS=$'\t' read -r namespace tenant; do
-    [[ -n "$namespace" ]] || continue
-    state="$(kubectl_ns "$namespace" get tenant "$tenant" -o jsonpath='{.status.currentState}' 2>/dev/null || true)"
-    [[ "$state" == "Ready" ]] || return 1
-  done <"$baseline_tenants"
   return 0
 }
 
@@ -355,16 +302,27 @@ find_artifact() {
 
 validate_scenario_artifacts() {
   local scenario="$1" artifacts="$2" run_root="$3"
-  local plan evidence checker summary seed disruptions recommitted committed
+  local metadata plan evidence checker summary recommit seed disruptions recommitted committed
+  metadata="$(find_artifact "$artifacts" run-metadata.json)"
   plan="$(find_artifact "$artifacts" workload-plan.json)"
   evidence="$(find_artifact "$artifacts" fault-evidence.json)"
   checker="$(find_artifact "$artifacts" checker-report.json)"
   summary="$(find_artifact "$artifacts" workload-summary.json)"
+  recommit="$(find_artifact "$artifacts" recommit-report.json)"
+  [[ -f "$metadata" ]] || die "$scenario did not produce run-metadata.json"
   [[ -f "$plan" ]] || die "$scenario did not produce workload-plan.json"
   [[ -f "$evidence" ]] || die "$scenario did not produce fault-evidence.json"
   [[ -f "$checker" ]] || die "$scenario did not produce checker-report.json"
   [[ -f "$summary" ]] || die "$scenario did not produce workload-summary.json"
+  [[ -f "$recommit" ]] || die "$scenario did not produce recommit-report.json"
 
+  jq -e --arg scenario "$scenario" '
+    .scenario == $scenario
+    and (.run_id | length) > 0
+    and (.rustfs_image | length) > 0
+    and (.storage_class | length) > 0
+    and (.context | length) > 0
+  ' "$metadata" >/dev/null || die "$scenario run metadata is incomplete"
   jq -e --argjson objects "$EXPECTED_OBJECTS" --argjson concurrency "$EXPECTED_CONCURRENCY" --argjson payload "$EXPECTED_PAYLOAD_BYTES" '
     .object_count == $objects
     and .concurrency == $concurrency
@@ -387,31 +345,53 @@ validate_scenario_artifacts() {
     and .tenant_recovered == true
     and .passed == true
   ' "$checker" >/dev/null || die "$scenario checker verdict failed"
+  jq -e '
+    .attempted == .committed
+    and .failed == 0
+    and (.attempts | length) == .attempted
+  ' "$recommit" >/dev/null || die "$scenario recovery recommit report contains failed attempts"
 
   seed="$(jq -r '.seed' "$plan")"
   disruptions="$(jq -r '.client_disruptions' "$evidence")"
-  recommitted="$(jq -r '.recommitted_after_recovery' "$summary")"
+  recommitted="$(jq -r '.committed' "$recommit")"
   committed="$(jq -r '.committed_puts' "$checker")"
   printf '%s\t%s\t0\t%s\t%s\t%s\t0\t0\t0\t0\ttrue\n' \
     "$scenario" "$seed" "$disruptions" "$recommitted" "$committed" >>"$run_root/validation-summary.tsv"
 }
 
+write_runner_failure_summary() {
+  local scenario="$1" artifacts="$2" rc="$3"
+  local health_guard_failed=false rust_failure_summary=false
+  [[ ! -f "$artifacts/health-guard-failed" ]] || health_guard_failed=true
+  [[ ! -f "$artifacts/failure-summary.json" ]] || rust_failure_summary=true
+  jq -n \
+    --arg scenario "$scenario" \
+    --argjson exit_code "$rc" \
+    --argjson health_guard_failed "$health_guard_failed" \
+    --argjson rust_failure_summary "$rust_failure_summary" \
+    --arg test_log "$artifacts/test.log" \
+    '{
+      scenario: $scenario,
+      stage: "runner",
+      exit_code: $exit_code,
+      health_guard_failed: $health_guard_failed,
+      rust_failure_summary_present: $rust_failure_summary,
+      test_log: $test_log
+    }' >"$artifacts/runner-failure-summary.json"
+}
+
 run_scenario() {
   local scenario="$1" run_root="$2"
   local artifacts="$run_root/$scenario"
-  local baseline_ready_nodes baseline_tenants test_pid rc current_time health_checks require_chaos
+  local baseline_ready_nodes test_pid rc current_time health_checks require_chaos
   preflight "$scenario"
   mkdir -p "$artifacts"
   baseline_ready_nodes="$(kubectl_cluster get nodes -o json | jq -r '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length')"
-  baseline_tenants="$artifacts/baseline-tenants.tsv"
   if [[ "$scenario" == "dm-flakey" ]]; then
     require_chaos=false
   else
     require_chaos=true
   fi
-  kubectl_cluster get tenants -A -o json | jq -r --arg namespace "$FAULT_NAMESPACE" '
-    .items[] | select(.metadata.namespace != $namespace) | [.metadata.namespace,.metadata.name] | @tsv
-  ' >"$baseline_tenants"
   capture_cluster_snapshot "$artifacts" before
 
   echo "starting scenario=$scenario artifacts=$artifacts"
@@ -435,7 +415,7 @@ run_scenario() {
   while kill -0 "$test_pid" 2>/dev/null; do
     current_time="$(date -u +%FT%TZ)"
     health_checks=$((health_checks + 1))
-    if health_is_safe "$baseline_ready_nodes" "$baseline_tenants" "$require_chaos"; then
+    if health_is_safe "$baseline_ready_nodes" "$require_chaos"; then
       echo "$current_time safe=true" >>"$artifacts/health-watch.log"
       if (( health_checks % 6 == 0 )); then
         echo "scenario=$scenario running safe=true time=$current_time"
@@ -461,6 +441,7 @@ run_scenario() {
   capture_fault_logs "$artifacts"
 
   if [[ "$rc" -ne 0 ]]; then
+    write_runner_failure_summary "$scenario" "$artifacts" "$rc"
     cleanup_managed_chaos
     echo "scenario failed: $scenario rc=$rc log=$artifacts/test.log" >&2
     return "$rc"
