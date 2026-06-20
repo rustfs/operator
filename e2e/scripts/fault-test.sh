@@ -24,6 +24,8 @@ DEFAULT_SCENARIOS="io-eio pod-kill-one network-partition-one io-read-mistake dis
 EXPECTED_OBJECTS=40000
 EXPECTED_CONCURRENCY=100
 EXPECTED_PAYLOAD_BYTES=20337459200
+BUILD_JOBS="${RUSTFS_FAULT_TEST_BUILD_JOBS:-1}"
+BUILD_SETTLE_SECONDS="${RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS:-60}"
 
 FAULT_NAMESPACE="${RUSTFS_FAULT_TEST_NAMESPACE:-rustfs-fault-test}"
 FAULT_TENANT="${RUSTFS_FAULT_TEST_TENANT:-fault-test-tenant}"
@@ -109,6 +111,59 @@ require_non_fault_tenants_ready() {
   [[ -z "$unhealthy" ]] || die "non-fault Tenant is not Ready: $unhealthy"
 }
 
+snapshot_non_fault_rustfs_pods() {
+  kubectl_cluster get pods -A -o json | jq -r --arg namespace "$FAULT_NAMESPACE" '
+    .items[]
+    | select(.metadata.namespace != $namespace)
+    | select(.metadata.labels["rustfs.tenant"] != null)
+    | [
+        .metadata.namespace,
+        .metadata.name,
+        .metadata.uid,
+        ([.status.containerStatuses[]?.restartCount] | add // 0),
+        ((.status.phase == "Running") and ([.status.containerStatuses[]?.ready] | all))
+      ]
+    | @tsv
+  ' | sort
+}
+
+prepare_fault_binary() {
+  local scenario="$1" run_root="$2"
+  local before="$run_root/build-pods-before.tsv"
+  local current="$run_root/build-pods-current.tsv"
+  local changes="$run_root/build-pod-changes.diff"
+  local elapsed=0 interval=10
+  local -a build_command=(cargo test --manifest-path "$MANIFEST" --test faults --no-run)
+
+  [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "RUSTFS_FAULT_TEST_BUILD_JOBS must be a positive integer"
+  [[ "$BUILD_SETTLE_SECONDS" =~ ^[0-9]+$ ]] || die "RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS must be a non-negative integer"
+  preflight "$scenario"
+  snapshot_non_fault_rustfs_pods >"$before"
+  echo "preparing fault-test binary with jobs=$BUILD_JOBS and lowest host priority"
+  if command -v ionice >/dev/null 2>&1; then
+    CARGO_BUILD_JOBS="$BUILD_JOBS" nice -n 19 ionice -c3 "${build_command[@]}" \
+      >"$run_root/fault-build.log" 2>&1
+  else
+    CARGO_BUILD_JOBS="$BUILD_JOBS" nice -n 19 "${build_command[@]}" \
+      >"$run_root/fault-build.log" 2>&1
+  fi
+
+  while (( elapsed <= BUILD_SETTLE_SECONDS )); do
+    snapshot_non_fault_rustfs_pods >"$current"
+    if ! cmp -s "$before" "$current"; then
+      diff -u "$before" "$current" >"$changes" || true
+      die "fault-test build changed a pre-existing RustFS Pod; see $changes"
+    fi
+    require_non_fault_tenants_ready
+    (( elapsed == BUILD_SETTLE_SECONDS )) && break
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+    (( elapsed > BUILD_SETTLE_SECONDS )) && elapsed="$BUILD_SETTLE_SECONDS"
+  done
+  preflight "$scenario"
+  echo "fault-test binary ready; pre-existing RustFS Pods remained unchanged for ${BUILD_SETTLE_SECONDS}s"
+}
+
 require_chaos_ready() {
   local deployment_ready daemon_ready
   deployment_ready="$(kubectl_ns "$CHAOS_NAMESPACE" get deployment chaos-controller-manager -o json | jq -r '
@@ -152,6 +207,7 @@ preflight() {
   require_command cargo
   require_command jq
   require_command kubectl
+  require_command nice
   require_command pgrep
   [[ -n "${RUSTFS_FAULT_TEST_EXPECTED_CONTEXT:-}" ]] || die "RUSTFS_FAULT_TEST_EXPECTED_CONTEXT is required"
   [[ -n "${RUSTFS_FAULT_TEST_SERVER_IMAGE:-}" ]] || die "RUSTFS_FAULT_TEST_SERVER_IMAGE is required"
@@ -398,17 +454,22 @@ run_one() {
   is_supported_scenario "$scenario" || die "unsupported scenario: $scenario"
   run_root="$(new_run_root)"
   initialize_summary "$run_root"
+  prepare_fault_binary "$scenario" "$run_root"
   run_scenario "$scenario" "$run_root"
   echo "run artifacts: $run_root"
 }
 
 run_regular() {
-  local run_root scenario
+  local run_root scenario prepared=false
   local scenarios="${RUSTFS_FAULT_TEST_SCENARIOS:-$DEFAULT_SCENARIOS}"
   run_root="$(new_run_root)"
   initialize_summary "$run_root"
   for scenario in $scenarios; do
     [[ "$scenario" != "dm-flakey" ]] || die "run-regular cannot include dm-flakey"
+    if [[ "$prepared" == "false" ]]; then
+      prepare_fault_binary "$scenario" "$run_root"
+      prepared=true
+    fi
     run_scenario "$scenario" "$run_root" || return $?
   done
   echo "regular scenario artifacts: $run_root"
