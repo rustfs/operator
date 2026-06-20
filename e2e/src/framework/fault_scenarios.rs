@@ -271,10 +271,10 @@ mod tests {
             scenario.case_name,
             "fault_io_eio_preserves_committed_objects"
         );
-        assert_eq!(scenario.duration, Duration::from_secs(900));
+        assert_eq!(scenario.duration, Duration::from_secs(7200));
         assert_eq!(scenario.percent, 20);
-        assert_eq!(scenario.prefill_count(), 2000);
-        assert_eq!(scenario.mixed_workload_count(), 2000);
+        assert_eq!(scenario.prefill_count(), 20000);
+        assert_eq!(scenario.mixed_workload_count(), 20000);
     }
 
     #[test]

@@ -16,6 +16,10 @@ The harness is split into four top-level domains:
 ```text
 e2e/
   Cargo.toml
+  Makefile             package-local fault-test entrypoints
+  FAULT_TESTING.md     bilingual fault-test operations manual
+  scripts/
+    fault-test.sh      guarded real-cluster scenario orchestration
   manifests/
     kind-rustfs-e2e.yaml  dedicated 1 control-plane + 3 worker Kind cluster
   src/
@@ -88,7 +92,7 @@ make e2e-live-run
 
 The harness refuses to run live tests unless the active Kubernetes context matches the configured dedicated Kind context.
 
-Fault tests have separate safety defaults and run exactly one selected scenario per invocation:
+Fault tests have separate safety defaults and are operated entirely from this package:
 
 ```text
 context:          current non-Kind kubectl context
@@ -96,20 +100,21 @@ test namespace:   rustfs-fault-test
 tenant name:      fault-test-tenant
 storage class:    required via RUSTFS_FAULT_TEST_STORAGE_CLASS
 artifacts:        target/fault-tests/artifacts
-PVCs:             4 × 80Gi
-objects:          4000 with seeded weighted sizes
-concurrency:      50
+PVCs:             4 × 100Gi
+objects:          40000 with seeded weighted sizes
+concurrency:      100
 ```
 
 Run them independently from the Kind lifecycle:
 
 ```bash
-RUSTFS_FAULT_TEST_SCENARIO=io-eio \
+RUSTFS_FAULT_TEST_EXPECTED_CONTEXT=<real-test-context> \
 RUSTFS_FAULT_TEST_STORAGE_CLASS=<dynamic-storage-class> \
-make fault-test
+RUSTFS_FAULT_TEST_SERVER_IMAGE=<pinned-rustfs-image> \
+make -C e2e fault-run SCENARIO=io-eio
 ```
 
-The runner creates an absent namespace with ownership metadata and refuses to reset or claim an existing namespace unless its ownership markers match. See the bilingual [Fault Injection Operations Manual](../FAULT_INJECTION_TEST_PLAN.md) for prerequisites, all seven scenarios, the dedicated `dm-flakey` storage procedure, validation, recovery, and cleanup.
+The runner creates an absent namespace with ownership metadata and refuses to reset or claim an existing namespace unless its ownership markers match. See the package-local bilingual [Fault-Test Operations Manual](FAULT_TESTING.md) for the Make targets, prerequisites, all seven scenarios, `dm-flakey` storage procedure, evidence, recovery, and cleanup.
 
 ## Non-live validation
 

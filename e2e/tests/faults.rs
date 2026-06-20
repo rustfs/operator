@@ -1135,7 +1135,7 @@ mod tests {
 
     #[test]
     fn workload_summary_counts_disrupted_operations() {
-        let mut summary = WorkloadSummary::new(&WorkloadPlan::seeded(42, 4000, 50));
+        let mut summary = WorkloadSummary::new(&WorkloadPlan::seeded(42, 40000, 100));
         summary.puts.record(OperationOutcome::Ok);
         summary.gets.record(OperationOutcome::Timeout);
 
@@ -1150,9 +1150,9 @@ mod tests {
     fn workload_summary_can_require_fault_evidence() {
         let summary = WorkloadSummary {
             seed: 42,
-            object_count: 4000,
-            concurrency: 50,
-            total_payload_bytes: 2_033_745_920,
+            object_count: 40000,
+            concurrency: 100,
+            total_payload_bytes: 20_337_459_200,
             puts: OutcomeCounts {
                 ok: 1,
                 ..OutcomeCounts::default()
