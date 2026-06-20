@@ -47,6 +47,12 @@ pub enum FaultBackend {
     MinioWarpWithChaos,
 }
 
+impl FaultBackend {
+    pub fn accepts_percent(self) -> bool {
+        matches!(self, Self::ChaosMeshIoChaos | Self::MinioWarpWithChaos)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultIsolation {
     FreshTenant,
@@ -209,14 +215,12 @@ impl FaultScenario {
             config.duration > Duration::ZERO,
             "RUSTFS_FAULT_TEST_DURATION_SECONDS must be greater than zero"
         );
+        config.workload.validate()?;
         ensure!(
-            config.workload_objects >= 4,
-            "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 4"
-        );
-        ensure!(
-            (1..=config.workload_objects).contains(&config.workload_concurrency),
-            "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY must be between 1 and RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS ({})",
-            config.workload_objects
+            !config.percent_overridden || spec.backend.accepts_percent(),
+            "RUSTFS_FAULT_TEST_PERCENT only applies to percent-based IOChaos scenarios; scenario {:?} targets {:?} with a fixed target count",
+            spec.scenario,
+            spec.backend
         );
 
         Ok(Self {
@@ -224,7 +228,7 @@ impl FaultScenario {
             case_name: spec.case_name,
             duration: config.duration,
             percent: config.percent,
-            object_count: config.workload_objects,
+            object_count: config.workload.object_count,
         })
     }
 
@@ -257,8 +261,11 @@ pub fn scenario_spec(name: &str) -> Result<&'static FaultScenarioSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FaultScenario, FaultScenarioStatus, IO_EIO_SCENARIO, scenario_catalog};
-    use crate::framework::fault_config::FaultTestConfig;
+    use super::{
+        FaultScenario, FaultScenarioStatus, IO_EIO_SCENARIO, POD_KILL_ONE_SCENARIO,
+        scenario_catalog,
+    };
+    use crate::framework::fault_config::{FaultTestConfig, FaultWorkloadProfile};
     use std::time::Duration;
 
     #[test]
@@ -288,8 +295,20 @@ mod tests {
     #[test]
     fn workload_concurrency_must_fit_the_object_count() {
         let mut config = FaultTestConfig::for_test("real-cluster", "fast-csi");
-        config.workload_objects = 4;
-        config.workload_concurrency = 5;
+        config.workload = FaultWorkloadProfile {
+            object_count: 4,
+            concurrency: 5,
+        };
+
+        assert!(FaultScenario::from_config(&config).is_err());
+    }
+
+    #[test]
+    fn fixed_target_scenarios_reject_percent_override() {
+        let mut config = FaultTestConfig::for_test("real-cluster", "fast-csi");
+        config.scenario = POD_KILL_ONE_SCENARIO.to_string();
+        config.percent = 50;
+        config.percent_overridden = true;
 
         assert!(FaultScenario::from_config(&config).is_err());
     }

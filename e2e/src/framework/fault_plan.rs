@@ -79,12 +79,27 @@ impl FaultTarget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultSelection {
+    Percent(u8),
+    FixedTargets(u32),
+}
+
+impl FaultSelection {
+    pub fn summary(self) -> String {
+        match self {
+            Self::Percent(percent) => format!("{percent}%"),
+            Self::FixedTargets(count) => format!("{count} target(s)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultInjection {
     kind: FaultKind,
     backend: FaultBackend,
     target: FaultTarget,
-    percent: u8,
+    selection: FaultSelection,
     duration: Duration,
 }
 
@@ -93,7 +108,7 @@ impl FaultInjection {
         kind: FaultKind,
         backend: FaultBackend,
         target: FaultTarget,
-        percent: u8,
+        selection: FaultSelection,
         duration: Duration,
     ) -> Result<Self> {
         ensure!(
@@ -103,8 +118,10 @@ impl FaultInjection {
             backend
         );
         ensure!(
-            (1..=100).contains(&percent),
-            "fault percent must be in 1..=100, got {percent}"
+            fault_kind_accepts_selection(kind, selection),
+            "fault kind {} cannot run with selection {:?}",
+            kind.as_str(),
+            selection
         );
         ensure!(duration > Duration::ZERO, "fault duration must be positive");
 
@@ -112,7 +129,7 @@ impl FaultInjection {
             kind,
             backend,
             target,
-            percent,
+            selection,
             duration,
         })
     }
@@ -129,8 +146,19 @@ impl FaultInjection {
         self.target
     }
 
-    pub fn percent(&self) -> u8 {
-        self.percent
+    pub fn selection(&self) -> FaultSelection {
+        self.selection
+    }
+
+    pub fn percent(&self) -> Result<u8> {
+        match self.selection {
+            FaultSelection::Percent(percent) => Ok(percent),
+            other => bail!(
+                "fault kind {} requires a percent selection, got {:?}",
+                self.kind.as_str(),
+                other
+            ),
+        }
     }
 
     pub fn duration(&self) -> Duration {
@@ -169,6 +197,23 @@ fn fault_kind_accepts_backend(kind: FaultKind, backend: FaultBackend) -> bool {
             FaultBackend::DeviceMapper
         )
     )
+}
+
+fn fault_kind_accepts_selection(kind: FaultKind, selection: FaultSelection) -> bool {
+    match kind {
+        FaultKind::RustfsVolumeIoError
+        | FaultKind::RustfsVolumeReadMistake
+        | FaultKind::RustfsVolumeEnospc => match selection {
+            FaultSelection::Percent(percent) => (1..=100).contains(&percent),
+            FaultSelection::FixedTargets(_) => false,
+        },
+        FaultKind::RustfsServerPodKill
+        | FaultKind::RustfsServerNetworkPartition
+        | FaultKind::RustfsBlockDeviceFlakey => match selection {
+            FaultSelection::FixedTargets(count) => count > 0,
+            FaultSelection::Percent(_) => false,
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,14 +263,14 @@ impl FaultPlan {
                 FaultKind::RustfsServerPodKill,
                 spec.backend,
                 FaultTarget::RustfsServerPod,
-                scenario.percent,
+                FaultSelection::FixedTargets(1),
                 scenario.duration,
             )?,
             NETWORK_PARTITION_ONE_SCENARIO => FaultInjection::new(
                 FaultKind::RustfsServerNetworkPartition,
                 spec.backend,
                 FaultTarget::RustfsServerPeerNetwork,
-                scenario.percent,
+                FaultSelection::FixedTargets(1),
                 scenario.duration,
             )?,
             IO_READ_MISTAKE_SCENARIO => {
@@ -236,7 +281,7 @@ impl FaultPlan {
                 FaultKind::RustfsBlockDeviceFlakey,
                 spec.backend,
                 FaultTarget::DedicatedBlockDevice,
-                scenario.percent,
+                FaultSelection::FixedTargets(1),
                 scenario.duration,
             )?,
             WARP_UNDER_CHAOS_SCENARIO => {
@@ -285,7 +330,13 @@ impl FaultPlan {
     pub fn target_summary(&self) -> String {
         self.faults
             .iter()
-            .map(|fault| fault.target().summary())
+            .map(|fault| {
+                format!(
+                    "{} via {}",
+                    fault.target().summary(),
+                    fault.selection().summary()
+                )
+            })
             .collect::<Vec<_>>()
             .join(" + ")
     }
@@ -302,7 +353,7 @@ fn volume_fault(
         FaultTarget::RustfsVolume {
             path: DEFAULT_RUSTFS_DATA_VOLUME,
         },
-        scenario.percent,
+        FaultSelection::Percent(scenario.percent),
         scenario.duration,
     )
 }
@@ -310,8 +361,8 @@ fn volume_fault(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_RUSTFS_DATA_VOLUME, FaultInjection, FaultKind, FaultPlan, FaultTarget,
-        FaultWorkloadMode,
+        DEFAULT_RUSTFS_DATA_VOLUME, FaultInjection, FaultKind, FaultPlan, FaultSelection,
+        FaultTarget, FaultWorkloadMode,
     };
     use crate::framework::{
         fault_config::FaultTestConfig,
@@ -387,7 +438,7 @@ mod tests {
             FaultTarget::RustfsVolume {
                 path: DEFAULT_RUSTFS_DATA_VOLUME,
             },
-            20,
+            FaultSelection::Percent(20),
             Duration::from_secs(60),
         )
         .expect("first fault");
@@ -395,7 +446,7 @@ mod tests {
             FaultKind::RustfsServerNetworkPartition,
             FaultBackend::ChaosMeshNetworkChaos,
             FaultTarget::RustfsServerPeerNetwork,
-            100,
+            FaultSelection::FixedTargets(1),
             Duration::from_secs(60),
         )
         .expect("second fault");
@@ -427,7 +478,20 @@ mod tests {
             FaultTarget::RustfsVolume {
                 path: DEFAULT_RUSTFS_DATA_VOLUME,
             },
-            20,
+            FaultSelection::Percent(20),
+            Duration::from_secs(60),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fixed_target_faults_reject_percent_selection() {
+        let result = FaultInjection::new(
+            FaultKind::RustfsServerPodKill,
+            FaultBackend::ChaosMeshPodChaos,
+            FaultTarget::RustfsServerPod,
+            FaultSelection::Percent(20),
             Duration::from_secs(60),
         );
 

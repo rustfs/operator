@@ -21,11 +21,11 @@ MANIFEST="$PACKAGE_DIR/Cargo.toml"
 MANAGER="rustfs-operator-fault-test"
 MANAGER_SELECTOR="app.kubernetes.io/managed-by=$MANAGER"
 DEFAULT_SCENARIOS="io-eio pod-kill-one network-partition-one io-read-mistake disk-full warp-under-chaos"
-EXPECTED_OBJECTS=40000
-EXPECTED_CONCURRENCY=80
-EXPECTED_PAYLOAD_BYTES=20337459200
+WORKLOAD_OBJECTS="${RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS:-40000}"
+WORKLOAD_CONCURRENCY="${RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY:-80}"
 BUILD_JOBS="${RUSTFS_FAULT_TEST_BUILD_JOBS:-1}"
 
+FAULT_CONTEXT="${RUSTFS_FAULT_TEST_EXPECTED_CONTEXT:-}"
 FAULT_NAMESPACE="${RUSTFS_FAULT_TEST_NAMESPACE:-rustfs-fault-test}"
 FAULT_TENANT="${RUSTFS_FAULT_TEST_TENANT:-fault-test-tenant}"
 CHAOS_NAMESPACE="${RUSTFS_FAULT_TEST_CHAOS_NAMESPACE:-chaos-mesh}"
@@ -43,7 +43,8 @@ Commands:
   run-regular           Run the six regular scenarios serially.
   cleanup               Remove managed Chaos and the owned fault namespace.
 
-Run through the package Make targets documented in e2e/FAULT_TESTING.md.
+RUSTFS_FAULT_TEST_EXPECTED_CONTEXT is optional. When unset, the current
+non-Kind kubectl context is used and pinned for the run.
 EOF
 }
 
@@ -56,21 +57,122 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+trim_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+require_nonempty_env() {
+  local name="$1" value
+  value="$(trim_value "${!name:-}")"
+  [[ -n "$value" ]] || die "$name is required"
+  export "$name=$value"
+}
+
+require_positive_integer() {
+  local name="$1" value="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer"
+}
+
+require_unsigned_integer() {
+  local name="$1" value="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be an unsigned integer"
+}
+
+require_optional_unsigned_integer() {
+  local name="$1" value
+  value="$(trim_value "${!name:-}")"
+  [[ -z "$value" ]] && return 0
+  require_unsigned_integer "$name" "$value"
+  export "$name=$value"
+}
+
+require_optional_positive_integer() {
+  local name="$1" value
+  value="$(trim_value "${!name:-}")"
+  [[ -z "$value" ]] && return 0
+  require_positive_integer "$name" "$value"
+  export "$name=$value"
+}
+
+require_optional_bool() {
+  local name="$1" value
+  value="$(trim_value "${!name:-}")"
+  [[ -z "$value" ]] && return 0
+  case "$value" in
+    1|0|[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])
+      export "$name=$value"
+      ;;
+    *)
+      die "$name must be a boolean: 1/0, true/false, or yes/no"
+      ;;
+  esac
+}
+
+require_safe_node_name() {
+  local name="$1" value="$2"
+  [[ "$value" =~ ^[A-Za-z0-9.-]+$ ]] || die "$name must be a valid node name"
+}
+
+require_safe_dm_name() {
+  local name="$1" value="$2"
+  [[ "$value" =~ ^[A-Za-z0-9._+-]+$ ]] || die "$name contains unsupported characters"
+}
+
+require_absolute_non_root_path() {
+  local name="$1" value="$2"
+  [[ "$value" == /* && "$value" != "/" ]] || die "$name must be an absolute non-root path"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "$name must not contain newlines"
+}
+
+require_safe_image_ref() {
+  local name="$1" value="$2"
+  [[ -n "$value" ]] || die "$name must be a non-empty image reference"
+  [[ "$value" != *[[:space:]]* ]] || die "$name must not contain whitespace"
+}
+
 kubectl_context() {
   kubectl config current-context
 }
 
+resolve_fault_context() {
+  local current_context
+  FAULT_CONTEXT="$(trim_value "$FAULT_CONTEXT")"
+  current_context="$(kubectl_context)"
+  if [[ -n "$FAULT_CONTEXT" ]]; then
+    [[ "$current_context" == "$FAULT_CONTEXT" ]] || die "current context $current_context does not match RUSTFS_FAULT_TEST_EXPECTED_CONTEXT $FAULT_CONTEXT"
+    export RUSTFS_FAULT_TEST_EXPECTED_CONTEXT="$FAULT_CONTEXT"
+  else
+    FAULT_CONTEXT="$current_context"
+    export RUSTFS_FAULT_TEST_EXPECTED_CONTEXT="$FAULT_CONTEXT"
+  fi
+  [[ "$FAULT_CONTEXT" != kind-* ]] || die "fault tests require a real Kubernetes or K3s cluster, got $FAULT_CONTEXT"
+}
+
 kubectl_ns() {
-  kubectl --context "$RUSTFS_FAULT_TEST_EXPECTED_CONTEXT" -n "$1" "${@:2}"
+  kubectl --context "$FAULT_CONTEXT" -n "$1" "${@:2}"
 }
 
 kubectl_cluster() {
-  kubectl --context "$RUSTFS_FAULT_TEST_EXPECTED_CONTEXT" "$@"
+  kubectl --context "$FAULT_CONTEXT" "$@"
 }
 
 is_supported_scenario() {
   case "$1" in
     io-eio|pod-kill-one|network-partition-one|io-read-mistake|disk-full|warp-under-chaos|dm-flakey)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_percent_scenario() {
+  case "$1" in
+    io-eio|io-read-mistake|disk-full|warp-under-chaos)
       return 0
       ;;
     *)
@@ -86,6 +188,46 @@ scenario_crd() {
     dm-flakey) echo "" ;;
     *) echo "iochaos.chaos-mesh.org" ;;
   esac
+}
+
+validate_runtime_env_contract() {
+  local scenario="$1" percent
+
+  WORKLOAD_OBJECTS="$(trim_value "$WORKLOAD_OBJECTS")"
+  WORKLOAD_CONCURRENCY="$(trim_value "$WORKLOAD_CONCURRENCY")"
+  BUILD_JOBS="$(trim_value "$BUILD_JOBS")"
+
+  require_positive_integer RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS "$WORKLOAD_OBJECTS"
+  (( 10#$WORKLOAD_OBJECTS >= 4 )) || die "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 4"
+  require_positive_integer RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY "$WORKLOAD_CONCURRENCY"
+  (( 10#$WORKLOAD_CONCURRENCY <= 10#$WORKLOAD_OBJECTS )) || die "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY must be <= RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS"
+  require_optional_positive_integer RUSTFS_FAULT_TEST_DURATION_SECONDS
+  require_optional_unsigned_integer RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS
+  require_optional_unsigned_integer RUSTFS_FAULT_TEST_TIMEOUT_SECONDS
+  require_optional_unsigned_integer RUSTFS_FAULT_TEST_WARP_DURATION_SECONDS
+  require_optional_unsigned_integer RUSTFS_FAULT_TEST_SEED
+  require_optional_bool RUSTFS_FAULT_TEST_USE_CLUSTER_IP
+  require_optional_bool RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION
+
+  percent="$(trim_value "${RUSTFS_FAULT_TEST_PERCENT:-}")"
+  if [[ -n "$percent" ]]; then
+    require_positive_integer RUSTFS_FAULT_TEST_PERCENT "$percent"
+    (( 10#$percent <= 100 )) || die "RUSTFS_FAULT_TEST_PERCENT must be in 1..=100"
+    is_percent_scenario "$scenario" || die "RUSTFS_FAULT_TEST_PERCENT only applies to percent-based IOChaos scenarios"
+    export RUSTFS_FAULT_TEST_PERCENT="$percent"
+  fi
+}
+
+validate_dm_env_contract() {
+  require_nonempty_env RUSTFS_FAULT_TEST_DM_NAME
+  require_nonempty_env RUSTFS_FAULT_TEST_DM_NODE
+  require_nonempty_env RUSTFS_FAULT_TEST_DM_MOUNT_PATH
+  require_nonempty_env RUSTFS_FAULT_TEST_DM_FAULT_TABLE
+
+  require_safe_dm_name RUSTFS_FAULT_TEST_DM_NAME "$RUSTFS_FAULT_TEST_DM_NAME"
+  require_safe_node_name RUSTFS_FAULT_TEST_DM_NODE "$RUSTFS_FAULT_TEST_DM_NODE"
+  require_absolute_non_root_path RUSTFS_FAULT_TEST_DM_MOUNT_PATH "$RUSTFS_FAULT_TEST_DM_MOUNT_PATH"
+  require_safe_image_ref RUSTFS_FAULT_TEST_DM_HELPER_IMAGE "${RUSTFS_FAULT_TEST_DM_HELPER_IMAGE:-rancher/mirrored-library-busybox:1.37.0}"
 }
 
 require_namespace_ownership() {
@@ -108,7 +250,8 @@ prepare_fault_binary() {
     --message-format=json-render-diagnostics
   )
 
-  [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "RUSTFS_FAULT_TEST_BUILD_JOBS must be a positive integer"
+  BUILD_JOBS="$(trim_value "$BUILD_JOBS")"
+  require_positive_integer RUSTFS_FAULT_TEST_BUILD_JOBS "$BUILD_JOBS"
   preflight "$scenario"
   echo "preparing fault-test binary with jobs=$BUILD_JOBS and lowest host priority"
   if command -v ionice >/dev/null 2>&1; then
@@ -163,8 +306,8 @@ require_chaos_ready() {
 require_storage_class() {
   local scenario="$1"
   local storage_class provisioner pv_count
-  storage_class="${RUSTFS_FAULT_TEST_STORAGE_CLASS:-}"
-  [[ -n "$storage_class" ]] || die "RUSTFS_FAULT_TEST_STORAGE_CLASS is required"
+  require_nonempty_env RUSTFS_FAULT_TEST_STORAGE_CLASS
+  storage_class="$RUSTFS_FAULT_TEST_STORAGE_CLASS"
   provisioner="$(kubectl_cluster get storageclass "$storage_class" -o json | jq -r '.provisioner // ""')"
   [[ -n "$provisioner" ]] || die "StorageClass $storage_class has no provisioner"
 
@@ -185,7 +328,7 @@ require_storage_class() {
 
 preflight() {
   local scenario="${1:-io-eio}"
-  local current_context ready_nodes crd
+  local ready_nodes crd
   is_supported_scenario "$scenario" || die "unsupported scenario: $scenario"
 
   require_command cargo
@@ -193,12 +336,10 @@ preflight() {
   require_command kubectl
   require_command nice
   require_command pgrep
-  [[ -n "${RUSTFS_FAULT_TEST_EXPECTED_CONTEXT:-}" ]] || die "RUSTFS_FAULT_TEST_EXPECTED_CONTEXT is required"
-  [[ -n "${RUSTFS_FAULT_TEST_SERVER_IMAGE:-}" ]] || die "RUSTFS_FAULT_TEST_SERVER_IMAGE is required"
+  validate_runtime_env_contract "$scenario"
+  require_nonempty_env RUSTFS_FAULT_TEST_SERVER_IMAGE
 
-  current_context="$(kubectl_context)"
-  [[ "$current_context" == "$RUSTFS_FAULT_TEST_EXPECTED_CONTEXT" ]] || die "current context $current_context does not match expected context $RUSTFS_FAULT_TEST_EXPECTED_CONTEXT"
-  [[ "$current_context" != kind-* ]] || die "fault tests require a real Kubernetes cluster, got $current_context"
+  resolve_fault_context
 
   kubectl_cluster get crd tenants.rustfs.com >/dev/null
   ready_nodes="$(kubectl_cluster get nodes -o json | jq -r '[.items[]
@@ -218,25 +359,18 @@ preflight() {
     require_command warp
   fi
   if [[ "$scenario" == "dm-flakey" ]]; then
-    [[ -n "${RUSTFS_FAULT_TEST_DM_NAME:-}" ]] || die "RUSTFS_FAULT_TEST_DM_NAME is required"
-    [[ -n "${RUSTFS_FAULT_TEST_DM_NODE:-}" ]] || die "RUSTFS_FAULT_TEST_DM_NODE is required"
-    [[ -n "${RUSTFS_FAULT_TEST_DM_MOUNT_PATH:-}" ]] || die "RUSTFS_FAULT_TEST_DM_MOUNT_PATH is required"
-    [[ -n "${RUSTFS_FAULT_TEST_DM_FAULT_TABLE:-}" ]] || die "RUSTFS_FAULT_TEST_DM_FAULT_TABLE is required"
+    validate_dm_env_contract
     kubectl_cluster get namespace "$FAULT_NAMESPACE" >/dev/null 2>&1 || die "dm-flakey requires a pre-created owned fault namespace with privileged Pod Security"
     [[ "$(kubectl_cluster get namespace "$FAULT_NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')" == "privileged" ]] || die "dm-flakey requires pod-security.kubernetes.io/enforce=privileged on $FAULT_NAMESPACE"
   fi
 
-  echo "preflight passed: context=$current_context scenario=$scenario nodes=$ready_nodes storageClass=${RUSTFS_FAULT_TEST_STORAGE_CLASS}"
+  echo "preflight passed: context=$FAULT_CONTEXT scenario=$scenario nodes=$ready_nodes storageClass=${RUSTFS_FAULT_TEST_STORAGE_CLASS} objects=$WORKLOAD_OBJECTS concurrency=$WORKLOAD_CONCURRENCY"
 }
 
 preflight_cleanup() {
-  local current_context
   require_command jq
   require_command kubectl
-  [[ -n "${RUSTFS_FAULT_TEST_EXPECTED_CONTEXT:-}" ]] || die "RUSTFS_FAULT_TEST_EXPECTED_CONTEXT is required"
-  current_context="$(kubectl_context)"
-  [[ "$current_context" == "$RUSTFS_FAULT_TEST_EXPECTED_CONTEXT" ]] || die "current context $current_context does not match expected context $RUSTFS_FAULT_TEST_EXPECTED_CONTEXT"
-  [[ "$current_context" != kind-* ]] || die "fault cleanup requires a real Kubernetes cluster, got $current_context"
+  resolve_fault_context
   require_namespace_ownership
 }
 
@@ -271,9 +405,10 @@ handle_signal() {
 capture_cluster_snapshot() {
   local artifacts="$1" stage="$2"
   kubectl_cluster get nodes -o wide >"$artifacts/nodes-$stage.txt" 2>&1 || true
-  kubectl_cluster get tenants -A -o wide >"$artifacts/tenants-$stage.txt" 2>&1 || true
-  kubectl_cluster get pods -A -o wide >"$artifacts/pods-$stage.txt" 2>&1 || true
-  kubectl_cluster get pv,pvc -A -o wide >"$artifacts/volumes-$stage.txt" 2>&1 || true
+  kubectl_ns "$FAULT_NAMESPACE" get tenants -o wide >"$artifacts/tenants-$stage.txt" 2>&1 || true
+  kubectl_ns "$FAULT_NAMESPACE" get pods -o wide >"$artifacts/pods-$stage.txt" 2>&1 || true
+  kubectl_ns "$FAULT_NAMESPACE" get pvc -o wide >"$artifacts/pvcs-$stage.txt" 2>&1 || true
+  kubectl_cluster get pv -o wide >"$artifacts/pvs-$stage.txt" 2>&1 || true
   kubectl_ns "$CHAOS_NAMESPACE" get iochaos,podchaos,networkchaos -o yaml >"$artifacts/chaos-$stage.yaml" 2>&1 || true
   kubectl_ns "$FAULT_NAMESPACE" get events --sort-by=.lastTimestamp >"$artifacts/events-$stage.txt" 2>&1 || true
 }
@@ -316,27 +451,24 @@ validate_scenario_artifacts() {
   [[ -f "$summary" ]] || die "$scenario did not produce workload-summary.json"
   [[ -f "$recommit" ]] || die "$scenario did not produce recommit-report.json"
 
-  jq -e --arg scenario "$scenario" '
+  jq -e --arg scenario "$scenario" --argjson objects "$WORKLOAD_OBJECTS" --argjson concurrency "$WORKLOAD_CONCURRENCY" '
     .scenario == $scenario
     and (.run_id | length) > 0
     and (.rustfs_image | length) > 0
     and (.storage_class | length) > 0
     and (.context | length) > 0
+    and .workload_objects == $objects
+    and .workload_concurrency == $concurrency
   ' "$metadata" >/dev/null || die "$scenario run metadata is incomplete"
-  jq -e --argjson objects "$EXPECTED_OBJECTS" --argjson concurrency "$EXPECTED_CONCURRENCY" --argjson payload "$EXPECTED_PAYLOAD_BYTES" '
+  jq -e --argjson objects "$WORKLOAD_OBJECTS" --argjson concurrency "$WORKLOAD_CONCURRENCY" '
     .object_count == $objects
     and .concurrency == $concurrency
-    and .total_payload_bytes == $payload
-    and .size_distribution == [
-      {"size_bytes":4096,"object_count":34000},
-      {"size_bytes":16384,"object_count":4000},
-      {"size_bytes":8388608,"object_count":1600},
-      {"size_bytes":16777216,"object_count":400}
-    ]
+    and ([.size_distribution[].object_count] | add) == $objects
+    and ([.size_distribution[] | (.size_bytes * .object_count)] | add) == .total_payload_bytes
   ' "$plan" >/dev/null || die "$scenario workload plan does not match the required profile"
   jq -e '.injected == true and .active_during_workload == true and .recovered == true' "$evidence" >/dev/null || die "$scenario fault evidence is incomplete"
   jq -e '(.active_snapshots | length) > 0 and (.workload_snapshots | length) > 0' "$evidence" >/dev/null || die "$scenario fault evidence snapshots are missing"
-  jq -e --argjson objects "$EXPECTED_OBJECTS" '
+  jq -e --argjson objects "$WORKLOAD_OBJECTS" '
     .committed_puts == $objects
     and (.missing_committed_objects | length) == 0
     and (.hash_mismatches | length) == 0
@@ -400,8 +532,8 @@ run_scenario() {
     set +e
     RUSTFS_FAULT_TEST_DESTRUCTIVE=1 \
     RUSTFS_FAULT_TEST_SCENARIO="$scenario" \
-    RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS="$EXPECTED_OBJECTS" \
-    RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY="$EXPECTED_CONCURRENCY" \
+    RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS="$WORKLOAD_OBJECTS" \
+    RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY="$WORKLOAD_CONCURRENCY" \
     RUSTFS_FAULT_TEST_DURATION_SECONDS="${RUSTFS_FAULT_TEST_DURATION_SECONDS:-7200}" \
     RUSTFS_FAULT_TEST_ARTIFACTS="$artifacts" \
     "$FAULT_TEST_BINARY" --ignored --test-threads=1 --nocapture \
