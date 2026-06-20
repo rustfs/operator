@@ -25,8 +25,7 @@ use rustfs_operator_e2e::framework::{
     fault_config::FaultTestConfig,
     fault_plan::{FaultInjection, FaultKind, FaultPlan},
     fault_scenarios::{self, FaultBackend, FaultIsolation, FaultScenario},
-    history::OperationOutcome,
-    history::Recorder,
+    history::{OperationOutcome, OperationRecord, Recorder},
     host_faults::{self, DmFlakeyGuard, DmFlakeySpec, DmStatusSnapshot},
     kube_client,
     kubectl::Kubectl,
@@ -94,12 +93,73 @@ async fn run_fault_case(
     plan: &FaultPlan,
 ) -> Result<()> {
     let spec = fault_scenarios::scenario_spec(&scenario.name)?;
-    require_fault_backends(config, plan)?;
-    cleanup_fault_backends(config, plan)?;
+    if let Err(error) = require_fault_backends(config, plan) {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "fault-backend-preflight",
+                "environment_or_fault_backend",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = cleanup_fault_backends(config, plan) {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "fault-backend-pre-cleanup",
+                "environment_or_fault_backend",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
 
-    prepare_fault_fixture(&config.cluster, spec.isolation)?;
-    wait_for_ready_tenant(&config.cluster).await?;
-    wait_for_stable_rustfs_pods(&config.cluster, RUSTFS_POD_STABLE_WINDOW).await?;
+    if let Err(error) = prepare_fault_fixture(&config.cluster, spec.isolation) {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "fixture-prepare",
+                "test_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = wait_for_ready_tenant(&config.cluster).await {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "tenant-ready-before-fault",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = wait_for_stable_rustfs_pods(&config.cluster, RUSTFS_POD_STABLE_WINDOW).await
+    {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "pod-stability-before-fault",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
 
     let run_id = format!("run-{}", Uuid::new_v4());
     let workload_seed = config.workload_seed.unwrap_or_else(generated_seed);
@@ -132,34 +192,148 @@ async fn run_fault_case(
     );
 
     let cluster = &config.cluster;
-    let (endpoint, mut port_forward) = s3_access(config)?;
-    ensure_s3_access(&mut port_forward, cluster, &endpoint).await?;
+    let (endpoint, mut port_forward) = match s3_access(config) {
+        Ok(access) => access,
+        Err(error) => {
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "s3-endpoint",
+                    "test_or_environment",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "initial-s3-access",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
 
     let (access_key, secret_key) = resources::test_credentials();
-    let s3 = S3WorkloadClient::new(
+    let s3 = match S3WorkloadClient::new(
         &endpoint,
         &bucket,
         access_key,
         secret_key,
         config.request_timeout,
     )
-    .await?;
-    let bucket_outcome = s3.create_bucket(&history).await?;
-    ensure!(
-        bucket_outcome == OperationOutcome::Ok,
-        "fault workload bucket creation did not succeed: {bucket_outcome:?}"
-    );
+    .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "s3-client",
+                    "test_or_environment",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    let bucket_outcome = match s3.create_bucket(&history).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "bucket-create",
+                    "test_harness",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    if bucket_outcome != OperationOutcome::Ok {
+        let message = format!("fault workload bucket creation did not succeed: {bucket_outcome:?}");
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "bucket-create",
+                "product_or_environment",
+                message.clone(),
+            ),
+        )?;
+        bail!("{message}");
+    }
 
-    let prefilled = prefill_objects(
+    let prefilled = match prefill_objects(
         &s3,
         &history,
         &run_id,
         &workload_plan,
         scenario.prefill_count(),
     )
-    .await?;
-    let pods_before = rustfs_pod_identities(cluster)?;
-    let mut fault = AppliedFaults::apply(config, collector, scenario, plan, &run_id)?;
+    .await
+    {
+        Ok(prefilled) => prefilled,
+        Err(error) => {
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "prefill",
+                    "product_or_environment",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    let pods_before = match rustfs_pod_identities(cluster) {
+        Ok(pods) => pods,
+        Err(error) => {
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "pod-identity-before-fault",
+                    "test_or_environment",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    let mut fault = match AppliedFaults::apply(config, collector, scenario, plan, &run_id) {
+        Ok(fault) => fault,
+        Err(error) => {
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "fault-apply",
+                    "environment_or_fault_backend",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
 
     if let Err(error) = fault.wait_active(cluster.timeout) {
         collect_fault_artifacts(collector, scenario.case_name, &fault, "wait-active-failed")?;
@@ -414,7 +588,7 @@ async fn run_fault_case(
             FailureSummary::new(
                 &scenario.name,
                 "recommit-unconfirmed",
-                "product_or_environment",
+                recommit_report.failure_classification(),
                 message.clone(),
             ),
         )?;
@@ -1531,21 +1705,11 @@ async fn recommit_unconfirmed_objects(
         let history = history.clone();
         async move {
             let prepared = object.prepare();
-            match s3.put_object(&prepared, &history).await {
-                Ok(outcome) => RecommitAttempt {
-                    key: object.key,
-                    size_bytes: object.size_bytes,
-                    sha256: object.sha256,
-                    outcome,
-                    error: None,
-                },
-                Err(error) => RecommitAttempt {
-                    key: object.key,
-                    size_bytes: object.size_bytes,
-                    sha256: object.sha256,
-                    outcome: OperationOutcome::Unknown,
-                    error: Some(error.to_string()),
-                },
+            match s3.put_object_record(&prepared, &history).await {
+                Ok(record) => RecommitAttempt::from_record(object, record),
+                Err(error) => {
+                    RecommitAttempt::from_harness_error(object, format!("record PUT: {error}"))
+                }
             }
         }
     });
@@ -1562,6 +1726,7 @@ struct RecommitReport {
     attempted: usize,
     committed: usize,
     failed: usize,
+    harness_errors: usize,
     attempts: Vec<RecommitAttempt>,
 }
 
@@ -1569,33 +1734,50 @@ impl RecommitReport {
     fn from_attempts(attempts: Vec<RecommitAttempt>) -> Self {
         let committed = attempts
             .iter()
-            .filter(|attempt| attempt.outcome == OperationOutcome::Ok)
+            .filter(|attempt| attempt.outcome == Some(OperationOutcome::Ok))
+            .count();
+        let failed = attempts
+            .iter()
+            .filter(|attempt| attempt.is_s3_failure())
+            .count();
+        let harness_errors = attempts
+            .iter()
+            .filter(|attempt| attempt.is_harness_error())
             .count();
         Self {
             attempted: attempts.len(),
             committed,
-            failed: attempts.len() - committed,
+            failed,
+            harness_errors,
             attempts,
         }
     }
 
     fn has_failures(&self) -> bool {
-        self.failed > 0
+        self.failed > 0 || self.harness_errors > 0
+    }
+
+    fn failure_classification(&self) -> &'static str {
+        if self.harness_errors > 0 {
+            "test_harness"
+        } else {
+            "product_or_environment"
+        }
     }
 
     fn failure_message(&self) -> String {
         let sample = self
             .attempts
             .iter()
-            .filter(|attempt| attempt.outcome != OperationOutcome::Ok)
+            .filter_map(RecommitAttempt::failure_sample)
             .take(5)
-            .map(|attempt| format!("{}={:?}", attempt.key, attempt.outcome))
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "{} of {} previously unconfirmed PUTs did not commit after recovery{}",
+            "{} of {} previously unconfirmed PUTs did not commit after recovery; harness_errors={}{}",
             self.failed,
             self.attempted,
+            self.harness_errors,
             if sample.is_empty() {
                 String::new()
             } else {
@@ -1610,8 +1792,67 @@ struct RecommitAttempt {
     key: String,
     size_bytes: usize,
     sha256: String,
-    outcome: OperationOutcome,
+    outcome: Option<OperationOutcome>,
+    http_status: Option<u16>,
     error: Option<String>,
+    harness_error: Option<String>,
+}
+
+impl RecommitAttempt {
+    fn from_record(object: ObjectSpec, record: OperationRecord) -> Self {
+        Self {
+            key: object.key,
+            size_bytes: object.size_bytes,
+            sha256: object.sha256,
+            outcome: Some(record.outcome),
+            http_status: record.http_status,
+            error: record.error,
+            harness_error: None,
+        }
+    }
+
+    fn from_harness_error(object: ObjectSpec, error: String) -> Self {
+        Self {
+            key: object.key,
+            size_bytes: object.size_bytes,
+            sha256: object.sha256,
+            outcome: None,
+            http_status: None,
+            error: None,
+            harness_error: Some(error),
+        }
+    }
+
+    fn is_s3_failure(&self) -> bool {
+        matches!(
+            self.outcome,
+            Some(OperationOutcome::Failed | OperationOutcome::Timeout | OperationOutcome::Unknown)
+        )
+    }
+
+    fn is_harness_error(&self) -> bool {
+        self.harness_error.is_some()
+    }
+
+    fn failure_sample(&self) -> Option<String> {
+        if let Some(error) = &self.harness_error {
+            return Some(format!("{}=harness_error({error})", self.key));
+        }
+        let outcome = self.outcome?;
+        if outcome == OperationOutcome::Ok {
+            return None;
+        }
+        let status = self
+            .http_status
+            .map(|status| format!(" status={status}"))
+            .unwrap_or_default();
+        let error = self
+            .error
+            .as_ref()
+            .map(|error| format!(" error={error}"))
+            .unwrap_or_default();
+        Some(format!("{}={outcome:?}{status}{error}", self.key))
+    }
 }
 
 #[derive(Debug)]
@@ -1820,23 +2061,58 @@ mod tests {
                 key: "object-a".to_string(),
                 size_bytes: 4096,
                 sha256: "sha-a".to_string(),
-                outcome: OperationOutcome::Ok,
+                outcome: Some(OperationOutcome::Ok),
+                http_status: Some(200),
                 error: None,
+                harness_error: None,
             },
             RecommitAttempt {
                 key: "object-b".to_string(),
                 size_bytes: 4096,
                 sha256: "sha-b".to_string(),
-                outcome: OperationOutcome::Failed,
+                outcome: Some(OperationOutcome::Failed),
+                http_status: Some(503),
                 error: Some("service unavailable".to_string()),
+                harness_error: None,
             },
         ]);
 
         assert_eq!(report.attempted, 2);
         assert_eq!(report.committed, 1);
         assert_eq!(report.failed, 1);
+        assert_eq!(report.harness_errors, 0);
         assert!(report.has_failures());
-        assert!(report.failure_message().contains("object-b=Failed"));
+        assert!(
+            report
+                .failure_message()
+                .contains("object-b=Failed status=503")
+        );
+        assert_eq!(report.failure_classification(), "product_or_environment");
+    }
+
+    #[test]
+    fn recommit_report_separates_harness_errors_from_s3_failures() {
+        let report = RecommitReport::from_attempts(vec![RecommitAttempt {
+            key: "object-a".to_string(),
+            size_bytes: 4096,
+            sha256: "sha-a".to_string(),
+            outcome: None,
+            http_status: None,
+            error: None,
+            harness_error: Some("record PUT: disk full".to_string()),
+        }]);
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.committed, 0);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.harness_errors, 1);
+        assert!(report.has_failures());
+        assert_eq!(report.failure_classification(), "test_harness");
+        assert!(
+            report
+                .failure_message()
+                .contains("object-a=harness_error(record PUT: disk full)")
+        );
     }
 
     #[test]
