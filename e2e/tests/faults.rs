@@ -239,6 +239,26 @@ async fn run_fault_case(
     wait_for_stable_rustfs_pods(cluster, RUSTFS_POD_STABLE_WINDOW).await?;
     let pods_after = rustfs_pod_identities(cluster)?;
     ensure_s3_access(&mut port_forward, cluster, &endpoint).await?;
+    let recovered_evidence = FaultEvidence {
+        scenario: scenario.name.clone(),
+        backend: plan.backend_summary(),
+        target: plan.target_summary(),
+        injected: true,
+        active_during_workload: true,
+        recovered: true,
+        client_disruptions: workload.summary.disrupted(),
+        workload_plan: workload_plan.clone(),
+        pods_before: pods_before.clone(),
+        pods_after: pods_after.clone(),
+        active_snapshots: active_snapshots.clone(),
+        workload_snapshots: workload_snapshots.clone(),
+        dm_recovery_snapshot: fault.recovery_dm_snapshot(),
+    };
+    collector.write_text(
+        scenario.case_name,
+        "fault-evidence.json",
+        &serde_json::to_string_pretty(&recovered_evidence)?,
+    )?;
     workload.summary.recommitted_after_recovery = recommit_unconfirmed_objects(
         &s3,
         &history,
