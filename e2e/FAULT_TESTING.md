@@ -102,6 +102,10 @@ make -C e2e fault-cleanup
 | `fault-run-dm` | 使用预先准备的静态 PV 和 DM 设备运行 `dm-flakey`。 / Runs `dm-flakey` with pre-provisioned static PVs and DM storage. |
 | `fault-cleanup` | 安全删除 owned namespace 和 managed Chaos。 / Safely removes the owned namespace and managed Chaos. |
 
+`fault-run*` 会先用单 job、最低主机优先级预编译精确的 `faults` 测试二进制，再等待 60 秒并确认原有 RustFS Pod 的 UID、重启数和 Ready 状态没有变化。预编译不计入故障窗口；如果编译影响现有 Tenant，runner 会在创建故障 Tenant 前停止。
+
+Before creating a fault Tenant, every `fault-run*` target prebuilds the exact `faults` binary with one job and the lowest host priority. It then verifies for 60 seconds that every pre-existing RustFS Pod keeps the same UID, restart count, and Ready state. Compilation is outside the fault window, and the runner stops if the build disturbs an existing Tenant.
+
 ## 4. Cluster Preparation / 集群准备
 
 ### 4.1 Required Tools / 必需工具
@@ -415,6 +419,8 @@ kubectl get namespace rustfs-fault-test
 | `RUSTFS_FAULT_TEST_SCENARIOS` | six regular scenarios | `fault-run-regular` 的空格分隔场景列表。 / Space-separated regular scenario list. |
 | `RUSTFS_FAULT_TEST_SEED` | generated | 固定后可重放相同对象。 / Replays the same objects when set. |
 | `RUSTFS_FAULT_TEST_USE_CLUSTER_IP` | `false` | 集群节点/Pod 内建议设为 `1`。 / Set to `1` on a node or in-cluster runner. |
+| `RUSTFS_FAULT_TEST_BUILD_JOBS` | `1` | 预编译并行度；小型控制面保持为 1。 / Prebuild parallelism; keep at 1 on small control planes. |
+| `RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS` | `60` | 预编译后原有 RustFS Pod 的稳定校验时间。 / Existing-Pod stability check after prebuild. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40000` | Make runner 强制验收该值。 / Required object count. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `100` | Make runner 强制验收该值。 / Required concurrency. |
 | `RUSTFS_FAULT_TEST_DURATION_SECONDS` | `7200` | 最大故障 TTL。 / Maximum fault TTL. |
