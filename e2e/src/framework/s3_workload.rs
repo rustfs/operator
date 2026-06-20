@@ -587,9 +587,9 @@ mod tests {
 
     #[test]
     fn workload_plan_is_weighted_shuffled_and_reproducible() {
-        let plan = WorkloadPlan::seeded(42, 40000, 100);
-        let same = WorkloadPlan::seeded(42, 40000, 100);
-        let different = WorkloadPlan::seeded(43, 40000, 100);
+        let plan = WorkloadPlan::seeded(42, 40000, 80);
+        let same = WorkloadPlan::seeded(42, 40000, 80);
+        let different = WorkloadPlan::seeded(43, 40000, 80);
 
         assert_eq!(plan, same);
         assert_ne!(plan.sizes, different.sizes);
@@ -606,5 +606,6 @@ mod tests {
             ]
         );
         assert_eq!(plan.total_payload_bytes, 20_337_459_200);
+        assert_eq!(plan.concurrency, 80);
     }
 }

@@ -101,11 +101,7 @@ impl FaultTestConfig {
             )),
             percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", default_percent),
             workload_objects: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS", 40000),
-            workload_concurrency: env_usize(
-                &get_env,
-                "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY",
-                100,
-            ),
+            workload_concurrency: env_usize(&get_env, "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY", 80),
             workload_seed: env_optional_u64(&get_env, "RUSTFS_FAULT_TEST_SEED")?,
             request_timeout: Duration::from_secs(env_u64(
                 &get_env,
@@ -304,7 +300,7 @@ mod tests {
         assert_eq!(config.duration, std::time::Duration::from_secs(7200));
         assert_eq!(config.percent, 20);
         assert_eq!(config.workload_objects, 40000);
-        assert_eq!(config.workload_concurrency, 100);
+        assert_eq!(config.workload_concurrency, 80);
         assert_eq!(config.workload_seed, None);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
         assert!(!config.use_cluster_ip);

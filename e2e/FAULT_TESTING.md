@@ -18,7 +18,7 @@ limitations under the License.
 
 本手册是 Agent 和开发人员使用 `e2e` package 故障测试工具的唯一操作入口。它说明执行步骤、步骤原因、安全边界、验收证据和清理方式。
 
-This manual is the single operational entry point for agents and developers using the fault-test tooling in the `e2e` package. It explains the steps, reasons, safety boundaries, evidence, and cleanup.
+This manual is the single operational entry point for agents and developers using the fault-test tooling in the `e2e` package. Fault-test commands, prerequisites, safety limits, evidence, and cleanup are intentionally kept here instead of duplicated in README files.
 
 ## 1. Purpose And Safety / 目的与安全边界
 
@@ -63,7 +63,7 @@ Each scenario deterministically generates object content and size order from a s
 
 ```text
 objects:           40,000
-concurrency:       100
+concurrency:       80
 payload/scenario:  20,337,459,200 bytes (~18.94GiB)
 PVCs:              4 × 100Gi
 maximum fault TTL: 7,200 seconds
@@ -105,6 +105,16 @@ make -C e2e fault-cleanup
 `fault-run*` 会先用单 job、最低主机优先级预编译精确的 `faults` 测试二进制，再等待 60 秒并确认原有 RustFS Pod 的 UID、重启数和 Ready 状态没有变化。故障窗口直接运行该二进制，不再次调用 Cargo。预编译不计入故障窗口；如果编译影响现有 Tenant，runner 会在创建故障 Tenant 前停止。
 
 Before creating a fault Tenant, every `fault-run*` target prebuilds the exact `faults` binary with one job and the lowest host priority. It then verifies for 60 seconds that every pre-existing RustFS Pod keeps the same UID, restart count, and Ready state. The fault window executes that binary directly without invoking Cargo again. Compilation is outside the fault window, and the runner stops if the build disturbs an existing Tenant.
+
+### 3.1 Recommended Flow / 推荐执行顺序
+
+1. 运行 `make -C e2e fault-check`，先确认本地代码、脚本和普通测试可用。 / Run `make -C e2e fault-check` first to validate code, scripts, and non-live tests.
+2. 准备真实测试集群、专用 StorageClass、Chaos Mesh 和固定 digest 的 RustFS image。 / Prepare the real test cluster, dedicated StorageClass, Chaos Mesh, and a pinned RustFS image digest.
+3. 导出 `RUSTFS_FAULT_TEST_EXPECTED_CONTEXT`、`RUSTFS_FAULT_TEST_STORAGE_CLASS` 和 `RUSTFS_FAULT_TEST_SERVER_IMAGE`。 / Export the required context, StorageClass, and image variables.
+4. 先执行 `make -C e2e fault-preflight SCENARIO=io-eio`，再单独跑 `io-eio`。 / Run `io-eio` preflight first, then run `io-eio` alone.
+5. `io-eio` 通过后再执行 `make -C e2e fault-run-regular`。 / After `io-eio` passes, run the remaining regular scenarios with `fault-run-regular`.
+6. 只有准备好静态 Local PV 和 Device Mapper 后，才执行 `make -C e2e fault-run-dm`。 / Run `fault-run-dm` only after static Local PVs and Device Mapper are ready.
+7. 结束后先收集 artifacts，再执行 `make -C e2e fault-cleanup`。 / Collect artifacts before running `fault-cleanup`.
 
 ## 4. Cluster Preparation / 集群准备
 
@@ -172,9 +182,9 @@ Non-K3s clusters must use their actual container runtime socket.
 
 ## 5. Regular Scenarios / 常规场景
 
-先固定 context、动态 StorageClass 和 RustFS image digest。测试机位于集群节点或 Pod 内时使用 ClusterIP，避免 100 并发经过 `kubectl port-forward`。
+先固定 context、动态 StorageClass 和 RustFS image digest。测试机位于集群节点或 Pod 内时使用 ClusterIP，避免 80 并发经过 `kubectl port-forward`。
 
-Pin the context, dynamic StorageClass, and RustFS image digest. Use ClusterIP when the runner is on a cluster node or in a Pod so 100 concurrent requests do not traverse `kubectl port-forward`.
+Pin the context, dynamic StorageClass, and RustFS image digest. Use ClusterIP when the runner is on a cluster node or in a Pod so 80 concurrent requests do not traverse `kubectl port-forward`.
 
 ```bash
 export RUSTFS_FAULT_TEST_EXPECTED_CONTEXT=default
@@ -362,12 +372,12 @@ Chaos or DM snapshots
 
 - 测试退出码为 0。
 - `fault-evidence.json` 的 `injected`、`active_during_workload`、`recovered` 都为 `true`。
-- `workload-plan.json` 精确记录 40,000 对象、100 并发和四档尺寸分布。
+- `workload-plan.json` 精确记录 40,000 对象、80 并发和四档尺寸分布。
 - `checker-report.json` 的 `committed_puts=40000`，并且 missing、hash mismatch、successful corrupted read、LIST warning 均为空。
 - fault Tenant 恢复 Ready；所有原有非 fault Tenant 和节点保持 Ready。
 - The test exits with zero.
 - `fault-evidence.json` reports `injected`, `active_during_workload`, and `recovered` as `true`.
-- `workload-plan.json` reports exactly 40,000 objects, concurrency 100, and the four size classes.
+- `workload-plan.json` reports exactly 40,000 objects, concurrency 80, and the four size classes.
 - `checker-report.json` reports `committed_puts=40000` with no missing object, hash mismatch, successful corrupted read, or LIST warning.
 - The fault Tenant recovers Ready while every pre-existing non-fault Tenant and node remains Ready.
 
@@ -422,7 +432,7 @@ kubectl get namespace rustfs-fault-test
 | `RUSTFS_FAULT_TEST_BUILD_JOBS` | `1` | 预编译并行度；小型控制面保持为 1。 / Prebuild parallelism; keep at 1 on small control planes. |
 | `RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS` | `60` | 预编译后原有 RustFS Pod 的稳定校验时间。 / Existing-Pod stability check after prebuild. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40000` | Make runner 强制验收该值。 / Required object count. |
-| `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `100` | Make runner 强制验收该值。 / Required concurrency. |
+| `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `80` | Make runner 强制验收该值。 / Required concurrency. |
 | `RUSTFS_FAULT_TEST_DURATION_SECONDS` | `7200` | 最大故障 TTL。 / Maximum fault TTL. |
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `30` | 单次 S3 请求超时。 / Per-request S3 timeout. |
 | `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | 是否要求客户端可见错误。 / Whether client-visible disruption is mandatory. |
