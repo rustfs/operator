@@ -40,12 +40,12 @@ annotation: rustfs.com/fault-test-tenant=fault-test-tenant
 - 当前 context 必须与 `RUSTFS_FAULT_TEST_EXPECTED_CONTEXT` 完全一致，并且不能是 `kind-*`。
 - 四个 RustFS 测试 Pod 必须调度到至少四个 Ready 节点。
 - 常规场景使用独立动态 StorageClass；`dm-flakey` 使用独立静态 Local PV StorageClass。
-- Make 编排器会监控所有节点和运行前已有的非 fault Tenant；任一异常会撤销 managed Chaos 并停止测试。
+- Make 编排器会监控 Ready 节点数量；常规 Chaos 场景还会监控 Chaos Mesh 健康。其他 Tenant 不参与 preflight、health guard 或通过判定。
 - `fault-cleanup` 只删除带正确所有权标记的 namespace 和 Chaos，不删除外部 StorageClass、PV 或主机设备。
 - The current context must exactly match `RUSTFS_FAULT_TEST_EXPECTED_CONTEXT` and must not be `kind-*`.
 - The four RustFS test Pods require at least four Ready schedulable nodes.
 - Regular scenarios use a dedicated dynamic StorageClass; `dm-flakey` uses a dedicated static Local PV StorageClass.
-- The Make runner monitors every node and every pre-existing non-fault Tenant. It removes managed Chaos and stops on degradation.
+- The Make runner monitors the Ready node count, and regular Chaos scenarios also monitor Chaos Mesh health. Other Tenants do not participate in preflight, health-guard, or pass/fail decisions.
 - `fault-cleanup` removes only the owned namespace and managed Chaos. It never removes external StorageClasses, PVs, or host devices.
 
 ## 2. Workload Profile / 工作负载
@@ -96,15 +96,15 @@ make -C e2e fault-cleanup
 | Target | Behavior / 行为 |
 | --- | --- |
 | `fault-check` | 单 job Rust fmt/test/clippy 和 Bash 语法检查；不访问集群。 / Single-job Rust fmt, tests, clippy, and Bash syntax; no cluster mutation. |
-| `fault-preflight` | 校验 context、CRD、StorageClass、Chaos、节点、namespace 所有权和现有 Tenant。 / Validates context, CRDs, storage, Chaos, nodes, ownership, and existing Tenants. |
+| `fault-preflight` | 校验 context、CRD、StorageClass、Chaos、节点和 namespace 所有权。 / Validates context, CRDs, storage, Chaos, nodes, and namespace ownership. |
 | `fault-run` | 运行一个场景，持续健康守护并验收 artifacts。 / Runs one guarded scenario and validates artifacts. |
 | `fault-run-regular` | 串行运行六个常规场景，首败停止。 / Runs six regular scenarios serially and stops on first failure. |
 | `fault-run-dm` | 使用预先准备的静态 PV 和 DM 设备运行 `dm-flakey`。 / Runs `dm-flakey` with pre-provisioned static PVs and DM storage. |
 | `fault-cleanup` | 安全删除 owned namespace 和 managed Chaos。 / Safely removes the owned namespace and managed Chaos. |
 
-`fault-run*` 会先用单 job、最低主机优先级预编译精确的 `faults` 测试二进制，再等待 60 秒并确认原有 RustFS Pod 的 UID、重启数和 Ready 状态没有变化。故障窗口直接运行该二进制，不再次调用 Cargo。预编译不计入故障窗口；如果编译影响现有 Tenant，runner 会在创建故障 Tenant 前停止。
+`fault-run*` 会先用单 job、最低主机优先级预编译精确的 `faults` 测试二进制。故障窗口直接运行该二进制，不再次调用 Cargo。预编译不计入故障窗口；预编译前后都会重新执行 preflight。
 
-Before creating a fault Tenant, every `fault-run*` target prebuilds the exact `faults` binary with one job and the lowest host priority. It then verifies for 60 seconds that every pre-existing RustFS Pod keeps the same UID, restart count, and Ready state. The fault window executes that binary directly without invoking Cargo again. Compilation is outside the fault window, and the runner stops if the build disturbs an existing Tenant.
+Before creating a fault Tenant, every `fault-run*` target prebuilds the exact `faults` binary with one job and the lowest host priority. The fault window executes that binary directly without invoking Cargo again. Compilation is outside the fault window, and the runner reruns preflight before and after prebuild.
 
 ### 3.1 Recommended Flow / 推荐执行顺序
 
@@ -357,11 +357,14 @@ Each scenario directory contains at least:
 ```text
 test.log
 health-watch.log
+run-metadata.json
 workload-plan.json
 history.jsonl
 workload-summary.json
+recommit-report.json
 checker-report.json
 fault-evidence.json
+failure-summary.json / runner-failure-summary.json (failure only)
 nodes-before.txt / nodes-after.txt
 tenants-before.txt / tenants-after.txt
 pods-before.txt / pods-after.txt
@@ -371,15 +374,19 @@ Chaos or DM snapshots
 通过条件 / Pass criteria:
 
 - 测试退出码为 0。
+- `run-metadata.json` 记录 scenario、run id、context、StorageClass、RustFS image 和 workload 参数。
 - `fault-evidence.json` 的 `injected`、`active_during_workload`、`recovered` 都为 `true`。
 - `workload-plan.json` 精确记录 40,000 对象、80 并发和四档尺寸分布。
+- `recommit-report.json` 的 `attempted == committed` 且 `failed == 0`。
 - `checker-report.json` 的 `committed_puts=40000`，并且 missing、hash mismatch、successful corrupted read、LIST warning 均为空。
-- fault Tenant 恢复 Ready；所有原有非 fault Tenant 和节点保持 Ready。
+- fault Tenant 恢复 Ready；Ready 节点数量不下降；常规 Chaos 场景中 Chaos Mesh 保持健康。
 - The test exits with zero.
+- `run-metadata.json` records the scenario, run id, context, StorageClass, RustFS image, and workload parameters.
 - `fault-evidence.json` reports `injected`, `active_during_workload`, and `recovered` as `true`.
 - `workload-plan.json` reports exactly 40,000 objects, concurrency 80, and the four size classes.
+- `recommit-report.json` reports `attempted == committed` and `failed == 0`.
 - `checker-report.json` reports `committed_puts=40000` with no missing object, hash mismatch, successful corrupted read, or LIST warning.
-- The fault Tenant recovers Ready while every pre-existing non-fault Tenant and node remains Ready.
+- The fault Tenant recovers Ready, the Ready node count does not drop, and Chaos Mesh remains healthy during regular Chaos scenarios.
 
 客户端没有看到错误并不表示故障无效。故障是否生效由 Chaos/DM 后端证据判断；客户端 disruption 单独记录。
 
@@ -430,7 +437,6 @@ kubectl get namespace rustfs-fault-test
 | `RUSTFS_FAULT_TEST_SEED` | generated | 固定后可重放相同对象。 / Replays the same objects when set. |
 | `RUSTFS_FAULT_TEST_USE_CLUSTER_IP` | `false` | 集群节点/Pod 内建议设为 `1`。 / Set to `1` on a node or in-cluster runner. |
 | `RUSTFS_FAULT_TEST_BUILD_JOBS` | `1` | 预编译并行度；小型控制面保持为 1。 / Prebuild parallelism; keep at 1 on small control planes. |
-| `RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS` | `60` | 预编译后原有 RustFS Pod 的稳定校验时间。 / Existing-Pod stability check after prebuild. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40000` | Make runner 强制验收该值。 / Required object count. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `80` | Make runner 强制验收该值。 / Required concurrency. |
 | `RUSTFS_FAULT_TEST_DURATION_SECONDS` | `7200` | 最大故障 TTL。 / Maximum fault TTL. |
