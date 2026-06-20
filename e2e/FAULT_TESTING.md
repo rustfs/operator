@@ -91,7 +91,7 @@ make -C e2e fault-cleanup
 
 | Target | Behavior / 行为 |
 | --- | --- |
-| `fault-check` | Rust fmt/test/clippy 和 Bash 语法检查；不访问集群。 / Rust fmt, tests, clippy, and Bash syntax; no cluster mutation. |
+| `fault-check` | 单 job Rust fmt/test/clippy 和 Bash 语法检查；不访问集群。 / Single-job Rust fmt, tests, clippy, and Bash syntax; no cluster mutation. |
 | `fault-preflight` | 校验 context、CRD、StorageClass、Chaos、节点、namespace 所有权和现有 Tenant。 / Validates context, CRDs, storage, Chaos, nodes, ownership, and existing Tenants. |
 | `fault-run` | 运行一个场景，持续健康守护并验收 artifacts。 / Runs one guarded scenario and validates artifacts. |
 | `fault-run-regular` | 串行运行六个常规场景，首败停止。 / Runs six regular scenarios serially and stops on first failure. |
