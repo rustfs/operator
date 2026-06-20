@@ -350,25 +350,49 @@ make -C e2e fault-run-dm
 
 ## 7. Evidence And Acceptance / 证据与验收
 
-每个场景目录至少包含：
+每个场景目录由 runner 固定创建：
 
-Each scenario directory contains at least:
+Each scenario directory is created by the runner with:
 
 ```text
 test.log
 health-watch.log
-run-metadata.json
-workload-plan.json
-history.jsonl
-workload-summary.json
-recommit-report.json
-checker-report.json
-fault-evidence.json
-failure-summary.json / runner-failure-summary.json (failure only)
 nodes-before.txt / nodes-after.txt
 tenants-before.txt / tenants-after.txt
 pods-before.txt / pods-after.txt
 Chaos or DM snapshots
+```
+
+Rust 测试初始化后会写入：
+
+After Rust test initialization, it contains:
+
+```text
+run-metadata.json
+workload-plan.json
+history.jsonl
+```
+
+workload 执行后会写入：
+
+After workload execution, it contains:
+
+```text
+workload-summary.json
+```
+
+Successful recovery and reconciliation also contain:
+
+```text
+fault-evidence.json
+recommit-report.json
+checker-report.json
+```
+
+Failure paths contain the artifacts that were reachable before the failure plus:
+
+```text
+failure-summary.json / runner-failure-summary.json
 ```
 
 通过条件 / Pass criteria:
@@ -377,14 +401,14 @@ Chaos or DM snapshots
 - `run-metadata.json` 记录 scenario、run id、context、StorageClass、RustFS image 和 workload 参数。
 - `fault-evidence.json` 的 `injected`、`active_during_workload`、`recovered` 都为 `true`。
 - `workload-plan.json` 精确记录 40,000 对象、80 并发和四档尺寸分布。
-- `recommit-report.json` 的 `attempted == committed` 且 `failed == 0`。
+- `recommit-report.json` 的 `attempted == committed`、`failed == 0` 且 `harness_errors == 0`。
 - `checker-report.json` 的 `committed_puts=40000`，并且 missing、hash mismatch、successful corrupted read、LIST warning 均为空。
 - fault Tenant 恢复 Ready；Ready 节点数量不下降；常规 Chaos 场景中 Chaos Mesh 保持健康。
 - The test exits with zero.
 - `run-metadata.json` records the scenario, run id, context, StorageClass, RustFS image, and workload parameters.
 - `fault-evidence.json` reports `injected`, `active_during_workload`, and `recovered` as `true`.
 - `workload-plan.json` reports exactly 40,000 objects, concurrency 80, and the four size classes.
-- `recommit-report.json` reports `attempted == committed` and `failed == 0`.
+- `recommit-report.json` reports `attempted == committed`, `failed == 0`, and `harness_errors == 0`.
 - `checker-report.json` reports `committed_puts=40000` with no missing object, hash mismatch, successful corrupted read, or LIST warning.
 - The fault Tenant recovers Ready, the Ready node count does not drop, and Chaos Mesh remains healthy during regular Chaos scenarios.
 

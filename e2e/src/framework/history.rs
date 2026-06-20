@@ -129,7 +129,7 @@ impl Recorder {
         outcome: OperationOutcome,
         http_status: Option<u16>,
         error: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<OperationRecord> {
         record.ended_at_ms = now_ms();
         record.outcome = outcome;
         record.http_status = http_status;
@@ -139,8 +139,8 @@ impl Recorder {
         serde_json::to_writer(&mut state.writer, &record)?;
         state.writer.write_all(b"\n")?;
         state.writer.flush()?;
-        state.records.push(record);
-        Ok(())
+        state.records.push(record.clone());
+        Ok(record)
     }
 
     pub fn records(&self) -> Vec<OperationRecord> {

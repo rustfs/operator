@@ -348,6 +348,7 @@ validate_scenario_artifacts() {
   jq -e '
     .attempted == .committed
     and .failed == 0
+    and .harness_errors == 0
     and (.attempts | length) == .attempted
   ' "$recommit" >/dev/null || die "$scenario recovery recommit report contains failed attempts"
 

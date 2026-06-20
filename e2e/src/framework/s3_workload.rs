@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::time::timeout;
 
-use crate::framework::history::{OperationKind, OperationOutcome, Recorder};
+use crate::framework::history::{OperationKind, OperationOutcome, OperationRecord, Recorder};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectSpec {
@@ -228,6 +228,14 @@ impl S3WorkloadClient {
         object: &PreparedObject,
         recorder: &Recorder,
     ) -> Result<OperationOutcome> {
+        Ok(self.put_object_record(object, recorder).await?.outcome)
+    }
+
+    pub async fn put_object_record(
+        &self,
+        object: &PreparedObject,
+        recorder: &Recorder,
+    ) -> Result<OperationRecord> {
         let spec = &object.spec;
         let record = recorder.begin(
             OperationKind::Put,
@@ -248,10 +256,7 @@ impl S3WorkloadClient {
         .await;
 
         match result {
-            Ok(Ok(_)) => {
-                recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
-                Ok(OperationOutcome::Ok)
-            }
+            Ok(Ok(_)) => recorder.finish(record, OperationOutcome::Ok, Some(200), None),
             Ok(Err(error)) => {
                 let outcome = classify_sdk_error(&error);
                 recorder.finish(
@@ -259,18 +264,14 @@ impl S3WorkloadClient {
                     outcome,
                     sdk_error_status(&error),
                     Some(format!("put object failed: {error}")),
-                )?;
-                Ok(outcome)
+                )
             }
-            Err(_) => {
-                recorder.finish(
-                    record,
-                    OperationOutcome::Timeout,
-                    None,
-                    Some("put object timed out".to_string()),
-                )?;
-                Ok(OperationOutcome::Timeout)
-            }
+            Err(_) => recorder.finish(
+                record,
+                OperationOutcome::Timeout,
+                None,
+                Some("put object timed out".to_string()),
+            ),
         }
     }
 
