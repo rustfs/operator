@@ -14,7 +14,7 @@
 
 use crate::console::{openapi::ApiDoc, routes, state::AppState};
 use axum::body::Body;
-use axum::http::{HeaderValue, Method, Request, Response, StatusCode, header};
+use axum::http::{HeaderValue, Method, Request, Response, StatusCode, Uri, header};
 use axum::{Router, middleware, response::IntoResponse, routing::get};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client, api::ListParams};
@@ -159,14 +159,18 @@ fn static_frontend_service(static_dir: PathBuf) -> StaticFrontendService {
     let index_path = static_dir.join("index.html");
     let static_service = ServeDir::new(static_dir)
         .append_index_html_on_directories(true)
-        .fallback(ServeFile::new(index_path));
+        .fallback(ServeFile::new(index_path.clone()));
 
-    StaticFrontendService { static_service }
+    StaticFrontendService {
+        static_service,
+        index_file: ServeFile::new(index_path),
+    }
 }
 
 #[derive(Clone)]
 struct StaticFrontendService {
     static_service: ServeDir<ServeFile>,
+    index_file: ServeFile,
 }
 
 impl Service<Request<Body>> for StaticFrontendService {
@@ -185,7 +189,19 @@ impl Service<Request<Body>> for StaticFrontendService {
         }
 
         let mut static_service = self.static_service.clone();
-        Box::pin(async move { static_service.call(request).await })
+        let mut index_file = self.index_file.clone();
+        let method = request.method().clone();
+        Box::pin(async move {
+            let response = static_service.call(request).await?;
+            if response.status() != StatusCode::NOT_FOUND {
+                return Ok(response);
+            }
+
+            let mut fallback_request = Request::new(Body::empty());
+            *fallback_request.method_mut() = method;
+            *fallback_request.uri_mut() = Uri::from_static("/");
+            index_file.call(fallback_request).await
+        })
     }
 }
 
