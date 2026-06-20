@@ -102,9 +102,9 @@ make -C e2e fault-cleanup
 | `fault-run-dm` | 使用预先准备的静态 PV 和 DM 设备运行 `dm-flakey`。 / Runs `dm-flakey` with pre-provisioned static PVs and DM storage. |
 | `fault-cleanup` | 安全删除 owned namespace 和 managed Chaos。 / Safely removes the owned namespace and managed Chaos. |
 
-`fault-run*` 会先用单 job、最低主机优先级预编译精确的 `faults` 测试二进制，再等待 60 秒并确认原有 RustFS Pod 的 UID、重启数和 Ready 状态没有变化。预编译不计入故障窗口；如果编译影响现有 Tenant，runner 会在创建故障 Tenant 前停止。
+`fault-run*` 会先用单 job、最低主机优先级预编译精确的 `faults` 测试二进制，再等待 60 秒并确认原有 RustFS Pod 的 UID、重启数和 Ready 状态没有变化。故障窗口直接运行该二进制，不再次调用 Cargo。预编译不计入故障窗口；如果编译影响现有 Tenant，runner 会在创建故障 Tenant 前停止。
 
-Before creating a fault Tenant, every `fault-run*` target prebuilds the exact `faults` binary with one job and the lowest host priority. It then verifies for 60 seconds that every pre-existing RustFS Pod keeps the same UID, restart count, and Ready state. Compilation is outside the fault window, and the runner stops if the build disturbs an existing Tenant.
+Before creating a fault Tenant, every `fault-run*` target prebuilds the exact `faults` binary with one job and the lowest host priority. It then verifies for 60 seconds that every pre-existing RustFS Pod keeps the same UID, restart count, and Ready state. The fault window executes that binary directly without invoking Cargo again. Compilation is outside the fault window, and the runner stops if the build disturbs an existing Tenant.
 
 ## 4. Cluster Preparation / 集群准备
 
