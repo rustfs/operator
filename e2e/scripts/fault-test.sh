@@ -32,6 +32,7 @@ FAULT_TENANT="${RUSTFS_FAULT_TEST_TENANT:-fault-test-tenant}"
 CHAOS_NAMESPACE="${RUSTFS_FAULT_TEST_CHAOS_NAMESPACE:-chaos-mesh}"
 ACTIVE_PID=""
 ACTIVE_ARTIFACTS=""
+FAULT_TEST_BINARY=""
 
 usage() {
   cat <<'EOF'
@@ -132,8 +133,12 @@ prepare_fault_binary() {
   local before="$run_root/build-pods-before.tsv"
   local current="$run_root/build-pods-current.tsv"
   local changes="$run_root/build-pod-changes.diff"
+  local build_messages="$run_root/fault-build.jsonl"
   local elapsed=0 interval=10
-  local -a build_command=(cargo test --manifest-path "$MANIFEST" --test faults --no-run)
+  local -a build_command=(
+    cargo test --manifest-path "$MANIFEST" --test faults --no-run
+    --message-format=json-render-diagnostics
+  )
 
   [[ "$BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || die "RUSTFS_FAULT_TEST_BUILD_JOBS must be a positive integer"
   [[ "$BUILD_SETTLE_SECONDS" =~ ^[0-9]+$ ]] || die "RUSTFS_FAULT_TEST_BUILD_SETTLE_SECONDS must be a non-negative integer"
@@ -142,11 +147,21 @@ prepare_fault_binary() {
   echo "preparing fault-test binary with jobs=$BUILD_JOBS and lowest host priority"
   if command -v ionice >/dev/null 2>&1; then
     CARGO_BUILD_JOBS="$BUILD_JOBS" nice -n 19 ionice -c3 "${build_command[@]}" \
-      >"$run_root/fault-build.log" 2>&1
+      >"$build_messages" 2>"$run_root/fault-build.log"
   else
     CARGO_BUILD_JOBS="$BUILD_JOBS" nice -n 19 "${build_command[@]}" \
-      >"$run_root/fault-build.log" 2>&1
+      >"$build_messages" 2>"$run_root/fault-build.log"
   fi
+  FAULT_TEST_BINARY="$(jq -r '
+    select(
+      .reason == "compiler-artifact"
+      and .target.name == "faults"
+      and (.target.kind | index("test"))
+    )
+    | .executable // empty
+  ' "$build_messages" | tail -n 1)"
+  [[ -x "$FAULT_TEST_BINARY" ]] || die "faults test binary was not produced; see $run_root/fault-build.log"
+  printf '%s\n' "$FAULT_TEST_BINARY" >"$run_root/fault-test-binary.path"
 
   while (( elapsed <= BUILD_SETTLE_SECONDS )); do
     snapshot_non_fault_rustfs_pods >"$current"
@@ -386,7 +401,7 @@ run_scenario() {
     RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY="$EXPECTED_CONCURRENCY" \
     RUSTFS_FAULT_TEST_DURATION_SECONDS="${RUSTFS_FAULT_TEST_DURATION_SECONDS:-7200}" \
     RUSTFS_FAULT_TEST_ARTIFACTS="$artifacts" \
-    cargo test --manifest-path "$MANIFEST" --test faults -- --ignored --test-threads=1 --nocapture \
+    "$FAULT_TEST_BINARY" --ignored --test-threads=1 --nocapture \
       >"$artifacts/test.log" 2>&1
     echo "$?" >"$artifacts/test-exit-code.tmp"
   ) &
