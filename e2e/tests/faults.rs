@@ -41,9 +41,12 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use tokio::time::sleep as async_sleep;
 use uuid::Uuid;
 
 const RUSTFS_DATA_VOLUME: &str = "/data/rustfs0";
+const FAULT_TENANT_POD_COUNT: usize = 4;
+const RUSTFS_POD_STABLE_WINDOW: Duration = Duration::from_secs(60);
 
 #[tokio::test]
 #[ignore = "destructive RustFS workload fault scenario; select with RUSTFS_FAULT_TEST_SCENARIO"]
@@ -91,6 +94,7 @@ async fn run_fault_case(
 
     prepare_fault_fixture(&config.cluster, spec.isolation)?;
     wait_for_ready_tenant(&config.cluster).await?;
+    wait_for_stable_rustfs_pods(&config.cluster, RUSTFS_POD_STABLE_WINDOW).await?;
 
     let run_id = format!("run-{}", Uuid::new_v4());
     let workload_seed = config.workload_seed.unwrap_or_else(generated_seed);
@@ -233,6 +237,7 @@ async fn run_fault_case(
     }
 
     wait_for_ready_tenant(cluster).await?;
+    wait_for_stable_rustfs_pods(cluster, RUSTFS_POD_STABLE_WINDOW).await?;
     let pods_after = rustfs_pod_identities(cluster)?;
     ensure_s3_access(&mut port_forward, cluster, &endpoint).await?;
     workload.summary.recommitted_after_recovery = recommit_unconfirmed_objects(
@@ -674,6 +679,16 @@ struct PodIdentity {
     uid: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PodRuntimeState {
+    name: String,
+    uid: String,
+    phase: String,
+    containers_ready: bool,
+    restart_count: u64,
+    terminating: bool,
+}
+
 fn rustfs_pod_identities(config: &ClusterTestConfig) -> Result<Vec<PodIdentity>> {
     let selector = format!("rustfs.tenant={}", config.tenant_name);
     let output = rustfs_operator_e2e::framework::kubectl::Kubectl::new(config)
@@ -702,6 +717,135 @@ fn rustfs_pod_identities(config: &ClusterTestConfig) -> Result<Vec<PodIdentity>>
         config.test_namespace
     );
     Ok(pods)
+}
+
+fn rustfs_pod_runtime_states(config: &ClusterTestConfig) -> Result<Vec<PodRuntimeState>> {
+    let selector = format!("rustfs.tenant={}", config.tenant_name);
+    let output = Kubectl::new(config)
+        .namespaced(&config.test_namespace)
+        .command(["get", "pod", "-l", &selector, "-o", "json"])
+        .run_checked()?;
+    let value = serde_json::from_str::<serde_json::Value>(&output.stdout)
+        .context("parse RustFS pod list json")?;
+    let items = value
+        .pointer("/items")
+        .and_then(serde_json::Value::as_array)
+        .context("RustFS pod list did not contain an items array")?;
+    let mut pods = items
+        .iter()
+        .map(|item| {
+            let metadata = item
+                .get("metadata")
+                .context("RustFS pod did not contain metadata")?;
+            let name = metadata
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .context("RustFS pod metadata did not contain a name")?;
+            let uid = metadata
+                .get("uid")
+                .and_then(serde_json::Value::as_str)
+                .context("RustFS pod metadata did not contain a uid")?;
+            let phase = item
+                .pointer("/status/phase")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("Unknown");
+            let container_statuses = item
+                .pointer("/status/containerStatuses")
+                .and_then(serde_json::Value::as_array);
+            let containers_ready = container_statuses.is_some_and(|statuses| {
+                !statuses.is_empty()
+                    && statuses.iter().all(|status| {
+                        status
+                            .get("ready")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                    })
+            });
+            let restart_count = container_statuses
+                .into_iter()
+                .flatten()
+                .filter_map(|status| status.get("restartCount"))
+                .filter_map(serde_json::Value::as_u64)
+                .sum();
+
+            Ok(PodRuntimeState {
+                name: name.to_string(),
+                uid: uid.to_string(),
+                phase: phase.to_string(),
+                containers_ready,
+                restart_count,
+                terminating: metadata.get("deletionTimestamp").is_some(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    pods.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(pods)
+}
+
+fn stable_pod_fingerprint(pods: &[PodRuntimeState]) -> Option<Vec<(String, u64)>> {
+    if pods.len() != FAULT_TENANT_POD_COUNT
+        || pods
+            .iter()
+            .any(|pod| pod.phase != "Running" || !pod.containers_ready || pod.terminating)
+    {
+        return None;
+    }
+
+    Some(
+        pods.iter()
+            .map(|pod| (pod.uid.clone(), pod.restart_count))
+            .collect(),
+    )
+}
+
+async fn wait_for_stable_rustfs_pods(
+    config: &ClusterTestConfig,
+    stable_window: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + config.timeout;
+    let mut stable_since = None;
+    let mut stable_fingerprint = None;
+    let mut last_snapshot = Vec::new();
+    let mut last_error = "not checked yet".to_string();
+
+    eprintln!(
+        "waiting for {FAULT_TENANT_POD_COUNT} RustFS pods to remain ready without restarts for {stable_window:?}"
+    );
+    loop {
+        if Instant::now() >= deadline {
+            bail!(
+                "timed out waiting for stable RustFS pods after {:?}\nlast: {last_snapshot:?}\nlast error: {last_error}",
+                config.timeout
+            );
+        }
+
+        match rustfs_pod_runtime_states(config) {
+            Ok(current) => {
+                if let Some(fingerprint) = stable_pod_fingerprint(&current) {
+                    if stable_fingerprint.as_ref() != Some(&fingerprint) {
+                        stable_since = Some(Instant::now());
+                        stable_fingerprint = Some(fingerprint);
+                    }
+                    if stable_since.is_some_and(|started| started.elapsed() >= stable_window) {
+                        eprintln!("RustFS pods remained stable for {stable_window:?}");
+                        return Ok(());
+                    }
+                } else {
+                    stable_since = None;
+                    stable_fingerprint = None;
+                }
+                last_snapshot = current;
+                last_error = "none".to_string();
+            }
+            Err(error) => {
+                stable_since = None;
+                stable_fingerprint = None;
+                last_error = error.to_string();
+            }
+        }
+
+        async_sleep(Duration::from_secs(1)).await;
+    }
 }
 
 fn wait_for_rustfs_pod_replacement(
@@ -1115,8 +1259,8 @@ fn warp_bucket_name(run_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OutcomeCounts, PodIdentity, WorkloadSummary, bucket_name, pod_deletion_observed,
-        pod_replacement_observed, warp_bucket_name,
+        OutcomeCounts, PodIdentity, PodRuntimeState, WorkloadSummary, bucket_name,
+        pod_deletion_observed, pod_replacement_observed, stable_pod_fingerprint, warp_bucket_name,
     };
     use rustfs_operator_e2e::framework::history::OperationOutcome;
     use rustfs_operator_e2e::framework::s3_workload::WorkloadPlan;
@@ -1195,5 +1339,34 @@ mod tests {
                 before[1].clone(),
             ],
         ));
+    }
+
+    #[test]
+    fn stable_pod_fingerprint_requires_four_ready_unchanged_pods() {
+        let pods = (0..4)
+            .map(|index| PodRuntimeState {
+                name: format!("rustfs-{index}"),
+                uid: format!("uid-{index}"),
+                phase: "Running".to_string(),
+                containers_ready: true,
+                restart_count: index,
+                terminating: false,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stable_pod_fingerprint(&pods),
+            Some(vec![
+                ("uid-0".to_string(), 0),
+                ("uid-1".to_string(), 1),
+                ("uid-2".to_string(), 2),
+                ("uid-3".to_string(), 3),
+            ])
+        );
+        assert!(stable_pod_fingerprint(&pods[..3]).is_none());
+
+        let mut unready = pods;
+        unready[0].containers_ready = false;
+        assert!(stable_pod_fingerprint(&unready).is_none());
     }
 }

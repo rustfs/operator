@@ -73,6 +73,10 @@ maximum fault TTL: 7,200 seconds
 
 The 7,200-second duration is a maximum fault-resource safety window, not a fixed wait. Successful runs recover immediately after the workload. The larger window prevents the 40,000-object workload from outliving Chaos.
 
+Tenant `Ready` 之后、注入故障之前，以及故障恢复之后，测试都会等待四个 RustFS Pod 连续 60 秒保持 `Running/Ready`，且 Pod UID 和容器重启数不变。这个稳定窗口避免把启动期 DNS 或 Pod 重启抖动误判为故障注入结果。
+
+After Tenant `Ready`, both before injection and after recovery, the test requires all four RustFS Pods to remain `Running/Ready` for 60 seconds with unchanged Pod UIDs and container restart counts. This stability window prevents startup DNS or restart churn from being misclassified as a fault-injection result.
+
 ## 3. Package Commands / Package 命令
 
 所有公共入口都位于 `e2e/Makefile`。从仓库根目录执行：
