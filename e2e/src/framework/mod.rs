@@ -22,6 +22,7 @@ pub mod config;
 pub mod console_client;
 pub mod deploy;
 pub mod fault_config;
+pub mod fault_plan;
 pub mod fault_scenarios;
 pub mod history;
 pub mod host_faults;
