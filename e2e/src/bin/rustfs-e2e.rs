@@ -13,28 +13,37 @@
 // limitations under the License.
 
 use anyhow::{Result, bail};
-use rustfs_operator_e2e::framework::{
-    cert_manager_tls, command::CommandSpec, config::E2eConfig, deploy, images::ImageSet,
-    kind::KindCluster, live, resources, storage,
+use rustfs_operator_e2e::{
+    fault::scenarios::scenario_catalog_json,
+    framework::{
+        cert_manager_tls, command::CommandSpec, config::E2eConfig, deploy, images::ImageSet,
+        kind::KindCluster, live, resources, storage,
+    },
 };
 
 fn main() -> Result<()> {
-    let command = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "help".to_string());
-    let config = E2eConfig::from_env();
+    let mut args = std::env::args().skip(1);
+    let command = args.next().unwrap_or_else(|| "help".to_string());
 
     match command.as_str() {
         "help" | "--help" | "-h" => print_help(),
-        "assert-context" => assert_context(&config),
-        "kind-create" => create_kind_cluster(&config),
-        "kind-delete" => delete_kind_cluster(&config),
-        "sanitize-live-storage" => sanitize_live_storage(&config),
-        "reset-live-fixtures" | "reset-live-smoke-fixture" => reset_live_fixtures(&config),
-        "kind-load-images" => load_images(&config),
-        "deploy-dev" => deploy_dev(&config),
-        "rollout-dev" => rollout_dev(&config),
-        unknown => bail!("unknown rustfs-e2e internal command: {unknown}; run `rustfs-e2e help`"),
+        "fault-catalog-json" => print_fault_catalog_json(),
+        _ => {
+            let config = E2eConfig::from_env();
+            match command.as_str() {
+                "assert-context" => assert_context(&config),
+                "kind-create" => create_kind_cluster(&config),
+                "kind-delete" => delete_kind_cluster(&config),
+                "sanitize-live-storage" => sanitize_live_storage(&config),
+                "reset-live-fixtures" | "reset-live-smoke-fixture" => reset_live_fixtures(&config),
+                "kind-load-images" => load_images(&config),
+                "deploy-dev" => deploy_dev(&config),
+                "rollout-dev" => rollout_dev(&config),
+                unknown => {
+                    bail!("unknown rustfs-e2e internal command: {unknown}; run `rustfs-e2e help`")
+                }
+            }
+        }
     }
 }
 
@@ -58,6 +67,12 @@ fn print_help() -> Result<()> {
     );
     println!("  deploy-dev        Apply operator/console manifests into dedicated Kind");
     println!("  rollout-dev       Restart and wait for e2e control-plane deployments");
+    println!("  fault-catalog-json");
+    Ok(())
+}
+
+fn print_fault_catalog_json() -> Result<()> {
+    println!("{}", scenario_catalog_json()?);
     Ok(())
 }
 

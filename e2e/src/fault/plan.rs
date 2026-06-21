@@ -17,8 +17,10 @@ use std::time::Duration;
 
 use crate::fault::scenarios::{
     DISK_FULL_SCENARIO, DM_FLAKEY_SCENARIO, FaultBackend, FaultScenario, FaultScenarioSpec,
-    IO_EIO_SCENARIO, IO_READ_MISTAKE_SCENARIO, NETWORK_PARTITION_ONE_SCENARIO,
-    POD_KILL_ONE_SCENARIO, WARP_UNDER_CHAOS_SCENARIO,
+    IO_EIO_SCENARIO, IO_LATENCY_SCENARIO, IO_READ_MISTAKE_SCENARIO, NETWORK_CORRUPT_SCENARIO,
+    NETWORK_DELAY_SCENARIO, NETWORK_DUPLICATE_SCENARIO, NETWORK_LOSS_SCENARIO,
+    NETWORK_PARTITION_ONE_SCENARIO, POD_FAILURE_SCENARIO, POD_KILL_ONE_SCENARIO,
+    STRESS_CPU_SCENARIO, STRESS_MEMORY_SCENARIO, WARP_UNDER_CHAOS_SCENARIO,
 };
 
 pub const DEFAULT_RUSTFS_DATA_VOLUME: &str = "/data/rustfs0";
@@ -38,10 +40,18 @@ impl FaultWorkloadMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultKind {
     RustfsVolumeIoError,
+    RustfsVolumeLatency,
     RustfsVolumeReadMistake,
     RustfsVolumeEnospc,
     RustfsServerPodKill,
+    RustfsServerPodFailure,
     RustfsServerNetworkPartition,
+    RustfsServerNetworkDelay,
+    RustfsServerNetworkLoss,
+    RustfsServerNetworkCorrupt,
+    RustfsServerNetworkDuplicate,
+    RustfsServerCpuStress,
+    RustfsServerMemoryStress,
     RustfsBlockDeviceFlakey,
 }
 
@@ -49,10 +59,18 @@ impl FaultKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RustfsVolumeIoError => "rustfs_volume_io_error",
+            Self::RustfsVolumeLatency => "rustfs_volume_latency",
             Self::RustfsVolumeReadMistake => "rustfs_volume_read_mistake",
             Self::RustfsVolumeEnospc => "rustfs_volume_enospc",
             Self::RustfsServerPodKill => "rustfs_server_pod_kill",
+            Self::RustfsServerPodFailure => "rustfs_server_pod_failure",
             Self::RustfsServerNetworkPartition => "rustfs_server_network_partition",
+            Self::RustfsServerNetworkDelay => "rustfs_server_network_delay",
+            Self::RustfsServerNetworkLoss => "rustfs_server_network_loss",
+            Self::RustfsServerNetworkCorrupt => "rustfs_server_network_corrupt",
+            Self::RustfsServerNetworkDuplicate => "rustfs_server_network_duplicate",
+            Self::RustfsServerCpuStress => "rustfs_server_cpu_stress",
+            Self::RustfsServerMemoryStress => "rustfs_server_memory_stress",
             Self::RustfsBlockDeviceFlakey => "rustfs_block_device_flakey",
         }
     }
@@ -63,6 +81,7 @@ pub enum FaultTarget {
     RustfsVolume { path: &'static str },
     RustfsServerPod,
     RustfsServerPeerNetwork,
+    RustfsServerResource,
     DedicatedBlockDevice,
 }
 
@@ -73,6 +92,9 @@ impl FaultTarget {
             Self::RustfsServerPod => "one RustFS server Pod".to_string(),
             Self::RustfsServerPeerNetwork => {
                 "one RustFS server Pod partitioned from its peers".to_string()
+            }
+            Self::RustfsServerResource => {
+                "one RustFS server Pod under resource pressure".to_string()
             }
             Self::DedicatedBlockDevice => "one dedicated block-device-backed PV".to_string(),
         }
@@ -184,14 +206,23 @@ fn fault_kind_accepts_backend(kind: FaultKind, backend: FaultBackend) -> bool {
             FaultKind::RustfsVolumeIoError,
             FaultBackend::ChaosMeshIoChaos | FaultBackend::MinioWarpWithChaos
         ) | (
-            FaultKind::RustfsVolumeReadMistake | FaultKind::RustfsVolumeEnospc,
+            FaultKind::RustfsVolumeLatency
+                | FaultKind::RustfsVolumeReadMistake
+                | FaultKind::RustfsVolumeEnospc,
             FaultBackend::ChaosMeshIoChaos
         ) | (
-            FaultKind::RustfsServerPodKill,
+            FaultKind::RustfsServerPodKill | FaultKind::RustfsServerPodFailure,
             FaultBackend::ChaosMeshPodChaos
         ) | (
-            FaultKind::RustfsServerNetworkPartition,
+            FaultKind::RustfsServerNetworkPartition
+                | FaultKind::RustfsServerNetworkDelay
+                | FaultKind::RustfsServerNetworkLoss
+                | FaultKind::RustfsServerNetworkCorrupt
+                | FaultKind::RustfsServerNetworkDuplicate,
             FaultBackend::ChaosMeshNetworkChaos
+        ) | (
+            FaultKind::RustfsServerCpuStress | FaultKind::RustfsServerMemoryStress,
+            FaultBackend::ChaosMeshStressChaos
         ) | (
             FaultKind::RustfsBlockDeviceFlakey,
             FaultBackend::DeviceMapper
@@ -202,13 +233,21 @@ fn fault_kind_accepts_backend(kind: FaultKind, backend: FaultBackend) -> bool {
 fn fault_kind_accepts_selection(kind: FaultKind, selection: FaultSelection) -> bool {
     match kind {
         FaultKind::RustfsVolumeIoError
+        | FaultKind::RustfsVolumeLatency
         | FaultKind::RustfsVolumeReadMistake
         | FaultKind::RustfsVolumeEnospc => match selection {
             FaultSelection::Percent(percent) => (1..=100).contains(&percent),
             FaultSelection::FixedTargets(_) => false,
         },
         FaultKind::RustfsServerPodKill
+        | FaultKind::RustfsServerPodFailure
         | FaultKind::RustfsServerNetworkPartition
+        | FaultKind::RustfsServerNetworkDelay
+        | FaultKind::RustfsServerNetworkLoss
+        | FaultKind::RustfsServerNetworkCorrupt
+        | FaultKind::RustfsServerNetworkDuplicate
+        | FaultKind::RustfsServerCpuStress
+        | FaultKind::RustfsServerMemoryStress
         | FaultKind::RustfsBlockDeviceFlakey => match selection {
             FaultSelection::FixedTargets(count) => count > 0,
             FaultSelection::Percent(_) => false,
@@ -266,6 +305,13 @@ impl FaultPlan {
                 FaultSelection::FixedTargets(1),
                 scenario.duration,
             )?,
+            POD_FAILURE_SCENARIO => FaultInjection::new(
+                FaultKind::RustfsServerPodFailure,
+                spec.backend,
+                FaultTarget::RustfsServerPod,
+                FaultSelection::FixedTargets(1),
+                scenario.duration,
+            )?,
             NETWORK_PARTITION_ONE_SCENARIO => FaultInjection::new(
                 FaultKind::RustfsServerNetworkPartition,
                 spec.backend,
@@ -273,10 +319,29 @@ impl FaultPlan {
                 FaultSelection::FixedTargets(1),
                 scenario.duration,
             )?,
+            NETWORK_DELAY_SCENARIO => {
+                network_fault(FaultKind::RustfsServerNetworkDelay, spec, scenario)?
+            }
+            NETWORK_LOSS_SCENARIO => {
+                network_fault(FaultKind::RustfsServerNetworkLoss, spec, scenario)?
+            }
+            NETWORK_CORRUPT_SCENARIO => {
+                network_fault(FaultKind::RustfsServerNetworkCorrupt, spec, scenario)?
+            }
+            NETWORK_DUPLICATE_SCENARIO => {
+                network_fault(FaultKind::RustfsServerNetworkDuplicate, spec, scenario)?
+            }
             IO_READ_MISTAKE_SCENARIO => {
                 volume_fault(FaultKind::RustfsVolumeReadMistake, spec, scenario)?
             }
+            IO_LATENCY_SCENARIO => volume_fault(FaultKind::RustfsVolumeLatency, spec, scenario)?,
             DISK_FULL_SCENARIO => volume_fault(FaultKind::RustfsVolumeEnospc, spec, scenario)?,
+            STRESS_CPU_SCENARIO => {
+                resource_fault(FaultKind::RustfsServerCpuStress, spec, scenario)?
+            }
+            STRESS_MEMORY_SCENARIO => {
+                resource_fault(FaultKind::RustfsServerMemoryStress, spec, scenario)?
+            }
             DM_FLAKEY_SCENARIO => FaultInjection::new(
                 FaultKind::RustfsBlockDeviceFlakey,
                 spec.backend,
@@ -354,6 +419,34 @@ fn volume_fault(
             path: DEFAULT_RUSTFS_DATA_VOLUME,
         },
         FaultSelection::Percent(scenario.percent),
+        scenario.duration,
+    )
+}
+
+fn network_fault(
+    kind: FaultKind,
+    spec: &FaultScenarioSpec,
+    scenario: &FaultScenario,
+) -> Result<FaultInjection> {
+    FaultInjection::new(
+        kind,
+        spec.backend,
+        FaultTarget::RustfsServerPeerNetwork,
+        FaultSelection::FixedTargets(1),
+        scenario.duration,
+    )
+}
+
+fn resource_fault(
+    kind: FaultKind,
+    spec: &FaultScenarioSpec,
+    scenario: &FaultScenario,
+) -> Result<FaultInjection> {
+    FaultInjection::new(
+        kind,
+        spec.backend,
+        FaultTarget::RustfsServerResource,
+        FaultSelection::FixedTargets(1),
         scenario.duration,
     )
 }

@@ -29,12 +29,17 @@ pub enum OperationKind {
     Head,
     List,
     Delete,
+    CreateMultipartUpload,
+    UploadPart,
+    CompleteMultipartUpload,
+    AbortMultipartUpload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationOutcome {
     Ok,
+    NotFound,
     Failed,
     Timeout,
     Unknown,
@@ -49,6 +54,8 @@ pub struct OperationRecord {
     pub key: Option<String>,
     pub value_sha256: Option<String>,
     pub size_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_keys: Option<Vec<String>>,
     pub started_at_ms: u64,
     pub ended_at_ms: u64,
     pub outcome: OperationOutcome,
@@ -115,6 +122,7 @@ impl Recorder {
             key,
             value_sha256,
             size_bytes,
+            listed_keys: None,
             started_at_ms,
             ended_at_ms: started_at_ms,
             outcome: OperationOutcome::Unknown,

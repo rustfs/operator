@@ -20,7 +20,6 @@ PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MANIFEST="$PACKAGE_DIR/Cargo.toml"
 MANAGER="rustfs-operator-fault-test"
 MANAGER_SELECTOR="app.kubernetes.io/managed-by=$MANAGER"
-DEFAULT_SCENARIOS="io-eio pod-kill-one network-partition-one io-read-mistake disk-full warp-under-chaos"
 WORKLOAD_OBJECTS="${RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS:-40000}"
 WORKLOAD_CONCURRENCY="${RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY:-80}"
 BUILD_JOBS="${RUSTFS_FAULT_TEST_BUILD_JOBS:-1}"
@@ -32,6 +31,7 @@ CHAOS_NAMESPACE="${RUSTFS_FAULT_TEST_CHAOS_NAMESPACE:-chaos-mesh}"
 ACTIVE_PID=""
 ACTIVE_ARTIFACTS=""
 FAULT_TEST_BINARY=""
+FAULT_CATALOG_JSON=""
 
 usage() {
   cat <<'EOF'
@@ -40,7 +40,7 @@ Usage: fault-test.sh <command> [scenario]
 Commands:
   preflight [scenario]  Validate the current real-cluster environment.
   run <scenario>        Run one destructive scenario with health guards.
-  run-regular           Run the six regular scenarios serially.
+  list                  List catalog scenarios.
   cleanup               Remove managed Chaos and the owned fault namespace.
 
 RUSTFS_FAULT_TEST_EXPECTED_CONTEXT is optional. When unset, the current
@@ -159,35 +159,44 @@ kubectl_cluster() {
   kubectl --context "$FAULT_CONTEXT" "$@"
 }
 
+fault_catalog_json() {
+  if [[ -z "$FAULT_CATALOG_JSON" ]]; then
+    FAULT_CATALOG_JSON="$(CARGO_BUILD_JOBS="$BUILD_JOBS" cargo run --quiet --manifest-path "$MANIFEST" --bin rustfs-e2e -- fault-catalog-json)"
+  fi
+  printf '%s\n' "$FAULT_CATALOG_JSON"
+}
+
+catalog_scenario_query() {
+  local scenario="$1"
+  shift
+  fault_catalog_json | jq -e --arg scenario "$scenario" "$@"
+}
+
 is_supported_scenario() {
-  case "$1" in
-    io-eio|pod-kill-one|network-partition-one|io-read-mistake|disk-full|warp-under-chaos|dm-flakey)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  catalog_scenario_query "$1" 'any(.[]; .scenario == $scenario and .status == "executable")' >/dev/null
 }
 
-is_percent_scenario() {
-  case "$1" in
-    io-eio|io-read-mistake|disk-full|warp-under-chaos)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+require_supported_scenario() {
+  local scenario="$1"
+  is_supported_scenario "$scenario" || die "unsupported scenario: $scenario"
 }
 
-scenario_crd() {
-  case "$1" in
-    pod-kill-one) echo "podchaos.chaos-mesh.org" ;;
-    network-partition-one) echo "networkchaos.chaos-mesh.org" ;;
-    dm-flakey) echo "" ;;
-    *) echo "iochaos.chaos-mesh.org" ;;
-  esac
+scenario_percent_supported() {
+  catalog_scenario_query "$1" '.[] | select(.scenario == $scenario) | .percent_supported' >/dev/null
+}
+
+scenario_requires_static_storage() {
+  catalog_scenario_query "$1" '.[] | select(.scenario == $scenario) | .isolation == "dedicated-linux-block-device"' >/dev/null
+}
+
+scenario_crds() {
+  local scenario="$1"
+  fault_catalog_json | jq -r --arg scenario "$scenario" '.[] | select(.scenario == $scenario) | .crds[]?'
+}
+
+scenario_required_tools() {
+  local scenario="$1"
+  fault_catalog_json | jq -r --arg scenario "$scenario" '.[] | select(.scenario == $scenario) | .required_tools[]?'
 }
 
 validate_runtime_env_contract() {
@@ -198,7 +207,7 @@ validate_runtime_env_contract() {
   BUILD_JOBS="$(trim_value "$BUILD_JOBS")"
 
   require_positive_integer RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS "$WORKLOAD_OBJECTS"
-  (( 10#$WORKLOAD_OBJECTS >= 4 )) || die "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 4"
+  (( 10#$WORKLOAD_OBJECTS >= 12 )) || die "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 12"
   require_positive_integer RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY "$WORKLOAD_CONCURRENCY"
   (( 10#$WORKLOAD_CONCURRENCY <= 10#$WORKLOAD_OBJECTS )) || die "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY must be <= RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS"
   require_optional_positive_integer RUSTFS_FAULT_TEST_DURATION_SECONDS
@@ -213,7 +222,7 @@ validate_runtime_env_contract() {
   if [[ -n "$percent" ]]; then
     require_positive_integer RUSTFS_FAULT_TEST_PERCENT "$percent"
     (( 10#$percent <= 100 )) || die "RUSTFS_FAULT_TEST_PERCENT must be in 1..=100"
-    is_percent_scenario "$scenario" || die "RUSTFS_FAULT_TEST_PERCENT only applies to percent-based IOChaos scenarios"
+    scenario_percent_supported "$scenario" || die "RUSTFS_FAULT_TEST_PERCENT does not apply to scenario $scenario"
     export RUSTFS_FAULT_TEST_PERCENT="$percent"
   fi
 }
@@ -322,14 +331,14 @@ require_storage_class() {
     ')"
     [[ "$pv_count" -eq 4 ]] || die "dm-flakey requires exactly four Available/Bound 100Gi PVs, found $pv_count"
   else
-    [[ "$provisioner" != "kubernetes.io/no-provisioner" ]] || die "regular scenarios require dynamic provisioning"
+    [[ "$provisioner" != "kubernetes.io/no-provisioner" ]] || die "non-static scenarios require dynamic provisioning"
   fi
 }
 
 preflight() {
   local scenario="${1:-io-eio}"
-  local ready_nodes crd
-  is_supported_scenario "$scenario" || die "unsupported scenario: $scenario"
+  local ready_nodes crd tool
+  require_supported_scenario "$scenario"
 
   require_command cargo
   require_command jq
@@ -350,14 +359,15 @@ preflight() {
   require_storage_class "$scenario"
   require_namespace_ownership
 
-  if [[ "$scenario" != "dm-flakey" ]]; then
-    crd="$(scenario_crd "$scenario")"
-    kubectl_cluster get crd "$crd" >/dev/null
+  if ! scenario_requires_static_storage "$scenario"; then
+    for crd in $(scenario_crds "$scenario"); do
+      kubectl_cluster get crd "$crd" >/dev/null
+    done
     require_chaos_ready
   fi
-  if [[ "$scenario" == "warp-under-chaos" ]]; then
-    require_command warp
-  fi
+  for tool in $(scenario_required_tools "$scenario"); do
+    require_command "$tool"
+  done
   if [[ "$scenario" == "dm-flakey" ]]; then
     validate_dm_env_contract
     kubectl_cluster get namespace "$FAULT_NAMESPACE" >/dev/null 2>&1 || die "dm-flakey requires a pre-created owned fault namespace with privileged Pod Security"
@@ -375,7 +385,7 @@ preflight_cleanup() {
 }
 
 cleanup_managed_chaos() {
-  kubectl_ns "$CHAOS_NAMESPACE" delete iochaos,podchaos,networkchaos \
+  kubectl_ns "$CHAOS_NAMESPACE" delete iochaos,podchaos,networkchaos,stresschaos \
     -l "$MANAGER_SELECTOR" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
 }
 
@@ -409,7 +419,7 @@ capture_cluster_snapshot() {
   kubectl_ns "$FAULT_NAMESPACE" get pods -o wide >"$artifacts/pods-$stage.txt" 2>&1 || true
   kubectl_ns "$FAULT_NAMESPACE" get pvc -o wide >"$artifacts/pvcs-$stage.txt" 2>&1 || true
   kubectl_cluster get pv -o wide >"$artifacts/pvs-$stage.txt" 2>&1 || true
-  kubectl_ns "$CHAOS_NAMESPACE" get iochaos,podchaos,networkchaos -o yaml >"$artifacts/chaos-$stage.yaml" 2>&1 || true
+  kubectl_ns "$CHAOS_NAMESPACE" get iochaos,podchaos,networkchaos,stresschaos -o yaml >"$artifacts/chaos-$stage.yaml" 2>&1 || true
   kubectl_ns "$FAULT_NAMESPACE" get events --sort-by=.lastTimestamp >"$artifacts/events-$stage.txt" 2>&1 || true
 }
 
@@ -437,16 +447,18 @@ find_artifact() {
 
 validate_scenario_artifacts() {
   local scenario="$1" artifacts="$2" run_root="$3"
-  local metadata plan evidence checker summary recommit seed disruptions recommitted committed
+  local metadata plan evidence prechecker checker summary recommit seed disruptions recommitted committed
   metadata="$(find_artifact "$artifacts" run-metadata.json)"
   plan="$(find_artifact "$artifacts" workload-plan.json)"
   evidence="$(find_artifact "$artifacts" fault-evidence.json)"
+  prechecker="$(find_artifact "$artifacts" checker-pre-recommit-report.json)"
   checker="$(find_artifact "$artifacts" checker-report.json)"
   summary="$(find_artifact "$artifacts" workload-summary.json)"
   recommit="$(find_artifact "$artifacts" recommit-report.json)"
   [[ -f "$metadata" ]] || die "$scenario did not produce run-metadata.json"
   [[ -f "$plan" ]] || die "$scenario did not produce workload-plan.json"
   [[ -f "$evidence" ]] || die "$scenario did not produce fault-evidence.json"
+  [[ -f "$prechecker" ]] || die "$scenario did not produce checker-pre-recommit-report.json"
   [[ -f "$checker" ]] || die "$scenario did not produce checker-report.json"
   [[ -f "$summary" ]] || die "$scenario did not produce workload-summary.json"
   [[ -f "$recommit" ]] || die "$scenario did not produce recommit-report.json"
@@ -468,11 +480,20 @@ validate_scenario_artifacts() {
   ' "$plan" >/dev/null || die "$scenario workload plan does not match the required profile"
   jq -e '.injected == true and .active_during_workload == true and .recovered == true' "$evidence" >/dev/null || die "$scenario fault evidence is incomplete"
   jq -e '(.active_snapshots | length) > 0 and (.workload_snapshots | length) > 0' "$evidence" >/dev/null || die "$scenario fault evidence snapshots are missing"
-  jq -e --argjson objects "$WORKLOAD_OBJECTS" '
-    .committed_puts == $objects
-    and (.missing_committed_objects | length) == 0
+  jq -e '
+    (.missing_committed_objects | length) == 0
     and (.hash_mismatches | length) == 0
     and (.successful_corrupted_reads | length) == 0
+    and (.unexpected_visible_deleted_objects | length) == 0
+    and (.list_warnings | length) == 0
+    and .tenant_recovered == true
+    and .passed == true
+  ' "$prechecker" >/dev/null || die "$scenario pre-recommit checker verdict failed"
+  jq -e '
+    (.missing_committed_objects | length) == 0
+    and (.hash_mismatches | length) == 0
+    and (.successful_corrupted_reads | length) == 0
+    and (.unexpected_visible_deleted_objects | length) == 0
     and (.list_warnings | length) == 0
     and .tenant_recovered == true
     and .passed == true
@@ -602,7 +623,7 @@ initialize_summary() {
 
 run_one() {
   local scenario="$1" run_root
-  is_supported_scenario "$scenario" || die "unsupported scenario: $scenario"
+  require_supported_scenario "$scenario"
   run_root="$(new_run_root)"
   initialize_summary "$run_root"
   prepare_fault_binary "$scenario" "$run_root"
@@ -610,20 +631,8 @@ run_one() {
   echo "run artifacts: $run_root"
 }
 
-run_regular() {
-  local run_root scenario prepared=false
-  local scenarios="${RUSTFS_FAULT_TEST_SCENARIOS:-$DEFAULT_SCENARIOS}"
-  run_root="$(new_run_root)"
-  initialize_summary "$run_root"
-  for scenario in $scenarios; do
-    [[ "$scenario" != "dm-flakey" ]] || die "run-regular cannot include dm-flakey"
-    if [[ "$prepared" == "false" ]]; then
-      prepare_fault_binary "$scenario" "$run_root"
-      prepared=true
-    fi
-    run_scenario "$scenario" "$run_root" || return $?
-  done
-  echo "regular scenario artifacts: $run_root"
+list_scenarios() {
+  fault_catalog_json | jq -r '.[] | .scenario'
 }
 
 cleanup() {
@@ -632,7 +641,7 @@ cleanup() {
     require_namespace_ownership
     kubectl_cluster delete namespace "$FAULT_NAMESPACE" --wait=true
   fi
-  if kubectl_ns "$CHAOS_NAMESPACE" get iochaos,podchaos,networkchaos -l "$MANAGER_SELECTOR" -o name 2>/dev/null | grep -q .; then
+  if kubectl_ns "$CHAOS_NAMESPACE" get iochaos,podchaos,networkchaos,stresschaos -l "$MANAGER_SELECTOR" -o name 2>/dev/null | grep -q .; then
     die "managed Chaos resources remain after cleanup"
   fi
   echo "managed fault-test resources cleaned; external StorageClasses, PVs, and host devices were not changed"
@@ -651,8 +660,9 @@ case "${1:-help}" in
     [[ -n "${2:-}" ]] || die "scenario is required"
     run_one "$2"
     ;;
-  run-regular)
-    run_regular
+  list)
+    [[ -z "${2:-}" ]] || die "list does not accept arguments; run a named scenario with: fault-test.sh run <scenario>"
+    list_scenarios
     ;;
   cleanup)
     preflight_cleanup
