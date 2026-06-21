@@ -516,7 +516,7 @@ mod tests {
         DmFlakeySpec, dm_helper_manifest, dm_resume_args, dm_suspend_args, helper_pod_name,
         pv_targets_node, validate_dm_spec,
     };
-    use crate::framework::fault_config::FaultTestConfig;
+    use crate::fault::config::FaultTestConfig;
 
     #[test]
     fn dm_helper_is_pinned_to_one_node_and_host_root() {

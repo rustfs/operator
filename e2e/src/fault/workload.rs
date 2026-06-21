@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::time::timeout;
 
-use crate::framework::history::{OperationKind, OperationOutcome, OperationRecord, Recorder};
+use crate::fault::history::{OperationKind, OperationOutcome, OperationRecord, Recorder};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectSpec {

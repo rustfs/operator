@@ -15,7 +15,7 @@
 use anyhow::{Result, ensure};
 use std::time::Duration;
 
-use crate::framework::fault_config::FaultTestConfig;
+use crate::fault::config::FaultTestConfig;
 
 pub const IO_EIO_SCENARIO: &str = "io-eio";
 pub const POD_KILL_ONE_SCENARIO: &str = "pod-kill-one";
@@ -265,7 +265,7 @@ mod tests {
         FaultScenario, FaultScenarioStatus, IO_EIO_SCENARIO, POD_KILL_ONE_SCENARIO,
         scenario_catalog,
     };
-    use crate::framework::fault_config::{FaultTestConfig, FaultWorkloadProfile};
+    use crate::fault::config::{FaultTestConfig, FaultWorkloadProfile};
     use std::time::Duration;
 
     #[test]

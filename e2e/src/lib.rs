@@ -15,4 +15,5 @@
 #![forbid(unsafe_code)]
 
 pub mod cases;
+pub mod fault;
 pub mod framework;

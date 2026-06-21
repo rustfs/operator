@@ -15,7 +15,7 @@
 use anyhow::{Result, bail, ensure};
 use std::time::Duration;
 
-use crate::framework::fault_scenarios::{
+use crate::fault::scenarios::{
     DISK_FULL_SCENARIO, DM_FLAKEY_SCENARIO, FaultBackend, FaultScenario, FaultScenarioSpec,
     IO_EIO_SCENARIO, IO_READ_MISTAKE_SCENARIO, NETWORK_PARTITION_ONE_SCENARIO,
     POD_KILL_ONE_SCENARIO, WARP_UNDER_CHAOS_SCENARIO,
@@ -364,9 +364,9 @@ mod tests {
         DEFAULT_RUSTFS_DATA_VOLUME, FaultInjection, FaultKind, FaultPlan, FaultSelection,
         FaultTarget, FaultWorkloadMode,
     };
-    use crate::framework::{
-        fault_config::FaultTestConfig,
-        fault_scenarios::{
+    use crate::fault::{
+        config::FaultTestConfig,
+        scenarios::{
             FaultBackend, FaultScenario, WARP_UNDER_CHAOS_SCENARIO, scenario_catalog, scenario_spec,
         },
     };
