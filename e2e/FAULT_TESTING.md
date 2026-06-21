@@ -22,7 +22,7 @@ tests from the `e2e` package.
 ## Scope
 
 Fault tests run only on a dedicated real Kubernetes or K3s cluster. They are
-not Kind tests and are not designed for shared application clusters. The suite
+not Kind tests and are not designed for shared application clusters. The runner
 creates and deletes its own namespace, Tenant, PVCs, Pods, Services, StatefulSet,
 and Chaos Mesh resources.
 
@@ -46,22 +46,22 @@ Run all commands from the repository root.
 
 ```bash
 make -C e2e fault-check
+make -C e2e fault-list
 make -C e2e fault-preflight SCENARIO=io-eio
 make -C e2e fault-run SCENARIO=io-eio
-make -C e2e fault-run-regular
 make -C e2e fault-run-dm
 make -C e2e fault-cleanup
 ```
 
 `fault-check` is local only. It runs Bash syntax, Rust fmt, tests, and clippy.
 
-`fault-run*` prebuilds the ignored `faults` test binary before the fault window,
+`fault-run` prebuilds the ignored `faults` test binary before the fault window,
 then runs that binary directly. The runner reruns preflight before and after the
 build.
 
 ## Required Environment
 
-Only these variables are required for regular fault scenarios:
+Only these variables are required for non-static fault scenarios:
 
 ```bash
 export RUSTFS_FAULT_TEST_STORAGE_CLASS=<dedicated-dynamic-storage-class>
@@ -98,16 +98,15 @@ resource cleanup remain under `e2e/src/framework/`.
 | `RUSTFS_FAULT_TEST_TENANT` | `fault-test-tenant` | Tenant name. |
 | `RUSTFS_FAULT_TEST_CHAOS_NAMESPACE` | `chaos-mesh` | Chaos Mesh namespace. |
 | `RUSTFS_FAULT_TEST_USE_CLUSTER_IP` | `false` | Set to `1` when the runner can reach Service ClusterIPs. |
-| `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40000` | Total object count; must be at least 4. |
+| `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40000` | Total object count; must be at least 12. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `80` | S3 workload concurrency; must be 1 through object count. |
 | `RUSTFS_FAULT_TEST_DURATION_SECONDS` | `7200` | Maximum fault TTL. Successful runs recover earlier. |
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `30` | Per S3 request timeout. |
 | `RUSTFS_FAULT_TEST_TIMEOUT_SECONDS` | `300` | Kubernetes wait timeout. |
 | `RUSTFS_FAULT_TEST_SEED` | generated | Reuse a workload plan. |
-| `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | Require at least one client-visible failed/timeout/unknown S3 operation. |
+| `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | Force at least one client-visible failed/timeout/unknown S3 operation even when the catalog marks disruption optional. |
 | `RUSTFS_FAULT_TEST_BUILD_JOBS` | `1` | Cargo prebuild job count. |
 | `RUSTFS_FAULT_TEST_RUN_ROOT` | timestamped target dir | Artifact root. |
-| `RUSTFS_FAULT_TEST_SCENARIOS` | regular scenario list | Space-separated list for `fault-run-regular`. |
 
 For a small rehearsal run:
 
@@ -117,11 +116,10 @@ export RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY=8
 make -C e2e fault-run SCENARIO=io-eio
 ```
 
-`RUSTFS_FAULT_TEST_PERCENT` applies only to percent-based IOChaos scenarios:
-`io-eio`, `io-read-mistake`, `disk-full`, and `warp-under-chaos`. Fixed-target
-scenarios such as `pod-kill-one`, `network-partition-one`, and `dm-flakey`
-reject a percent override. Their run metadata records `percent: null` and
-`fault_selection` such as `1 target(s)`.
+`RUSTFS_FAULT_TEST_PERCENT` applies only when the Rust scenario catalog marks
+the scenario as percent-based. Fixed-target scenarios reject a percent override.
+Run `make -C e2e fault-list` or `cargo run --manifest-path e2e/Cargo.toml --bin
+rustfs-e2e -- fault-catalog-json` to inspect the current catalog.
 
 ## Cluster Preparation
 
@@ -137,9 +135,9 @@ kubectl get storageclass
 Requirements:
 
 - The current context must be a real Kubernetes or K3s cluster, not `kind-*`.
-- At least four schedulable Ready nodes are required for the current regular
+- At least four schedulable Ready nodes are required for the current default
   Tenant shape.
-- Regular scenarios need a dedicated dynamic StorageClass.
+- Non-static scenarios need a dedicated dynamic StorageClass.
 - `dm-flakey` needs a dedicated static Local PV StorageClass and explicit
   device-mapper variables.
 - Other Tenants in the cluster are intentionally ignored by preflight, health
@@ -153,7 +151,7 @@ kubectl -n kube-system get configmap local-path-config -o yaml
 df -h <actual-provisioner-path>
 ```
 
-Chaos Mesh is required for regular scenarios. The validated version is v2.8.3:
+Chaos Mesh is required for Chaos Mesh-backed scenarios. The validated version is v2.8.3:
 
 ```bash
 helm repo add chaos-mesh https://charts.chaos-mesh.org
@@ -166,7 +164,7 @@ helm upgrade --install chaos-mesh chaos-mesh/chaos-mesh \
   --wait --timeout 10m
 
 kubectl -n chaos-mesh get deployment,daemonset
-kubectl get crd iochaos.chaos-mesh.org podchaos.chaos-mesh.org networkchaos.chaos-mesh.org
+kubectl get crd iochaos.chaos-mesh.org podchaos.chaos-mesh.org networkchaos.chaos-mesh.org stresschaos.chaos-mesh.org
 ```
 
 Use the actual runtime socket for non-K3s clusters.
@@ -194,10 +192,11 @@ Use the actual runtime socket for non-K3s clusters.
    make -C e2e fault-run SCENARIO=io-eio
    ```
 
-4. Run the regular suite:
+4. List the catalog and run each selected scenario explicitly:
 
    ```bash
-   make -C e2e fault-run-regular
+   make -C e2e fault-list
+   make -C e2e fault-run SCENARIO=network-delay
    ```
 
 5. Collect artifacts, then clean owned resources:
@@ -206,33 +205,21 @@ Use the actual runtime socket for non-K3s clusters.
    make -C e2e fault-cleanup
    ```
 
-## Regular Scenarios
+## Scenario Catalog
 
-Current regular scenarios run serially and stop on the first failure:
-
-```text
-io-eio
-pod-kill-one
-network-partition-one
-io-read-mistake
-disk-full
-warp-under-chaos
-```
-
-The current catalog maps each scenario to one fault. The internal plan model is
-not limited to that: a future scenario can contain multiple `FaultInjection`
-entries and can use fixed target counts for multiple Pods or percent selection
-for IO faults.
-
-To run a subset:
+The Rust catalog in `e2e/src/fault/scenarios.rs` is the only maintained scenario
+source of truth. The shell runner and this guide query that catalog instead of
+duplicating scenario names, percent rules, CRDs, tools, or impact policy.
 
 ```bash
-export RUSTFS_FAULT_TEST_SCENARIOS='pod-kill-one network-partition-one'
-make -C e2e fault-run-regular
-unset RUSTFS_FAULT_TEST_SCENARIOS
+make -C e2e fault-list
+cargo run --manifest-path e2e/Cargo.toml --bin rustfs-e2e -- fault-catalog-json
 ```
 
-`warp-under-chaos` also requires `warp` in `PATH`.
+Each run names exactly one scenario with `SCENARIO=<name>`. SRE-owned scheduling
+or automation should live outside this repository and call the same explicit
+command for the desired scenario. Tool requirements, such as `warp` for
+`warp-under-chaos`, are read from the Rust catalog during preflight.
 
 ## Artifacts And Pass Criteria
 
@@ -250,6 +237,7 @@ workload-plan.json
 history.jsonl
 workload-summary.json
 recommit-report.json
+checker-pre-recommit-report.json
 checker-report.json
 fault-evidence.json
 chaos-manifest.yaml
@@ -266,11 +254,12 @@ A successful run must show:
 
 - `fault-evidence.json`: `injected`, `active_during_workload`, and `recovered`
   are `true`.
-- `checker-report.json`: `passed` is `true`, committed object count equals the
-  selected workload object count, and missing objects, hash mismatches,
-  successful corrupted reads, and LIST warnings are empty.
-- `recommit-report.json`: every previously unconfirmed PUT was recommitted
-  after recovery.
+- `checker-pre-recommit-report.json` and `checker-report.json`: `passed` is
+  `true`; expected live objects are GET+sha256 verified; missing objects, hash
+  mismatches, successful corrupted reads, unexpected visible deleted objects,
+  and LIST warnings are empty.
+- `recommit-report.json`: every previously unconfirmed write was recommitted
+  and GET verified after recovery.
 - `workload-plan.json`: object count, concurrency, and payload distribution are
   internally consistent with the selected environment values.
 
@@ -292,7 +281,7 @@ Manual checks:
 
 ```bash
 kubectl -n "${RUSTFS_FAULT_TEST_CHAOS_NAMESPACE:-chaos-mesh}" \
-  get iochaos,podchaos,networkchaos \
+  get iochaos,podchaos,networkchaos,stresschaos \
   -l app.kubernetes.io/managed-by=rustfs-operator-fault-test
 
 kubectl get namespace "${RUSTFS_FAULT_TEST_NAMESPACE:-rustfs-fault-test}"
@@ -300,8 +289,8 @@ kubectl get namespace "${RUSTFS_FAULT_TEST_NAMESPACE:-rustfs-fault-test}"
 
 ## dm-flakey
 
-`dm-flakey` is separate from the regular suite. It needs a dedicated static
-Local PV setup and privileged helper access on the fault namespace.
+`dm-flakey` is an explicit scenario that needs a dedicated static Local PV setup
+and privileged helper access on the fault namespace.
 
 There is no Make target that installs this environment. Prepare the host storage
 and Kubernetes Local PVs first, then use `fault-preflight` to verify them.

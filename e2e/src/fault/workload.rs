@@ -15,7 +15,13 @@
 use anyhow::{Context, Result};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{Client, config::Region, error::SdkError, primitives::ByteStream};
+use aws_sdk_s3::{
+    Client,
+    config::Region,
+    error::SdkError,
+    primitives::ByteStream,
+    types::{CompletedMultipartUpload, CompletedPart},
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -69,6 +75,13 @@ pub struct GetObjectResult {
     pub body: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedWriteResult {
+    pub write_outcome: OperationOutcome,
+    pub verify_get_outcome: Option<OperationOutcome>,
+    pub verified: bool,
+}
+
 impl ObjectSpec {
     pub fn key_prefix(run_id: &str) -> String {
         format!("fault-test/{run_id}/")
@@ -101,6 +114,22 @@ impl ObjectSpec {
         debug_assert_eq!(sha256_hex(&body), self.sha256);
         PreparedObject {
             spec: self.clone(),
+            body,
+        }
+    }
+
+    pub fn prepare_overwrite(&self, variant: u64) -> PreparedObject {
+        let seed = self.seed ^ variant.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let body = seeded_bytes(seed, self.index, self.size_bytes);
+        let sha256 = sha256_hex(&body);
+        PreparedObject {
+            spec: Self {
+                key: self.key.clone(),
+                size_bytes: self.size_bytes,
+                sha256,
+                seed,
+                index: self.index,
+            },
             body,
         }
     }
@@ -370,6 +399,359 @@ impl S3WorkloadClient {
         }
     }
 
+    pub async fn put_and_verify_object(
+        &self,
+        object: &PreparedObject,
+        recorder: &Recorder,
+    ) -> Result<VerifiedWriteResult> {
+        let write_outcome = self.put_object(object, recorder).await?;
+        if write_outcome != OperationOutcome::Ok {
+            return Ok(VerifiedWriteResult {
+                write_outcome,
+                verify_get_outcome: None,
+                verified: false,
+            });
+        }
+
+        let get = self.get_object_result(&object.spec.key, recorder).await?;
+        let verified = get.body.as_deref().is_some_and(|body| {
+            body.len() == object.spec.size_bytes && sha256_hex(body) == object.spec.sha256
+        });
+        Ok(VerifiedWriteResult {
+            write_outcome,
+            verify_get_outcome: Some(get.outcome),
+            verified,
+        })
+    }
+
+    pub async fn delete_object(&self, key: &str, recorder: &Recorder) -> Result<OperationOutcome> {
+        let record = recorder.begin(
+            OperationKind::Delete,
+            self.bucket.clone(),
+            Some(key.to_string()),
+            None,
+            None,
+        );
+        let result = timeout(
+            self.request_timeout,
+            self.client
+                .delete_object()
+                .bucket(&self.bucket)
+                .key(key)
+                .send(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(_)) => {
+                recorder.finish(record, OperationOutcome::Ok, Some(204), None)?;
+                Ok(OperationOutcome::Ok)
+            }
+            Ok(Err(error)) => {
+                let outcome = classify_sdk_error(&error);
+                recorder.finish(
+                    record,
+                    outcome,
+                    sdk_error_status(&error),
+                    Some(format!("delete object failed: {error}")),
+                )?;
+                Ok(outcome)
+            }
+            Err(_) => {
+                recorder.finish(
+                    record,
+                    OperationOutcome::Timeout,
+                    None,
+                    Some("delete object timed out".to_string()),
+                )?;
+                Ok(OperationOutcome::Timeout)
+            }
+        }
+    }
+
+    pub async fn delete_and_verify_absent(
+        &self,
+        key: &str,
+        recorder: &Recorder,
+    ) -> Result<(OperationOutcome, Option<OperationOutcome>)> {
+        let delete_outcome = self.delete_object(key, recorder).await?;
+        if delete_outcome != OperationOutcome::Ok {
+            return Ok((delete_outcome, None));
+        }
+        let get = self.get_object_result(key, recorder).await?;
+        Ok((delete_outcome, Some(get.outcome)))
+    }
+
+    pub async fn complete_multipart_object(
+        &self,
+        object: &PreparedObject,
+        recorder: &Recorder,
+    ) -> Result<OperationOutcome> {
+        let Some(upload_id) = self
+            .create_multipart_upload(&object.spec.key, recorder)
+            .await?
+        else {
+            return Ok(OperationOutcome::Unknown);
+        };
+        let mut completed_parts = Vec::new();
+        for (index, chunk) in object.body.chunks(5 * 1024 * 1024).enumerate() {
+            let part_number = (index + 1) as i32;
+            match self
+                .upload_part(&object.spec.key, &upload_id, part_number, chunk, recorder)
+                .await?
+            {
+                Some(part) => completed_parts.push(part),
+                None => {
+                    let _ = self
+                        .abort_multipart_upload(&object.spec.key, &upload_id, recorder)
+                        .await;
+                    return Ok(OperationOutcome::Unknown);
+                }
+            }
+        }
+
+        let record = recorder.begin(
+            OperationKind::CompleteMultipartUpload,
+            self.bucket.clone(),
+            Some(object.spec.key.clone()),
+            Some(object.spec.sha256.clone()),
+            Some(object.spec.size_bytes),
+        );
+        let upload = CompletedMultipartUpload::builder()
+            .set_parts(Some(completed_parts))
+            .build();
+        let result = timeout(
+            self.request_timeout,
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&object.spec.key)
+                .upload_id(upload_id)
+                .multipart_upload(upload)
+                .send(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(_)) => {
+                recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
+                Ok(OperationOutcome::Ok)
+            }
+            Ok(Err(error)) => {
+                let outcome = classify_sdk_error(&error);
+                recorder.finish(
+                    record,
+                    outcome,
+                    sdk_error_status(&error),
+                    Some(format!("complete multipart upload failed: {error}")),
+                )?;
+                Ok(outcome)
+            }
+            Err(_) => {
+                recorder.finish(
+                    record,
+                    OperationOutcome::Timeout,
+                    None,
+                    Some("complete multipart upload timed out".to_string()),
+                )?;
+                Ok(OperationOutcome::Timeout)
+            }
+        }
+    }
+
+    pub async fn abort_multipart_object(
+        &self,
+        object: &PreparedObject,
+        recorder: &Recorder,
+    ) -> Result<OperationOutcome> {
+        let Some(upload_id) = self
+            .create_multipart_upload(&object.spec.key, recorder)
+            .await?
+        else {
+            return Ok(OperationOutcome::Unknown);
+        };
+        self.abort_multipart_upload(&object.spec.key, &upload_id, recorder)
+            .await
+    }
+
+    async fn create_multipart_upload(
+        &self,
+        key: &str,
+        recorder: &Recorder,
+    ) -> Result<Option<String>> {
+        let record = recorder.begin(
+            OperationKind::CreateMultipartUpload,
+            self.bucket.clone(),
+            Some(key.to_string()),
+            None,
+            None,
+        );
+        let result = timeout(
+            self.request_timeout,
+            self.client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .send(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(output)) => {
+                let Some(upload_id) = output.upload_id().map(str::to_string) else {
+                    recorder.finish(
+                        record,
+                        OperationOutcome::Unknown,
+                        Some(200),
+                        Some("create multipart upload omitted upload_id".to_string()),
+                    )?;
+                    return Ok(None);
+                };
+                recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
+                Ok(Some(upload_id))
+            }
+            Ok(Err(error)) => {
+                let outcome = classify_sdk_error(&error);
+                recorder.finish(
+                    record,
+                    outcome,
+                    sdk_error_status(&error),
+                    Some(format!("create multipart upload failed: {error}")),
+                )?;
+                Ok(None)
+            }
+            Err(_) => {
+                recorder.finish(
+                    record,
+                    OperationOutcome::Timeout,
+                    None,
+                    Some("create multipart upload timed out".to_string()),
+                )?;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: i32,
+        body: &[u8],
+        recorder: &Recorder,
+    ) -> Result<Option<CompletedPart>> {
+        let record = recorder.begin(
+            OperationKind::UploadPart,
+            self.bucket.clone(),
+            Some(key.to_string()),
+            Some(sha256_hex(body)),
+            Some(body.len()),
+        );
+        let result = timeout(
+            self.request_timeout,
+            self.client
+                .upload_part()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(body.to_vec()))
+                .send(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(output)) => {
+                let Some(e_tag) = output.e_tag().map(str::to_string) else {
+                    recorder.finish(
+                        record,
+                        OperationOutcome::Unknown,
+                        Some(200),
+                        Some(format!("upload part {part_number} omitted ETag")),
+                    )?;
+                    return Ok(None);
+                };
+                recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
+                Ok(Some(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .e_tag(e_tag)
+                        .build(),
+                ))
+            }
+            Ok(Err(error)) => {
+                let outcome = classify_sdk_error(&error);
+                recorder.finish(
+                    record,
+                    outcome,
+                    sdk_error_status(&error),
+                    Some(format!("upload part {part_number} failed: {error}")),
+                )?;
+                Ok(None)
+            }
+            Err(_) => {
+                recorder.finish(
+                    record,
+                    OperationOutcome::Timeout,
+                    None,
+                    Some(format!("upload part {part_number} timed out")),
+                )?;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        key: &str,
+        upload_id: &str,
+        recorder: &Recorder,
+    ) -> Result<OperationOutcome> {
+        let record = recorder.begin(
+            OperationKind::AbortMultipartUpload,
+            self.bucket.clone(),
+            Some(key.to_string()),
+            None,
+            None,
+        );
+        let result = timeout(
+            self.request_timeout,
+            self.client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(key)
+                .upload_id(upload_id)
+                .send(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(_)) => {
+                recorder.finish(record, OperationOutcome::Ok, Some(204), None)?;
+                Ok(OperationOutcome::Ok)
+            }
+            Ok(Err(error)) => {
+                let outcome = classify_sdk_error(&error);
+                recorder.finish(
+                    record,
+                    outcome,
+                    sdk_error_status(&error),
+                    Some(format!("abort multipart upload failed: {error}")),
+                )?;
+                Ok(outcome)
+            }
+            Err(_) => {
+                recorder.finish(
+                    record,
+                    OperationOutcome::Timeout,
+                    None,
+                    Some("abort multipart upload timed out".to_string()),
+                )?;
+                Ok(OperationOutcome::Timeout)
+            }
+        }
+    }
+
     pub async fn head_object(&self, key: &str, recorder: &Recorder) -> Result<OperationOutcome> {
         let record = recorder.begin(
             OperationKind::Head,
@@ -484,6 +866,7 @@ impl S3WorkloadClient {
 
         let mut record = record;
         record.size_bytes = Some(keys.len());
+        record.listed_keys = Some(keys.clone());
         recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
         Ok(Some(keys))
     }
@@ -553,6 +936,9 @@ fn classify_sdk_error<E>(error: &SdkError<E>) -> OperationOutcome {
     match error {
         SdkError::TimeoutError(_) => OperationOutcome::Timeout,
         SdkError::DispatchFailure(_) | SdkError::ResponseError(_) => OperationOutcome::Unknown,
+        SdkError::ServiceError(context) if context.raw().status().as_u16() == 404 => {
+            OperationOutcome::NotFound
+        }
         SdkError::ConstructionFailure(_) | SdkError::ServiceError(_) => OperationOutcome::Failed,
         _ => OperationOutcome::Unknown,
     }

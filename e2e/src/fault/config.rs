@@ -30,6 +30,7 @@ pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_CLUSTER_TIMEOUT_SECONDS: u64 = 300;
 pub const DEFAULT_WARP_DURATION_SECONDS: u64 = 60;
 pub const DEFAULT_DM_HELPER_IMAGE: &str = "rancher/mirrored-library-busybox:1.37.0";
+pub const MIN_WORKLOAD_OBJECTS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FaultWorkloadProfile {
@@ -49,8 +50,8 @@ impl FaultWorkloadProfile {
 
     pub fn validate(self) -> Result<()> {
         ensure!(
-            self.object_count >= 4,
-            "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 4"
+            self.object_count >= MIN_WORKLOAD_OBJECTS,
+            "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least {MIN_WORKLOAD_OBJECTS}"
         );
         ensure!(
             (1..=self.object_count).contains(&self.concurrency),
@@ -366,7 +367,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{FaultTestConfig, validate_storage_class};
+    use super::{FaultTestConfig, FaultWorkloadProfile, validate_storage_class};
 
     #[test]
     fn real_cluster_fault_defaults_are_isolated() {
@@ -473,6 +474,12 @@ mod tests {
         );
         assert_eq!(config.warp_duration, std::time::Duration::from_secs(30));
         assert_eq!(config.dm_helper_image, "busybox:test");
+    }
+
+    #[test]
+    fn workload_object_count_must_cover_all_mixed_operations() {
+        assert!(FaultWorkloadProfile::new(11, 1).is_err());
+        assert!(FaultWorkloadProfile::new(12, 12).is_ok());
     }
 
     #[test]

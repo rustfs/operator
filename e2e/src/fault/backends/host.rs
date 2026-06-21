@@ -117,7 +117,7 @@ pub fn apply_dm_flakey(
     guard.load_table(spec.fault_table, false)?;
     let active = guard.snapshot("active")?;
     ensure!(
-        active.table.split_whitespace().nth(2) == spec.fault_table.split_whitespace().nth(2),
+        normalize_dm_table(&active.table) == normalize_dm_table(spec.fault_table),
         "device-mapper target did not switch to the requested fault table; requested {:?}, active {:?}",
         spec.fault_table,
         active.table
@@ -181,7 +181,7 @@ impl DmFlakeyGuard {
     pub fn ensure_active(&self, stage: &str) -> Result<DmStatusSnapshot> {
         let snapshot = self.snapshot(stage)?;
         ensure!(
-            snapshot.table.split_whitespace().nth(2) == self.fault_table.split_whitespace().nth(2),
+            normalize_dm_table(&snapshot.table) == normalize_dm_table(&self.fault_table),
             "device-mapper target {:?} is no longer using the requested fault table at {stage}; expected {:?}, active {:?}",
             self.dm_name,
             self.fault_table,
@@ -510,11 +510,15 @@ spec:
     )
 }
 
+fn normalize_dm_table(table: &str) -> String {
+    table.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         DmFlakeySpec, dm_helper_manifest, dm_resume_args, dm_suspend_args, helper_pod_name,
-        pv_targets_node, validate_dm_spec,
+        normalize_dm_table, pv_targets_node, validate_dm_spec,
     };
     use crate::fault::config::FaultTestConfig;
 
@@ -552,6 +556,18 @@ mod tests {
         assert_eq!(
             dm_suspend_args("rustfs-fault-dm", false),
             ["suspend", "rustfs-fault-dm"]
+        );
+    }
+
+    #[test]
+    fn dm_table_comparison_uses_the_full_normalized_table() {
+        assert_eq!(
+            normalize_dm_table("0 1024  flakey   /dev/loop0 0 1 15\n"),
+            "0 1024 flakey /dev/loop0 0 1 15"
+        );
+        assert_ne!(
+            normalize_dm_table("0 1024 flakey /dev/loop0 0 1 15"),
+            normalize_dm_table("0 1024 flakey /dev/loop1 0 1 15")
         );
     }
 

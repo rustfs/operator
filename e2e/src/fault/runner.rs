@@ -15,7 +15,9 @@
 use crate::{
     fault::{
         backends::{
-            chaos_mesh::{self, ChaosGuard, IoChaosSpec, NetworkChaosSpec, PodChaosSpec},
+            chaos_mesh::{
+                self, ChaosGuard, IoChaosSpec, NetworkChaosSpec, PodChaosSpec, StressChaosSpec,
+            },
             host::{self, DmFlakeyGuard, DmFlakeySpec, DmStatusSnapshot},
         },
         checker,
@@ -448,9 +450,11 @@ async fn run_fault_case(
         "workload-summary.json",
         &serde_json::to_string_pretty(&workload.summary)?,
     )?;
+    let require_client_disruption =
+        config.require_client_disruption || spec.impact_policy.requires_client_disruption();
     if let Err(error) = workload
         .summary
-        .require_fault_evidence(config.require_client_disruption)
+        .require_fault_evidence(require_client_disruption)
     {
         collect_fault_artifacts(
             collector,
@@ -566,6 +570,26 @@ async fn run_fault_case(
         "fault-evidence.json",
         &serde_json::to_string_pretty(&recovered_evidence)?,
     )?;
+    let pre_recommit_report =
+        checker::check_s3_history(&s3, &history, true, workload_plan.concurrency).await?;
+    collector.write_text(
+        scenario.case_name,
+        "checker-pre-recommit-report.json",
+        &serde_json::to_string_pretty(&pre_recommit_report)?,
+    )?;
+    if let Err(error) = pre_recommit_report.require_success() {
+        write_failure_summary(
+            collector,
+            scenario.case_name,
+            FailureSummary::new(
+                &scenario.name,
+                "checker-pre-recommit-verdict",
+                "product_or_environment",
+                error.to_string(),
+            ),
+        )?;
+        return Err(error);
+    }
     let recommit_report = recommit_unconfirmed_objects(
         &s3,
         &history,
@@ -624,23 +648,6 @@ async fn run_fault_case(
         "fault-evidence.json",
         &serde_json::to_string_pretty(&evidence)?,
     )?;
-    if report.committed_puts != scenario.object_count {
-        let message = format!(
-            "fault scenario {} expected {} committed objects after recovery reconciliation, got {}",
-            scenario.name, scenario.object_count, report.committed_puts
-        );
-        write_failure_summary(
-            collector,
-            scenario.case_name,
-            FailureSummary::new(
-                &scenario.name,
-                "checker-committed-count",
-                "product_or_environment",
-                message.clone(),
-            ),
-        )?;
-        bail!("{message}");
-    }
     if let Err(error) = report.require_success() {
         write_failure_summary(
             collector,
@@ -675,6 +682,7 @@ fn require_fault_backend(config: &FaultTestConfig, backend: FaultBackend) -> Res
         }
         FaultBackend::ChaosMeshPodChaos => chaos_mesh::require_podchaos_crd(cluster),
         FaultBackend::ChaosMeshNetworkChaos => chaos_mesh::require_networkchaos_crd(cluster),
+        FaultBackend::ChaosMeshStressChaos => chaos_mesh::require_stresschaos_crd(cluster),
         FaultBackend::DeviceMapper => require_dm_flakey_preflight(config),
     }
 }
@@ -728,6 +736,9 @@ fn cleanup_fault_backend(config: &FaultTestConfig, backend: FaultBackend) -> Res
         }
         FaultBackend::ChaosMeshNetworkChaos => {
             chaos_mesh::cleanup_managed_networkchaos(&config.cluster, &config.chaos_namespace)
+        }
+        FaultBackend::ChaosMeshStressChaos => {
+            chaos_mesh::cleanup_managed_stresschaos(&config.cluster, &config.chaos_namespace)
         }
         FaultBackend::DeviceMapper => Ok(()),
     }
@@ -895,6 +906,23 @@ impl AppliedFault {
                     active_required: true,
                 })
             }
+            FaultKind::RustfsVolumeLatency => {
+                let chaos = IoChaosSpec::latency_on_rustfs_volume(
+                    cluster,
+                    &config.chaos_namespace,
+                    run_id,
+                    &scenario.name,
+                    injection.rustfs_volume_path()?,
+                    injection.percent()?,
+                    injection.duration(),
+                )?
+                .with_name_suffix(resource_name_suffix);
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
+                Ok(Self::Chaos {
+                    guard: Box::new(chaos_mesh::apply_iochaos(cluster, &chaos)?),
+                    active_required: true,
+                })
+            }
             FaultKind::RustfsVolumeIoError => {
                 let chaos = IoChaosSpec::eio_on_rustfs_volume(
                     cluster,
@@ -928,6 +956,21 @@ impl AppliedFault {
                     config: Box::new(cluster.clone()),
                 })
             }
+            FaultKind::RustfsServerPodFailure => {
+                let chaos = PodChaosSpec::fail_one_rustfs_pod(
+                    cluster,
+                    &config.chaos_namespace,
+                    run_id,
+                    &scenario.name,
+                    injection.duration(),
+                )?
+                .with_name_suffix(resource_name_suffix);
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
+                Ok(Self::Chaos {
+                    guard: Box::new(chaos_mesh::apply_podchaos(cluster, &chaos)?),
+                    active_required: true,
+                })
+            }
             FaultKind::RustfsServerNetworkPartition => {
                 let chaos = NetworkChaosSpec::partition_one_rustfs_pod(
                     cluster,
@@ -940,6 +983,79 @@ impl AppliedFault {
                 collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
                 Ok(Self::Chaos {
                     guard: Box::new(chaos_mesh::apply_networkchaos(cluster, &chaos)?),
+                    active_required: true,
+                })
+            }
+            FaultKind::RustfsServerNetworkDelay
+            | FaultKind::RustfsServerNetworkLoss
+            | FaultKind::RustfsServerNetworkCorrupt
+            | FaultKind::RustfsServerNetworkDuplicate => {
+                let chaos = match injection.kind() {
+                    FaultKind::RustfsServerNetworkDelay => NetworkChaosSpec::delay_one_rustfs_pod(
+                        cluster,
+                        &config.chaos_namespace,
+                        run_id,
+                        &scenario.name,
+                        injection.duration(),
+                    )?,
+                    FaultKind::RustfsServerNetworkLoss => NetworkChaosSpec::loss_one_rustfs_pod(
+                        cluster,
+                        &config.chaos_namespace,
+                        run_id,
+                        &scenario.name,
+                        injection.duration(),
+                    )?,
+                    FaultKind::RustfsServerNetworkCorrupt => {
+                        NetworkChaosSpec::corrupt_one_rustfs_pod(
+                            cluster,
+                            &config.chaos_namespace,
+                            run_id,
+                            &scenario.name,
+                            injection.duration(),
+                        )?
+                    }
+                    FaultKind::RustfsServerNetworkDuplicate => {
+                        NetworkChaosSpec::duplicate_one_rustfs_pod(
+                            cluster,
+                            &config.chaos_namespace,
+                            run_id,
+                            &scenario.name,
+                            injection.duration(),
+                        )?
+                    }
+                    _ => unreachable!(),
+                }
+                .with_name_suffix(resource_name_suffix);
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
+                Ok(Self::Chaos {
+                    guard: Box::new(chaos_mesh::apply_networkchaos(cluster, &chaos)?),
+                    active_required: true,
+                })
+            }
+            FaultKind::RustfsServerCpuStress | FaultKind::RustfsServerMemoryStress => {
+                let chaos = match injection.kind() {
+                    FaultKind::RustfsServerCpuStress => StressChaosSpec::cpu_on_one_rustfs_pod(
+                        cluster,
+                        &config.chaos_namespace,
+                        run_id,
+                        &scenario.name,
+                        injection.duration(),
+                    )?,
+                    FaultKind::RustfsServerMemoryStress => {
+                        StressChaosSpec::memory_on_one_rustfs_pod(
+                            cluster,
+                            &config.chaos_namespace,
+                            run_id,
+                            &scenario.name,
+                            injection.duration(),
+                        )?
+                    }
+                    _ => unreachable!(),
+                }
+                .with_name_suffix(resource_name_suffix);
+                collector.write_text(scenario.case_name, manifest_name, &chaos.manifest())?;
+                Ok(Self::Chaos {
+                    guard: Box::new(chaos_mesh::apply_stresschaos(cluster, &chaos)?),
                     active_required: true,
                 })
             }
@@ -1629,17 +1745,18 @@ async fn prefill_objects(
         async move {
             let object = ObjectSpec::prepare_seeded(&run_id, index, size_bytes, seed);
             let spec = object.spec.clone();
-            let put_outcome = s3.put_object(&object, &history).await?;
+            let verified = s3.put_and_verify_object(&object, &history).await?;
             ensure!(
-                put_outcome == OperationOutcome::Ok,
-                "prefill PUT failed before fault injection for key {}: {put_outcome:?}",
-                spec.key
+                verified.write_outcome == OperationOutcome::Ok,
+                "prefill PUT failed before fault injection for key {}: {:?}",
+                spec.key,
+                verified.write_outcome
             );
-            let head_outcome = s3.head_object(&spec.key, &history).await?;
             ensure!(
-                head_outcome == OperationOutcome::Ok,
-                "prefill HEAD failed before fault injection for key {}: {head_outcome:?}",
-                spec.key
+                verified.verified,
+                "prefill GET verification failed before fault injection for key {}: {:?}",
+                spec.key,
+                verified.verify_get_outcome
             );
             Ok::<_, anyhow::Error>((index, spec))
         }
@@ -1671,16 +1788,78 @@ async fn run_mixed_workload(
         let seed = plan.seed;
         let existing = prefilled[offset % prefilled.len()].clone();
         async move {
-            let object = ObjectSpec::prepare_seeded(&run_id, index, size_bytes, seed);
-            let spec = object.spec.clone();
-            let put_outcome = s3.put_object(&object, &history).await?;
-            let get_outcome = s3.get_object_result(&existing.key, &history).await?.outcome;
-            Ok::<_, anyhow::Error>(MixedTaskResult {
-                index,
-                object: spec,
-                put_outcome,
-                get_outcome,
-            })
+            let mut result = MixedTaskResult::new(index);
+            match offset % 6 {
+                0 => {
+                    let object = ObjectSpec::prepare_seeded(&run_id, index, size_bytes, seed);
+                    let spec = object.spec.clone();
+                    let verified = s3.put_and_verify_object(&object, &history).await?;
+                    result.puts.push(verified.write_outcome);
+                    if let Some(get_outcome) = verified.verify_get_outcome {
+                        result.gets.push(get_outcome);
+                    }
+                    if verified.write_outcome != OperationOutcome::Ok {
+                        result.unconfirmed_puts.push(spec);
+                    }
+                }
+                1 => {
+                    let object = existing.prepare_overwrite(index as u64 + 1);
+                    let spec = object.spec.clone();
+                    let verified = s3.put_and_verify_object(&object, &history).await?;
+                    result.puts.push(verified.write_outcome);
+                    if let Some(get_outcome) = verified.verify_get_outcome {
+                        result.gets.push(get_outcome);
+                    }
+                    if verified.write_outcome != OperationOutcome::Ok {
+                        result.unconfirmed_puts.push(spec);
+                    }
+                }
+                2 => {
+                    result
+                        .gets
+                        .push(s3.get_object_result(&existing.key, &history).await?.outcome);
+                }
+                3 => {
+                    let prefix = ObjectSpec::key_prefix(&run_id);
+                    let outcome = if s3.list_prefix(&prefix, &history).await?.is_some() {
+                        OperationOutcome::Ok
+                    } else {
+                        OperationOutcome::Unknown
+                    };
+                    result.lists.push(outcome);
+                }
+                4 => {
+                    let (delete_outcome, verify_get) =
+                        s3.delete_and_verify_absent(&existing.key, &history).await?;
+                    result.deletes.push(delete_outcome);
+                    if let Some(get_outcome) = verify_get {
+                        result.gets.push(get_outcome);
+                    }
+                }
+                _ => {
+                    let object = ObjectSpec::prepare_seeded(&run_id, index, size_bytes, seed);
+                    let spec = object.spec.clone();
+                    let complete_outcome = s3.complete_multipart_object(&object, &history).await?;
+                    result.multipart_completes.push(complete_outcome);
+                    if complete_outcome == OperationOutcome::Ok {
+                        result
+                            .gets
+                            .push(s3.get_object_result(&spec.key, &history).await?.outcome);
+                    } else {
+                        result.unconfirmed_puts.push(spec);
+                    }
+                    let abort_object = ObjectSpec::prepare_seeded(
+                        &run_id,
+                        plan.object_count + index,
+                        4 * 1024,
+                        seed,
+                    );
+                    result
+                        .multipart_aborts
+                        .push(s3.abort_multipart_object(&abort_object, &history).await?);
+                }
+            }
+            Ok::<_, anyhow::Error>(result)
         }
     });
     let results = stream::iter(tasks)
@@ -1696,11 +1875,8 @@ async fn run_mixed_workload(
     let mut summary = WorkloadSummary::new(plan);
     let mut unconfirmed_puts = Vec::new();
     for result in completed {
-        summary.puts.record(result.put_outcome);
-        summary.gets.record(result.get_outcome);
-        if result.put_outcome != OperationOutcome::Ok {
-            unconfirmed_puts.push(result.object);
-        }
+        summary.record_all(&result);
+        unconfirmed_puts.extend(result.unconfirmed_puts);
     }
 
     summary.require_exercised()?;
@@ -1722,7 +1898,17 @@ async fn recommit_unconfirmed_objects(
         async move {
             let prepared = object.prepare();
             match s3.put_object_record(&prepared, &history).await {
-                Ok(record) => RecommitAttempt::from_record(object, record),
+                Ok(record) => {
+                    let verify_get_outcome = if record.outcome == OperationOutcome::Ok {
+                        match s3.get_object_result(&object.key, &history).await {
+                            Ok(get) => Some(get.outcome),
+                            Err(_) => Some(OperationOutcome::Unknown),
+                        }
+                    } else {
+                        None
+                    };
+                    RecommitAttempt::from_record(object, record, verify_get_outcome)
+                }
                 Err(error) => {
                     RecommitAttempt::from_harness_error(object, format!("record PUT: {error}"))
                 }
@@ -1754,7 +1940,7 @@ impl RecommitReport {
             .count();
         let failed = attempts
             .iter()
-            .filter(|attempt| attempt.is_s3_failure())
+            .filter(|attempt| attempt.is_s3_failure() || attempt.verify_get_failed())
             .count();
         let harness_errors = attempts
             .iter()
@@ -1809,18 +1995,24 @@ struct RecommitAttempt {
     size_bytes: usize,
     sha256: String,
     outcome: Option<OperationOutcome>,
+    verify_get_outcome: Option<OperationOutcome>,
     http_status: Option<u16>,
     error: Option<String>,
     harness_error: Option<String>,
 }
 
 impl RecommitAttempt {
-    fn from_record(object: ObjectSpec, record: OperationRecord) -> Self {
+    fn from_record(
+        object: ObjectSpec,
+        record: OperationRecord,
+        verify_get_outcome: Option<OperationOutcome>,
+    ) -> Self {
         Self {
             key: object.key,
             size_bytes: object.size_bytes,
             sha256: object.sha256,
             outcome: Some(record.outcome),
+            verify_get_outcome,
             http_status: record.http_status,
             error: record.error,
             harness_error: None,
@@ -1833,6 +2025,7 @@ impl RecommitAttempt {
             size_bytes: object.size_bytes,
             sha256: object.sha256,
             outcome: None,
+            verify_get_outcome: None,
             http_status: None,
             error: None,
             harness_error: Some(error),
@@ -1842,12 +2035,22 @@ impl RecommitAttempt {
     fn is_s3_failure(&self) -> bool {
         matches!(
             self.outcome,
-            Some(OperationOutcome::Failed | OperationOutcome::Timeout | OperationOutcome::Unknown)
+            Some(
+                OperationOutcome::NotFound
+                    | OperationOutcome::Failed
+                    | OperationOutcome::Timeout
+                    | OperationOutcome::Unknown
+            )
         )
     }
 
     fn is_harness_error(&self) -> bool {
         self.harness_error.is_some()
+    }
+
+    fn verify_get_failed(&self) -> bool {
+        self.outcome == Some(OperationOutcome::Ok)
+            && self.verify_get_outcome != Some(OperationOutcome::Ok)
     }
 
     fn failure_sample(&self) -> Option<String> {
@@ -1856,6 +2059,12 @@ impl RecommitAttempt {
         }
         let outcome = self.outcome?;
         if outcome == OperationOutcome::Ok {
+            if self.verify_get_failed() {
+                return Some(format!(
+                    "{}=verify_get({:?})",
+                    self.key, self.verify_get_outcome
+                ));
+            }
             return None;
         }
         let status = self
@@ -1874,9 +2083,28 @@ impl RecommitAttempt {
 #[derive(Debug)]
 struct MixedTaskResult {
     index: usize,
-    object: ObjectSpec,
-    put_outcome: OperationOutcome,
-    get_outcome: OperationOutcome,
+    puts: Vec<OperationOutcome>,
+    gets: Vec<OperationOutcome>,
+    deletes: Vec<OperationOutcome>,
+    lists: Vec<OperationOutcome>,
+    multipart_completes: Vec<OperationOutcome>,
+    multipart_aborts: Vec<OperationOutcome>,
+    unconfirmed_puts: Vec<ObjectSpec>,
+}
+
+impl MixedTaskResult {
+    fn new(index: usize) -> Self {
+        Self {
+            index,
+            puts: Vec::new(),
+            gets: Vec::new(),
+            deletes: Vec::new(),
+            lists: Vec::new(),
+            multipart_completes: Vec::new(),
+            multipart_aborts: Vec::new(),
+            unconfirmed_puts: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1893,6 +2121,10 @@ struct WorkloadSummary {
     total_payload_bytes: u64,
     puts: OutcomeCounts,
     gets: OutcomeCounts,
+    deletes: OutcomeCounts,
+    lists: OutcomeCounts,
+    multipart_completes: OutcomeCounts,
+    multipart_aborts: OutcomeCounts,
     recommitted_after_recovery: usize,
 }
 
@@ -1905,14 +2137,44 @@ impl WorkloadSummary {
             total_payload_bytes: plan.total_payload_bytes,
             puts: OutcomeCounts::default(),
             gets: OutcomeCounts::default(),
+            deletes: OutcomeCounts::default(),
+            lists: OutcomeCounts::default(),
+            multipart_completes: OutcomeCounts::default(),
+            multipart_aborts: OutcomeCounts::default(),
             recommitted_after_recovery: 0,
+        }
+    }
+
+    fn record_all(&mut self, result: &MixedTaskResult) {
+        for outcome in &result.puts {
+            self.puts.record(*outcome);
+        }
+        for outcome in &result.gets {
+            self.gets.record(*outcome);
+        }
+        for outcome in &result.deletes {
+            self.deletes.record(*outcome);
+        }
+        for outcome in &result.lists {
+            self.lists.record(*outcome);
+        }
+        for outcome in &result.multipart_completes {
+            self.multipart_completes.record(*outcome);
+        }
+        for outcome in &result.multipart_aborts {
+            self.multipart_aborts.record(*outcome);
         }
     }
 
     fn require_exercised(&self) -> Result<()> {
         ensure!(
-            self.puts.total() > 0 && self.gets.total() > 0,
-            "fault workload did not exercise both PUT and GET paths: {self:?}"
+            self.puts.total() > 0
+                && self.gets.total() > 0
+                && self.deletes.total() > 0
+                && self.lists.total() > 0
+                && self.multipart_completes.total() > 0
+                && self.multipart_aborts.total() > 0,
+            "fault workload did not exercise every required S3 object path: {self:?}"
         );
         Ok(())
     }
@@ -1932,13 +2194,19 @@ impl WorkloadSummary {
     }
 
     fn disrupted(&self) -> usize {
-        self.puts.disrupted() + self.gets.disrupted()
+        self.puts.disrupted()
+            + self.gets.disrupted()
+            + self.deletes.disrupted()
+            + self.lists.disrupted()
+            + self.multipart_completes.disrupted()
+            + self.multipart_aborts.disrupted()
     }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
 struct OutcomeCounts {
     ok: usize,
+    not_found: usize,
     failed: usize,
     timeout: usize,
     unknown: usize,
@@ -1948,6 +2216,7 @@ impl OutcomeCounts {
     fn record(&mut self, outcome: OperationOutcome) {
         match outcome {
             OperationOutcome::Ok => self.ok += 1,
+            OperationOutcome::NotFound => self.not_found += 1,
             OperationOutcome::Failed => self.failed += 1,
             OperationOutcome::Timeout => self.timeout += 1,
             OperationOutcome::Unknown => self.unknown += 1,
@@ -1955,7 +2224,7 @@ impl OutcomeCounts {
     }
 
     fn total(&self) -> usize {
-        self.ok + self.failed + self.timeout + self.unknown
+        self.ok + self.not_found + self.failed + self.timeout + self.unknown
     }
 
     fn disrupted(&self) -> usize {
@@ -2040,12 +2309,32 @@ mod tests {
         let mut summary = WorkloadSummary::new(&WorkloadPlan::seeded(42, 40000, 80));
         summary.puts.record(OperationOutcome::Ok);
         summary.gets.record(OperationOutcome::Timeout);
+        summary.gets.record(OperationOutcome::NotFound);
+        summary.deletes.record(OperationOutcome::Ok);
+        summary.lists.record(OperationOutcome::Ok);
+        summary.multipart_completes.record(OperationOutcome::Ok);
+        summary.multipart_aborts.record(OperationOutcome::Ok);
 
         assert_eq!(summary.puts.total(), 1);
-        assert_eq!(summary.gets.total(), 1);
+        assert_eq!(summary.gets.total(), 2);
         assert_eq!(summary.disrupted(), 1);
         assert!(summary.require_exercised().is_ok());
         assert!(summary.require_fault_evidence(true).is_ok());
+    }
+
+    #[test]
+    fn workload_summary_requires_every_object_operation_family() {
+        let mut summary = WorkloadSummary::new(&WorkloadPlan::seeded(42, 40000, 80));
+        summary.puts.record(OperationOutcome::Ok);
+        summary.gets.record(OperationOutcome::Ok);
+        summary.deletes.record(OperationOutcome::Ok);
+        summary.lists.record(OperationOutcome::Ok);
+        summary.multipart_completes.record(OperationOutcome::Ok);
+
+        assert!(summary.require_exercised().is_err());
+
+        summary.multipart_aborts.record(OperationOutcome::Ok);
+        assert!(summary.require_exercised().is_ok());
     }
 
     #[test]
@@ -2063,6 +2352,10 @@ mod tests {
                 ok: 1,
                 ..OutcomeCounts::default()
             },
+            deletes: OutcomeCounts::default(),
+            lists: OutcomeCounts::default(),
+            multipart_completes: OutcomeCounts::default(),
+            multipart_aborts: OutcomeCounts::default(),
             recommitted_after_recovery: 0,
         };
 
@@ -2078,6 +2371,7 @@ mod tests {
                 size_bytes: 4096,
                 sha256: "sha-a".to_string(),
                 outcome: Some(OperationOutcome::Ok),
+                verify_get_outcome: Some(OperationOutcome::Ok),
                 http_status: Some(200),
                 error: None,
                 harness_error: None,
@@ -2087,6 +2381,7 @@ mod tests {
                 size_bytes: 4096,
                 sha256: "sha-b".to_string(),
                 outcome: Some(OperationOutcome::Failed),
+                verify_get_outcome: None,
                 http_status: Some(503),
                 error: Some("service unavailable".to_string()),
                 harness_error: None,
@@ -2113,6 +2408,7 @@ mod tests {
             size_bytes: 4096,
             sha256: "sha-a".to_string(),
             outcome: None,
+            verify_get_outcome: None,
             http_status: None,
             error: None,
             harness_error: Some("record PUT: disk full".to_string()),

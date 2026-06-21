@@ -18,7 +18,7 @@ FAULT_SCRIPT := $(CURDIR)/scripts/fault-test.sh
 MANIFEST := $(CURDIR)/Cargo.toml
 FAULT_BUILD_JOBS ?= 1
 
-.PHONY: help fault-check fault-preflight fault-run fault-run-regular fault-run-dm fault-cleanup
+.PHONY: help fault-check fault-list fault-preflight fault-run fault-run-dm fault-cleanup
 
 help:
 	@echo "RustFS e2e fault-test package"
@@ -26,8 +26,8 @@ help:
 	@echo "Usage:"
 	@echo "  make -C e2e fault-check"
 	@echo "  make -C e2e fault-preflight [SCENARIO=io-eio]"
+	@echo "  make -C e2e fault-list"
 	@echo "  make -C e2e fault-run SCENARIO=io-eio"
-	@echo "  make -C e2e fault-run-regular"
 	@echo "  make -C e2e fault-run-dm"
 	@echo "  make -C e2e fault-cleanup"
 	@echo ""
@@ -45,15 +45,15 @@ fault-check:
 	CARGO_BUILD_JOBS=$(FAULT_BUILD_JOBS) cargo test --manifest-path $(MANIFEST)
 	CARGO_BUILD_JOBS=$(FAULT_BUILD_JOBS) cargo clippy --manifest-path $(MANIFEST) --all-targets -- -D warnings
 
+fault-list:
+	@bash $(FAULT_SCRIPT) list
+
 fault-preflight:
 	@bash $(FAULT_SCRIPT) preflight "$(or $(SCENARIO),io-eio)"
 
 fault-run:
 	@test -n "$(SCENARIO)" || (echo "SCENARIO is required" >&2; exit 2)
 	@bash $(FAULT_SCRIPT) run "$(SCENARIO)"
-
-fault-run-regular:
-	@bash $(FAULT_SCRIPT) run-regular
 
 fault-run-dm:
 	@bash $(FAULT_SCRIPT) run dm-flakey

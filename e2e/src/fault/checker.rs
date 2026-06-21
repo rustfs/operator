@@ -27,9 +27,12 @@ pub struct CheckerReport {
     pub scenario: String,
     pub run_id: String,
     pub committed_puts: usize,
+    pub expected_live_objects: usize,
+    pub verified_live_objects: usize,
     pub missing_committed_objects: Vec<String>,
     pub hash_mismatches: Vec<String>,
     pub successful_corrupted_reads: Vec<String>,
+    pub unexpected_visible_deleted_objects: Vec<String>,
     pub unknown_writes_materialized: Vec<String>,
     pub list_warnings: Vec<String>,
     pub tenant_recovered: bool,
@@ -56,40 +59,49 @@ pub async fn check_s3_history(
     concurrency: usize,
 ) -> Result<CheckerReport> {
     let initial_records = recorder.records();
-    let committed = committed_puts(&initial_records);
-    let unknown_writes = unknown_puts(&initial_records);
+    let model = object_model(&initial_records);
+    let read_anomalies = successful_read_anomalies(&initial_records);
+    let list_warnings = list_history_warnings(&initial_records);
     let mut report = CheckerReport {
         scenario: recorder.scenario(),
         run_id: recorder.run_id(),
-        committed_puts: committed.len(),
+        committed_puts: model.committed_writes,
+        expected_live_objects: model.live.len(),
+        verified_live_objects: 0,
         missing_committed_objects: Vec::new(),
         hash_mismatches: Vec::new(),
-        successful_corrupted_reads: successful_corrupted_reads(&initial_records, &committed),
+        successful_corrupted_reads: read_anomalies.corrupted_reads,
+        unexpected_visible_deleted_objects: read_anomalies.visible_deleted_objects,
         unknown_writes_materialized: Vec::new(),
-        list_warnings: Vec::new(),
+        list_warnings,
         tenant_recovered,
         passed: false,
     };
 
     let mut committed_results =
-        stream::iter(committed.clone().into_iter().map(|(key, expected_hash)| {
+        stream::iter(model.live.clone().into_iter().map(|(key, expected)| {
             let s3 = s3.clone();
             let recorder = recorder.clone();
             async move {
                 let body = s3.get_object(&key, &recorder).await?;
-                Ok::<_, anyhow::Error>((key, expected_hash, body))
+                Ok::<_, anyhow::Error>((key, expected, body))
             }
         }))
         .buffer_unordered(concurrency);
     while let Some(result) = committed_results.next().await {
-        let (key, expected_hash, body) = result?;
+        let (key, expected, body) = result?;
         match body {
             Some(body) => {
                 let actual_hash = sha256_hex(&body);
-                if actual_hash != expected_hash {
+                if actual_hash != expected.sha256 || body.len() != expected.size_bytes {
                     report.hash_mismatches.push(format!(
-                        "{key}: expected {expected_hash}, got {actual_hash}"
+                        "{key}: expected {} ({} bytes), got {actual_hash} ({} bytes)",
+                        expected.sha256,
+                        expected.size_bytes,
+                        body.len()
                     ));
+                } else {
+                    report.verified_live_objects += 1;
                 }
             }
             None => report.missing_committed_objects.push(key),
@@ -97,21 +109,22 @@ pub async fn check_s3_history(
     }
 
     let mut unknown_results =
-        stream::iter(unknown_writes.into_iter().map(|(key, attempted_hash)| {
+        stream::iter(model.unknown_writes.into_iter().map(|(key, attempted)| {
             let s3 = s3.clone();
             let recorder = recorder.clone();
             async move {
                 let body = s3.get_object(&key, &recorder).await?;
-                Ok::<_, anyhow::Error>((key, attempted_hash, body))
+                Ok::<_, anyhow::Error>((key, attempted, body))
             }
         }))
         .buffer_unordered(concurrency);
     while let Some(result) = unknown_results.next().await {
-        let (key, attempted_hash, body) = result?;
+        let (key, attempted, body) = result?;
         if let Some(body) = body {
             let actual_hash = sha256_hex(&body);
             report.unknown_writes_materialized.push(format!(
-                "{key}: attempted {attempted_hash}, got {actual_hash}"
+                "{key}: attempted {}, got {actual_hash}",
+                attempted.sha256
             ));
         }
     }
@@ -121,11 +134,18 @@ pub async fn check_s3_history(
     match s3.list_prefix(&prefix, recorder).await? {
         Some(keys) => {
             let listed = keys.into_iter().collect::<BTreeSet<_>>();
-            for key in committed.keys() {
+            for key in model.live.keys() {
                 if !listed.contains(key) {
                     report.list_warnings.push(format!(
-                        "LIST prefix {prefix} did not include committed key {key}"
+                        "LIST prefix {prefix} did not include expected live key {key}"
                     ));
+                }
+            }
+            for key in model.deleted {
+                if listed.contains(&key) {
+                    report
+                        .list_warnings
+                        .push(format!("LIST prefix {prefix} included deleted key {key}"));
                 }
             }
         }
@@ -137,73 +157,189 @@ pub async fn check_s3_history(
     report.missing_committed_objects.sort();
     report.hash_mismatches.sort();
     report.unknown_writes_materialized.sort();
+    report.unexpected_visible_deleted_objects.sort();
     report.list_warnings.sort();
     report.passed = report.tenant_recovered
         && report.missing_committed_objects.is_empty()
         && report.hash_mismatches.is_empty()
         && report.successful_corrupted_reads.is_empty()
+        && report.unexpected_visible_deleted_objects.is_empty()
         && report.list_warnings.is_empty();
 
     Ok(report)
 }
 
-fn committed_puts(records: &[OperationRecord]) -> BTreeMap<String, String> {
-    records
-        .iter()
-        .filter(|record| {
-            record.kind == OperationKind::Put && record.outcome == OperationOutcome::Ok
-        })
-        .filter_map(|record| Some((record.key.clone()?, record.value_sha256.clone()?)))
-        .collect()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedObject {
+    sha256: String,
+    size_bytes: usize,
 }
 
-fn unknown_puts(records: &[OperationRecord]) -> BTreeMap<String, String> {
-    records
-        .iter()
-        .filter(|record| {
-            record.kind == OperationKind::Put
-                && matches!(
-                    record.outcome,
-                    OperationOutcome::Timeout | OperationOutcome::Unknown
-                )
-        })
-        .filter_map(|record| Some((record.key.clone()?, record.value_sha256.clone()?)))
-        .collect()
+#[derive(Debug, Default)]
+struct ObjectModel {
+    live: BTreeMap<String, ExpectedObject>,
+    deleted: BTreeSet<String>,
+    unknown_writes: BTreeMap<String, ExpectedObject>,
+    committed_writes: usize,
 }
 
-fn successful_corrupted_reads(
-    records: &[OperationRecord],
-    committed: &BTreeMap<String, String>,
-) -> Vec<String> {
-    records
-        .iter()
-        .filter(|record| {
-            record.kind == OperationKind::Get && record.outcome == OperationOutcome::Ok
-        })
-        .filter_map(|record| {
-            let key = record.key.as_ref()?;
-            let expected_hash = committed.get(key)?;
-            let actual_hash = record.value_sha256.as_ref()?;
-            (expected_hash != actual_hash)
-                .then(|| format!("{key}: expected {expected_hash}, got {actual_hash}"))
-        })
-        .collect()
+#[derive(Debug, Default)]
+struct ReadAnomalies {
+    corrupted_reads: Vec<String>,
+    visible_deleted_objects: Vec<String>,
+}
+
+fn object_model(records: &[OperationRecord]) -> ObjectModel {
+    let mut model = ObjectModel::default();
+    for record in records {
+        apply_record_to_model(&mut model, record);
+    }
+    model
+}
+
+fn object_model_before(records: &[OperationRecord], started_at_ms: u64) -> ObjectModel {
+    let mut model = ObjectModel::default();
+    for record in records {
+        if record.ended_at_ms < started_at_ms {
+            apply_record_to_model(&mut model, record);
+        }
+    }
+    model
+}
+
+fn apply_record_to_model(model: &mut ObjectModel, record: &OperationRecord) {
+    match record.kind {
+        OperationKind::Put | OperationKind::CompleteMultipartUpload
+            if record.outcome == OperationOutcome::Ok =>
+        {
+            if let Some((key, object)) = record_object(record) {
+                model.committed_writes += 1;
+                model.deleted.remove(&key);
+                model.live.insert(key, object);
+            }
+        }
+        OperationKind::Put | OperationKind::CompleteMultipartUpload
+            if matches!(
+                record.outcome,
+                OperationOutcome::Timeout | OperationOutcome::Unknown
+            ) =>
+        {
+            if let Some((key, object)) = record_object(record) {
+                model.unknown_writes.insert(key, object);
+            }
+        }
+        OperationKind::Delete if record.outcome == OperationOutcome::Ok => {
+            if let Some(key) = record.key.clone() {
+                model.live.remove(&key);
+                model.deleted.insert(key);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn list_history_warnings(records: &[OperationRecord]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for record in records.iter().filter(|record| {
+        record.kind == OperationKind::List && record.outcome == OperationOutcome::Ok
+    }) {
+        let Some(prefix) = record.key.as_deref() else {
+            continue;
+        };
+        let Some(listed_keys) = record.listed_keys.as_ref() else {
+            warnings.push(format!("LIST {} did not record returned keys", record.id));
+            continue;
+        };
+        let listed = listed_keys
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let stable = object_model_before(records, record.started_at_ms);
+        for key in stable.live.keys().filter(|key| key.starts_with(prefix)) {
+            if !listed.contains(key.as_str()) {
+                warnings.push(format!(
+                    "LIST {} prefix {prefix} did not include stable live key {key}",
+                    record.id
+                ));
+            }
+        }
+        for key in stable.deleted.iter().filter(|key| key.starts_with(prefix)) {
+            if listed.contains(key.as_str()) {
+                warnings.push(format!(
+                    "LIST {} prefix {prefix} included stable deleted key {key}",
+                    record.id
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+fn successful_read_anomalies(records: &[OperationRecord]) -> ReadAnomalies {
+    let mut live = BTreeMap::<String, ExpectedObject>::new();
+    let mut anomalies = ReadAnomalies::default();
+    for record in records {
+        match record.kind {
+            OperationKind::Put | OperationKind::CompleteMultipartUpload
+                if record.outcome == OperationOutcome::Ok =>
+            {
+                if let Some((key, object)) = record_object(record) {
+                    live.insert(key, object);
+                }
+            }
+            OperationKind::Delete if record.outcome == OperationOutcome::Ok => {
+                if let Some(key) = record.key.as_ref() {
+                    live.remove(key);
+                }
+            }
+            OperationKind::Get if record.outcome == OperationOutcome::Ok => {
+                let Some(key) = record.key.as_ref() else {
+                    continue;
+                };
+                let actual_hash = record.value_sha256.as_deref().unwrap_or_default();
+                match live.get(key) {
+                    Some(expected) if expected.sha256 != actual_hash => {
+                        anomalies.corrupted_reads.push(format!(
+                            "{key}: expected {}, got {actual_hash}",
+                            expected.sha256
+                        ));
+                    }
+                    None => anomalies
+                        .visible_deleted_objects
+                        .push(format!("{key}: successful GET had no committed live value")),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    anomalies
+}
+
+fn record_object(record: &OperationRecord) -> Option<(String, ExpectedObject)> {
+    Some((
+        record.key.clone()?,
+        ExpectedObject {
+            sha256: record.value_sha256.clone()?,
+            size_bytes: record.size_bytes?,
+        },
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckerReport, successful_corrupted_reads};
+    use super::{CheckerReport, list_history_warnings, object_model, successful_read_anomalies};
     use crate::fault::history::{OperationKind, OperationOutcome, OperationRecord};
-    use std::collections::BTreeMap;
 
     fn record(
+        id: &str,
         kind: OperationKind,
         key: &str,
         hash: &str,
         outcome: OperationOutcome,
     ) -> OperationRecord {
         OperationRecord {
-            id: "op-1".to_string(),
+            id: id.to_string(),
             scenario: "io-eio".to_string(),
             kind,
             bucket: "bucket".to_string(),
@@ -215,17 +351,120 @@ mod tests {
             outcome,
             http_status: Some(200),
             error: None,
+            listed_keys: None,
+        }
+    }
+
+    fn list_record(
+        id: &str,
+        prefix: &str,
+        started_at_ms: u64,
+        ended_at_ms: u64,
+        keys: &[&str],
+    ) -> OperationRecord {
+        OperationRecord {
+            id: id.to_string(),
+            scenario: "io-eio".to_string(),
+            kind: OperationKind::List,
+            bucket: "bucket".to_string(),
+            key: Some(prefix.to_string()),
+            value_sha256: None,
+            size_bytes: Some(keys.len()),
+            listed_keys: Some(keys.iter().map(|key| key.to_string()).collect()),
+            started_at_ms,
+            ended_at_ms,
+            outcome: OperationOutcome::Ok,
+            http_status: Some(200),
+            error: None,
         }
     }
 
     #[test]
     fn corrupted_successful_get_is_hard_failure_input() {
-        let records = vec![record(OperationKind::Get, "k", "bad", OperationOutcome::Ok)];
-        let committed = BTreeMap::from([("k".to_string(), "good".to_string())]);
+        let records = vec![
+            record(
+                "op-1",
+                OperationKind::Put,
+                "k",
+                "good",
+                OperationOutcome::Ok,
+            ),
+            record("op-2", OperationKind::Get, "k", "bad", OperationOutcome::Ok),
+        ];
 
-        let corrupted = successful_corrupted_reads(&records, &committed);
+        let anomalies = successful_read_anomalies(&records);
 
-        assert_eq!(corrupted, vec!["k: expected good, got bad"]);
+        assert_eq!(anomalies.corrupted_reads, vec!["k: expected good, got bad"]);
+    }
+
+    #[test]
+    fn object_model_tracks_overwrite_delete_and_multipart_complete() {
+        let records = vec![
+            record("op-1", OperationKind::Put, "k1", "v1", OperationOutcome::Ok),
+            record("op-2", OperationKind::Put, "k1", "v2", OperationOutcome::Ok),
+            record("op-3", OperationKind::Put, "k2", "v1", OperationOutcome::Ok),
+            record(
+                "op-4",
+                OperationKind::Delete,
+                "k2",
+                "",
+                OperationOutcome::Ok,
+            ),
+            record(
+                "op-5",
+                OperationKind::CompleteMultipartUpload,
+                "k3",
+                "mp",
+                OperationOutcome::Ok,
+            ),
+        ];
+
+        let model = object_model(&records);
+
+        assert_eq!(model.committed_writes, 4);
+        assert_eq!(model.live.get("k1").expect("k1").sha256, "v2");
+        assert!(!model.live.contains_key("k2"));
+        assert_eq!(model.live.get("k3").expect("k3").sha256, "mp");
+        assert!(model.deleted.contains("k2"));
+    }
+
+    #[test]
+    fn list_history_checks_stable_keys_and_ignores_overlapping_changes() {
+        let records = vec![
+            OperationRecord {
+                started_at_ms: 1,
+                ended_at_ms: 2,
+                ..record(
+                    "op-1",
+                    OperationKind::Put,
+                    "fault-test/run-1/stable",
+                    "v1",
+                    OperationOutcome::Ok,
+                )
+            },
+            OperationRecord {
+                started_at_ms: 4,
+                ended_at_ms: 7,
+                ..record(
+                    "op-2",
+                    OperationKind::Put,
+                    "fault-test/run-1/overlap",
+                    "v2",
+                    OperationOutcome::Ok,
+                )
+            },
+            list_record("op-3", "fault-test/run-1/", 5, 6, &[]),
+        ];
+
+        let warnings = list_history_warnings(&records);
+
+        assert_eq!(
+            warnings,
+            vec![
+                "LIST op-3 prefix fault-test/run-1/ did not include stable live key fault-test/run-1/stable"
+            ]
+        );
+        assert!(!warnings.iter().any(|warning| warning.contains("overlap")));
     }
 
     #[test]
@@ -234,9 +473,12 @@ mod tests {
             scenario: "io-eio".to_string(),
             run_id: "run-1".to_string(),
             committed_puts: 1,
+            expected_live_objects: 1,
+            verified_live_objects: 1,
             missing_committed_objects: Vec::new(),
             hash_mismatches: Vec::new(),
             successful_corrupted_reads: Vec::new(),
+            unexpected_visible_deleted_objects: Vec::new(),
             unknown_writes_materialized: Vec::new(),
             list_warnings: Vec::new(),
             tenant_recovered: true,
