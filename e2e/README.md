@@ -6,10 +6,11 @@ The harness is intentionally separated from the main operator crate so e2e-only 
 
 ## Architecture
 
-The harness is split into four top-level domains:
+The harness is split into five top-level domains:
 
 - `manifests/`: e2e-owned static manifests such as the dedicated Kind config.
 - `framework/`: reusable infrastructure primitives.
+- `fault/`: real-cluster fault-test orchestration and fault-specific helpers.
 - `cases/`: release test-case inventory grouped by product boundary.
 - `tests/`: executable suite entrypoints; live tests are ignored by default and run only through explicit Make targets.
 
@@ -24,9 +25,18 @@ e2e/
   src/
     lib.rs
     bin/rustfs-e2e.rs  Makefile-internal helper for live workflow steps
+    fault/
+      config.rs          real-cluster fault-test configuration and safety checks
+      scenarios.rs       fault scenario catalog
+      plan.rs            fault plan expansion for one or more fault injections
+      runner.rs          destructive fault-test orchestration
+      fixture.rs         fault namespace ownership and real-cluster Tenant fixture
+      backends/          Chaos Mesh and host-side fault backends
+      workload.rs        S3 workload generation and execution
+      history.rs         workload operation recorder
+      checker.rs         committed-object correctness checker
     framework/
       config.rs          dedicated Kind e2e configuration
-      fault_config.rs    real-cluster fault-test configuration and safety checks
       command.rs         safe subprocess wrapper for kind/docker/kubectl
       kind.rs            Kind cluster lifecycle and host mount preparation
       kubectl.rs         kubectl command construction boundary

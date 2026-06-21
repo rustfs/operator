@@ -17,9 +17,9 @@ use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::framework::{
+use crate::fault::{
     history::{OperationKind, OperationOutcome, OperationRecord, Recorder},
-    s3_workload::{ObjectSpec, S3WorkloadClient, sha256_hex},
+    workload::{ObjectSpec, S3WorkloadClient, sha256_hex},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +193,7 @@ fn successful_corrupted_reads(
 #[cfg(test)]
 mod tests {
     use super::{CheckerReport, successful_corrupted_reads};
-    use crate::framework::history::{OperationKind, OperationOutcome, OperationRecord};
+    use crate::fault::history::{OperationKind, OperationOutcome, OperationRecord};
     use std::collections::BTreeMap;
 
     fn record(

@@ -81,10 +81,16 @@ export RUSTFS_FAULT_TEST_EXPECTED_CONTEXT=<dedicated-k8s-or-k3s-context>
 
 ## Common Overrides
 
-Defaults are centralized in `e2e/src/framework/fault_config.rs`. The shell
+Defaults are centralized in `e2e/src/fault/config.rs`. The shell
 runner passes the same values into the Rust test and validates artifacts against
 the selected values. Shell preflight mirrors the Rust entrypoint for numeric
 ranges, booleans, and scenario-specific percent overrides.
+
+Fault-test orchestration lives under `e2e/src/fault/`: runtime configuration,
+scenario catalog, plan expansion, fault backends, fixture ownership checks, S3
+workload history, and the Rust runner. Shared Kubernetes wrappers, kubectl
+command helpers, artifact collection, port-forwarding, and generic Tenant
+resource cleanup remain under `e2e/src/framework/`.
 
 | Variable | Default | Use |
 | --- | --- | --- |

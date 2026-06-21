@@ -12,23 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod artifacts;
-pub mod assertions;
-pub mod cert_manager_tls;
-pub mod command;
+pub mod backends;
+pub mod checker;
 pub mod config;
-pub mod console_client;
-pub mod deploy;
-pub mod images;
-pub mod kind;
-pub mod kube_client;
-pub mod kubectl;
-pub mod live;
-pub mod port_forward;
-pub mod resources;
-pub mod storage;
-pub mod tenant_factory;
-pub mod tools;
-pub mod wait;
-
-pub use config::{ClusterTestConfig, E2eConfig};
+pub mod fixture;
+pub mod history;
+pub mod plan;
+pub mod runner;
+pub mod scenarios;
+pub mod workload;

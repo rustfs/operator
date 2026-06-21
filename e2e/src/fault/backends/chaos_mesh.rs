@@ -668,7 +668,7 @@ impl Drop for ChaosGuard {
 #[cfg(test)]
 mod tests {
     use super::{IoChaosSpec, chaos_experiment_is_active};
-    use crate::framework::fault_config::FaultTestConfig;
+    use crate::fault::config::FaultTestConfig;
     use std::time::Duration;
 
     #[test]
