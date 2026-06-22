@@ -26,11 +26,12 @@ not Kind tests and are not designed for shared application clusters. The runner
 creates and deletes its own namespace, Tenant, PVCs, Pods, Services, StatefulSet,
 and Chaos Mesh resources.
 
-The fault-test cluster is dedicated to this work, so other Tenants are outside
-the test contract. The runner does not use other Tenants as health input, does
-not assert their readiness, and does not try to protect unrelated workloads. Do
-not point the fault namespace, Tenant, StorageClass, or device-mapper path at
-shared or production resources.
+The fault-test runner owns only the resources it creates in the fault namespace.
+Pre-existing non-fault Tenants are treated as health guardrails: preflight
+requires them to be Ready, and each scenario stops if one becomes non-Ready. The
+runner never modifies, restarts, scales, or cleans up those Tenants. Do not point
+the fault namespace, Tenant, StorageClass, or device-mapper path at shared or
+production resources.
 
 Default owned resources:
 
