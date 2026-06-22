@@ -25,6 +25,7 @@ pub const DEFAULT_CHAOS_NAMESPACE: &str = "chaos-mesh";
 pub const DEFAULT_OPERATOR_NAMESPACE: &str = "rustfs-system";
 pub const DEFAULT_WORKLOAD_OBJECTS: usize = 40_000;
 pub const DEFAULT_WORKLOAD_CONCURRENCY: usize = 80;
+pub const DEFAULT_PREFILL_CONCURRENCY: usize = 16;
 pub const DEFAULT_FAULT_DURATION_SECONDS: u64 = 7_200;
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_CLUSTER_TIMEOUT_SECONDS: u64 = 300;
@@ -72,6 +73,7 @@ pub struct FaultTestConfig {
     pub percent: u8,
     pub percent_overridden: bool,
     pub workload: FaultWorkloadProfile,
+    pub prefill_concurrency: usize,
     pub workload_seed: Option<u64>,
     pub request_timeout: Duration,
     pub use_cluster_ip: bool,
@@ -129,6 +131,16 @@ impl FaultTestConfig {
                 DEFAULT_WORKLOAD_CONCURRENCY,
             )?,
         )?;
+        let prefill_concurrency = env_usize(
+            &get_env,
+            "RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY",
+            workload.concurrency.min(DEFAULT_PREFILL_CONCURRENCY),
+        )?;
+        ensure!(
+            (1..=workload.object_count).contains(&prefill_concurrency),
+            "RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY must be between 1 and RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS ({})",
+            workload.object_count
+        );
         let cluster = ClusterTestConfig {
             context,
             operator_namespace: env_or(
@@ -167,6 +179,7 @@ impl FaultTestConfig {
             percent: env_u8(&get_env, "RUSTFS_FAULT_TEST_PERCENT", default_percent)?,
             percent_overridden: env_optional(&get_env, "RUSTFS_FAULT_TEST_PERCENT").is_some(),
             workload,
+            prefill_concurrency,
             workload_seed: env_optional_u64(&get_env, "RUSTFS_FAULT_TEST_SEED")?,
             request_timeout: Duration::from_secs(env_u64(
                 &get_env,
@@ -397,6 +410,7 @@ mod tests {
         assert!(!config.percent_overridden);
         assert_eq!(config.workload.object_count, 40000);
         assert_eq!(config.workload.concurrency, 80);
+        assert_eq!(config.prefill_concurrency, 16);
         assert_eq!(config.workload_seed, None);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
         assert!(!config.use_cluster_ip);
@@ -426,6 +440,7 @@ mod tests {
                 "RUSTFS_FAULT_TEST_PERCENT" => Some("35".to_string()),
                 "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("64".to_string()),
                 "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY" => Some("8".to_string()),
+                "RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY" => Some("4".to_string()),
                 "RUSTFS_FAULT_TEST_SEED" => Some("4242".to_string()),
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS" => Some("7".to_string()),
                 "RUSTFS_FAULT_TEST_USE_CLUSTER_IP" => Some("true".to_string()),
@@ -457,6 +472,7 @@ mod tests {
         assert!(config.percent_overridden);
         assert_eq!(config.workload.object_count, 64);
         assert_eq!(config.workload.concurrency, 8);
+        assert_eq!(config.prefill_concurrency, 4);
         assert_eq!(config.workload_seed, Some(4242));
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(7));
         assert!(config.use_cluster_ip);
@@ -546,6 +562,22 @@ mod tests {
                 "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
                 "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
                 "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("not-a-number".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_prefill_concurrency_is_rejected() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("64".to_string()),
+                "RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY" => Some("0".to_string()),
                 _ => None,
             },
             "production-test-cluster".to_string(),
