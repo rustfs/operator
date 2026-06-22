@@ -72,6 +72,8 @@ pub struct S3WorkloadClient {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetObjectResult {
     pub outcome: OperationOutcome,
+    pub http_status: Option<u16>,
+    pub error: Option<String>,
     pub body: Option<Vec<u8>>,
 }
 
@@ -346,6 +348,8 @@ impl S3WorkloadClient {
                 )?;
                 return Ok(GetObjectResult {
                     outcome,
+                    http_status: sdk_error_status(&error),
+                    error: Some(format!("get object failed: {error}")),
                     body: None,
                 });
             }
@@ -358,6 +362,8 @@ impl S3WorkloadClient {
                 )?;
                 return Ok(GetObjectResult {
                     outcome: OperationOutcome::Timeout,
+                    http_status: None,
+                    error: Some("get object timed out".to_string()),
                     body: None,
                 });
             }
@@ -373,18 +379,23 @@ impl S3WorkloadClient {
                 recorder.finish(record, OperationOutcome::Ok, Some(200), None)?;
                 Ok(GetObjectResult {
                     outcome: OperationOutcome::Ok,
+                    http_status: Some(200),
+                    error: None,
                     body: Some(body),
                 })
             }
             Ok(Err(error)) => {
+                let error = format!("get body read failed: {error}");
                 recorder.finish(
                     record,
                     OperationOutcome::Unknown,
                     Some(200),
-                    Some(format!("get body read failed: {error}")),
+                    Some(error.clone()),
                 )?;
                 Ok(GetObjectResult {
                     outcome: OperationOutcome::Unknown,
+                    http_status: Some(200),
+                    error: Some(error),
                     body: None,
                 })
             }
@@ -397,6 +408,8 @@ impl S3WorkloadClient {
                 )?;
                 Ok(GetObjectResult {
                     outcome: OperationOutcome::Timeout,
+                    http_status: Some(200),
+                    error: Some("get body read timed out".to_string()),
                     body: None,
                 })
             }

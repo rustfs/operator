@@ -1049,8 +1049,9 @@ impl ChaosGuard {
         Ok(output.stdout)
     }
 
-    pub fn delete(&mut self) -> Result<()> {
+    pub fn delete(&mut self, timeout: Duration) -> Result<()> {
         self.delete_inner()?;
+        self.wait_deleted(timeout)?;
         self.deleted = true;
         Ok(())
     }
@@ -1066,9 +1067,53 @@ impl ChaosGuard {
     fn delete_inner(&self) -> Result<()> {
         Kubectl::new(&self.config)
             .namespaced(&self.namespace)
-            .command(["delete", self.kind, &self.name, "--ignore-not-found"])
+            .command([
+                "delete",
+                self.kind,
+                &self.name,
+                "--ignore-not-found",
+                "--wait=false",
+            ])
             .run_checked()?;
         Ok(())
+    }
+
+    fn wait_deleted(&self, timeout: Duration) -> Result<()> {
+        let resource = format!("{}/{}", self.kind, self.name);
+        let timeout_arg = format!("--timeout={}s", timeout.as_secs().max(1));
+        let result = Kubectl::new(&self.config)
+            .namespaced(&self.namespace)
+            .command([
+                "wait",
+                "--for=delete",
+                resource.as_str(),
+                timeout_arg.as_str(),
+            ])
+            .run_checked();
+        let error = match result {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+
+        let status = self.yaml().unwrap_or_else(|error| {
+            format!(
+                "failed to read {kind}/{name} yaml after delete timeout: {error}",
+                kind = self.kind,
+                name = self.name
+            )
+        });
+        let describe = self.describe().unwrap_or_else(|error| {
+            format!(
+                "failed to describe {kind}/{name} after delete timeout: {error}",
+                kind = self.kind,
+                name = self.name
+            )
+        });
+        bail!(
+            "timed out waiting for {kind}/{name} deletion after {timeout:?}: {error}\nlast status:\n{status}\n\ndescribe:\n{describe}",
+            kind = self.kind,
+            name = self.name,
+        )
     }
 }
 

@@ -268,8 +268,10 @@ A successful run must show:
   are `true`.
 - `checker-pre-recommit-report.json` and `checker-report.json`: `passed` is
   `true`; expected live objects are GET+sha256 verified; missing objects, hash
-  mismatches, successful corrupted reads, unexpected visible deleted objects,
-  and LIST warnings are empty.
+  mismatches, unavailable committed-object reads, unknown committed-object read
+  failures, successful corrupted reads, unexpected visible deleted objects, and
+  final post-recovery LIST warnings are empty. `list_history_warnings` are
+  retained as sampled workload-time diagnostics.
 - `recommit-report.json`: every previously unconfirmed write was recommitted
   and GET verified after recovery.
 - `workload-plan.json`: object count, concurrency, and payload distribution are
