@@ -87,6 +87,10 @@ impl ObjectSpec {
         format!("fault-test/{run_id}/")
     }
 
+    pub fn matches_body(&self, body: &[u8]) -> bool {
+        body.len() == self.size_bytes && sha256_hex(body) == self.sha256
+    }
+
     pub fn prepare_seeded(
         run_id: &str,
         index: usize,
@@ -414,9 +418,10 @@ impl S3WorkloadClient {
         }
 
         let get = self.get_object_result(&object.spec.key, recorder).await?;
-        let verified = get.body.as_deref().is_some_and(|body| {
-            body.len() == object.spec.size_bytes && sha256_hex(body) == object.spec.sha256
-        });
+        let verified = get
+            .body
+            .as_deref()
+            .is_some_and(|body| object.spec.matches_body(body));
         Ok(VerifiedWriteResult {
             write_outcome,
             verify_get_outcome: Some(get.outcome),
@@ -966,10 +971,16 @@ mod tests {
         assert_eq!(object.spec.size_bytes, 4096);
         assert_eq!(object.spec.sha256, same.spec.sha256);
         assert_eq!(object.spec.sha256, sha256_hex(&same.body));
+        assert!(object.spec.matches_body(&same.body));
         assert_ne!(
             object.spec.sha256,
             ObjectSpec::prepare_seeded("run-1", 7, 4096, 43).spec.sha256
         );
+
+        let mut corrupted = same.body.clone();
+        corrupted[0] ^= 1;
+        assert!(!object.spec.matches_body(&corrupted));
+        assert!(!object.spec.matches_body(&same.body[..same.body.len() - 1]));
     }
 
     #[test]
