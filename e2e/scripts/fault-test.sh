@@ -160,6 +160,8 @@ kubectl_cluster() {
 }
 
 fault_catalog_json() {
+  require_command cargo
+  require_command jq
   if [[ -z "$FAULT_CATALOG_JSON" ]]; then
     FAULT_CATALOG_JSON="$(CARGO_BUILD_JOBS="$BUILD_JOBS" cargo run --quiet --manifest-path "$MANIFEST" --bin rustfs-e2e -- fault-catalog-json)"
   fi
