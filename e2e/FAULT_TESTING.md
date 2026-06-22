@@ -104,6 +104,7 @@ resource cleanup remain under `e2e/src/framework/`.
 | `RUSTFS_FAULT_TEST_USE_CLUSTER_IP` | `false` | Set to `1` when the runner can reach Service ClusterIPs. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS` | `40000` | Total object count; must be at least 12. |
 | `RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY` | `80` | S3 workload concurrency; must be 1 through object count. |
+| `RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY` | `min(16, workload concurrency)` | Setup PUT+GET verification concurrency before fault injection. |
 | `RUSTFS_FAULT_TEST_DURATION_SECONDS` | `7200` | Maximum fault TTL. Successful runs recover earlier. |
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `30` | Per S3 request timeout. |
 | `RUSTFS_FAULT_TEST_TIMEOUT_SECONDS` | `300` | Kubernetes wait timeout. |
@@ -115,7 +116,9 @@ resource cleanup remain under `e2e/src/framework/`.
 The prefill stage writes each setup object once and requires a matching GET
 before fault injection. It retries transient GET timeouts or unknown read
 failures a small bounded number of times; mismatched bytes and explicit S3
-failures still fail the run immediately.
+failures still fail the run immediately. Its concurrency is intentionally
+separate from the fault-window workload so setup does not fail the scenario
+before the selected fault is injected.
 
 For a small rehearsal run:
 

@@ -292,6 +292,7 @@ async fn run_fault_case(
         &run_id,
         &workload_plan,
         scenario.prefill_count(),
+        config.prefill_concurrency,
     )
     .await
     {
@@ -1238,6 +1239,7 @@ struct RunMetadata {
     fault_selection: Vec<String>,
     workload_objects: usize,
     workload_concurrency: usize,
+    prefill_concurrency: usize,
     request_timeout_seconds: u64,
     use_cluster_ip: bool,
     require_client_disruption: bool,
@@ -1280,6 +1282,7 @@ impl RunMetadata {
                 .collect(),
             workload_objects: scenario.object_count,
             workload_concurrency: config.workload.concurrency,
+            prefill_concurrency: config.prefill_concurrency,
             request_timeout_seconds: config.request_timeout.as_secs(),
             use_cluster_ip: config.use_cluster_ip,
             require_client_disruption: config.require_client_disruption,
@@ -1737,6 +1740,7 @@ async fn prefill_objects(
     run_id: &str,
     plan: &WorkloadPlan,
     count: usize,
+    prefill_concurrency: usize,
 ) -> Result<Vec<ObjectSpec>> {
     let tasks = (0..count).map(|index| {
         let s3 = s3.clone();
@@ -1759,7 +1763,7 @@ async fn prefill_objects(
         }
     });
     let mut objects = stream::iter(tasks)
-        .buffer_unordered(plan.concurrency)
+        .buffer_unordered(prefill_concurrency)
         .try_collect::<Vec<_>>()
         .await?;
     objects.sort_by_key(|(index, _)| *index);
