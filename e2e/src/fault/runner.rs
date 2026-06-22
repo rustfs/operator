@@ -26,7 +26,7 @@ use crate::{
         history::{OperationOutcome, OperationRecord, Recorder},
         plan::{FaultInjection, FaultKind, FaultPlan, FaultSelection},
         scenarios::{self, FaultBackend, FaultIsolation, FaultScenario},
-        workload::{ObjectSpec, S3WorkloadClient, WorkloadPlan, wait_for_s3_endpoint},
+        workload::{ObjectSpec, S3WorkloadClient, WorkloadPlan, sha256_hex, wait_for_s3_endpoint},
     },
     framework::{
         artifacts::ArtifactCollector,
@@ -51,6 +51,8 @@ use uuid::Uuid;
 
 const FAULT_TENANT_POD_COUNT: usize = 4;
 const RUSTFS_POD_STABLE_WINDOW: Duration = Duration::from_secs(60);
+const PREFILL_VERIFY_ATTEMPTS: usize = 3;
+const PREFILL_VERIFY_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub async fn run_selected_scenario_from_env() -> Result<()> {
     let config = FaultTestConfig::from_env()?;
@@ -1745,19 +1747,14 @@ async fn prefill_objects(
         async move {
             let object = ObjectSpec::prepare_seeded(&run_id, index, size_bytes, seed);
             let spec = object.spec.clone();
-            let verified = s3.put_and_verify_object(&object, &history).await?;
+            let write_outcome = s3.put_object(&object, &history).await?;
             ensure!(
-                verified.write_outcome == OperationOutcome::Ok,
+                write_outcome == OperationOutcome::Ok,
                 "prefill PUT failed before fault injection for key {}: {:?}",
                 spec.key,
-                verified.write_outcome
+                write_outcome
             );
-            ensure!(
-                verified.verified,
-                "prefill GET verification failed before fault injection for key {}: {:?}",
-                spec.key,
-                verified.verify_get_outcome
-            );
+            verify_prefill_object(&s3, &history, &spec).await?;
             Ok::<_, anyhow::Error>((index, spec))
         }
     });
@@ -1768,6 +1765,51 @@ async fn prefill_objects(
     objects.sort_by_key(|(index, _)| *index);
 
     Ok(objects.into_iter().map(|(_, object)| object).collect())
+}
+
+async fn verify_prefill_object(
+    s3: &S3WorkloadClient,
+    history: &Recorder,
+    spec: &ObjectSpec,
+) -> Result<()> {
+    let mut last_outcome = None;
+    for attempt in 1..=PREFILL_VERIFY_ATTEMPTS {
+        let get = s3.get_object_result(&spec.key, history).await?;
+        last_outcome = Some(get.outcome);
+        match get.outcome {
+            OperationOutcome::Ok => {
+                let body = get.body.as_deref().with_context(|| {
+                    format!(
+                        "prefill GET verification returned no body before fault injection for key {}",
+                        spec.key
+                    )
+                })?;
+                ensure!(
+                    spec.matches_body(body),
+                    "prefill GET verification returned mismatched bytes before fault injection for key {}: expected size={} sha256={}, got size={} sha256={}",
+                    spec.key,
+                    spec.size_bytes,
+                    spec.sha256,
+                    body.len(),
+                    sha256_hex(body)
+                );
+                return Ok(());
+            }
+            OperationOutcome::Timeout | OperationOutcome::Unknown
+                if attempt < PREFILL_VERIFY_ATTEMPTS =>
+            {
+                async_sleep(PREFILL_VERIFY_RETRY_DELAY).await;
+            }
+            _ => break,
+        }
+    }
+
+    bail!(
+        "prefill GET verification failed before fault injection for key {} after {} attempt(s): {:?}",
+        spec.key,
+        PREFILL_VERIFY_ATTEMPTS,
+        last_outcome
+    )
 }
 
 async fn run_mixed_workload(

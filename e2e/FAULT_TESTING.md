@@ -112,6 +112,11 @@ resource cleanup remain under `e2e/src/framework/`.
 | `RUSTFS_FAULT_TEST_BUILD_JOBS` | `1` | Cargo prebuild job count. |
 | `RUSTFS_FAULT_TEST_RUN_ROOT` | timestamped target dir | Artifact root. |
 
+The prefill stage writes each setup object once and requires a matching GET
+before fault injection. It retries transient GET timeouts or unknown read
+failures a small bounded number of times; mismatched bytes and explicit S3
+failures still fail the run immediately.
+
 For a small rehearsal run:
 
 ```bash
