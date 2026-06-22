@@ -534,18 +534,24 @@ validate_scenario_artifacts() {
   jq -e '(.active_snapshots | length) > 0 and (.workload_snapshots | length) > 0' "$evidence" >/dev/null || die "$scenario fault evidence snapshots are missing"
   jq -e '
     (.missing_committed_objects | length) == 0
+    and ((.unavailable_committed_objects // []) | length) == 0
+    and ((.unknown_committed_read_failures // []) | length) == 0
     and (.hash_mismatches | length) == 0
     and (.successful_corrupted_reads | length) == 0
     and (.unexpected_visible_deleted_objects | length) == 0
+    and ((.final_list_warning_count // (.list_warnings | length)) == 0)
     and (.list_warnings | length) == 0
     and .tenant_recovered == true
     and .passed == true
   ' "$prechecker" >/dev/null || die "$scenario pre-recommit checker verdict failed"
   jq -e '
     (.missing_committed_objects | length) == 0
+    and ((.unavailable_committed_objects // []) | length) == 0
+    and ((.unknown_committed_read_failures // []) | length) == 0
     and (.hash_mismatches | length) == 0
     and (.successful_corrupted_reads | length) == 0
     and (.unexpected_visible_deleted_objects | length) == 0
+    and ((.final_list_warning_count // (.list_warnings | length)) == 0)
     and (.list_warnings | length) == 0
     and .tenant_recovered == true
     and .passed == true
@@ -670,7 +676,7 @@ initialize_summary() {
   local run_root="$1"
   mkdir -p "$run_root"
   if [[ ! -f "$run_root/validation-summary.tsv" ]]; then
-    printf 'scenario\tseed\texit\tdisruptions\trecommitted\tcommitted\tmissing\thash_mismatch\tcorrupt_read\tlist_warning\trecovered\n' \
+    printf 'scenario\tseed\texit\tdisruptions\trecommitted\tcommitted\tmissing\thash_mismatch\tcorrupt_read\tfinal_list_warning\trecovered\n' \
       >"$run_root/validation-summary.tsv"
   fi
 }

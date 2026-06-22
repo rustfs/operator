@@ -19,8 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fault::{
     history::{OperationKind, OperationOutcome, OperationRecord, Recorder},
-    workload::{ObjectSpec, S3WorkloadClient, sha256_hex},
+    workload::{GetObjectResult, ObjectSpec, S3WorkloadClient, sha256_hex},
 };
+
+const MAX_WARNING_SAMPLES: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckerReport {
@@ -30,11 +32,17 @@ pub struct CheckerReport {
     pub expected_live_objects: usize,
     pub verified_live_objects: usize,
     pub missing_committed_objects: Vec<String>,
+    pub unavailable_committed_objects: Vec<String>,
+    pub unknown_committed_read_failures: Vec<String>,
     pub hash_mismatches: Vec<String>,
     pub successful_corrupted_reads: Vec<String>,
     pub unexpected_visible_deleted_objects: Vec<String>,
     pub unknown_writes_materialized: Vec<String>,
+    pub list_history_warning_count: usize,
+    pub final_list_warning_count: usize,
+    pub list_history_warnings: Vec<String>,
     pub list_warnings: Vec<String>,
+    pub final_listed_objects: Option<usize>,
     pub tenant_recovered: bool,
     pub passed: bool,
 }
@@ -61,7 +69,7 @@ pub async fn check_s3_history(
     let initial_records = recorder.records();
     let model = object_model(&initial_records);
     let read_anomalies = successful_read_anomalies(&initial_records);
-    let list_warnings = list_history_warnings(&initial_records);
+    let list_history_warnings = list_history_warnings(&initial_records);
     let mut report = CheckerReport {
         scenario: recorder.scenario(),
         run_id: recorder.run_id(),
@@ -69,11 +77,17 @@ pub async fn check_s3_history(
         expected_live_objects: model.live.len(),
         verified_live_objects: 0,
         missing_committed_objects: Vec::new(),
+        unavailable_committed_objects: Vec::new(),
+        unknown_committed_read_failures: Vec::new(),
         hash_mismatches: Vec::new(),
         successful_corrupted_reads: read_anomalies.corrupted_reads,
         unexpected_visible_deleted_objects: read_anomalies.visible_deleted_objects,
         unknown_writes_materialized: Vec::new(),
-        list_warnings,
+        list_history_warning_count: list_history_warnings.total_count,
+        final_list_warning_count: 0,
+        list_history_warnings: list_history_warnings.samples,
+        list_warnings: Vec::new(),
+        final_listed_objects: None,
         tenant_recovered,
         passed: false,
     };
@@ -83,29 +97,14 @@ pub async fn check_s3_history(
             let s3 = s3.clone();
             let recorder = recorder.clone();
             async move {
-                let body = s3.get_object(&key, &recorder).await?;
-                Ok::<_, anyhow::Error>((key, expected, body))
+                let get = s3.get_object_result(&key, &recorder).await?;
+                Ok::<_, anyhow::Error>((key, expected, get))
             }
         }))
         .buffer_unordered(concurrency);
     while let Some(result) = committed_results.next().await {
-        let (key, expected, body) = result?;
-        match body {
-            Some(body) => {
-                let actual_hash = sha256_hex(&body);
-                if actual_hash != expected.sha256 || body.len() != expected.size_bytes {
-                    report.hash_mismatches.push(format!(
-                        "{key}: expected {} ({} bytes), got {actual_hash} ({} bytes)",
-                        expected.sha256,
-                        expected.size_bytes,
-                        body.len()
-                    ));
-                } else {
-                    report.verified_live_objects += 1;
-                }
-            }
-            None => report.missing_committed_objects.push(key),
-        }
+        let (key, expected, get) = result?;
+        evaluate_committed_get(&mut report, key, &expected, get);
     }
 
     let mut unknown_results =
@@ -113,14 +112,14 @@ pub async fn check_s3_history(
             let s3 = s3.clone();
             let recorder = recorder.clone();
             async move {
-                let body = s3.get_object(&key, &recorder).await?;
-                Ok::<_, anyhow::Error>((key, attempted, body))
+                let get = s3.get_object_result(&key, &recorder).await?;
+                Ok::<_, anyhow::Error>((key, attempted, get))
             }
         }))
         .buffer_unordered(concurrency);
     while let Some(result) = unknown_results.next().await {
-        let (key, attempted, body) = result?;
-        if let Some(body) = body {
+        let (key, attempted, get) = result?;
+        if let Some(body) = get.body {
             let actual_hash = sha256_hex(&body);
             report.unknown_writes_materialized.push(format!(
                 "{key}: attempted {}, got {actual_hash}",
@@ -131,40 +130,46 @@ pub async fn check_s3_history(
 
     let run_id = recorder.run_id();
     let prefix = ObjectSpec::key_prefix(&run_id);
+    let mut final_list_warnings = WarningSummary::default();
     match s3.list_prefix(&prefix, recorder).await? {
         Some(keys) => {
+            report.final_listed_objects = Some(keys.len());
             let listed = keys.into_iter().collect::<BTreeSet<_>>();
             for key in model.live.keys() {
                 if !listed.contains(key) {
-                    report.list_warnings.push(format!(
+                    final_list_warnings.push(format!(
                         "LIST prefix {prefix} did not include expected live key {key}"
                     ));
                 }
             }
             for key in model.deleted {
                 if listed.contains(&key) {
-                    report
-                        .list_warnings
+                    final_list_warnings
                         .push(format!("LIST prefix {prefix} included deleted key {key}"));
                 }
             }
         }
-        None => report
-            .list_warnings
-            .push(format!("LIST prefix {prefix} did not complete")),
+        None => final_list_warnings.push(format!("LIST prefix {prefix} did not complete")),
     }
+    report.final_list_warning_count = final_list_warnings.total_count;
+    report.list_warnings = final_list_warnings.samples;
 
     report.missing_committed_objects.sort();
+    report.unavailable_committed_objects.sort();
+    report.unknown_committed_read_failures.sort();
     report.hash_mismatches.sort();
     report.unknown_writes_materialized.sort();
     report.unexpected_visible_deleted_objects.sort();
+    report.list_history_warnings.sort();
     report.list_warnings.sort();
     report.passed = report.tenant_recovered
         && report.missing_committed_objects.is_empty()
+        && report.unavailable_committed_objects.is_empty()
+        && report.unknown_committed_read_failures.is_empty()
         && report.hash_mismatches.is_empty()
         && report.successful_corrupted_reads.is_empty()
         && report.unexpected_visible_deleted_objects.is_empty()
-        && report.list_warnings.is_empty();
+        && report.final_list_warning_count == 0;
 
     Ok(report)
 }
@@ -187,6 +192,82 @@ struct ObjectModel {
 struct ReadAnomalies {
     corrupted_reads: Vec<String>,
     visible_deleted_objects: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WarningSummary {
+    total_count: usize,
+    samples: Vec<String>,
+}
+
+impl WarningSummary {
+    fn push(&mut self, warning: String) {
+        self.total_count += 1;
+        if self.samples.len() < MAX_WARNING_SAMPLES {
+            self.samples.push(warning);
+        }
+    }
+}
+
+fn evaluate_committed_get(
+    report: &mut CheckerReport,
+    key: String,
+    expected: &ExpectedObject,
+    get: GetObjectResult,
+) {
+    match (get.outcome, get.body) {
+        (OperationOutcome::Ok, Some(body)) => {
+            let actual_hash = sha256_hex(&body);
+            if actual_hash != expected.sha256 || body.len() != expected.size_bytes {
+                report.hash_mismatches.push(format!(
+                    "{key}: expected {} ({} bytes), got {actual_hash} ({} bytes)",
+                    expected.sha256,
+                    expected.size_bytes,
+                    body.len()
+                ));
+            } else {
+                report.verified_live_objects += 1;
+            }
+        }
+        (OperationOutcome::NotFound, None) => report.missing_committed_objects.push(key),
+        (OperationOutcome::Failed | OperationOutcome::Timeout, None) => report
+            .unavailable_committed_objects
+            .push(read_failure_message(
+                &key,
+                get.outcome,
+                get.http_status,
+                get.error.as_deref(),
+            )),
+        (OperationOutcome::Unknown, None) | (OperationOutcome::Ok, None) => report
+            .unknown_committed_read_failures
+            .push(read_failure_message(
+                &key,
+                get.outcome,
+                get.http_status,
+                get.error.as_deref(),
+            )),
+        (outcome, Some(body)) => report.unknown_committed_read_failures.push(format!(
+            "{}: unexpected body for {:?} ({} bytes)",
+            key,
+            outcome,
+            body.len()
+        )),
+    }
+}
+
+fn read_failure_message(
+    key: &str,
+    outcome: OperationOutcome,
+    http_status: Option<u16>,
+    error: Option<&str>,
+) -> String {
+    let status = http_status
+        .map(|status| format!(" status={status}"))
+        .unwrap_or_default();
+    let error = error
+        .map(|error| format!(" error={error:?}"))
+        .unwrap_or_default();
+    format!("{key}: outcome={outcome:?}{status}{error}")
 }
 
 fn object_model(records: &[OperationRecord]) -> ObjectModel {
@@ -238,8 +319,8 @@ fn apply_record_to_model(model: &mut ObjectModel, record: &OperationRecord) {
     }
 }
 
-fn list_history_warnings(records: &[OperationRecord]) -> Vec<String> {
-    let mut warnings = Vec::new();
+fn list_history_warnings(records: &[OperationRecord]) -> WarningSummary {
+    let mut warnings = WarningSummary::default();
     for record in records.iter().filter(|record| {
         record.kind == OperationKind::List && record.outcome == OperationOutcome::Ok
     }) {
@@ -328,8 +409,12 @@ fn record_object(record: &OperationRecord) -> Option<(String, ExpectedObject)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckerReport, list_history_warnings, object_model, successful_read_anomalies};
+    use super::{
+        CheckerReport, ExpectedObject, WarningSummary, evaluate_committed_get,
+        list_history_warnings, object_model, successful_read_anomalies,
+    };
     use crate::fault::history::{OperationKind, OperationOutcome, OperationRecord};
+    use crate::fault::workload::GetObjectResult;
 
     fn record(
         id: &str,
@@ -458,13 +543,57 @@ mod tests {
 
         let warnings = list_history_warnings(&records);
 
+        assert_eq!(warnings.total_count, 1);
         assert_eq!(
-            warnings,
+            warnings.samples,
             vec![
                 "LIST op-3 prefix fault-test/run-1/ did not include stable live key fault-test/run-1/stable"
             ]
         );
-        assert!(!warnings.iter().any(|warning| warning.contains("overlap")));
+        assert!(
+            !warnings
+                .samples
+                .iter()
+                .any(|warning| warning.contains("overlap"))
+        );
+    }
+
+    #[test]
+    fn committed_get_timeout_is_unavailable_not_missing() {
+        let mut report = empty_report();
+        let expected = ExpectedObject {
+            sha256: "sha".to_string(),
+            size_bytes: 1,
+        };
+
+        evaluate_committed_get(
+            &mut report,
+            "k".to_string(),
+            &expected,
+            GetObjectResult {
+                outcome: OperationOutcome::Timeout,
+                http_status: Some(200),
+                error: Some("get body read timed out".to_string()),
+                body: None,
+            },
+        );
+
+        assert!(report.missing_committed_objects.is_empty());
+        assert_eq!(
+            report.unavailable_committed_objects,
+            vec!["k: outcome=Timeout status=200 error=\"get body read timed out\""]
+        );
+    }
+
+    #[test]
+    fn warning_summary_caps_samples_but_counts_all() {
+        let mut warnings = WarningSummary::default();
+        for idx in 0..(super::MAX_WARNING_SAMPLES + 3) {
+            warnings.push(format!("warning-{idx}"));
+        }
+
+        assert_eq!(warnings.total_count, super::MAX_WARNING_SAMPLES + 3);
+        assert_eq!(warnings.samples.len(), super::MAX_WARNING_SAMPLES);
     }
 
     #[test]
@@ -476,15 +605,45 @@ mod tests {
             expected_live_objects: 1,
             verified_live_objects: 1,
             missing_committed_objects: Vec::new(),
+            unavailable_committed_objects: Vec::new(),
+            unknown_committed_read_failures: Vec::new(),
             hash_mismatches: Vec::new(),
             successful_corrupted_reads: Vec::new(),
             unexpected_visible_deleted_objects: Vec::new(),
             unknown_writes_materialized: Vec::new(),
+            list_history_warning_count: 0,
+            final_list_warning_count: 0,
+            list_history_warnings: Vec::new(),
             list_warnings: Vec::new(),
+            final_listed_objects: Some(1),
             tenant_recovered: true,
             passed: true,
         };
 
         assert!(report.require_success().is_ok());
+    }
+
+    fn empty_report() -> CheckerReport {
+        CheckerReport {
+            scenario: "io-eio".to_string(),
+            run_id: "run-1".to_string(),
+            committed_puts: 0,
+            expected_live_objects: 0,
+            verified_live_objects: 0,
+            missing_committed_objects: Vec::new(),
+            unavailable_committed_objects: Vec::new(),
+            unknown_committed_read_failures: Vec::new(),
+            hash_mismatches: Vec::new(),
+            successful_corrupted_reads: Vec::new(),
+            unexpected_visible_deleted_objects: Vec::new(),
+            unknown_writes_materialized: Vec::new(),
+            list_history_warning_count: 0,
+            final_list_warning_count: 0,
+            list_history_warnings: Vec::new(),
+            list_warnings: Vec::new(),
+            final_listed_objects: None,
+            tenant_recovered: true,
+            passed: false,
+        }
     }
 }

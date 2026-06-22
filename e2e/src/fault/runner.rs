@@ -1128,13 +1128,13 @@ impl AppliedFault {
 
     fn delete(&mut self, timeout: Duration) -> Result<()> {
         match self {
-            Self::Chaos { guard, .. } => guard.delete(),
+            Self::Chaos { guard, .. } => guard.delete(timeout),
             Self::PodKill {
                 guard,
                 before_pods,
                 config,
             } => {
-                guard.delete()?;
+                guard.delete(timeout)?;
                 wait_for_rustfs_pod_replacement(config, before_pods, timeout)
             }
             Self::DmFlakey(guard) => guard.restore(),
