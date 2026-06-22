@@ -251,6 +251,40 @@ require_namespace_ownership() {
   [[ "$tenant" == "$FAULT_TENANT" ]] || die "namespace $FAULT_NAMESPACE is not owned by tenant $FAULT_TENANT"
 }
 
+list_non_fault_tenants() {
+  kubectl_cluster get tenants -A -o json | jq -r --arg namespace "$FAULT_NAMESPACE" '
+    .items[]
+    | select(.metadata.namespace != $namespace)
+    | [.metadata.namespace, .metadata.name]
+    | @tsv
+  '
+}
+
+tenant_current_state() {
+  local namespace="$1" tenant="$2"
+  kubectl_ns "$namespace" get tenant "$tenant" -o jsonpath='{.status.currentState}' 2>/dev/null || true
+}
+
+require_non_fault_tenants_ready() {
+  local namespace tenant state
+  while IFS=$'\t' read -r namespace tenant; do
+    [[ -n "$namespace" ]] || continue
+    state="$(tenant_current_state "$namespace" "$tenant")"
+    [[ "$state" == "Ready" ]] || die "pre-existing Tenant $namespace/$tenant is not Ready: ${state:-missing}"
+  done < <(list_non_fault_tenants)
+}
+
+non_fault_tenants_are_ready() {
+  local baseline_tenants="$1"
+  local namespace tenant state
+  while IFS=$'\t' read -r namespace tenant; do
+    [[ -n "$namespace" ]] || continue
+    state="$(tenant_current_state "$namespace" "$tenant")"
+    [[ "$state" == "Ready" ]] || return 1
+  done <"$baseline_tenants"
+  return 0
+}
+
 prepare_fault_binary() {
   local scenario="$1" run_root="$2"
   local build_messages="$run_root/fault-build.jsonl"
@@ -358,6 +392,7 @@ preflight() {
 
   require_storage_class "$scenario"
   require_namespace_ownership
+  require_non_fault_tenants_ready
 
   if ! scenario_requires_static_storage "$scenario"; then
     for crd in $(scenario_crds "$scenario"); do
@@ -433,10 +468,11 @@ capture_fault_logs() {
 }
 
 health_is_safe() {
-  local baseline_ready_nodes="$1" require_chaos="$2"
+  local baseline_ready_nodes="$1" baseline_tenants="$2" require_chaos="$3"
   local current_ready_nodes
   current_ready_nodes="$(kubectl_cluster get nodes -o json 2>/dev/null | jq -r '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length' 2>/dev/null || echo 0)"
   [[ "$current_ready_nodes" -ge "$baseline_ready_nodes" ]] || return 1
+  non_fault_tenants_are_ready "$baseline_tenants" || return 1
   [[ "$require_chaos" != "true" ]] || chaos_is_ready || return 1
   return 0
 }
@@ -537,10 +573,12 @@ write_runner_failure_summary() {
 run_scenario() {
   local scenario="$1" run_root="$2"
   local artifacts="$run_root/$scenario"
-  local baseline_ready_nodes test_pid rc current_time health_checks require_chaos
+  local baseline_ready_nodes baseline_tenants test_pid rc current_time health_checks require_chaos
   preflight "$scenario"
   mkdir -p "$artifacts"
   baseline_ready_nodes="$(kubectl_cluster get nodes -o json | jq -r '[.items[] | select(any(.status.conditions[]; .type == "Ready" and .status == "True"))] | length')"
+  baseline_tenants="$artifacts/baseline-non-fault-tenants.tsv"
+  list_non_fault_tenants >"$baseline_tenants"
   if [[ "$scenario" == "dm-flakey" ]]; then
     require_chaos=false
   else
@@ -569,7 +607,7 @@ run_scenario() {
   while kill -0 "$test_pid" 2>/dev/null; do
     current_time="$(date -u +%FT%TZ)"
     health_checks=$((health_checks + 1))
-    if health_is_safe "$baseline_ready_nodes" "$require_chaos"; then
+    if health_is_safe "$baseline_ready_nodes" "$baseline_tenants" "$require_chaos"; then
       echo "$current_time safe=true" >>"$artifacts/health-watch.log"
       if (( health_checks % 6 == 0 )); then
         echo "scenario=$scenario running safe=true time=$current_time"
