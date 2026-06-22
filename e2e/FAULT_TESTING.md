@@ -75,6 +75,9 @@ failed run can be reproduced.
 `RUSTFS_FAULT_TEST_EXPECTED_CONTEXT` is optional. When set, both the shell
 runner and Rust test entrypoint require the current context to match it exactly.
 When unset, the current non-Kind context is used and pinned for the run.
+When `KUBECONFIG` is unset on a K3s host, the runner inherits
+`/etc/rancher/k3s/k3s.yaml` if it is readable so the Rust Kubernetes client uses
+the same cluster as `kubectl`.
 
 ```bash
 export RUSTFS_FAULT_TEST_EXPECTED_CONTEXT=<dedicated-k8s-or-k3s-context>

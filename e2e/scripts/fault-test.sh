@@ -137,8 +137,22 @@ kubectl_context() {
   kubectl config current-context
 }
 
+ensure_inherited_kubeconfig() {
+  local default_config home_config
+  [[ -n "${KUBECONFIG:-}" ]] && return 0
+  home_config="${HOME:-}/.kube/config"
+  [[ -r "$home_config" ]] && return 0
+  for default_config in /etc/rancher/k3s/k3s.yaml; do
+    if [[ -r "$default_config" ]]; then
+      export KUBECONFIG="$default_config"
+      return 0
+    fi
+  done
+}
+
 resolve_fault_context() {
   local current_context
+  ensure_inherited_kubeconfig
   FAULT_CONTEXT="$(trim_value "$FAULT_CONTEXT")"
   current_context="$(kubectl_context)"
   if [[ -n "$FAULT_CONTEXT" ]]; then
