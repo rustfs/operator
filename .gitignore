@@ -25,7 +25,9 @@ console-web/node_modules/
 CONSOLE-INTEGRATION-SUMMARY.md
 SCRIPTS-UPDATE.md
 AGENTS.md
-docs/
+docs/*
+!docs/operator-user-guide.md
+!docs/operator-user-guide.zh-CN.md
 .codex
 .codex/
 .claude/
