@@ -1696,9 +1696,13 @@ fn s3_access(config: &FaultTestConfig) -> Result<(String, Option<PortForwardGuar
         return Ok((format!("http://{host}:9000"), None));
     }
 
-    let spec = PortForwardSpec::tenant_io(&cluster.test_namespace, &cluster.tenant_name);
+    let spec = PortForwardSpec::tenant_io_on_available_port(
+        &cluster.test_namespace,
+        &cluster.tenant_name,
+    )?;
     let endpoint = spec.local_base_url();
-    Ok((endpoint, Some(PortForwardSpec::start_tenant_io(cluster)?)))
+    let kubectl = Kubectl::new(cluster);
+    Ok((endpoint, Some(spec.start_with_temp_log(&kubectl)?)))
 }
 
 async fn ensure_s3_access(
@@ -1708,7 +1712,17 @@ async fn ensure_s3_access(
 ) -> Result<()> {
     if let Some(guard) = port_forward {
         if guard.ensure_running().is_err() {
-            *guard = PortForwardSpec::start_tenant_io(config)?;
+            let local_port = endpoint
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .context("parse local S3 port-forward endpoint")?;
+            let spec = PortForwardSpec::tenant_io_with_local_port(
+                &config.test_namespace,
+                &config.tenant_name,
+                local_port,
+            );
+            let kubectl = Kubectl::new(config);
+            *guard = spec.start_with_temp_log(&kubectl)?;
         }
         return wait_for_tenant_s3(guard, endpoint, config.timeout).await;
     }
