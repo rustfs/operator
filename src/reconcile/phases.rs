@@ -31,7 +31,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
 use std::collections::HashSet;
 use std::time::Duration;
-use tracing::{debug, error, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Default)]
 pub(super) struct PoolReconcileSummary {
@@ -470,7 +470,14 @@ pub(super) async fn reconcile_pool_statefulsets(
                 created_missing_pool = true;
             }
             Err(e) => {
-                error!("Failed to get StatefulSet {}: {}", ss_name, e);
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    statefulset = %ss_name,
+                    error = %e,
+                    "failed to get pool StatefulSet"
+                );
                 let status_error = StatusError::from_context_error(&e);
                 patch_status_error(ctx, tenant, &status_error).await;
                 return Err(e.into());
@@ -600,10 +607,23 @@ async fn reconcile_existing_pool_statefulset(
     summary: &mut PoolReconcileSummary,
 ) -> Result<(), Error> {
     let ss_name = existing_ss.name_any();
-    debug!("StatefulSet {} exists, checking if update needed", ss_name);
+    debug!(
+        tenant = %tenant.name(),
+        namespace = %namespace,
+        pool = %pool.name,
+        statefulset = %ss_name,
+        "checking existing pool StatefulSet"
+    );
 
     if let Err(e) = tenant.validate_statefulset_update_with_tls_plan(&existing_ss, pool, tls_plan) {
-        error!("StatefulSet {} update validation failed: {}", ss_name, e);
+        warn!(
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            pool = %pool.name,
+            statefulset = %ss_name,
+            error = %e,
+            "StatefulSet update validation failed"
+        );
 
         let status_error = StatusError::statefulset_update_validation_failed(&ss_name);
         patch_status_error(ctx, tenant, &status_error).await;
@@ -617,7 +637,13 @@ async fn reconcile_existing_pool_statefulset(
     )
     .await?
     {
-        debug!("StatefulSet {} needs update, applying changes", ss_name);
+        info!(
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            pool = %pool.name,
+            statefulset = %ss_name,
+            "applying StatefulSet update"
+        );
 
         let _ = ctx
             .record(
@@ -640,9 +666,21 @@ async fn reconcile_existing_pool_statefulset(
             return Err(e.into());
         }
 
-        debug!("StatefulSet {} updated successfully", ss_name);
+        info!(
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            pool = %pool.name,
+            statefulset = %ss_name,
+            "StatefulSet updated successfully"
+        );
     } else {
-        debug!("StatefulSet {} is up to date, no changes needed", ss_name);
+        debug!(
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            pool = %pool.name,
+            statefulset = %ss_name,
+            "StatefulSet is up to date"
+        );
     }
 
     let ss = context_result(
@@ -667,7 +705,13 @@ async fn reconcile_missing_pool_statefulset(
     tls_plan: &TlsPlan,
     summary: &mut PoolReconcileSummary,
 ) -> Result<(), Error> {
-    debug!("StatefulSet {} not found, creating", ss_name);
+    info!(
+        tenant = %tenant.name(),
+        namespace = %namespace,
+        pool = %pool.name,
+        statefulset = %ss_name,
+        "creating missing StatefulSet"
+    );
 
     let _ = ctx
         .record(
@@ -690,7 +734,13 @@ async fn reconcile_missing_pool_statefulset(
         return Err(e.into());
     }
 
-    debug!("StatefulSet {} created successfully", ss_name);
+    info!(
+        tenant = %tenant.name(),
+        namespace = %namespace,
+        pool = %pool.name,
+        statefulset = %ss_name,
+        "StatefulSet created successfully"
+    );
 
     let ss = context_result(
         ctx.get::<k8s_openapi::api::apps::v1::StatefulSet>(ss_name, namespace)
@@ -751,6 +801,7 @@ pub(super) async fn finalize_tenant_status(
     tls_plan: TlsPlan,
 ) -> Result<Action, Error> {
     let mut builder = StatusBuilder::from_tenant(tenant);
+    let pool_count = summary.pool_statuses.len();
     builder.set_pool_statuses(summary.pool_statuses);
     if let Some(tls_status) = tls_plan.status {
         builder.set_tls_status(tls_status);
@@ -893,7 +944,19 @@ pub(super) async fn finalize_tenant_status(
     };
 
     let status = builder.build();
-    debug!("Patching tenant status if changed: {:?}", status);
+    debug!(
+        tenant = %tenant.name(),
+        namespace = ?tenant.namespace(),
+        current_state = %status.current_state,
+        observed_generation = ?status.observed_generation,
+        pool_count,
+        condition_count = status.conditions.len(),
+        reason = event_reason.as_str(),
+        condition = event_condition.as_str(),
+        ready_replicas = summary.ready_replicas,
+        total_replicas = summary.total_replicas,
+        "patching Tenant status if changed"
+    );
     patch_status_and_record(
         ctx,
         tenant,
@@ -907,12 +970,19 @@ pub(super) async fn finalize_tenant_status(
 
     if let Some(requeue_after) = summary.lifecycle_requeue_after {
         debug!(
+            tenant = %tenant.name(),
+            namespace = ?tenant.namespace(),
             seconds = requeue_after.as_secs(),
             "Pool lifecycle is active, requeuing"
         );
         Ok(Action::requeue(requeue_after))
     } else if summary.any_updating {
-        debug!("Pools are updating, requeuing in 10 seconds");
+        debug!(
+            tenant = %tenant.name(),
+            namespace = ?tenant.namespace(),
+            seconds = 10,
+            "Pools are updating, requeuing"
+        );
         Ok(Action::requeue(Duration::from_secs(10)))
     } else {
         Ok(Action::await_change())

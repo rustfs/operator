@@ -86,6 +86,59 @@ pub fn map_kube_error(e: kube::Error, not_found_resource: impl Into<String>) -> 
 }
 
 impl Error {
+    fn log_if_server_error(&self) {
+        match self {
+            Error::InternalServer { message } => {
+                tracing::warn!(
+                    status = StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    code = "InternalServerError",
+                    message = %message,
+                    "Console request failed"
+                );
+            }
+            Error::KubeApi { source } => {
+                tracing::warn!(
+                    status = StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    code = "KubeApiError",
+                    error = %source,
+                    "Console request failed"
+                );
+            }
+            Error::Session { source } => {
+                tracing::warn!(
+                    status = StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    code = "SessionError",
+                    error = %source,
+                    "Console request failed"
+                );
+            }
+            Error::Json { source } => {
+                tracing::warn!(
+                    status = StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    code = "JsonError",
+                    error = %source,
+                    "Console request failed"
+                );
+            }
+            Error::ActionRequired {
+                status,
+                code,
+                reason,
+                message,
+                ..
+            } if status.is_server_error() => {
+                tracing::warn!(
+                    status = status.as_u16(),
+                    code = %code,
+                    reason = %reason,
+                    message = %message,
+                    "Console request failed"
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn into_response_parts(self) -> (StatusCode, ConsoleErrorResponse) {
         let (status, code, reason, message, next_actions, details) = match self {
             Error::Unauthorized { message } => (
@@ -192,6 +245,7 @@ impl Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        self.log_if_server_error();
         let (status, body) = self.into_response_parts();
 
         (status, Json(body)).into_response()

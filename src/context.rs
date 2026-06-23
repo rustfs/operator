@@ -198,7 +198,8 @@ impl Context {
     ) -> Result<Tenant, Error> {
         use kube::api::{Patch, PatchParams};
 
-        let api: Api<Tenant> = Api::namespaced(self.client.clone(), &resource.namespace()?);
+        let namespace = resource.namespace()?;
+        let api: Api<Tenant> = Api::namespaced(self.client.clone(), &namespace);
         let name = resource.name();
 
         // Create a JSON merge patch for the status
@@ -217,10 +218,15 @@ impl Context {
             .await
         {
             Ok(t) => return Ok(t),
-            _ => {}
+            Err(error) => {
+                info!(
+                    tenant = %name,
+                    namespace = %namespace,
+                    %error,
+                    "status update failed; retrying status patch"
+                );
+            }
         }
-
-        info!("status update failed due to conflict, retrieve the latest resource and retry.");
 
         // Retry with the same patch
         api.patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch))

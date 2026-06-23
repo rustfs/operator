@@ -19,7 +19,7 @@ use k8s_openapi::api::apps::v1::StatefulSet;
 use kube::api::{DeleteParams, PropagationPolicy};
 use kube::runtime::events::EventType;
 use sha2::{Digest, Sha256};
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::{Error, context};
 use crate::context::Context;
@@ -188,6 +188,14 @@ async fn reconcile_single_pool_lifecycle(
         let client = match rustfs_admin_client(ctx, tenant).await {
             Ok(client) => client,
             Err(error) => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    reason = "RustfsAdminClientError",
+                    %error,
+                    "RustFS admin client unavailable for decommissioned pool cleanup"
+                );
                 return cleanup_retriable_decision(
                     status,
                     "RustfsAdminClientError",
@@ -230,6 +238,15 @@ async fn reconcile_single_pool_lifecycle(
     let client = match rustfs_admin_client(ctx, tenant).await {
         Ok(client) => client,
         Err(error) => {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = %namespace,
+                pool = %pool.name,
+                request_id = %request.request_id,
+                reason = "RustfsAdminClientError",
+                %error,
+                "RustFS admin client unavailable for pool lifecycle request"
+            );
             return retriable_decision(
                 Some(request.request_id.clone()),
                 "RustfsAdminClientError",
@@ -241,6 +258,15 @@ async fn reconcile_single_pool_lifecycle(
     let matched_pool = match find_rustfs_pool(&client, tenant, namespace, pool).await {
         Ok(pool_item) => pool_item,
         Err(error) if error.is_retriable() => {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = %namespace,
+                pool = %pool.name,
+                request_id = %request.request_id,
+                reason = error.reason(),
+                message = error.message(),
+                "RustFS pool mapping is not ready"
+            );
             return retriable_decision(
                 Some(request.request_id.clone()),
                 error.reason(),
@@ -248,6 +274,15 @@ async fn reconcile_single_pool_lifecycle(
             );
         }
         Err(error) => {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = %namespace,
+                pool = %pool.name,
+                request_id = %request.request_id,
+                reason = error.reason(),
+                message = error.message(),
+                "RustFS pool mapping failed"
+            );
             return failed_decision(
                 Some(request.request_id.clone()),
                 error.reason(),
@@ -261,7 +296,7 @@ async fn reconcile_single_pool_lifecycle(
         return active_lifecycle_decision();
     }
 
-    if request.action == DecommissionAction::Start
+    let should_start = request.action == DecommissionAction::Start
         && match should_start_decommission(
             existing_state.as_ref(),
             existing.as_ref(),
@@ -276,33 +311,89 @@ async fn reconcile_single_pool_lifecycle(
                     &message,
                 );
             }
+        };
+    if should_start {
+        match client.start_pool_decommission_by_id(&pool_id).await {
+            Ok(()) => {
+                info!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    rustfs_pool_id = %pool_id,
+                    request_id = %request.request_id,
+                    "started RustFS pool decommission"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    rustfs_pool_id = %pool_id,
+                    request_id = %request.request_id,
+                    reason = "RustfsDecommissionStartFailed",
+                    %error,
+                    "failed to start RustFS pool decommission"
+                );
+                return retriable_decision(
+                    Some(request.request_id.clone()),
+                    "RustfsDecommissionStartFailed",
+                    &error.to_string(),
+                );
+            }
         }
-        && let Err(error) = client.start_pool_decommission_by_id(&pool_id).await
-    {
-        return retriable_decision(
-            Some(request.request_id.clone()),
-            "RustfsDecommissionStartFailed",
-            &error.to_string(),
-        );
     }
 
-    if request.action == DecommissionAction::Cancel
+    let should_cancel = request.action == DecommissionAction::Cancel
         && !matches!(
             existing_state,
             Some(PoolLifecycleState::DecommissionCanceled)
-        )
-        && let Err(error) = client.cancel_pool_decommission_by_id(&pool_id).await
-    {
-        return retriable_decision(
-            Some(request.request_id.clone()),
-            "RustfsDecommissionCancelFailed",
-            &error.to_string(),
         );
+    if should_cancel {
+        match client.cancel_pool_decommission_by_id(&pool_id).await {
+            Ok(()) => {
+                info!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    rustfs_pool_id = %pool_id,
+                    request_id = %request.request_id,
+                    "canceled RustFS pool decommission"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    rustfs_pool_id = %pool_id,
+                    request_id = %request.request_id,
+                    reason = "RustfsDecommissionCancelFailed",
+                    %error,
+                    "failed to cancel RustFS pool decommission"
+                );
+                return retriable_decision(
+                    Some(request.request_id.clone()),
+                    "RustfsDecommissionCancelFailed",
+                    &error.to_string(),
+                );
+            }
+        }
     }
 
     let rustfs_status = match client.pool_status_by_id(&pool_id).await {
         Ok(status) => status,
         Err(error) => {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = %namespace,
+                pool = %pool.name,
+                rustfs_pool_id = %pool_id,
+                request_id = %request.request_id,
+                reason = "RustfsDecommissionStatusFailed",
+                %error,
+                "failed to query RustFS pool decommission status"
+            );
             return retriable_decision(
                 Some(request.request_id.clone()),
                 "RustfsDecommissionStatusFailed",

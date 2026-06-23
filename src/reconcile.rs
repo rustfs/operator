@@ -25,7 +25,7 @@ use kube::runtime::events::EventType;
 use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 mod phases;
 mod pool_lifecycle;
@@ -60,9 +60,10 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
 
     if latest_tenant.metadata.deletion_timestamp.is_some() {
         debug!(
-            "tenant {} is deleted, deletion_timestamp is {:?}",
-            tenant.name(),
-            latest_tenant.metadata.deletion_timestamp
+            tenant = %tenant.name(),
+            namespace = %ns,
+            deletion_timestamp = ?latest_tenant.metadata.deletion_timestamp,
+            "tenant is deleting; skipping reconcile"
         );
         return Ok(Action::await_change());
     }
@@ -401,8 +402,12 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
 
         let pod_name = pod.name_any();
         warn!(
-            "Node {} is detected down. Pod {} is terminating on it.",
-            node_name, pod_name
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            node = %node_name,
+            pod = %pod_name,
+            policy = ?policy,
+            "terminating pod is scheduled on a down node"
         );
         let delete_params = match policy {
             crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing => continue,
@@ -516,9 +521,7 @@ fn requeue_after(duration: Duration) -> Action {
     Action::requeue(duration)
 }
 
-pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
-    error!("error_policy: {:?}", error);
-
+pub fn error_policy(object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> Action {
     // Status updates happen during reconciliation before errors are returned.
     // The reconcile function sets appropriate conditions (Ready=False, Degraded=True)
     // and records events for failures before propagating errors.
@@ -527,7 +530,7 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
     // Use different requeue strategies based on error type:
     // - User-fixable errors (credentials, validation): Longer intervals to reduce spam
     // - Transient errors (API, network): Shorter intervals for quick recovery
-    match error {
+    let requeue = match error {
         Error::Context { source } => match source {
             // Credential / KMS validation errors - require user intervention
             // Use 60-second requeue to reduce event/log spam while user fixes the issue
@@ -537,16 +540,14 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
             | context::Error::CredentialSecretTooShort { .. }
             | context::Error::KmsSecretNotFound { .. }
             | context::Error::KmsSecretMissingKey { .. }
-            | context::Error::KmsConfigInvalid { .. } => requeue_after(Duration::from_secs(60)),
+            | context::Error::KmsConfigInvalid { .. } => Duration::from_secs(60),
 
             // Kubernetes API errors - might be transient (network, API server issues)
             // Use shorter requeue for faster recovery
-            context::Error::Kube { .. } | context::Error::Record { .. } => {
-                requeue_after(Duration::from_secs(5))
-            }
+            context::Error::Kube { .. } | context::Error::Record { .. } => Duration::from_secs(5),
 
             // Other context errors - use moderate requeue
-            _ => requeue_after(Duration::from_secs(15)),
+            _ => Duration::from_secs(15),
         },
 
         // Type errors - validation issues, use moderate requeue
@@ -555,16 +556,56 @@ pub fn error_policy(_object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> 
             // Use 60-second requeue to reduce event/log spam while user fixes the issue
             types::error::Error::ImmutableFieldModified { .. }
             | types::error::Error::InvalidTenantName { .. }
-            | types::error::Error::PoolDeleteBlocked { .. } => {
-                requeue_after(Duration::from_secs(60))
-            }
+            | types::error::Error::PoolDeleteBlocked { .. } => Duration::from_secs(60),
 
             // Other type errors - use moderate requeue
-            _ => requeue_after(Duration::from_secs(15)),
+            _ => Duration::from_secs(15),
         },
 
-        Error::TlsBlocked { .. } => requeue_after(Duration::from_secs(60)),
-        Error::TlsPending { .. } => requeue_after(Duration::from_secs(20)),
+        Error::TlsBlocked { .. } => Duration::from_secs(60),
+        Error::TlsPending { .. } => Duration::from_secs(20),
+    };
+
+    warn!(
+        tenant = %object.name(),
+        namespace = ?object.namespace(),
+        reason = reconcile_error_reason(error),
+        requeue_seconds = requeue.as_secs(),
+        %error,
+        "reconcile failed; scheduling retry"
+    );
+
+    requeue_after(requeue)
+}
+
+fn reconcile_error_reason(error: &Error) -> &'static str {
+    match error {
+        Error::Context { source } => match source {
+            context::Error::CredentialSecretNotFound { .. } => "CredentialSecretNotFound",
+            context::Error::CredentialSecretMissingKey { .. } => "CredentialSecretMissingKey",
+            context::Error::CredentialSecretInvalidEncoding { .. } => {
+                "CredentialSecretInvalidEncoding"
+            }
+            context::Error::CredentialSecretTooShort { .. } => "CredentialSecretTooShort",
+            context::Error::KmsSecretNotFound { .. } => "KmsSecretNotFound",
+            context::Error::KmsSecretMissingKey { .. } => "KmsSecretMissingKey",
+            context::Error::KmsConfigInvalid { .. } => "KmsConfigInvalid",
+            context::Error::Kube { .. } => "KubernetesApiError",
+            context::Error::Record { .. } => "KubernetesEventRecordError",
+            context::Error::Types { .. } => "TypeError",
+            context::Error::Serde { .. } => "SerdeError",
+        },
+        Error::Types { source } => match source {
+            types::error::Error::InvalidTenantName { .. } => "InvalidTenantName",
+            types::error::Error::InvalidPoolSpec { .. } => "InvalidPoolSpec",
+            types::error::Error::ImmutableFieldModified { .. } => "ImmutableFieldModified",
+            types::error::Error::PoolDeleteBlocked { .. } => "PoolDeleteBlocked",
+            types::error::Error::NoNamespace => "NoNamespace",
+            types::error::Error::InternalError { .. } => "InternalError",
+            types::error::Error::SerdeJson { .. } => "SerdeJsonError",
+        },
+        Error::TlsBlocked { .. } => "TlsBlocked",
+        Error::TlsPending { .. } => "TlsPending",
     }
 }
 

@@ -60,7 +60,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     crate::install_rustls_crypto_provider();
     crate::init_tracing();
 
-    tracing::info!("Starting RustFS Operator Console on port {}", port);
+    tracing::info!(port, "Starting RustFS Operator Console");
 
     let jwt_secret = load_jwt_secret();
 
@@ -71,8 +71,8 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(error) => {
             tracing::warn!(
-                "Kubernetes client unavailable; STS authorization paths fall back to compatibility mode: {}",
-                error
+                %error,
+                "Kubernetes client unavailable; STS authorization paths fall back to compatibility mode"
             );
             AppState::new(jwt_secret)
         }
@@ -119,7 +119,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    tracing::info!("Console server listening on http://{}", addr);
+    tracing::info!(%addr, "Console server listening");
     tracing::info!("API endpoints:");
     tracing::info!("  - POST /api/v1/login");
     tracing::info!("  - GET  /api/v1/tenants");
@@ -145,13 +145,13 @@ fn api_routes() -> Router<AppState> {
 fn with_static_frontend(app: Router) -> Router {
     let Some(static_dir) = static_frontend_dir() else {
         tracing::warn!(
-            "Console frontend static files not found; serving API only. Set {} to enable static UI serving.",
-            CONSOLE_STATIC_DIR_ENV
+            env = CONSOLE_STATIC_DIR_ENV,
+            "Console frontend static files not found; serving API only"
         );
         return app;
     };
 
-    tracing::info!("Serving Console frontend from {}", static_dir.display());
+    tracing::info!(static_dir = %static_dir.display(), "Serving Console frontend");
     app.fallback_service(static_frontend_service(static_dir))
 }
 
@@ -225,9 +225,12 @@ async fn health_check() -> impl IntoResponse {
 async fn ready_check() -> impl IntoResponse {
     match check_k8s_connectivity().await {
         Ok(()) => (StatusCode::OK, "Ready".to_string()),
-        Err(e) => {
-            tracing::warn!("Readiness check failed: {}", e);
-            (StatusCode::SERVICE_UNAVAILABLE, format!("Not ready: {}", e))
+        Err(error) => {
+            tracing::warn!(%error, "Readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Not ready: {}", error),
+            )
         }
     }
 }
@@ -290,15 +293,19 @@ fn read_urandom(bytes: &mut [u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use tower::ServiceExt;
 
+    static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
+
     fn temp_static_dir() -> std::io::Result<PathBuf> {
+        let id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "rustfs-console-static-{}-{nanos}",
+            "rustfs-console-static-{}-{id}-{nanos}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir)?;

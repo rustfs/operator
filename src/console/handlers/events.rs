@@ -52,8 +52,15 @@ pub async fn stream_tenant_events(
     let tenant_name = tenant.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = run_event_sse_loop(client, ns, tenant_name, tx, first_json).await {
-            tracing::warn!("Tenant events SSE ended with error: {}", e);
+        let log_namespace = ns.clone();
+        let log_tenant = tenant_name.clone();
+        if let Err(error) = run_event_sse_loop(client, ns, tenant_name, tx, first_json).await {
+            tracing::warn!(
+                namespace = %log_namespace,
+                tenant = %log_tenant,
+                %error,
+                "Tenant events SSE ended with error"
+            );
         }
     });
 
@@ -101,9 +108,14 @@ async fn run_event_sse_loop(
                             return Ok(());
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("tenant events snapshot failed: {}", e);
-                        let msg = e.to_string();
+                    Err(error) => {
+                        tracing::warn!(
+                            namespace = %namespace,
+                            tenant = %tenant,
+                            %error,
+                            "tenant events snapshot failed"
+                        );
+                        let msg = error.to_string();
                         if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
                             return Ok(());
                         }
@@ -119,18 +131,28 @@ async fn run_event_sse_loop(
                                     return Ok(());
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("tenant events snapshot failed: {}", e);
-                                let msg = e.to_string();
+                            Err(error) => {
+                                tracing::warn!(
+                                    namespace = %namespace,
+                                    tenant = %tenant,
+                                    %error,
+                                    "tenant events snapshot failed"
+                                );
+                                let msg = error.to_string();
                                 if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
                                     return Ok(());
                                 }
                             }
                         }
                     }
-                    Some(Err(e)) => {
-                        tracing::warn!("Kubernetes Event watch error: {}", e);
-                        let msg = format!("Kubernetes Event watch error: {}", e);
+                    Some(Err(error)) => {
+                        tracing::warn!(
+                            namespace = %namespace,
+                            tenant = %tenant,
+                            %error,
+                            "Kubernetes Event watch error"
+                        );
+                        let msg = format!("Kubernetes Event watch error: {}", error);
                         if tx.send(Ok(stream_error_sse_event(&msg))).await.is_err() {
                             return Ok(());
                         }

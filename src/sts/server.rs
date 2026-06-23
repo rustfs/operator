@@ -198,6 +198,7 @@ async fn process_assume_role_request(
         Err(error) => {
             tracing::warn!(
                 tenant_namespace = %parsed_request.tenant_namespace,
+                tenant = %parsed_request.tenant_name,
                 error = %error.code(),
                 "TokenReview denied STS request"
             );
@@ -213,6 +214,7 @@ async fn process_assume_role_request(
         Err(error) => {
             tracing::warn!(
                 tenant_namespace = %parsed_request.tenant_namespace,
+                tenant = %parsed_request.tenant_name,
                 error = %error.code(),
                 "Failed listing PolicyBindings for STS authorization"
             );
@@ -229,6 +231,7 @@ async fn process_assume_role_request(
     if matching_bindings.is_empty() {
         tracing::warn!(
             tenant_namespace = %parsed_request.tenant_namespace,
+            tenant = %parsed_request.tenant_name,
             service_account_namespace = %identity.namespace,
             service_account = %identity.service_account,
             "No PolicyBinding matched service account for this STS request"
@@ -247,6 +250,7 @@ async fn process_assume_role_request(
         Err(error) => {
             tracing::warn!(
                 tenant_namespace = %parsed_request.tenant_namespace,
+                tenant = %parsed_request.tenant_name,
                 error = %error.code(),
                 "Failed selecting tenant for STS request"
             );
@@ -259,6 +263,7 @@ async fn process_assume_role_request(
         Err(error) => {
             tracing::warn!(
                 tenant_namespace = %parsed_request.tenant_namespace,
+                tenant = %parsed_request.tenant_name,
                 error = %error.code(),
                 "Failed creating RustFS admin client"
             );
@@ -272,6 +277,7 @@ async fn process_assume_role_request(
             Err(error) => {
                 tracing::warn!(
                     tenant_namespace = %parsed_request.tenant_namespace,
+                    tenant = %parsed_request.tenant_name,
                     error = %error.code(),
                     "Failed resolving PolicyBinding policy documents"
                 );
@@ -292,6 +298,7 @@ async fn process_assume_role_request(
         Err(error) => {
             tracing::warn!(
                 tenant_namespace = %parsed_request.tenant_namespace,
+                tenant = %parsed_request.tenant_name,
                 error = %error.code(),
                 "Failed to build merged STS session policy"
             );
@@ -311,6 +318,7 @@ async fn process_assume_role_request(
         Err(error) => {
             tracing::warn!(
                 tenant_namespace = %parsed_request.tenant_namespace,
+                tenant = %parsed_request.tenant_name,
                 error = %error,
                 "Failed calling RustFS AssumeRole"
             );
