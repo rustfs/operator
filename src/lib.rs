@@ -129,7 +129,7 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
                 &material,
             )?))
         } else {
-            warn!("Operator STS TLS disabled by OPERATOR_STS_ENABLED=false");
+            warn!("Operator STS TLS disabled by OPERATOR_STS_TLS_ENABLED=false");
             None
         };
         let sts_listener = bind_sts_listener(sts_port, tls_server_config.is_some()).await?;
@@ -244,8 +244,14 @@ async fn run_controller(client: Client, cancel: CancellationToken) {
         _ = async {
             while let Some(res) = reconcile_stream.next().await {
                 match res {
-                    Ok((tenant, _)) => info!("reconciled successful, object{:?}", tenant.name),
-                    Err(e) => warn!("reconcile failed: {}", e),
+                    Ok((tenant, _)) => {
+                        info!(
+                            tenant = %tenant.name,
+                            namespace = %tenant.namespace.as_deref().unwrap_or("<unknown>"),
+                            "reconcile completed successfully"
+                        );
+                    }
+                    Err(error) => warn!(%error, "controller reconcile stream item failed"),
                 }
             }
         } => {}
@@ -358,7 +364,7 @@ async fn run_operator_observability_server(
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!("operator observability server listening on http://{}", addr);
+    info!(%addr, "operator observability server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -471,7 +477,7 @@ async fn bind_sts_listener(
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let scheme = if tls_enabled { "https" } else { "http" };
-    tracing::info!("Operator STS server listening on {}://{}", scheme, addr);
+    tracing::info!(%scheme, %addr, "Operator STS server listening");
     Ok(listener)
 }
 

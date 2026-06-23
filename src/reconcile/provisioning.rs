@@ -27,6 +27,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use tracing::{info, warn};
 
 pub(super) struct ProvisioningReconcileResult {
     pub status: ProvisioningStatus,
@@ -94,6 +95,7 @@ impl ProvisioningRun<'_> {
     }
 
     fn push_policy(&mut self, item: ProvisioningItemStatus) {
+        self.log_item_transition("policy", self.previous_policy(&item.name), &item);
         if item.state == ProvisioningItemState::Failed.as_str() {
             self.failures
                 .push((reason_from_str(&item.reason), item_message(&item)));
@@ -102,6 +104,7 @@ impl ProvisioningRun<'_> {
     }
 
     fn push_user(&mut self, item: ProvisioningItemStatus) {
+        self.log_item_transition("user", self.previous_user(&item.name), &item);
         if item.state == ProvisioningItemState::Failed.as_str() {
             self.failures
                 .push((reason_from_str(&item.reason), item_message(&item)));
@@ -110,11 +113,56 @@ impl ProvisioningRun<'_> {
     }
 
     fn push_bucket(&mut self, item: ProvisioningItemStatus) {
+        self.log_item_transition("bucket", self.previous_bucket(&item.name), &item);
         if item.state == ProvisioningItemState::Failed.as_str() {
             self.failures
                 .push((reason_from_str(&item.reason), item_message(&item)));
         }
         self.status.buckets.push(item);
+    }
+
+    fn log_item_transition(
+        &self,
+        item_type: &'static str,
+        previous: Option<&ProvisioningItemStatus>,
+        item: &ProvisioningItemStatus,
+    ) {
+        let changed = match previous {
+            Some(previous) => {
+                previous.state != item.state
+                    || previous.reason != item.reason
+                    || previous.message != item.message
+            }
+            None => true,
+        };
+        if !changed {
+            return;
+        }
+
+        let message = item.message.as_deref().unwrap_or("");
+        if item.state == ProvisioningItemState::Failed.as_str() {
+            warn!(
+                tenant = %self.tenant.name(),
+                namespace = %self.namespace,
+                item_type = %item_type,
+                item = %item.name,
+                state = %item.state,
+                reason = %item.reason,
+                message = %message,
+                "RustFS provisioning item failed"
+            );
+        } else {
+            info!(
+                tenant = %self.tenant.name(),
+                namespace = %self.namespace,
+                item_type = %item_type,
+                item = %item.name,
+                state = %item.state,
+                reason = %item.reason,
+                message = %message,
+                "RustFS provisioning item state changed"
+            );
+        }
     }
 
     fn item(
@@ -296,6 +344,14 @@ pub(super) async fn reconcile_provisioning(
         Ok(client) => client,
         Err(error) => {
             let (reason, message, pending) = client_error_outcome(error);
+            warn!(
+                tenant = %tenant.name(),
+                namespace = %namespace,
+                reason = reason.as_str(),
+                pending,
+                message = %message,
+                "RustFS provisioning admin client unavailable"
+            );
             if pending {
                 run.mark_all_active(ProvisioningItemState::Pending, reason, &message);
             } else {
@@ -321,6 +377,13 @@ pub(super) async fn reconcile_provisioning(
     let mut live_policies = match load_live_policies(&client, tenant).await {
         Ok(policies) => policies,
         Err(message) => {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = %namespace,
+                reason = Reason::PolicyApplyFailed.as_str(),
+                message = %message,
+                "RustFS provisioning failed to load live policies"
+            );
             run.fail_all_active(Reason::PolicyApplyFailed, &message);
             run.prepare_status(ProvisioningPhase::Failed);
             return ProvisioningReconcileResult {

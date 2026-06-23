@@ -72,7 +72,7 @@ impl AppState {
         let session_claims = match open_session_token(&self.jwt_secret, token) {
             Ok(claims) => claims,
             Err(error) => {
-                tracing::warn!("Console session token validation failed: {}", error);
+                tracing::warn!(%error, "Console session token validation failed");
                 return None;
             }
         };

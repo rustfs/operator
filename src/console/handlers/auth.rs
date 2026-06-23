@@ -32,7 +32,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse> {
-    tracing::info!("Login attempt");
+    tracing::info!("Console login attempt");
 
     // Validate the bearer token by building a client
     let client = create_k8s_client(&req.token).await?;
@@ -41,8 +41,11 @@ pub async fn login(
     let api: kube::Api<Tenant> = kube::Api::all(client);
     api.list(&kube::api::ListParams::default().limit(1))
         .await
-        .map_err(|e| {
-            tracing::warn!("K8s API test failed: {}", e);
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                "Console login Kubernetes API permission check failed"
+            );
             Error::Unauthorized {
                 message: "Invalid or insufficient permissions".to_string(),
             }
