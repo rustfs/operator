@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use uuid::Uuid;
@@ -55,12 +56,31 @@ impl PortForwardSpec {
     }
 
     pub fn tenant_io(namespace: impl Into<String>, tenant_name: impl Into<String>) -> Self {
+        Self::tenant_io_with_local_port(namespace, tenant_name, 19000)
+    }
+
+    pub fn tenant_io_with_local_port(
+        namespace: impl Into<String>,
+        tenant_name: impl Into<String>,
+        local_port: u16,
+    ) -> Self {
         Self {
             namespace: namespace.into(),
             service: format!("svc/{}-io", tenant_name.into()),
-            local_port: 19000,
+            local_port,
             remote_port: 9000,
         }
+    }
+
+    pub fn tenant_io_on_available_port(
+        namespace: impl Into<String>,
+        tenant_name: impl Into<String>,
+    ) -> Result<Self> {
+        Ok(Self::tenant_io_with_local_port(
+            namespace,
+            tenant_name,
+            available_local_port()?,
+        ))
     }
 
     pub fn command(&self, kubectl: &Kubectl) -> CommandSpec {
@@ -110,6 +130,17 @@ impl PortForwardSpec {
         let kubectl = Kubectl::new(config);
         Self::tenant_io(&config.test_namespace, &config.tenant_name).start_with_temp_log(&kubectl)
     }
+}
+
+fn available_local_port() -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .context("bind an ephemeral local port for kubectl port-forward")?;
+    let port = listener
+        .local_addr()
+        .context("read ephemeral local port for kubectl port-forward")?
+        .port();
+    drop(listener);
+    Ok(port)
 }
 
 impl PortForwardGuard {
@@ -182,11 +213,27 @@ mod tests {
     fn tenant_io_port_forward_targets_tenant_service() {
         let kubectl = Kubectl::new(&E2eConfig::defaults());
         let command =
-            PortForwardSpec::tenant_io("rustfs-e2e-smoke", "e2e-tenant").command(&kubectl);
+            PortForwardSpec::tenant_io_with_local_port("rustfs-e2e-smoke", "e2e-tenant", 19000)
+                .command(&kubectl);
 
         assert_eq!(
             command.display(),
             "kubectl --context kind-rustfs-e2e -n rustfs-e2e-smoke port-forward svc/e2e-tenant-io 19000:9000"
         );
+    }
+
+    #[test]
+    fn tenant_io_available_port_uses_tenant_service() {
+        let kubectl = Kubectl::new(&E2eConfig::defaults());
+        let spec = PortForwardSpec::tenant_io_on_available_port("rustfs-e2e-smoke", "e2e-tenant")
+            .expect("available local port");
+        let command = spec.command(&kubectl);
+
+        assert!(spec.local_port > 0);
+        assert_eq!(spec.remote_port, 9000);
+        assert!(command.display().contains(
+            "kubectl --context kind-rustfs-e2e -n rustfs-e2e-smoke port-forward svc/e2e-tenant-io "
+        ));
+        assert!(command.display().ends_with(":9000"));
     }
 }
