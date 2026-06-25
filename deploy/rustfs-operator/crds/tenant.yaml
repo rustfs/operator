@@ -1356,13 +1356,6 @@ spec:
                   - persistence
                   - servers
                   type: object
-                  x-kubernetes-validations:
-                  - messageExpression: '"pool " + self.name + " must have at least 4 total volumes (servers × volumesPerServer)"'
-                    reason: FieldValueInvalid
-                    rule: self.servers * self.persistence.volumesPerServer >= 4
-                  - messageExpression: '"pool " + self.name + " with 3 servers must have at least 6 volumes in total"'
-                    reason: FieldValueInvalid
-                    rule: self.servers != 3 || self.servers * self.persistence.volumesPerServer >= 6
                 maxItems: 32
                 minItems: 1
                 type: array

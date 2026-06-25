@@ -294,7 +294,7 @@ spec:
 # Best Practices:
 
 # 1. Maintain minimum on-demand capacity:
-#    - At least servers × volumesPerServer >= 4 on on-demand
+#    - Keep enough on-demand RustFS capacity for the layout you choose
 #    - Ensures cluster survives even if all spot instances interrupted
 
 # 2. Use topology spread for spot pools:

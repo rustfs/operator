@@ -25,7 +25,7 @@ pub mod tenant;
 pub mod tls;
 
 // Re-export commonly used types
-pub use pool::{SchedulingConfig, validate_pool_total_volumes};
+pub use pool::SchedulingConfig;
 
 #[cfg(test)]
 mod policy_binding_tests {

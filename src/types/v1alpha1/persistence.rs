@@ -40,7 +40,7 @@ pub struct PersistenceConfig {
 impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
-            volumes_per_server: 4, // Default to 4 volumes to satisfy validation (must be > 0)
+            volumes_per_server: 4, // Must be > 0 when serialized into a Tenant spec.
             volume_claim_template: None,
             path: None,
             labels: None,

@@ -217,12 +217,12 @@ impl Tenant {
     }
 
     pub fn validate_pools(&self) -> Result<(), types::error::Error> {
-        validate_pool_collection(&self.name(), &self.spec.pools, &self.spec.env).map_err(
-            |message| types::error::Error::InvalidPoolSpec {
+        validate_pool_collection(&self.name(), &self.spec.pools).map_err(|message| {
+            types::error::Error::InvalidPoolSpec {
                 name: self.name(),
                 message,
-            },
-        )
+            }
+        })
     }
 
     /// a new owner reference for tenant

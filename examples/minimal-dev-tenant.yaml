@@ -5,11 +5,11 @@
 #
 # Resources created:
 # - 1 StatefulSet with 1 replica
-# - 4 PVCs (1 server × 4 volumes)
+# - 1 PVC (1 server × 1 volume)
 # - 3 Services (IO at 9000, Console at 9001, Headless)
 # - RBAC resources (Role, ServiceAccount, RoleBinding)
 #
-# Total storage: 40Gi (4 volumes × 10Gi default)
+# Total storage: 10Gi (1 volume × 10Gi default)
 
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant
@@ -22,14 +22,14 @@ spec:
   # Container image (optional - uses operator default if not specified)
   image: rustfs/rustfs:latest
 
-  # Minimal pool configuration
-  # servers * volumesPerServer must be >= 4 (RustFS erasure coding requirement)
-  # This uses: 1 server × 4 volumes = 4 total volumes (minimum valid)
+  # Minimal pool configuration.
+  # A single-node single-disk Tenant is expressed as 1 server × 1 volume.
+  # Other storage layouts are passed through to RustFS for validation at startup.
   pools:
     - name: dev-pool
       servers: 1  # Single server for development
       persistence:
-        volumesPerServer: 4  # Minimum 4 volumes required
+        volumesPerServer: 1  # Single PVC; RustFS uses no erasure parity
 
         # Optional: Reduce storage size for development
         # volumeClaimTemplate:
@@ -61,7 +61,7 @@ spec:
 #   kubectl wait --for=condition=ready pod -l rustfs.tenant=dev-minimal --timeout=300s
 
 # 4. Access S3 API (port 9000):
-#   kubectl port-forward svc/rustfs 9000:9000
+#   kubectl port-forward svc/dev-minimal-io 9000:9000
 #   # Test: aws --endpoint-url http://localhost:9000 s3 ls
 
 # 5. Access Console UI (port 9001):
@@ -74,10 +74,10 @@ spec:
 #     -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="RUSTFS_VOLUMES")].value}'
 #
 # Output will be:
-#   http://dev-minimal-dev-pool-0.dev-minimal-hl.default.svc.cluster.local:9000/data/rustfs{0...3}
+#   /data/rustfs0
 #
-# This tells RustFS to use 4 volumes at paths:
-#   /data/rustfs0, /data/rustfs1, /data/rustfs2, /data/rustfs3
+# This tells RustFS to use one local volume at:
+#   /data/rustfs0
 
 # 7. Test with MinIO client:
 #   mc alias set devlocal http://localhost:9000 rustfsadmin rustfsadmin

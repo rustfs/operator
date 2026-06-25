@@ -1,5 +1,5 @@
 # RustFS Tenant - 4-node distributed deployment (Kind multi-node + local storage)
-# Architecture: 4 servers x 2 volumes = 8 drives (servers * volumesPerServer >= 4)
+# Architecture: 4 servers x 2 volumes = 8 drives
 # Requires: kind-rustfs-cluster (3 workers), StorageClass local-storage, 12 PVs
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant

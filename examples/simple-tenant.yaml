@@ -12,15 +12,14 @@ spec:
   podManagementPolicy: Parallel
 
   # Pool configuration - at least one pool is required
-  # Each pool must have: servers * volumesPerServer >= 4
+  # RustFS validates whether the requested storage layout is supported at startup.
   pools:
     - name: primary
       servers: 2
 
       # Persistence configuration for storage (REQUIRED)
-      # Note: servers * volumesPerServer must be >= 4 for RustFS distributed storage
       persistence:
-        # Number of volumes per server (REQUIRED, must satisfy servers * volumesPerServer >= 4)
+        # Number of volumes per server (REQUIRED)
         volumesPerServer: 2
 
         # Optional: Path where volumes will be mounted in the container (defaults to /data)
@@ -99,9 +98,10 @@ spec:
       # Optional: Priority class - overrides tenant-level priority
       # priorityClassName: high-priority
 
-  # Multi-Node Communication (Automatic)
+  # Volume Configuration (Automatic)
   # The operator automatically generates the RUSTFS_VOLUMES environment variable
-  # for multi-node, multi-disk distributed storage communication.
+  # for the selected layout. Single-pool single-node single-disk tenants use a
+  # local path, while multi-pool and distributed layouts use peer DNS.
   #
   # For this configuration, the generated RUSTFS_VOLUMES will be:
   # http://example-tenant-primary-{0...1}.example-tenant-hl.rustfs-system.svc.cluster.local:9000/data/rustfs{0...1}
