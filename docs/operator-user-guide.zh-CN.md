@@ -186,7 +186,7 @@ spec:
     - name: dev-pool
       servers: 1
       persistence:
-        volumesPerServer: 4
+        volumesPerServer: 1
 ```
 
 应用并检查：
@@ -253,13 +253,14 @@ Tenant 名称必须兼容 DNS-1035，且长度不超过 55 个字符，因为 Op
 | `resources` | Pool 容器资源 request 和 limit。 |
 | `priorityClassName` | Pool 级 PriorityClass 覆盖。 |
 
-校验规则：
+Operator admission 检查：
 
-- `servers * volumesPerServer >= 4`。
-- 当 `servers: 3` 时，总卷数至少为 `6`。
+- `servers` 和 `persistence.volumesPerServer` 必须大于 `0`。
 - Pool 名称必须唯一。
 - Pool peer DNS label 必须满足 Kubernetes DNS label 长度限制。
 - 已存在 pool 的 `servers` 和 `volumesPerServer` 不能原地修改。
+
+Operator 不校验 RustFS 存储布局、erasure set 大小或 storage class parity 是否被支持。这些检查由 Tenant workload 启动后的 RustFS 自行完成。
 
 示例：
 
@@ -347,6 +348,8 @@ Operator 会自动管理以下环境变量：
 - `RUSTFS_CONSOLE_ADDRESS`
 - `RUSTFS_CONSOLE_ENABLE`
 - 启用 TLS 时的 RustFS TLS 相关变量
+
+对于单 pool 的单节点单盘 Tenant，`RUSTFS_VOLUMES` 会渲染为本地数据路径，例如 `/data/rustfs0`。多 pool Tenant 和其他布局仍会通过 Tenant headless Service 渲染 peer DNS URL，并由 RustFS 在运行时校验。
 
 `podDeletionPolicyWhenNodeIsDown` 支持以下值：
 

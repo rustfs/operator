@@ -120,7 +120,7 @@
   "Optional": "可选",
   "Image": "镜像",
   "Credentials Secret": "凭证 Secret",
-  "At least one pool with 4+ volumes (e.g. 2 servers × 2 volumes).": "至少一个池且总卷数不少于 4（例如 2 服务器 × 2 卷）。",
+  "RustFS validates storage layout when the tenant starts.": "RustFS 会在 Tenant 启动时校验存储布局。",
   "Add Pool": "添加存储池",
   "Pool": "存储池",
   "Remove": "移除",

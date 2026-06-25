@@ -120,7 +120,7 @@
   "Optional": "Optional",
   "Image": "Image",
   "Credentials Secret": "Credentials Secret",
-  "At least one pool with 4+ volumes (e.g. 2 servers × 2 volumes).": "At least one pool with 4+ volumes (e.g. 2 servers × 2 volumes).",
+  "RustFS validates storage layout when the tenant starts.": "RustFS validates storage layout when the tenant starts.",
   "Add Pool": "Add Pool",
   "Pool": "Pool",
   "Remove": "Remove",

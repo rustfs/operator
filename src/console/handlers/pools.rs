@@ -24,10 +24,7 @@ use crate::console::{
 };
 use crate::types::v1alpha1::{
     persistence::PersistenceConfig,
-    pool::{
-        Pool, SchedulingConfig, validate_pool_collection, validate_pool_name,
-        validate_pool_total_volumes,
-    },
+    pool::{Pool, SchedulingConfig, validate_pool_collection, validate_pool_name},
     pool_lifecycle::{
         DecommissionAction, DecommissionRequest, PoolLifecycleSpec, PvcRetentionPolicy,
     },
@@ -65,12 +62,6 @@ fn is_valid_k8s_quantity(s: &str) -> bool {
         }
     }
     true
-}
-
-/// Validate pool volume count (same rules as CRD CEL on [`Pool`] and [`validate_pool_total_volumes`]).
-fn validate_pool_volumes(servers: i32, volumes_per_server: i32) -> Result<i32> {
-    validate_pool_total_volumes(servers, volumes_per_server)
-        .map_err(|message| Error::BadRequest { message })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -578,7 +569,7 @@ pub async fn add_pool(
             ),
         });
     }
-    let total_volumes = validate_pool_volumes(req.servers, req.volumes_per_server)?;
+    let total_volumes = req.servers.saturating_mul(req.volumes_per_server);
 
     // Build Pool spec
     let new_pool = Pool {
@@ -669,9 +660,7 @@ pub async fn add_pool(
 
         remove_decommission_request(&mut tenant, pool_name);
         tenant.spec.pools.push(new_pool.clone());
-        if let Err(message) =
-            validate_pool_collection(&tenant.name_any(), &tenant.spec.pools, &tenant.spec.env)
-        {
+        if let Err(message) = validate_pool_collection(&tenant.name_any(), &tenant.spec.pools) {
             return Err(Error::BadRequest { message });
         }
 

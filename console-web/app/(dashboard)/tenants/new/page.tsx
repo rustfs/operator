@@ -31,8 +31,8 @@ const DEFAULT_RUSTFS_IMAGE = "rustfs/rustfs:latest"
 
 const defaultPool: CreatePoolRequest = {
   name: "pool-0",
-  servers: 2,
-  volumes_per_server: 2,
+  servers: 1,
+  volumes_per_server: 1,
   storage_size: "10Gi",
   storage_class: "",
 }
@@ -48,9 +48,9 @@ spec:
     name: rustfs-creds
   pools:
     - name: pool-0
-      servers: 2
+      servers: 1
       persistence:
-        volumesPerServer: 2
+        volumesPerServer: 1
         volumeClaimTemplate:
           accessModes:
             - ReadWriteOnce
@@ -474,9 +474,7 @@ export default function TenantCreatePage() {
               <CardHeader className="flex flex-row items-center justify-between">
                 <div>
                   <CardTitle className="text-base">{t("Pools")}</CardTitle>
-                  <CardDescription>
-                    {t("At least one pool with 4+ volumes (e.g. 2 servers × 2 volumes).")}
-                  </CardDescription>
+                  <CardDescription>{t("RustFS validates storage layout when the tenant starts.")}</CardDescription>
                 </div>
                 <Button type="button" variant="outline" size="sm" onClick={addPool}>
                   {t("Add Pool")}

@@ -8,7 +8,7 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 
 | Example | Use Case | Complexity | Storage | Best For |
 |---------|----------|------------|---------|----------|
-| [minimal-dev-tenant.yaml](./minimal-dev-tenant.yaml) | Development/Learning | ⭐ Simple | 40Gi | **Start here** if new |
+| [minimal-dev-tenant.yaml](./minimal-dev-tenant.yaml) | Development/Learning | ⭐ Simple | 10Gi | **Start here** if new |
 | [simple-tenant.yaml](./simple-tenant.yaml) | Documentation Reference | ⭐⭐ Moderate | Configurable | Learning all options |
 | [secret-credentials-tenant.yaml](./secret-credentials-tenant.yaml) | Secret-based Credentials | ⭐ Simple | Configurable | **Production credential security** |
 | [provisioning-tenant.yaml](./provisioning-tenant.yaml) | Policy/User/Bucket Provisioning | ⭐⭐ Moderate | 40Gi | Tenant bootstrap automation |
@@ -46,8 +46,8 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 **Smallest valid configuration** for learning, testing, and local development.
 
 **Configuration:**
-- 1 server × 4 volumes = 4 total volumes (minimum valid)
-- 40Gi total storage (4 × 10Gi default)
+- 1 server × 1 volume = 1 total volume (single-node single-disk)
+- 10Gi total storage (1 × 10Gi default)
 - Debug logging enabled
 
 **Use case:** Local development, learning the operator, quick testing.
@@ -64,7 +64,7 @@ kubectl apply -f examples/minimal-dev-tenant.yaml
 Single-pool tenant with **comprehensive comments** explaining all available options.
 
 **Features demonstrated:**
-- Basic pool configuration with validation
+- Basic pool configuration and admission checks
 - Persistence settings with volume claim templates
 - Custom labels and annotations for PVCs
 - Environment variable configuration
@@ -369,7 +369,6 @@ spec:
       servers: <number>              # Must be > 0
       persistence:
         volumesPerServer: <number>   # Must be > 0
-        # Validation: servers * volumesPerServer >= 4
 
   # Optional fields
   env: [...]
@@ -378,31 +377,22 @@ spec:
   # ... see Tenant CRD for all fields
 ```
 
-## Validation Rules
+## Admission Checks
 
 ### Pool Requirements
 
-- **Minimum total volumes**: `servers * volumesPerServer >= 4` (RustFS erasure coding requirement)
-- **Three-server pools**: `servers * volumesPerServer >= 6` (stricter than the general minimum)
 - **Server count**: Must be > 0
 - **Volumes per server**: Must be > 0
 - **Pool name**: Must not be empty
 
-These rules are enforced by the Tenant CRD (CEL) and the operator console API.
+The operator intentionally does not validate RustFS storage topology, erasure set sizing, or parity compatibility. Those checks are left to RustFS when the Tenant starts.
 
-### Valid Examples
+### Layout Examples
 
-✅ `servers: 4, volumesPerServer: 1` → 4 total volumes
-✅ `servers: 2, volumesPerServer: 2` → 4 total volumes
-✅ `servers: 3, volumesPerServer: 2` → 6 total volumes (minimum for 3 servers)
-✅ `servers: 4, volumesPerServer: 4` → 16 total volumes
-
-### Invalid Examples
-
-❌ `servers: 2, volumesPerServer: 1` → 2 total volumes (< 4)
-❌ `servers: 1, volumesPerServer: 1` → 1 total volume (< 4)
-❌ `servers: 3, volumesPerServer: 1` → 3 total volumes (< 6 for 3 servers)
-❌ `servers: 0, volumesPerServer: 4` → Server count must be > 0
+- `servers: 1, volumesPerServer: 1` → single-node single-disk style
+- `servers: 2, volumesPerServer: 1` → passed through to RustFS
+- `servers: 3, volumesPerServer: 1` → passed through to RustFS
+- `servers: 4, volumesPerServer: 4` → distributed style
 
 ## Common Configurations
 
@@ -414,7 +404,7 @@ spec:
     - name: dev
       servers: 1
       persistence:
-        volumesPerServer: 4  # 1 * 4 = 4 (minimum valid)
+        volumesPerServer: 1  # single-node single-disk
 ```
 
 ### Production (High Availability)
@@ -511,9 +501,9 @@ kubectl logs -n rustfs-system -l app=rustfs-operator
 ### Validation Errors
 
 Common issues:
-- Pool validation: Ensure `servers * volumesPerServer >= 4`
 - Empty pool name
 - Zero servers or volumes
+- RustFS rejecting an unsupported storage layout after the Tenant starts
 
 ### Pods Not Starting
 

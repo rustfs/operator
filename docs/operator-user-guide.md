@@ -184,7 +184,7 @@ spec:
     - name: dev-pool
       servers: 1
       persistence:
-        volumesPerServer: 4
+        volumesPerServer: 1
 ```
 
 Apply and verify:
@@ -251,13 +251,14 @@ Key fields:
 | `resources` | Container resource requests and limits for the pool. |
 | `priorityClassName` | Pool-level priority class override. |
 
-Validation rules:
+Operator admission checks:
 
-- `servers * volumesPerServer >= 4`.
-- For `servers: 3`, total volumes must be at least `6`.
+- `servers` and `persistence.volumesPerServer` must be greater than `0`.
 - Pool names must be unique.
 - Pool peer DNS labels must fit Kubernetes DNS label limits.
 - Existing pool `servers` and `volumesPerServer` cannot be changed in place.
+
+The operator does not validate whether a RustFS storage layout, erasure set size, or storage class parity is supported. RustFS performs those checks when the Tenant workload starts.
 
 Example:
 
@@ -345,6 +346,8 @@ The operator reserves these environment variables and manages them automatically
 - `RUSTFS_CONSOLE_ADDRESS`
 - `RUSTFS_CONSOLE_ENABLE`
 - TLS-related RustFS variables when Tenant TLS is enabled.
+
+For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered as the local data path, for example `/data/rustfs0`. Multi-pool tenants and other layouts render peer DNS URLs through the Tenant headless Service and are validated by RustFS at runtime.
 
 `podDeletionPolicyWhenNodeIsDown` accepts:
 

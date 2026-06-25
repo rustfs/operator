@@ -56,20 +56,24 @@ impl Tenant {
         let tenant_name = self.name();
         let headless_service = self.headless_service_name();
         let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
+        let base_path = base_path.trim_end_matches('/');
+
+        if self.spec.pools.len() == 1 && pool.is_single_node_single_disk() {
+            return format!("{base_path}/rustfs0");
+        }
 
         format!(
             "{scheme}://{tenant_name}-{}-{{0...{}}}.{headless_service}.{namespace}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
             pool.name,
             pool.servers - 1,
-            base_path.trim_end_matches('/'),
+            base_path,
             pool.persistence.volumes_per_server - 1
         )
     }
 
     /// Constructs the RUSTFS_VOLUMES environment variable value
-    /// Format: http://{tenant}-{pool}-{0...servers-1}.{service}.{namespace}.svc.cluster.local:9000{path}/rustfs{0...volumes-1}
-    /// All pools are combined into a space-separated string for a unified cluster
-    /// Follows RustFS convention: /data/rustfs0, /data/rustfs1, etc.
+    /// Distributed and multi-pool tenants use peer DNS entries, while a single-pool
+    /// single-node single-disk tenant uses its local data path.
     fn rustfs_volumes_env_value(&self, scheme: &str) -> Result<String, types::error::Error> {
         let namespace = self.namespace()?;
         let volume_specs = self
@@ -370,7 +374,7 @@ impl Tenant {
         // Generate environment variables: operator-managed + user-provided
         let mut env_vars = Vec::new();
 
-        // Add RUSTFS_VOLUMES environment variable for multi-node communication
+        // Add RUSTFS_VOLUMES environment variable for the inferred storage layout.
         let rustfs_volumes = self.rustfs_volumes_env_value(tls_plan.internode_scheme)?;
         env_vars.push(corev1::EnvVar {
             name: "RUSTFS_VOLUMES".to_owned(),
@@ -1094,6 +1098,64 @@ mod tests {
             container.termination_message_policy.as_deref(),
             Some("FallbackToLogsOnError")
         );
+    }
+
+    #[test]
+    fn single_node_single_disk_statefulset_uses_local_rustfs_volume() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.pools[0].persistence.volumes_per_server = 1;
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet for single-node single-disk");
+
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+        assert_eq!(
+            env_value(container, "RUSTFS_VOLUMES"),
+            Some("/data/rustfs0")
+        );
+        assert_eq!(
+            container
+                .volume_mounts
+                .as_ref()
+                .expect("data mount should be present")
+                .iter()
+                .filter(|mount| mount.mount_path == "/data/rustfs0")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn mixed_pool_single_node_single_disk_uses_peer_dns_volume() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.pools[0].persistence.volumes_per_server = 1;
+        let mut second_pool = tenant.spec.pools[0].clone();
+        second_pool.name = "pool-1".to_string();
+        second_pool.servers = 2;
+        second_pool.persistence.volumes_per_server = 1;
+        tenant.spec.pools.push(second_pool);
+        let pool = &tenant.spec.pools[1];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet for mixed pools");
+
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+        let rustfs_volumes =
+            env_value(container, "RUSTFS_VOLUMES").expect("RUSTFS_VOLUMES should be configured");
+        assert!(!rustfs_volumes.starts_with("/data/rustfs0"));
+        assert!(rustfs_volumes.contains(
+            "http://test-tenant-pool-0-{0...0}.test-tenant-hl.default.svc.cluster.local:9000/data/rustfs{0...0}"
+        ));
+        assert!(rustfs_volumes.contains(
+            "http://test-tenant-pool-1-{0...1}.test-tenant-hl.default.svc.cluster.local:9000/data/rustfs{0...0}"
+        ));
     }
 
     #[test]
