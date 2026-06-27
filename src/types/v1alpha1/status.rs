@@ -245,7 +245,7 @@ pub struct ConditionInput {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
-    /// Type of condition (Ready, Progressing, Degraded)
+    /// Type of condition (Ready, Reconciling, Degraded)
     #[serde(rename = "type")]
     pub type_: String,
 
@@ -344,6 +344,10 @@ impl Status {
                 (None, None) => left.type_.cmp(&right.type_),
             }
         });
+    }
+
+    pub fn remove_condition_by_type(&mut self, type_: &str) {
+        self.conditions.retain(|condition| condition.type_ != type_);
     }
 
     pub fn condition_is_true(&self, type_: ConditionType) -> bool {

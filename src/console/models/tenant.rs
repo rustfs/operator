@@ -25,6 +25,8 @@ use kube::ResourceExt;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+const LEGACY_PROGRESSING_CONDITION: &str = "Progressing";
+
 /// Single tenant row in a list view
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TenantListItem {
@@ -267,21 +269,42 @@ pub fn tenant_status_summary(tenant: &Tenant) -> TenantStatusSummary {
     } else {
         legacy_ready_for_state(&current_state)
     };
-    let mut reconciling = if has_conditions {
-        condition_is_true(status, ConditionType::Reconciling.as_str())
-            || condition_is_true(status, "Progressing")
-    } else {
-        legacy_reconciling_for_state(&current_state)
-    };
     let degraded = if has_conditions {
         condition_is_true(status, ConditionType::Degraded.as_str())
     } else {
         legacy_degraded_for_state(&current_state)
     };
+    let legacy_progressing_condition = if has_conditions && !ready && !degraded {
+        status.and_then(|status| {
+            status
+                .condition_by_type(LEGACY_PROGRESSING_CONDITION)
+                .filter(|condition| condition.status == ConditionStatus::True.as_str())
+        })
+    } else {
+        None
+    };
+    let legacy_progressing = legacy_progressing_condition.is_some();
+
+    if legacy_progressing && matches!(current_state.as_str(), "Unknown" | "NotReady") {
+        current_state = CurrentState::Reconciling.as_str().to_string();
+    }
+
+    let mut reconciling = if has_conditions {
+        condition_is_true(status, ConditionType::Reconciling.as_str()) || legacy_progressing
+    } else {
+        legacy_reconciling_for_state(&current_state)
+    };
 
     let primary = status.and_then(primary_condition);
     let mut primary_reason = primary.map(|condition| condition.reason.clone());
     let mut primary_message = primary.map(|condition| condition.message.clone());
+
+    if primary_reason.is_none()
+        && let Some(condition) = legacy_progressing_condition
+    {
+        primary_reason = Some(condition.reason.clone());
+        primary_message = Some(condition.message.clone());
+    }
 
     if stale {
         current_state = CurrentState::Reconciling.as_str().to_string();
@@ -533,6 +556,10 @@ mod tests {
         assert!(summary.ready);
         assert!(!summary.reconciling);
         assert!(!summary.degraded);
+        assert!(summary.primary_reason.is_none());
+        assert!(summary.next_actions.is_empty());
+        assert!(summary.primary_reason.is_none());
+        assert!(summary.next_actions.is_empty());
     }
 
     #[test]
@@ -551,6 +578,52 @@ mod tests {
         assert_eq!(summary.current_state, "Reconciling");
         assert!(!summary.ready);
         assert!(summary.reconciling);
+        assert_eq!(summary.primary_reason.as_deref(), Some("RolloutInProgress"));
+        assert_eq!(summary.next_actions, vec!["waitForRollout"]);
+    }
+
+    #[test]
+    fn tenant_summary_ignores_legacy_progressing_after_ready_success() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.generation = Some(3);
+        tenant.status = Some(Status {
+            current_state: "Ready".to_string(),
+            observed_generation: Some(3),
+            conditions: vec![
+                condition("Ready", "True", "ReconcileSucceeded"),
+                condition("Reconciling", "False", "ReconcileSucceeded"),
+                condition("Degraded", "False", "ReconcileSucceeded"),
+                condition("Progressing", "True", "RolloutInProgress"),
+            ],
+            ..Default::default()
+        });
+
+        let summary = tenant_status_summary(&tenant);
+
+        assert_eq!(summary.current_state, "Ready");
+        assert!(summary.ready);
+        assert!(!summary.reconciling);
+        assert!(!summary.degraded);
+    }
+
+    #[test]
+    fn tenant_summary_uses_legacy_progressing_without_ready_success() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.generation = Some(3);
+        tenant.status = Some(Status {
+            current_state: "Ready".to_string(),
+            observed_generation: Some(3),
+            conditions: vec![condition("Progressing", "True", "RolloutInProgress")],
+            ..Default::default()
+        });
+
+        let summary = tenant_status_summary(&tenant);
+
+        assert_eq!(summary.current_state, "Reconciling");
+        assert!(!summary.ready);
+        assert!(summary.reconciling);
+        assert_eq!(summary.primary_reason.as_deref(), Some("RolloutInProgress"));
+        assert_eq!(summary.next_actions, vec!["waitForRollout"]);
     }
 
     #[test]
