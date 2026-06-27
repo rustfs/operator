@@ -21,6 +21,8 @@ use crate::types::v1alpha1::status::{
 use crate::types::v1alpha1::tenant::Tenant;
 use kube::runtime::events::EventType;
 
+const LEGACY_PROGRESSING_CONDITION: &str = "Progressing";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusImpact {
     UserBlocked,
@@ -510,6 +512,8 @@ impl StatusBuilder {
     }
 
     pub fn build(mut self) -> Status {
+        self.next
+            .remove_condition_by_type(LEGACY_PROGRESSING_CONDITION);
         self.next.observed_generation = self.generation;
         self.next.current_state = summarize_current_state(&self.next);
         self.next.sort_conditions();
@@ -910,6 +914,41 @@ mod tests {
                 .condition(ConditionType::Reconciling)
                 .map(|condition| condition.reason.as_str()),
             Some("ReconcileStarted")
+        );
+    }
+
+    #[test]
+    fn status_builder_prunes_legacy_progressing_condition() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.generation = Some(1);
+        tenant.status = Some(Status {
+            current_state: "Ready".to_string(),
+            observed_generation: Some(1),
+            conditions: vec![
+                condition("Ready", "True", "ReconcileSucceeded"),
+                condition("Reconciling", "False", "ReconcileSucceeded"),
+                condition("Degraded", "False", "ReconcileSucceeded"),
+                condition("Progressing", "True", "RolloutInProgress"),
+            ],
+            ..Default::default()
+        });
+
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.finish_success();
+        let status = builder.build();
+
+        assert_eq!(status.current_state, "Ready");
+        assert!(
+            status
+                .conditions
+                .iter()
+                .all(|condition| condition.type_ != "Progressing")
+        );
+        assert_eq!(
+            status
+                .condition(ConditionType::Reconciling)
+                .map(|condition| condition.status.as_str()),
+            Some("False")
         );
     }
 
