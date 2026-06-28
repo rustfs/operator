@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rustfs_operator_e2e::{
-    fault::scenarios::scenario_catalog_json,
+    fault::{scenarios::scenario_catalog_json, spec::FaultRunSpec},
     framework::{
         cert_manager_tls, command::CommandSpec, config::E2eConfig, deploy, images::ImageSet,
         kind::KindCluster, live, resources, storage,
@@ -28,6 +28,7 @@ fn main() -> Result<()> {
     match command.as_str() {
         "help" | "--help" | "-h" => print_help(),
         "fault-catalog-json" => print_fault_catalog_json(),
+        "fault-run-spec-equal" => validate_fault_run_spec_equivalence(args),
         _ => {
             let config = E2eConfig::from_env();
             match command.as_str() {
@@ -68,11 +69,41 @@ fn print_help() -> Result<()> {
     println!("  deploy-dev        Apply operator/console manifests into dedicated Kind");
     println!("  rollout-dev       Restart and wait for e2e control-plane deployments");
     println!("  fault-catalog-json");
+    println!("  fault-run-spec-equal <run-spec.json> <run-spec.yaml>");
     Ok(())
 }
 
 fn print_fault_catalog_json() -> Result<()> {
     println!("{}", scenario_catalog_json()?);
+    Ok(())
+}
+
+fn validate_fault_run_spec_equivalence(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let json_path = args
+        .next()
+        .context("fault-run-spec-equal requires run-spec.json path")?;
+    let yaml_path = args
+        .next()
+        .context("fault-run-spec-equal requires run-spec.yaml path")?;
+    ensure!(
+        args.next().is_none(),
+        "fault-run-spec-equal accepts exactly two paths"
+    );
+
+    let json_raw = std::fs::read_to_string(&json_path)
+        .with_context(|| format!("read run spec json {json_path}"))?;
+    let yaml_raw = std::fs::read_to_string(&yaml_path)
+        .with_context(|| format!("read run spec yaml {yaml_path}"))?;
+    let json_spec = serde_json::from_str::<FaultRunSpec>(&json_raw)
+        .with_context(|| format!("parse run spec json {json_path}"))?;
+    let yaml_spec = serde_yaml_ng::from_str::<FaultRunSpec>(&yaml_raw)
+        .with_context(|| format!("parse run spec yaml {yaml_path}"))?;
+
+    ensure!(
+        json_spec == yaml_spec,
+        "run spec JSON and YAML artifacts do not describe the same contract"
+    );
+    println!("run spec JSON/YAML contract matches");
     Ok(())
 }
 

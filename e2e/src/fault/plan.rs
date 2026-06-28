@@ -15,15 +15,18 @@
 use anyhow::{Result, bail, ensure};
 use std::time::Duration;
 
-use crate::fault::scenarios::{
-    DISK_FULL_SCENARIO, DM_FLAKEY_SCENARIO, FaultBackend, FaultScenario, FaultScenarioSpec,
-    IO_EIO_SCENARIO, IO_LATENCY_SCENARIO, IO_READ_MISTAKE_SCENARIO, NETWORK_CORRUPT_SCENARIO,
-    NETWORK_DELAY_SCENARIO, NETWORK_DUPLICATE_SCENARIO, NETWORK_LOSS_SCENARIO,
-    NETWORK_PARTITION_ONE_SCENARIO, POD_FAILURE_SCENARIO, POD_KILL_ONE_SCENARIO,
-    STRESS_CPU_SCENARIO, STRESS_MEMORY_SCENARIO, WARP_UNDER_CHAOS_SCENARIO,
+use crate::fault::{
+    config::{DEFAULT_RUSTFS_VOLUME_PATH, FaultTestConfig, validate_rustfs_volume_path},
+    scenarios::{
+        DISK_FULL_SCENARIO, DM_FLAKEY_SCENARIO, FaultBackend, FaultScenario, FaultScenarioSpec,
+        IO_EIO_SCENARIO, IO_LATENCY_SCENARIO, IO_READ_MISTAKE_SCENARIO, NETWORK_CORRUPT_SCENARIO,
+        NETWORK_DELAY_SCENARIO, NETWORK_DUPLICATE_SCENARIO, NETWORK_LOSS_SCENARIO,
+        NETWORK_PARTITION_ONE_SCENARIO, POD_FAILURE_SCENARIO, POD_KILL_ONE_SCENARIO,
+        STRESS_CPU_SCENARIO, STRESS_MEMORY_SCENARIO, WARP_UNDER_CHAOS_SCENARIO,
+    },
 };
 
-pub const DEFAULT_RUSTFS_DATA_VOLUME: &str = "/data/rustfs0";
+pub const DEFAULT_RUSTFS_DATA_VOLUME: &str = DEFAULT_RUSTFS_VOLUME_PATH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultWorkloadMode {
@@ -76,9 +79,9 @@ impl FaultKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaultTarget {
-    RustfsVolume { path: &'static str },
+    RustfsVolume { path: String },
     RustfsServerPod,
     RustfsServerPeerNetwork,
     RustfsServerResource,
@@ -86,7 +89,7 @@ pub enum FaultTarget {
 }
 
 impl FaultTarget {
-    pub fn summary(self) -> String {
+    pub fn summary(&self) -> String {
         match self {
             Self::RustfsVolume { path } => format!("one RustFS volume at {path}"),
             Self::RustfsServerPod => "one RustFS server Pod".to_string(),
@@ -145,6 +148,15 @@ impl FaultInjection {
             kind.as_str(),
             selection
         );
+        ensure!(
+            fault_kind_accepts_target(kind, &target),
+            "fault kind {} cannot run with target {:?}",
+            kind.as_str(),
+            target
+        );
+        if let FaultTarget::RustfsVolume { path } = &target {
+            validate_rustfs_volume_path(path)?;
+        }
         ensure!(duration > Duration::ZERO, "fault duration must be positive");
 
         Ok(Self {
@@ -164,8 +176,8 @@ impl FaultInjection {
         self.backend
     }
 
-    pub fn target(&self) -> FaultTarget {
-        self.target
+    pub fn target(&self) -> &FaultTarget {
+        &self.target
     }
 
     pub fn selection(&self) -> FaultSelection {
@@ -187,8 +199,8 @@ impl FaultInjection {
         self.duration
     }
 
-    pub fn rustfs_volume_path(&self) -> Result<&'static str> {
-        match self.target {
+    pub fn rustfs_volume_path(&self) -> Result<&str> {
+        match &self.target {
             FaultTarget::RustfsVolume { path } => Ok(path),
             other => bail!(
                 "fault kind {} requires a RustFS volume target, got {:?}",
@@ -255,12 +267,56 @@ fn fault_kind_accepts_selection(kind: FaultKind, selection: FaultSelection) -> b
     }
 }
 
+fn fault_kind_accepts_target(kind: FaultKind, target: &FaultTarget) -> bool {
+    match kind {
+        FaultKind::RustfsVolumeIoError
+        | FaultKind::RustfsVolumeLatency
+        | FaultKind::RustfsVolumeReadMistake
+        | FaultKind::RustfsVolumeEnospc => matches!(target, FaultTarget::RustfsVolume { .. }),
+        FaultKind::RustfsServerPodKill | FaultKind::RustfsServerPodFailure => {
+            matches!(target, FaultTarget::RustfsServerPod)
+        }
+        FaultKind::RustfsServerNetworkPartition
+        | FaultKind::RustfsServerNetworkDelay
+        | FaultKind::RustfsServerNetworkLoss
+        | FaultKind::RustfsServerNetworkCorrupt
+        | FaultKind::RustfsServerNetworkDuplicate => {
+            matches!(target, FaultTarget::RustfsServerPeerNetwork)
+        }
+        FaultKind::RustfsServerCpuStress | FaultKind::RustfsServerMemoryStress => {
+            matches!(target, FaultTarget::RustfsServerResource)
+        }
+        FaultKind::RustfsBlockDeviceFlakey => matches!(target, FaultTarget::DedicatedBlockDevice),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultPlan {
     pub scenario: String,
     pub case_name: &'static str,
     pub workload_mode: FaultWorkloadMode,
     faults: Vec<FaultInjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultPlanOptions {
+    pub rustfs_volume_path: String,
+}
+
+impl FaultPlanOptions {
+    pub fn from_config(config: &FaultTestConfig) -> Self {
+        Self {
+            rustfs_volume_path: config.rustfs_volume_path.clone(),
+        }
+    }
+}
+
+impl Default for FaultPlanOptions {
+    fn default() -> Self {
+        Self {
+            rustfs_volume_path: DEFAULT_RUSTFS_DATA_VOLUME.to_string(),
+        }
+    }
 }
 
 impl FaultPlan {
@@ -274,6 +330,10 @@ impl FaultPlan {
             !faults.is_empty(),
             "fault plan must contain at least one fault"
         );
+        ensure!(
+            faults.len() == 1,
+            "composite fault plans require an explicit composition policy before they can be executed safely"
+        );
 
         Ok(Self {
             scenario: scenario.into(),
@@ -284,6 +344,14 @@ impl FaultPlan {
     }
 
     pub fn from_scenario(scenario: &FaultScenario, spec: &FaultScenarioSpec) -> Result<Self> {
+        Self::from_scenario_with_options(scenario, spec, FaultPlanOptions::default())
+    }
+
+    pub fn from_scenario_with_options(
+        scenario: &FaultScenario,
+        spec: &FaultScenarioSpec,
+        options: FaultPlanOptions,
+    ) -> Result<Self> {
         ensure!(
             scenario.name == spec.scenario,
             "fault scenario/spec mismatch: scenario={}, spec={}",
@@ -297,7 +365,12 @@ impl FaultPlan {
             FaultWorkloadMode::S3Mixed
         };
         let fault = match scenario.name.as_str() {
-            IO_EIO_SCENARIO => volume_fault(FaultKind::RustfsVolumeIoError, spec, scenario)?,
+            IO_EIO_SCENARIO => volume_fault(
+                FaultKind::RustfsVolumeIoError,
+                spec,
+                scenario,
+                &options.rustfs_volume_path,
+            )?,
             POD_KILL_ONE_SCENARIO => FaultInjection::new(
                 FaultKind::RustfsServerPodKill,
                 spec.backend,
@@ -331,11 +404,24 @@ impl FaultPlan {
             NETWORK_DUPLICATE_SCENARIO => {
                 network_fault(FaultKind::RustfsServerNetworkDuplicate, spec, scenario)?
             }
-            IO_READ_MISTAKE_SCENARIO => {
-                volume_fault(FaultKind::RustfsVolumeReadMistake, spec, scenario)?
-            }
-            IO_LATENCY_SCENARIO => volume_fault(FaultKind::RustfsVolumeLatency, spec, scenario)?,
-            DISK_FULL_SCENARIO => volume_fault(FaultKind::RustfsVolumeEnospc, spec, scenario)?,
+            IO_READ_MISTAKE_SCENARIO => volume_fault(
+                FaultKind::RustfsVolumeReadMistake,
+                spec,
+                scenario,
+                &options.rustfs_volume_path,
+            )?,
+            IO_LATENCY_SCENARIO => volume_fault(
+                FaultKind::RustfsVolumeLatency,
+                spec,
+                scenario,
+                &options.rustfs_volume_path,
+            )?,
+            DISK_FULL_SCENARIO => volume_fault(
+                FaultKind::RustfsVolumeEnospc,
+                spec,
+                scenario,
+                &options.rustfs_volume_path,
+            )?,
             STRESS_CPU_SCENARIO => {
                 resource_fault(FaultKind::RustfsServerCpuStress, spec, scenario)?
             }
@@ -349,9 +435,12 @@ impl FaultPlan {
                 FaultSelection::FixedTargets(1),
                 scenario.duration,
             )?,
-            WARP_UNDER_CHAOS_SCENARIO => {
-                volume_fault(FaultKind::RustfsVolumeIoError, spec, scenario)?
-            }
+            WARP_UNDER_CHAOS_SCENARIO => volume_fault(
+                FaultKind::RustfsVolumeIoError,
+                spec,
+                scenario,
+                &options.rustfs_volume_path,
+            )?,
             other => bail!("scenario {other:?} has no fault plan mapping"),
         };
 
@@ -411,12 +500,13 @@ fn volume_fault(
     kind: FaultKind,
     spec: &FaultScenarioSpec,
     scenario: &FaultScenario,
+    volume_path: &str,
 ) -> Result<FaultInjection> {
     FaultInjection::new(
         kind,
         spec.backend,
         FaultTarget::RustfsVolume {
-            path: DEFAULT_RUSTFS_DATA_VOLUME,
+            path: volume_path.to_string(),
         },
         FaultSelection::Percent(scenario.percent),
         scenario.duration,
@@ -482,8 +572,8 @@ mod tests {
         assert_eq!(plan.faults()[0].kind(), FaultKind::RustfsVolumeIoError);
         assert_eq!(
             plan.faults()[0].target(),
-            FaultTarget::RustfsVolume {
-                path: DEFAULT_RUSTFS_DATA_VOLUME
+            &FaultTarget::RustfsVolume {
+                path: DEFAULT_RUSTFS_DATA_VOLUME.to_string()
             }
         );
     }
@@ -524,12 +614,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_contract_allows_multiple_faults_for_future_composition() {
+    fn plan_rejects_multi_faults_without_composition_policy() {
         let first = FaultInjection::new(
             FaultKind::RustfsVolumeIoError,
             FaultBackend::ChaosMeshIoChaos,
             FaultTarget::RustfsVolume {
-                path: DEFAULT_RUSTFS_DATA_VOLUME,
+                path: DEFAULT_RUSTFS_DATA_VOLUME.to_string(),
             },
             FaultSelection::Percent(20),
             Duration::from_secs(60),
@@ -544,23 +634,14 @@ mod tests {
         )
         .expect("second fault");
 
-        let plan = FaultPlan::new(
+        let result = FaultPlan::new(
             "composite",
             "fault_composite",
             FaultWorkloadMode::S3Mixed,
             vec![first, second],
-        )
-        .expect("composite plan");
-
-        assert_eq!(plan.faults().len(), 2);
-        assert_eq!(
-            plan.required_backends(),
-            vec![
-                FaultBackend::ChaosMeshIoChaos,
-                FaultBackend::ChaosMeshNetworkChaos
-            ]
         );
-        assert!(plan.target_summary().contains(" + "));
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -569,7 +650,7 @@ mod tests {
             FaultKind::RustfsVolumeIoError,
             FaultBackend::ChaosMeshNetworkChaos,
             FaultTarget::RustfsVolume {
-                path: DEFAULT_RUSTFS_DATA_VOLUME,
+                path: DEFAULT_RUSTFS_DATA_VOLUME.to_string(),
             },
             FaultSelection::Percent(20),
             Duration::from_secs(60),
@@ -585,6 +666,21 @@ mod tests {
             FaultBackend::ChaosMeshPodChaos,
             FaultTarget::RustfsServerPod,
             FaultSelection::Percent(20),
+            Duration::from_secs(60),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fault_injection_rejects_kind_target_mismatch() {
+        let result = FaultInjection::new(
+            FaultKind::RustfsServerPodKill,
+            FaultBackend::ChaosMeshPodChaos,
+            FaultTarget::RustfsVolume {
+                path: DEFAULT_RUSTFS_DATA_VOLUME.to_string(),
+            },
+            FaultSelection::FixedTargets(1),
             Duration::from_secs(60),
         );
 

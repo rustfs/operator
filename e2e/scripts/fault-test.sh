@@ -22,6 +22,9 @@ MANAGER="rustfs-operator-fault-test"
 MANAGER_SELECTOR="app.kubernetes.io/managed-by=$MANAGER"
 WORKLOAD_OBJECTS="${RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS:-40000}"
 WORKLOAD_CONCURRENCY="${RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY:-80}"
+RUSTFS_POD_COUNT="${RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT:-4}"
+RUSTFS_VOLUME_PATH="${RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH:-/data/rustfs0}"
+RUSTFS_POD_STABLE_WINDOW_SECONDS="${RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS:-60}"
 BUILD_JOBS="${RUSTFS_FAULT_TEST_BUILD_JOBS:-1}"
 
 FAULT_CONTEXT="${RUSTFS_FAULT_TEST_EXPECTED_CONTEXT:-}"
@@ -125,6 +128,7 @@ require_absolute_non_root_path() {
   local name="$1" value="$2"
   [[ "$value" == /* && "$value" != "/" ]] || die "$name must be an absolute non-root path"
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || die "$name must not contain newlines"
+  [[ "$value" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$name must contain only ASCII letters, digits, '/', '.', '_', or '-'"
 }
 
 require_safe_image_ref() {
@@ -216,16 +220,28 @@ scenario_required_tools() {
 }
 
 validate_runtime_env_contract() {
-  local scenario="$1" percent
+  local scenario="$1" percent timeout_seconds
 
   WORKLOAD_OBJECTS="$(trim_value "$WORKLOAD_OBJECTS")"
   WORKLOAD_CONCURRENCY="$(trim_value "$WORKLOAD_CONCURRENCY")"
+  RUSTFS_POD_COUNT="$(trim_value "$RUSTFS_POD_COUNT")"
+  RUSTFS_VOLUME_PATH="$(trim_value "$RUSTFS_VOLUME_PATH")"
+  RUSTFS_POD_STABLE_WINDOW_SECONDS="$(trim_value "$RUSTFS_POD_STABLE_WINDOW_SECONDS")"
   BUILD_JOBS="$(trim_value "$BUILD_JOBS")"
 
   require_positive_integer RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS "$WORKLOAD_OBJECTS"
   (( 10#$WORKLOAD_OBJECTS >= 12 )) || die "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS must be at least 12"
   require_positive_integer RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY "$WORKLOAD_CONCURRENCY"
   (( 10#$WORKLOAD_CONCURRENCY <= 10#$WORKLOAD_OBJECTS )) || die "RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY must be <= RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS"
+  require_positive_integer RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT "$RUSTFS_POD_COUNT"
+  require_absolute_non_root_path RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH "$RUSTFS_VOLUME_PATH"
+  require_positive_integer RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS "$RUSTFS_POD_STABLE_WINDOW_SECONDS"
+  timeout_seconds="$(trim_value "${RUSTFS_FAULT_TEST_TIMEOUT_SECONDS:-300}")"
+  require_unsigned_integer RUSTFS_FAULT_TEST_TIMEOUT_SECONDS "$timeout_seconds"
+  (( 10#$RUSTFS_POD_STABLE_WINDOW_SECONDS < 10#$timeout_seconds )) || die "RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS must be less than RUSTFS_FAULT_TEST_TIMEOUT_SECONDS"
+  export RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT="$RUSTFS_POD_COUNT"
+  export RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH="$RUSTFS_VOLUME_PATH"
+  export RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS="$RUSTFS_POD_STABLE_WINDOW_SECONDS"
   require_optional_positive_integer RUSTFS_FAULT_TEST_DURATION_SECONDS
   require_optional_unsigned_integer RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS
   require_optional_unsigned_integer RUSTFS_FAULT_TEST_TIMEOUT_SECONDS
@@ -425,7 +441,7 @@ preflight() {
     [[ "$(kubectl_cluster get namespace "$FAULT_NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')" == "privileged" ]] || die "dm-flakey requires pod-security.kubernetes.io/enforce=privileged on $FAULT_NAMESPACE"
   fi
 
-  echo "preflight passed: context=$FAULT_CONTEXT scenario=$scenario nodes=$ready_nodes storageClass=${RUSTFS_FAULT_TEST_STORAGE_CLASS} objects=$WORKLOAD_OBJECTS concurrency=$WORKLOAD_CONCURRENCY"
+  echo "preflight passed: context=$FAULT_CONTEXT scenario=$scenario nodes=$ready_nodes storageClass=${RUSTFS_FAULT_TEST_STORAGE_CLASS} objects=$WORKLOAD_OBJECTS concurrency=$WORKLOAD_CONCURRENCY pods=$RUSTFS_POD_COUNT volume=$RUSTFS_VOLUME_PATH"
 }
 
 preflight_cleanup() {
@@ -497,10 +513,21 @@ find_artifact() {
   find "$1" -name "$2" -type f -print -quit
 }
 
+validate_run_spec_equivalence() {
+  local scenario="$1" run_spec="$2" run_spec_yaml="$3"
+  require_command cargo
+  CARGO_BUILD_JOBS="$BUILD_JOBS" cargo run --quiet --manifest-path "$MANIFEST" --bin rustfs-e2e -- \
+    fault-run-spec-equal "$run_spec" "$run_spec_yaml" >/dev/null \
+    || die "$scenario run spec JSON/YAML artifacts diverged"
+}
+
 validate_scenario_artifacts() {
   local scenario="$1" artifacts="$2" run_root="$3"
-  local metadata plan evidence prechecker checker summary recommit seed disruptions recommitted committed
+  local metadata run_spec run_spec_yaml events plan evidence prechecker checker summary recommit seed disruptions recommitted committed
   metadata="$(find_artifact "$artifacts" run-metadata.json)"
+  run_spec="$(find_artifact "$artifacts" run-spec.json)"
+  run_spec_yaml="$(find_artifact "$artifacts" run-spec.yaml)"
+  events="$(find_artifact "$artifacts" run-events.jsonl)"
   plan="$(find_artifact "$artifacts" workload-plan.json)"
   evidence="$(find_artifact "$artifacts" fault-evidence.json)"
   prechecker="$(find_artifact "$artifacts" checker-pre-recommit-report.json)"
@@ -508,6 +535,9 @@ validate_scenario_artifacts() {
   summary="$(find_artifact "$artifacts" workload-summary.json)"
   recommit="$(find_artifact "$artifacts" recommit-report.json)"
   [[ -f "$metadata" ]] || die "$scenario did not produce run-metadata.json"
+  [[ -f "$run_spec" ]] || die "$scenario did not produce run-spec.json"
+  [[ -f "$run_spec_yaml" ]] || die "$scenario did not produce run-spec.yaml"
+  [[ -f "$events" ]] || die "$scenario did not produce run-events.jsonl"
   [[ -f "$plan" ]] || die "$scenario did not produce workload-plan.json"
   [[ -f "$evidence" ]] || die "$scenario did not produce fault-evidence.json"
   [[ -f "$prechecker" ]] || die "$scenario did not produce checker-pre-recommit-report.json"
@@ -530,6 +560,54 @@ validate_scenario_artifacts() {
     and ([.size_distribution[].object_count] | add) == $objects
     and ([.size_distribution[] | (.size_bytes * .object_count)] | add) == .total_payload_bytes
   ' "$plan" >/dev/null || die "$scenario workload plan does not match the required profile"
+  jq -e \
+    --arg scenario "$scenario" \
+    --argjson objects "$WORKLOAD_OBJECTS" \
+    --argjson concurrency "$WORKLOAD_CONCURRENCY" \
+    --argjson pod_count "$RUSTFS_POD_COUNT" \
+    --argjson stable_window "$RUSTFS_POD_STABLE_WINDOW_SECONDS" \
+    --arg volume_path "$RUSTFS_VOLUME_PATH" \
+    '
+    def has_required_artifact($name): (.artifacts.required | index($name)) != null;
+    .apiVersion == "rustfs.com/fault-test/v1alpha1"
+    and .kind == "FaultRun"
+    and .scenario.name == $scenario
+    and .workload.object_count == $objects
+    and .workload.concurrency == $concurrency
+    and .recovery.expected_rustfs_pod_count == $pod_count
+    and .recovery.stable_pod_window_seconds == $stable_window
+    and .artifacts.event_stream == "run-events.jsonl"
+    and all([
+      "run-spec.yaml",
+      "run-spec.json",
+      "run-events.jsonl",
+      "run-metadata.json",
+      "workload-plan.json",
+      "history.jsonl",
+      "workload-summary.json",
+      "recommit-report.json",
+      "checker-pre-recommit-report.json",
+      "checker-report.json",
+      "fault-evidence.json"
+    ][]; has_required_artifact(.))
+    and (.faults | length) > 0
+    and all(.faults[];
+      (.duration_seconds > 0)
+      and (.conflict_domain | length) > 0
+      and (.selection.value > 0)
+      and (if .target.kind == "rustfs-volume" then
+        .target.path == $volume_path
+      else
+        (.target.path == null)
+      end)
+    )
+  ' "$run_spec" >/dev/null || die "$scenario run spec does not match the selected contract"
+  validate_run_spec_equivalence "$scenario" "$run_spec" "$run_spec_yaml"
+  jq -s -e '
+    any(.[]; .stage == "run" and .status == "started")
+    and any(.[]; .stage == "run" and .status == "succeeded")
+    and any(.[]; .stage == "checker-final" and .status == "succeeded")
+  ' "$events" >/dev/null || die "$scenario run events are incomplete"
   jq -e '.injected == true and .active_during_workload == true and .recovered == true' "$evidence" >/dev/null || die "$scenario fault evidence is incomplete"
   jq -e '(.active_snapshots | length) > 0 and (.workload_snapshots | length) > 0' "$evidence" >/dev/null || die "$scenario fault evidence snapshots are missing"
   jq -e '
@@ -615,6 +693,9 @@ run_scenario() {
     RUSTFS_FAULT_TEST_SCENARIO="$scenario" \
     RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS="$WORKLOAD_OBJECTS" \
     RUSTFS_FAULT_TEST_WORKLOAD_CONCURRENCY="$WORKLOAD_CONCURRENCY" \
+    RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT="$RUSTFS_POD_COUNT" \
+    RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH="$RUSTFS_VOLUME_PATH" \
+    RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS="$RUSTFS_POD_STABLE_WINDOW_SECONDS" \
     RUSTFS_FAULT_TEST_DURATION_SECONDS="${RUSTFS_FAULT_TEST_DURATION_SECONDS:-7200}" \
     RUSTFS_FAULT_TEST_ARTIFACTS="$artifacts" \
     "$FAULT_TEST_BINARY" --ignored --test-threads=1 --nocapture \

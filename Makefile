@@ -98,6 +98,7 @@ E2E_LIVE_ENV ?= RUSTFS_E2E_LIVE=1 RUSTFS_E2E_CERT_MANAGER_VERSION=$(CERT_MANAGER
 
 # Rust-native e2e harness checks (non-live; ignored live tests remain opt-in)
 e2e-check:
+	bash -n e2e/scripts/fault-test.sh
 	cargo fmt --manifest-path $(E2E_MANIFEST) --all --check
 	cargo test --manifest-path $(E2E_MANIFEST)
 	cargo clippy --manifest-path $(E2E_MANIFEST) --all-targets -- -D warnings
