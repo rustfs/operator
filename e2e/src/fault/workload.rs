@@ -22,7 +22,7 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
 };
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize, de};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -44,7 +44,7 @@ pub struct PreparedObject {
     body: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadSizeClass {
     pub size_bytes: usize,
     pub object_count: usize,
@@ -53,13 +53,22 @@ pub struct WorkloadSizeClass {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkloadPlan {
     pub seed: u64,
-    pub generator: &'static str,
+    pub generator: String,
     pub object_count: usize,
     pub concurrency: usize,
     pub total_payload_bytes: u64,
     pub size_distribution: Vec<WorkloadSizeClass>,
-    #[serde(skip)]
     sizes: Vec<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SerializedWorkloadPlan {
+    seed: u64,
+    generator: String,
+    object_count: usize,
+    concurrency: usize,
+    total_payload_bytes: u64,
+    size_distribution: Vec<WorkloadSizeClass>,
 }
 
 #[derive(Clone)]
@@ -142,6 +151,8 @@ impl ObjectSpec {
 }
 
 impl WorkloadPlan {
+    const GENERATOR: &'static str = "splitmix64-v1";
+
     pub fn seeded(seed: u64, object_count: usize, concurrency: usize) -> Self {
         const SIZE_CLASSES: &[(usize, usize)] = &[
             (4 * 1024, 85),
@@ -171,7 +182,7 @@ impl WorkloadPlan {
         let total_payload_bytes = sizes.iter().map(|size| *size as u64).sum();
         Self {
             seed,
-            generator: "splitmix64-v1",
+            generator: Self::GENERATOR.to_string(),
             object_count,
             concurrency,
             total_payload_bytes,
@@ -182,6 +193,80 @@ impl WorkloadPlan {
 
     pub fn size_at(&self, index: usize) -> usize {
         self.sizes[index]
+    }
+
+    fn from_serialized(raw: SerializedWorkloadPlan) -> std::result::Result<Self, String> {
+        if raw.generator != Self::GENERATOR {
+            return Err(format!("unsupported workload generator {}", raw.generator));
+        }
+        if !(1..=raw.object_count).contains(&raw.concurrency) {
+            return Err(format!(
+                "workload concurrency {} must be between 1 and object_count {}",
+                raw.concurrency, raw.object_count
+            ));
+        }
+
+        let distributed_objects =
+            raw.size_distribution
+                .iter()
+                .try_fold(0usize, |total, class| {
+                    total.checked_add(class.object_count).ok_or_else(|| {
+                        "workload size_distribution object_count overflowed".to_string()
+                    })
+                })?;
+        if distributed_objects != raw.object_count {
+            return Err(format!(
+                "workload size_distribution object_count {} does not match object_count {}",
+                distributed_objects, raw.object_count
+            ));
+        }
+
+        let distributed_payload = raw
+            .size_distribution
+            .iter()
+            .try_fold(0u64, |total, class| {
+                if class.size_bytes == 0 {
+                    return Err("workload size class size_bytes must be positive".to_string());
+                }
+                let class_payload = (class.size_bytes as u64)
+                    .checked_mul(class.object_count as u64)
+                    .ok_or_else(|| "workload size_distribution payload overflowed".to_string())?;
+                total.checked_add(class_payload).ok_or_else(|| {
+                    "workload size_distribution total payload overflowed".to_string()
+                })
+            })?;
+        if distributed_payload != raw.total_payload_bytes {
+            return Err(format!(
+                "workload size_distribution payload {} does not match total_payload_bytes {}",
+                distributed_payload, raw.total_payload_bytes
+            ));
+        }
+
+        let mut sizes = Vec::with_capacity(raw.object_count);
+        for class in &raw.size_distribution {
+            sizes.extend(std::iter::repeat_n(class.size_bytes, class.object_count));
+        }
+        shuffle_sizes(&mut sizes, raw.seed);
+
+        Ok(Self {
+            seed: raw.seed,
+            generator: raw.generator,
+            object_count: raw.object_count,
+            concurrency: raw.concurrency,
+            total_payload_bytes: raw.total_payload_bytes,
+            size_distribution: raw.size_distribution,
+            sizes,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkloadPlan {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = SerializedWorkloadPlan::deserialize(deserializer)?;
+        Self::from_serialized(raw).map_err(de::Error::custom)
     }
 }
 
@@ -1018,5 +1103,28 @@ mod tests {
         );
         assert_eq!(plan.total_payload_bytes, 20_337_459_200);
         assert_eq!(plan.concurrency, 80);
+    }
+
+    #[test]
+    fn workload_plan_deserialization_rehydrates_runtime_sizes() {
+        let plan = WorkloadPlan::seeded(42, 128, 8);
+        let encoded = serde_json::to_string(&plan).expect("workload plan json");
+        let decoded =
+            serde_json::from_str::<WorkloadPlan>(&encoded).expect("decoded workload plan");
+
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.size_at(0), plan.size_at(0));
+        assert_eq!(decoded.size_at(127), plan.size_at(127));
+    }
+
+    #[test]
+    fn workload_plan_deserialization_rejects_invalid_distribution() {
+        let plan = WorkloadPlan::seeded(42, 128, 8);
+        let mut value = serde_json::to_value(&plan).expect("workload plan json");
+        value["object_count"] = serde_json::json!(129);
+
+        let result = serde_json::from_value::<WorkloadPlan>(value);
+
+        assert!(result.is_err());
     }
 }

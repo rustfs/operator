@@ -54,6 +54,17 @@ pub enum FaultPriority {
     P3,
 }
 
+impl FaultPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::P0 => "p0",
+            Self::P1 => "p1",
+            Self::P2 => "p2",
+            Self::P3 => "p3",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FaultBackend {
@@ -66,6 +77,17 @@ pub enum FaultBackend {
 }
 
 impl FaultBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ChaosMeshIoChaos => "chaos-mesh-io-chaos",
+            Self::ChaosMeshPodChaos => "chaos-mesh-pod-chaos",
+            Self::ChaosMeshNetworkChaos => "chaos-mesh-network-chaos",
+            Self::ChaosMeshStressChaos => "chaos-mesh-stress-chaos",
+            Self::DeviceMapper => "device-mapper",
+            Self::MinioWarpWithChaos => "minio-warp-with-chaos",
+        }
+    }
+
     pub fn accepts_percent(self) -> bool {
         matches!(self, Self::ChaosMeshIoChaos | Self::MinioWarpWithChaos)
     }
@@ -79,6 +101,16 @@ pub enum FaultIsolation {
     DedicatedLinuxBlockDevice,
 }
 
+impl FaultIsolation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FreshTenant => "fresh-tenant",
+            Self::ReusableTenant => "reusable-tenant",
+            Self::DedicatedLinuxBlockDevice => "dedicated-linux-block-device",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FaultImpactPolicy {
@@ -87,6 +119,13 @@ pub enum FaultImpactPolicy {
 }
 
 impl FaultImpactPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientDisruptionRequired => "client-disruption-required",
+            Self::ClientDisruptionOptional => "client-disruption-optional",
+        }
+    }
+
     pub fn requires_client_disruption(self) -> bool {
         matches!(self, Self::ClientDisruptionRequired)
     }
@@ -138,7 +177,7 @@ pub const FAULT_SCENARIO_CATALOG: &[FaultScenarioSpec] = &[
         impact_policy: FaultImpactPolicy::ClientDisruptionRequired,
         boundary: "rustfs-workload/fault-injection",
         ci_phase: "faults",
-        target: "one RustFS container data volume selected by tenant label and /data/rustfs0 path",
+        target: "one RustFS container data volume selected by tenant label and configured RustFS volume path",
         validation: "prefill succeeds before injection, mixed PUT/GET workload runs while IOChaos is active, committed PUTs are GET+sha256 verified after recovery, and successful GETs cannot return corrupt bytes",
         observability: "history.jsonl, workload-summary.json, checker-report.json, chaos-manifest.yaml, chaos-describe*.txt, Kubernetes snapshot artifacts",
         conflict_domain: "fresh Tenant/PVC/PV fixture and run-scoped IOChaos cleanup",
@@ -271,7 +310,7 @@ pub const FAULT_SCENARIO_CATALOG: &[FaultScenarioSpec] = &[
         impact_policy: FaultImpactPolicy::ClientDisruptionOptional,
         boundary: "rustfs-workload/data-integrity",
         ci_phase: "faults",
-        target: "one RustFS data volume read path selected by tenant label and /data/rustfs0 path",
+        target: "one RustFS data volume read path selected by tenant label and configured RustFS volume path",
         validation: "successful GET responses must match the committed hash; RustFS may fail or repair reads but must not return wrong bytes with a successful status",
         observability: "history.jsonl, checker-report.json with successful_corrupted_reads, iochaos manifest/describe/yaml, RustFS logs, events",
         conflict_domain: "fresh Tenant/PVC/PV fixture and run-scoped IOChaos mistake resource",

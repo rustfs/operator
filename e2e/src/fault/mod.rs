@@ -15,9 +15,11 @@
 pub mod backends;
 pub mod checker;
 pub mod config;
+pub mod events;
 pub mod fixture;
 pub mod history;
 pub mod plan;
 pub mod runner;
 pub mod scenarios;
+pub mod spec;
 pub mod workload;

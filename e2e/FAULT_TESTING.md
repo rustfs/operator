@@ -109,6 +109,9 @@ resource cleanup remain under `e2e/src/framework/`.
 | `RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS` | `30` | Per S3 request timeout. |
 | `RUSTFS_FAULT_TEST_TIMEOUT_SECONDS` | `300` | Kubernetes wait timeout. |
 | `RUSTFS_FAULT_TEST_SEED` | generated | Reuse a workload plan. |
+| `RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT` | `4` | Expected RustFS server Pod count for stability gates. |
+| `RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH` | `/data/rustfs0` | RustFS data volume path targeted by volume faults; must be an absolute safe path using ASCII letters, digits, `/`, `.`, `_`, or `-`. |
+| `RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS` | `60` | Required no-restart Ready window before and after fault injection. |
 | `RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION` | `false` | Force at least one client-visible failed/timeout/unknown S3 operation even when the catalog marks disruption optional. |
 | `RUSTFS_FAULT_TEST_BUILD_JOBS` | `1` | Cargo prebuild job count. |
 | `RUSTFS_FAULT_TEST_RUN_ROOT` | timestamped target dir | Artifact root. |
@@ -244,6 +247,9 @@ ${RUSTFS_FAULT_TEST_RUN_ROOT:-e2e/target/fault-tests/<timestamp>}/<scenario>/
 Key files:
 
 ```text
+run-spec.yaml
+run-spec.json
+run-events.jsonl
 run-metadata.json
 workload-plan.json
 history.jsonl
@@ -264,6 +270,14 @@ events-*.txt
 
 A successful run must show:
 
+- `run-spec.yaml` and `run-spec.json`: the resolved run contract, including the
+  selected scenario, fault list, workload profile, recovery gates, topology
+  assumptions, and required artifacts. This is the stable handoff surface for
+  future YAML-driven orchestration and UI rendering. The shell runner validates
+  that the JSON and YAML artifacts decode to the same contract.
+- `run-events.jsonl`: an ordered lifecycle event stream for visualization. A
+  successful run includes `run started`, `checker-final succeeded`, and `run
+  succeeded` events.
 - `fault-evidence.json`: `injected`, `active_during_workload`, and `recovered`
   are `true`.
 - `checker-pre-recommit-report.json` and `checker-report.json`: `passed` is

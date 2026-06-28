@@ -26,6 +26,9 @@ pub const DEFAULT_OPERATOR_NAMESPACE: &str = "rustfs-system";
 pub const DEFAULT_WORKLOAD_OBJECTS: usize = 40_000;
 pub const DEFAULT_WORKLOAD_CONCURRENCY: usize = 80;
 pub const DEFAULT_PREFILL_CONCURRENCY: usize = 16;
+pub const DEFAULT_RUSTFS_POD_COUNT: usize = 4;
+pub const DEFAULT_RUSTFS_VOLUME_PATH: &str = "/data/rustfs0";
+pub const DEFAULT_RUSTFS_POD_STABLE_WINDOW_SECONDS: u64 = 60;
 pub const DEFAULT_FAULT_DURATION_SECONDS: u64 = 7_200;
 pub const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 pub const DEFAULT_CLUSTER_TIMEOUT_SECONDS: u64 = 300;
@@ -76,6 +79,9 @@ pub struct FaultTestConfig {
     pub prefill_concurrency: usize,
     pub workload_seed: Option<u64>,
     pub request_timeout: Duration,
+    pub expected_rustfs_pod_count: usize,
+    pub rustfs_volume_path: String,
+    pub rustfs_pod_stable_window: Duration,
     pub use_cluster_ip: bool,
     pub require_client_disruption: bool,
     pub dm_name: Option<String>,
@@ -141,6 +147,39 @@ impl FaultTestConfig {
             "RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY must be between 1 and RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS ({})",
             workload.object_count
         );
+        let expected_rustfs_pod_count = env_usize(
+            &get_env,
+            "RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT",
+            DEFAULT_RUSTFS_POD_COUNT,
+        )?;
+        ensure!(
+            expected_rustfs_pod_count > 0,
+            "RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT must be greater than zero"
+        );
+        let rustfs_volume_path = env_or(
+            &get_env,
+            "RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH",
+            DEFAULT_RUSTFS_VOLUME_PATH,
+        );
+        validate_rustfs_volume_path(&rustfs_volume_path)?;
+        let cluster_timeout_seconds = env_u64(
+            &get_env,
+            "RUSTFS_FAULT_TEST_TIMEOUT_SECONDS",
+            DEFAULT_CLUSTER_TIMEOUT_SECONDS,
+        )?;
+        let rustfs_pod_stable_window_seconds = env_u64(
+            &get_env,
+            "RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS",
+            DEFAULT_RUSTFS_POD_STABLE_WINDOW_SECONDS,
+        )?;
+        ensure!(
+            rustfs_pod_stable_window_seconds > 0,
+            "RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS must be greater than zero"
+        );
+        ensure!(
+            rustfs_pod_stable_window_seconds < cluster_timeout_seconds,
+            "RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS must be less than RUSTFS_FAULT_TEST_TIMEOUT_SECONDS"
+        );
         let cluster = ClusterTestConfig {
             context,
             operator_namespace: env_or(
@@ -159,11 +198,7 @@ impl FaultTestConfig {
                 "target/fault-tests/artifacts",
             )),
             pod_management_policy: None,
-            timeout: Duration::from_secs(env_u64(
-                &get_env,
-                "RUSTFS_FAULT_TEST_TIMEOUT_SECONDS",
-                DEFAULT_CLUSTER_TIMEOUT_SECONDS,
-            )?),
+            timeout: Duration::from_secs(cluster_timeout_seconds),
         };
 
         Ok(Self {
@@ -186,6 +221,9 @@ impl FaultTestConfig {
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS",
                 DEFAULT_REQUEST_TIMEOUT_SECONDS,
             )?),
+            expected_rustfs_pod_count,
+            rustfs_volume_path,
+            rustfs_pod_stable_window: Duration::from_secs(rustfs_pod_stable_window_seconds),
             use_cluster_ip: env_bool(&get_env, "RUSTFS_FAULT_TEST_USE_CLUSTER_IP")?,
             require_client_disruption: env_bool(
                 &get_env,
@@ -258,6 +296,24 @@ impl FaultTestConfig {
         )
         .expect("fault test config")
     }
+}
+
+pub(crate) fn validate_rustfs_volume_path(value: &str) -> Result<()> {
+    ensure!(
+        value.starts_with('/') && value != "/",
+        "RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH must be an absolute non-root path"
+    );
+    ensure!(
+        !value.contains(['\n', '\r']),
+        "RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH must not contain newlines"
+    );
+    ensure!(
+        value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')),
+        "RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH must contain only ASCII letters, digits, '/', '.', '_', or '-'"
+    );
+    Ok(())
 }
 
 fn validate_storage_class(raw: &str, allow_static: bool) -> Result<()> {
@@ -413,6 +469,12 @@ mod tests {
         assert_eq!(config.prefill_concurrency, 16);
         assert_eq!(config.workload_seed, None);
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
+        assert_eq!(config.expected_rustfs_pod_count, 4);
+        assert_eq!(config.rustfs_volume_path, "/data/rustfs0");
+        assert_eq!(
+            config.rustfs_pod_stable_window,
+            std::time::Duration::from_secs(60)
+        );
         assert!(!config.use_cluster_ip);
         assert!(config.dm_name.is_none());
         assert!(config.dm_node.is_none());
@@ -443,6 +505,9 @@ mod tests {
                 "RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY" => Some("4".to_string()),
                 "RUSTFS_FAULT_TEST_SEED" => Some("4242".to_string()),
                 "RUSTFS_FAULT_TEST_REQUEST_TIMEOUT_SECONDS" => Some("7".to_string()),
+                "RUSTFS_FAULT_TEST_RUSTFS_POD_COUNT" => Some("6".to_string()),
+                "RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH" => Some("/data/rustfs1".to_string()),
+                "RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS" => Some("15".to_string()),
                 "RUSTFS_FAULT_TEST_USE_CLUSTER_IP" => Some("true".to_string()),
                 "RUSTFS_FAULT_TEST_REQUIRE_CLIENT_DISRUPTION" => Some("true".to_string()),
                 "RUSTFS_FAULT_TEST_DM_NAME" => Some("rustfs-test".to_string()),
@@ -475,6 +540,12 @@ mod tests {
         assert_eq!(config.prefill_concurrency, 4);
         assert_eq!(config.workload_seed, Some(4242));
         assert_eq!(config.request_timeout, std::time::Duration::from_secs(7));
+        assert_eq!(config.expected_rustfs_pod_count, 6);
+        assert_eq!(config.rustfs_volume_path, "/data/rustfs1");
+        assert_eq!(
+            config.rustfs_pod_stable_window,
+            std::time::Duration::from_secs(15)
+        );
         assert!(config.use_cluster_ip);
         assert!(config.require_client_disruption);
         assert_eq!(config.dm_name.as_deref(), Some("rustfs-test"));
@@ -578,6 +649,69 @@ mod tests {
                 "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
                 "RUSTFS_FAULT_TEST_WORKLOAD_OBJECTS" => Some("64".to_string()),
                 "RUSTFS_FAULT_TEST_PREFILL_CONCURRENCY" => Some("0".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_rustfs_volume_path_is_rejected() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH" => Some("relative".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unsafe_rustfs_volume_path_characters_are_rejected() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_RUSTFS_VOLUME_PATH" => {
+                    Some("/data/rustfs0 # comment".to_string())
+                }
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_rustfs_pod_stable_window_is_rejected() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS" => Some("0".to_string()),
+                _ => None,
+            },
+            "production-test-cluster".to_string(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rustfs_pod_stable_window_must_fit_inside_timeout() {
+        let result = FaultTestConfig::from_env_with(
+            |name| match name {
+                "RUSTFS_FAULT_TEST_STORAGE_CLASS" => Some("fast-csi".to_string()),
+                "RUSTFS_FAULT_TEST_SERVER_IMAGE" => Some("rustfs/rustfs:test".to_string()),
+                "RUSTFS_FAULT_TEST_TIMEOUT_SECONDS" => Some("10".to_string()),
+                "RUSTFS_FAULT_TEST_RUSTFS_POD_STABLE_WINDOW_SECONDS" => Some("10".to_string()),
                 _ => None,
             },
             "production-test-cluster".to_string(),

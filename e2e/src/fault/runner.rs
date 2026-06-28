@@ -22,10 +22,12 @@ use crate::{
         },
         checker,
         config::FaultTestConfig,
+        events::{RunEventRecorder, RunEventStatus},
         fixture,
         history::{OperationOutcome, OperationRecord, Recorder},
-        plan::{FaultInjection, FaultKind, FaultPlan, FaultSelection},
-        scenarios::{self, FaultBackend, FaultIsolation, FaultScenario},
+        plan::{FaultInjection, FaultKind, FaultPlan, FaultPlanOptions, FaultSelection},
+        scenarios::{self, FaultBackend, FaultIsolation, FaultScenario, FaultScenarioSpec},
+        spec::FaultRunSpec,
         workload::{ObjectSpec, S3WorkloadClient, WorkloadPlan, sha256_hex, wait_for_s3_endpoint},
     },
     framework::{
@@ -49,16 +51,27 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep as async_sleep;
 use uuid::Uuid;
 
-const FAULT_TENANT_POD_COUNT: usize = 4;
-const RUSTFS_POD_STABLE_WINDOW: Duration = Duration::from_secs(60);
 const PREFILL_VERIFY_ATTEMPTS: usize = 3;
 const PREFILL_VERIFY_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+struct FaultRunContext {
+    spec: &'static FaultScenarioSpec,
+    run_id: String,
+    workload_plan: WorkloadPlan,
+    bucket: String,
+    events: RunEventRecorder,
+    history: Recorder,
+}
 
 pub async fn run_selected_scenario_from_env() -> Result<()> {
     let config = FaultTestConfig::from_env()?;
     let scenario = FaultScenario::from_config(&config)?;
     let spec = scenarios::scenario_spec(&scenario.name)?;
-    let plan = FaultPlan::from_scenario(&scenario, spec)?;
+    let plan = FaultPlan::from_scenario_with_options(
+        &scenario,
+        spec,
+        FaultPlanOptions::from_config(&config),
+    )?;
 
     config.require_destructive_enabled()?;
     config.validate_cluster(plan.requires_static_storage())?;
@@ -100,8 +113,32 @@ async fn run_fault_case(
     scenario: &FaultScenario,
     plan: &FaultPlan,
 ) -> Result<()> {
-    let spec = scenarios::scenario_spec(&scenario.name)?;
+    let FaultRunContext {
+        spec,
+        run_id,
+        workload_plan,
+        bucket,
+        events,
+        history,
+    } = initialize_fault_run(config, collector, scenario, plan)?;
+    let mut run_completion =
+        events.completion_guard("run", "fault run failed before successful completion");
+
+    events.record(
+        "fault-backend-preflight",
+        RunEventStatus::Started,
+        "checking required fault backends",
+        None,
+    )?;
     if let Err(error) = require_fault_backends(config, plan) {
+        events
+            .record(
+                "fault-backend-preflight",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -114,7 +151,27 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "fault-backend-preflight",
+        RunEventStatus::Succeeded,
+        "required fault backends are available",
+        None,
+    )?;
+    events.record(
+        "fault-backend-pre-cleanup",
+        RunEventStatus::Started,
+        "removing stale managed fault resources",
+        None,
+    )?;
     if let Err(error) = cleanup_fault_backends(config, plan) {
+        events
+            .record(
+                "fault-backend-pre-cleanup",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -127,8 +184,28 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "fault-backend-pre-cleanup",
+        RunEventStatus::Succeeded,
+        "stale managed fault resources were removed",
+        None,
+    )?;
 
+    events.record(
+        "fixture-prepare",
+        RunEventStatus::Started,
+        "preparing owned fault-test Tenant fixture",
+        None,
+    )?;
     if let Err(error) = prepare_fault_fixture(&config.cluster, spec.isolation) {
+        events
+            .record(
+                "fixture-prepare",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -141,7 +218,27 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "fixture-prepare",
+        RunEventStatus::Succeeded,
+        "owned fault-test Tenant fixture prepared",
+        None,
+    )?;
+    events.record(
+        "tenant-ready-before-fault",
+        RunEventStatus::Started,
+        "waiting for Tenant readiness before fault injection",
+        None,
+    )?;
     if let Err(error) = wait_for_ready_tenant(&config.cluster).await {
+        events
+            .record(
+                "tenant-ready-before-fault",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -154,8 +251,36 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
-    if let Err(error) = wait_for_stable_rustfs_pods(&config.cluster, RUSTFS_POD_STABLE_WINDOW).await
+    events.record(
+        "tenant-ready-before-fault",
+        RunEventStatus::Succeeded,
+        "Tenant is Ready before fault injection",
+        None,
+    )?;
+    events.record(
+        "pod-stability-before-fault",
+        RunEventStatus::Started,
+        "waiting for RustFS pods to remain stable before fault injection",
+        Some(serde_json::json!({
+            "expected_pod_count": config.expected_rustfs_pod_count,
+            "stable_window_seconds": config.rustfs_pod_stable_window.as_secs(),
+        })),
+    )?;
+    if let Err(error) = wait_for_stable_rustfs_pods(
+        &config.cluster,
+        config.expected_rustfs_pod_count,
+        config.rustfs_pod_stable_window,
+    )
+    .await
     {
+        events
+            .record(
+                "pod-stability-before-fault",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -168,41 +293,31 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
-
-    let run_id = format!("run-{}", Uuid::new_v4());
-    let workload_seed = config.workload_seed.unwrap_or_else(generated_seed);
-    let workload_plan = WorkloadPlan::seeded(
-        workload_seed,
-        scenario.object_count,
-        config.workload.concurrency,
-    );
-    let bucket = bucket_name(&run_id);
-    let history_path = collector.case_dir(scenario.case_name).join("history.jsonl");
-    let history = Recorder::create(history_path, &scenario.name, &run_id)?;
-    collector.write_text(
-        scenario.case_name,
-        "run-metadata.json",
-        &serde_json::to_string_pretty(&RunMetadata::from_case(
-            config, scenario, plan, &run_id, &bucket,
-        ))?,
+    events.record(
+        "pod-stability-before-fault",
+        RunEventStatus::Succeeded,
+        "RustFS pods were stable before fault injection",
+        None,
     )?;
-    collector.write_text(
-        scenario.case_name,
-        "workload-plan.json",
-        &serde_json::to_string_pretty(&workload_plan)?,
-    )?;
-    eprintln!(
-        "fault workload seed={} objects={} concurrency={} payload_bytes={}",
-        workload_plan.seed,
-        workload_plan.object_count,
-        workload_plan.concurrency,
-        workload_plan.total_payload_bytes
-    );
 
     let cluster = &config.cluster;
+    events.record(
+        "initial-s3-access",
+        RunEventStatus::Started,
+        "opening initial S3 access path",
+        Some(serde_json::json!({ "use_cluster_ip": config.use_cluster_ip })),
+    )?;
     let (endpoint, mut port_forward) = match s3_access(config) {
         Ok(access) => access,
         Err(error) => {
+            events
+                .record(
+                    "initial-s3-access",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    None,
+                )
+                .ok();
             write_failure_summary(
                 collector,
                 scenario.case_name,
@@ -217,6 +332,14 @@ async fn run_fault_case(
         }
     };
     if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
+        events
+            .record(
+                "initial-s3-access",
+                RunEventStatus::Failed,
+                error.to_string(),
+                Some(serde_json::json!({ "endpoint": endpoint })),
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -229,8 +352,20 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "initial-s3-access",
+        RunEventStatus::Succeeded,
+        "S3 endpoint is reachable before fault injection",
+        Some(serde_json::json!({ "endpoint": endpoint })),
+    )?;
 
     let (access_key, secret_key) = resources::test_credentials();
+    events.record(
+        "s3-client",
+        RunEventStatus::Started,
+        "constructing S3 workload client",
+        Some(serde_json::json!({ "endpoint": endpoint })),
+    )?;
     let s3 = match S3WorkloadClient::new(
         &endpoint,
         &bucket,
@@ -242,6 +377,9 @@ async fn run_fault_case(
     {
         Ok(client) => client,
         Err(error) => {
+            events
+                .record("s3-client", RunEventStatus::Failed, error.to_string(), None)
+                .ok();
             write_failure_summary(
                 collector,
                 scenario.case_name,
@@ -255,9 +393,29 @@ async fn run_fault_case(
             return Err(error);
         }
     };
+    events.record(
+        "s3-client",
+        RunEventStatus::Succeeded,
+        "S3 workload client is ready",
+        None,
+    )?;
+    events.record(
+        "bucket-create",
+        RunEventStatus::Started,
+        "creating run-scoped workload bucket",
+        Some(serde_json::json!({ "bucket": bucket })),
+    )?;
     let bucket_outcome = match s3.create_bucket(&history).await {
         Ok(outcome) => outcome,
         Err(error) => {
+            events
+                .record(
+                    "bucket-create",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    Some(serde_json::json!({ "bucket": bucket })),
+                )
+                .ok();
             write_failure_summary(
                 collector,
                 scenario.case_name,
@@ -273,6 +431,14 @@ async fn run_fault_case(
     };
     if bucket_outcome != OperationOutcome::Ok {
         let message = format!("fault workload bucket creation did not succeed: {bucket_outcome:?}");
+        events
+            .record(
+                "bucket-create",
+                RunEventStatus::Failed,
+                message.clone(),
+                Some(serde_json::json!({ "bucket": bucket, "outcome": format!("{bucket_outcome:?}") })),
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -285,7 +451,22 @@ async fn run_fault_case(
         )?;
         bail!("{message}");
     }
+    events.record(
+        "bucket-create",
+        RunEventStatus::Succeeded,
+        "run-scoped workload bucket was created",
+        Some(serde_json::json!({ "bucket": bucket })),
+    )?;
 
+    events.record(
+        "prefill",
+        RunEventStatus::Started,
+        "writing and verifying pre-fault objects",
+        Some(serde_json::json!({
+            "object_count": scenario.prefill_count(),
+            "concurrency": config.prefill_concurrency,
+        })),
+    )?;
     let prefilled = match prefill_objects(
         &s3,
         &history,
@@ -298,6 +479,9 @@ async fn run_fault_case(
     {
         Ok(prefilled) => prefilled,
         Err(error) => {
+            events
+                .record("prefill", RunEventStatus::Failed, error.to_string(), None)
+                .ok();
             write_failure_summary(
                 collector,
                 scenario.case_name,
@@ -311,6 +495,12 @@ async fn run_fault_case(
             return Err(error);
         }
     };
+    events.record(
+        "prefill",
+        RunEventStatus::Succeeded,
+        "pre-fault objects were written and verified",
+        Some(serde_json::json!({ "objects": prefilled.len() })),
+    )?;
     let pods_before = match rustfs_pod_identities(cluster) {
         Ok(pods) => pods,
         Err(error) => {
@@ -327,9 +517,26 @@ async fn run_fault_case(
             return Err(error);
         }
     };
+    events.record(
+        "fault-apply",
+        RunEventStatus::Started,
+        "applying planned faults",
+        Some(serde_json::json!({
+            "faults": plan.faults().len(),
+            "backend": plan.backend_summary(),
+        })),
+    )?;
     let mut fault = match AppliedFaults::apply(config, collector, scenario, plan, &run_id) {
         Ok(fault) => fault,
         Err(error) => {
+            events
+                .record(
+                    "fault-apply",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    None,
+                )
+                .ok();
             write_failure_summary(
                 collector,
                 scenario.case_name,
@@ -343,8 +550,28 @@ async fn run_fault_case(
             return Err(error);
         }
     };
+    events.record(
+        "fault-apply",
+        RunEventStatus::Succeeded,
+        "planned faults were applied",
+        None,
+    )?;
 
+    events.record(
+        "wait-active",
+        RunEventStatus::Started,
+        "waiting for applied faults to become active",
+        None,
+    )?;
     if let Err(error) = fault.wait_active(cluster.timeout) {
+        events
+            .record(
+                "wait-active",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         collect_fault_artifacts(collector, scenario.case_name, &fault, "wait-active-failed")?;
         write_failure_summary(
             collector,
@@ -358,9 +585,70 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
-    let active_snapshots = fault.snapshots("active")?;
+    events.record(
+        "wait-active",
+        RunEventStatus::Succeeded,
+        "applied faults are active",
+        None,
+    )?;
+    events.record(
+        "fault-snapshot-active",
+        RunEventStatus::Started,
+        "capturing active fault status snapshots",
+        None,
+    )?;
+    let active_snapshots = match fault.snapshots("active") {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            events
+                .record(
+                    "fault-snapshot-active",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    None,
+                )
+                .ok();
+            collect_fault_artifacts(
+                collector,
+                scenario.case_name,
+                &fault,
+                "active-snapshot-failed",
+            )?;
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "fault-snapshot-active",
+                    "environment_or_fault_backend",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    events.record(
+        "fault-snapshot-active",
+        RunEventStatus::Succeeded,
+        "active fault status snapshots captured",
+        Some(serde_json::json!({ "snapshots": active_snapshots.len() })),
+    )?;
 
+    events.record(
+        "s3-access-under-fault",
+        RunEventStatus::Started,
+        "checking S3 access while faults are active",
+        Some(serde_json::json!({ "endpoint": endpoint })),
+    )?;
     if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
+        events
+            .record(
+                "s3-access-under-fault",
+                RunEventStatus::Failed,
+                error.to_string(),
+                Some(serde_json::json!({ "endpoint": endpoint })),
+            )
+            .ok();
         collect_fault_artifacts(collector, scenario.case_name, &fault, "port-forward-failed")?;
         write_failure_summary(
             collector,
@@ -374,9 +662,21 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "s3-access-under-fault",
+        RunEventStatus::Succeeded,
+        "S3 endpoint is reachable while faults are active",
+        Some(serde_json::json!({ "endpoint": endpoint })),
+    )?;
 
     if plan.workload_mode.runs_warp() {
         let warp_bucket = warp_bucket_name(&run_id);
+        events.record(
+            "warp-workload",
+            RunEventStatus::Started,
+            "running Warp workload under active faults",
+            Some(serde_json::json!({ "bucket": warp_bucket })),
+        )?;
         if let Err(error) = host::run_warp_mixed(
             config.warp_duration,
             collector,
@@ -386,6 +686,14 @@ async fn run_fault_case(
             access_key,
             secret_key,
         ) {
+            events
+                .record(
+                    "warp-workload",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    Some(serde_json::json!({ "bucket": warp_bucket })),
+                )
+                .ok();
             collect_fault_artifacts(collector, scenario.case_name, &fault, "warp-failed")?;
             write_failure_summary(
                 collector,
@@ -399,8 +707,28 @@ async fn run_fault_case(
             )?;
             return Err(error);
         }
+        events.record(
+            "warp-workload",
+            RunEventStatus::Succeeded,
+            "Warp workload completed under active faults",
+            Some(serde_json::json!({ "bucket": warp_bucket })),
+        )?;
 
+        events.record(
+            "post-warp-s3-access",
+            RunEventStatus::Started,
+            "checking S3 access after Warp workload",
+            Some(serde_json::json!({ "endpoint": endpoint })),
+        )?;
         if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
+            events
+                .record(
+                    "post-warp-s3-access",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    Some(serde_json::json!({ "endpoint": endpoint })),
+                )
+                .ok();
             collect_fault_artifacts(
                 collector,
                 scenario.case_name,
@@ -419,8 +747,23 @@ async fn run_fault_case(
             )?;
             return Err(error);
         }
+        events.record(
+            "post-warp-s3-access",
+            RunEventStatus::Succeeded,
+            "S3 endpoint is reachable after Warp workload",
+            Some(serde_json::json!({ "endpoint": endpoint })),
+        )?;
     }
 
+    events.record(
+        "mixed-workload",
+        RunEventStatus::Started,
+        "running mixed S3 workload while faults are active",
+        Some(serde_json::json!({
+            "object_count": scenario.mixed_workload_count(),
+            "concurrency": workload_plan.concurrency,
+        })),
+    )?;
     let mut workload = match run_mixed_workload(
         &s3,
         &history,
@@ -434,6 +777,14 @@ async fn run_fault_case(
     {
         Ok(workload) => workload,
         Err(error) => {
+            events
+                .record(
+                    "mixed-workload",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    None,
+                )
+                .ok();
             collect_fault_artifacts(collector, scenario.case_name, &fault, "workload-failed")?;
             write_failure_summary(
                 collector,
@@ -448,6 +799,12 @@ async fn run_fault_case(
             return Err(error);
         }
     };
+    events.record(
+        "mixed-workload",
+        RunEventStatus::Succeeded,
+        "mixed S3 workload completed under active faults",
+        Some(serde_json::json!({ "disruptions": workload.summary.disrupted() })),
+    )?;
     collector.write_text(
         scenario.case_name,
         "workload-summary.json",
@@ -459,6 +816,17 @@ async fn run_fault_case(
         .summary
         .require_fault_evidence(require_client_disruption)
     {
+        events
+            .record(
+                "fault-evidence",
+                RunEventStatus::Failed,
+                error.to_string(),
+                Some(serde_json::json!({
+                    "require_client_disruption": require_client_disruption,
+                    "disruptions": workload.summary.disrupted(),
+                })),
+            )
+            .ok();
         collect_fault_artifacts(
             collector,
             scenario.case_name,
@@ -477,7 +845,24 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "fault-evidence",
+        RunEventStatus::Observed,
+        "workload evidence matched the scenario impact policy",
+        Some(serde_json::json!({
+            "require_client_disruption": require_client_disruption,
+            "disruptions": workload.summary.disrupted(),
+        })),
+    )?;
     if let Err(error) = fault.ensure_active("after fault workload") {
+        events
+            .record(
+                "fault-still-active",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         collect_fault_artifacts(
             collector,
             scenario.case_name,
@@ -496,9 +881,64 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
-    let workload_snapshots = fault.snapshots("after-workload")?;
+    events.record(
+        "fault-snapshot-after-workload",
+        RunEventStatus::Started,
+        "capturing fault status snapshots after workload",
+        None,
+    )?;
+    let workload_snapshots = match fault.snapshots("after-workload") {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            events
+                .record(
+                    "fault-snapshot-after-workload",
+                    RunEventStatus::Failed,
+                    error.to_string(),
+                    None,
+                )
+                .ok();
+            collect_fault_artifacts(
+                collector,
+                scenario.case_name,
+                &fault,
+                "after-workload-snapshot-failed",
+            )?;
+            write_failure_summary(
+                collector,
+                scenario.case_name,
+                FailureSummary::new(
+                    &scenario.name,
+                    "fault-snapshot-after-workload",
+                    "environment_or_fault_backend",
+                    error.to_string(),
+                ),
+            )?;
+            return Err(error);
+        }
+    };
+    events.record(
+        "fault-snapshot-after-workload",
+        RunEventStatus::Succeeded,
+        "fault status snapshots captured after workload",
+        Some(serde_json::json!({ "snapshots": workload_snapshots.len() })),
+    )?;
 
+    events.record(
+        "fault-delete",
+        RunEventStatus::Started,
+        "removing applied faults",
+        None,
+    )?;
     if let Err(error) = fault.delete(cluster.timeout) {
+        events
+            .record(
+                "fault-delete",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         collect_fault_artifacts(collector, scenario.case_name, &fault, "delete-failed")?;
         write_failure_summary(
             collector,
@@ -512,8 +952,28 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "fault-delete",
+        RunEventStatus::Succeeded,
+        "applied faults were removed",
+        None,
+    )?;
 
+    events.record(
+        "tenant-recovery",
+        RunEventStatus::Started,
+        "waiting for Tenant readiness after fault removal",
+        None,
+    )?;
     if let Err(error) = wait_for_ready_tenant(cluster).await {
+        events
+            .record(
+                "tenant-recovery",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -526,7 +986,36 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
-    if let Err(error) = wait_for_stable_rustfs_pods(cluster, RUSTFS_POD_STABLE_WINDOW).await {
+    events.record(
+        "tenant-recovery",
+        RunEventStatus::Succeeded,
+        "Tenant is Ready after fault removal",
+        None,
+    )?;
+    events.record(
+        "pod-stability-after-recovery",
+        RunEventStatus::Started,
+        "waiting for RustFS pods to remain stable after recovery",
+        Some(serde_json::json!({
+            "expected_pod_count": config.expected_rustfs_pod_count,
+            "stable_window_seconds": config.rustfs_pod_stable_window.as_secs(),
+        })),
+    )?;
+    if let Err(error) = wait_for_stable_rustfs_pods(
+        cluster,
+        config.expected_rustfs_pod_count,
+        config.rustfs_pod_stable_window,
+    )
+    .await
+    {
+        events
+            .record(
+                "pod-stability-after-recovery",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -539,8 +1028,28 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "pod-stability-after-recovery",
+        RunEventStatus::Succeeded,
+        "RustFS pods were stable after recovery",
+        None,
+    )?;
     let pods_after = rustfs_pod_identities(cluster)?;
+    events.record(
+        "s3-access-after-recovery",
+        RunEventStatus::Started,
+        "checking S3 access after recovery",
+        Some(serde_json::json!({ "endpoint": endpoint })),
+    )?;
     if let Err(error) = ensure_s3_access(&mut port_forward, cluster, &endpoint).await {
+        events
+            .record(
+                "s3-access-after-recovery",
+                RunEventStatus::Failed,
+                error.to_string(),
+                Some(serde_json::json!({ "endpoint": endpoint })),
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -553,6 +1062,12 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "s3-access-after-recovery",
+        RunEventStatus::Succeeded,
+        "S3 endpoint is reachable after recovery",
+        Some(serde_json::json!({ "endpoint": endpoint })),
+    )?;
     let recovered_evidence = FaultEvidence {
         scenario: scenario.name.clone(),
         backend: plan.backend_summary(),
@@ -573,14 +1088,58 @@ async fn run_fault_case(
         "fault-evidence.json",
         &serde_json::to_string_pretty(&recovered_evidence)?,
     )?;
+    events.record(
+        "checker-pre-recommit",
+        RunEventStatus::Started,
+        "checking recovered object model before recommit",
+        None,
+    )?;
     let pre_recommit_report =
-        checker::check_s3_history(&s3, &history, true, workload_plan.concurrency).await?;
+        match checker::check_s3_history(&s3, &history, true, workload_plan.concurrency).await {
+            Ok(report) => report,
+            Err(error) => {
+                let message = error.to_string();
+                events
+                    .record(
+                        "checker-pre-recommit",
+                        RunEventStatus::Failed,
+                        message.clone(),
+                        None,
+                    )
+                    .ok();
+                write_checker_error(
+                    collector,
+                    scenario.case_name,
+                    "checker-pre-recommit-error.txt",
+                    &message,
+                )?;
+                write_failure_summary(
+                    collector,
+                    scenario.case_name,
+                    FailureSummary::new(
+                        &scenario.name,
+                        "checker-pre-recommit",
+                        "checker_or_environment",
+                        message,
+                    ),
+                )?;
+                return Err(error);
+            }
+        };
     collector.write_text(
         scenario.case_name,
         "checker-pre-recommit-report.json",
         &serde_json::to_string_pretty(&pre_recommit_report)?,
     )?;
     if let Err(error) = pre_recommit_report.require_success() {
+        events
+            .record(
+                "checker-pre-recommit",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -593,6 +1152,18 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "checker-pre-recommit",
+        RunEventStatus::Succeeded,
+        "pre-recommit object model check passed",
+        None,
+    )?;
+    events.record(
+        "recommit-unconfirmed",
+        RunEventStatus::Started,
+        "recommitting previously unconfirmed writes after recovery",
+        Some(serde_json::json!({ "attempted": workload.unconfirmed_puts.len() })),
+    )?;
     let recommit_report = recommit_unconfirmed_objects(
         &s3,
         &history,
@@ -613,6 +1184,17 @@ async fn run_fault_case(
     )?;
     if recommit_report.has_failures() {
         let message = recommit_report.failure_message();
+        events
+            .record(
+                "recommit-unconfirmed",
+                RunEventStatus::Failed,
+                message.clone(),
+                Some(serde_json::json!({
+                    "failed": recommit_report.failed,
+                    "harness_errors": recommit_report.harness_errors,
+                })),
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -625,7 +1207,50 @@ async fn run_fault_case(
         )?;
         bail!("{message}");
     }
-    let report = checker::check_s3_history(&s3, &history, true, workload_plan.concurrency).await?;
+    events.record(
+        "recommit-unconfirmed",
+        RunEventStatus::Succeeded,
+        "previously unconfirmed writes were recommitted",
+        Some(serde_json::json!({ "committed": recommit_report.committed })),
+    )?;
+    events.record(
+        "checker-final",
+        RunEventStatus::Started,
+        "checking final recovered object model",
+        None,
+    )?;
+    let report =
+        match checker::check_s3_history(&s3, &history, true, workload_plan.concurrency).await {
+            Ok(report) => report,
+            Err(error) => {
+                let message = error.to_string();
+                events
+                    .record(
+                        "checker-final",
+                        RunEventStatus::Failed,
+                        message.clone(),
+                        None,
+                    )
+                    .ok();
+                write_checker_error(
+                    collector,
+                    scenario.case_name,
+                    "checker-final-error.txt",
+                    &message,
+                )?;
+                write_failure_summary(
+                    collector,
+                    scenario.case_name,
+                    FailureSummary::new(
+                        &scenario.name,
+                        "checker-final",
+                        "checker_or_environment",
+                        message,
+                    ),
+                )?;
+                return Err(error);
+            }
+        };
     collector.write_text(
         scenario.case_name,
         "checker-report.json",
@@ -652,6 +1277,14 @@ async fn run_fault_case(
         &serde_json::to_string_pretty(&evidence)?,
     )?;
     if let Err(error) = report.require_success() {
+        events
+            .record(
+                "checker-final",
+                RunEventStatus::Failed,
+                error.to_string(),
+                None,
+            )
+            .ok();
         write_failure_summary(
             collector,
             scenario.case_name,
@@ -664,8 +1297,103 @@ async fn run_fault_case(
         )?;
         return Err(error);
     }
+    events.record(
+        "checker-final",
+        RunEventStatus::Succeeded,
+        "final object model check passed",
+        Some(serde_json::json!({
+            "committed_puts": report.committed_puts,
+            "verified_live_objects": report.verified_live_objects,
+            "final_listed_objects": report.final_listed_objects,
+        })),
+    )?;
+    events.record(
+        "run",
+        RunEventStatus::Succeeded,
+        "fault run completed successfully",
+        None,
+    )?;
+    run_completion.complete();
 
     Ok(())
+}
+
+fn initialize_fault_run(
+    config: &FaultTestConfig,
+    collector: &ArtifactCollector,
+    scenario: &FaultScenario,
+    plan: &FaultPlan,
+) -> Result<FaultRunContext> {
+    let spec = scenarios::scenario_spec(&scenario.name)?;
+    let run_id = format!("run-{}", Uuid::new_v4());
+    let workload_seed = config.workload_seed.unwrap_or_else(generated_seed);
+    let workload_plan = WorkloadPlan::seeded(
+        workload_seed,
+        scenario.object_count,
+        config.workload.concurrency,
+    );
+    let bucket = bucket_name(&run_id);
+    let events_path = collector
+        .case_dir(scenario.case_name)
+        .join("run-events.jsonl");
+    let events = RunEventRecorder::create(events_path, &scenario.name, &run_id)?;
+    let run_spec = FaultRunSpec::resolved(
+        config,
+        scenario,
+        spec,
+        plan,
+        &workload_plan,
+        &run_id,
+        &bucket,
+    );
+    collector.write_text(scenario.case_name, "run-spec.yaml", &run_spec.to_yaml()?)?;
+    collector.write_text(scenario.case_name, "run-spec.json", &run_spec.to_json()?)?;
+    let history_path = collector.case_dir(scenario.case_name).join("history.jsonl");
+    let history = Recorder::create(history_path, &scenario.name, &run_id)?;
+    collector.write_text(
+        scenario.case_name,
+        "run-metadata.json",
+        &serde_json::to_string_pretty(&RunMetadata::from_case(
+            config,
+            scenario,
+            plan,
+            &workload_plan,
+            &run_id,
+            &bucket,
+        ))?,
+    )?;
+    collector.write_text(
+        scenario.case_name,
+        "workload-plan.json",
+        &serde_json::to_string_pretty(&workload_plan)?,
+    )?;
+    events.record(
+        "run",
+        RunEventStatus::Started,
+        "fault run initialized",
+        Some(serde_json::json!({
+            "bucket": bucket,
+            "backend": plan.backend_summary(),
+            "target": plan.target_summary(),
+            "faults": plan.faults().len(),
+        })),
+    )?;
+    eprintln!(
+        "fault workload seed={} objects={} concurrency={} payload_bytes={}",
+        workload_plan.seed,
+        workload_plan.object_count,
+        workload_plan.concurrency,
+        workload_plan.total_payload_bytes
+    );
+
+    Ok(FaultRunContext {
+        spec,
+        run_id,
+        workload_plan,
+        bucket,
+        events,
+        history,
+    })
 }
 
 fn require_fault_backends(config: &FaultTestConfig, plan: &FaultPlan) -> Result<()> {
@@ -1251,6 +1979,7 @@ impl RunMetadata {
         config: &FaultTestConfig,
         scenario: &FaultScenario,
         plan: &FaultPlan,
+        workload_plan: &WorkloadPlan,
         run_id: &str,
         bucket: &str,
     ) -> Self {
@@ -1280,8 +2009,8 @@ impl RunMetadata {
                 .iter()
                 .map(|fault| fault.selection().summary())
                 .collect(),
-            workload_objects: scenario.object_count,
-            workload_concurrency: config.workload.concurrency,
+            workload_objects: workload_plan.object_count,
+            workload_concurrency: workload_plan.concurrency,
             prefill_concurrency: config.prefill_concurrency,
             request_timeout_seconds: config.request_timeout.as_secs(),
             use_cluster_ip: config.use_cluster_ip,
@@ -1338,6 +2067,16 @@ fn write_failure_summary_if_absent(
         return Ok(());
     }
     write_failure_summary(collector, case_name, summary)
+}
+
+fn write_checker_error(
+    collector: &ArtifactCollector,
+    case_name: &str,
+    artifact: &str,
+    message: &str,
+) -> Result<()> {
+    collector.write_text(case_name, artifact, message)?;
+    Ok(())
 }
 
 fn collect_fault_artifacts(
@@ -1500,8 +2239,11 @@ fn rustfs_pod_runtime_states(config: &ClusterTestConfig) -> Result<Vec<PodRuntim
     Ok(pods)
 }
 
-fn stable_pod_fingerprint(pods: &[PodRuntimeState]) -> Option<Vec<(String, u64)>> {
-    if pods.len() != FAULT_TENANT_POD_COUNT
+fn stable_pod_fingerprint(
+    pods: &[PodRuntimeState],
+    expected_pod_count: usize,
+) -> Option<Vec<(String, u64)>> {
+    if pods.len() != expected_pod_count
         || pods
             .iter()
             .any(|pod| pod.phase != "Running" || !pod.containers_ready || pod.terminating)
@@ -1518,6 +2260,7 @@ fn stable_pod_fingerprint(pods: &[PodRuntimeState]) -> Option<Vec<(String, u64)>
 
 async fn wait_for_stable_rustfs_pods(
     config: &ClusterTestConfig,
+    expected_pod_count: usize,
     stable_window: Duration,
 ) -> Result<()> {
     let deadline = Instant::now() + config.timeout;
@@ -1527,7 +2270,7 @@ async fn wait_for_stable_rustfs_pods(
     let mut last_error = "not checked yet".to_string();
 
     eprintln!(
-        "waiting for {FAULT_TENANT_POD_COUNT} RustFS pods to remain ready without restarts for {stable_window:?}"
+        "waiting for {expected_pod_count} RustFS pods to remain ready without restarts for {stable_window:?}"
     );
     loop {
         if Instant::now() >= deadline {
@@ -1539,7 +2282,7 @@ async fn wait_for_stable_rustfs_pods(
 
         match rustfs_pod_runtime_states(config) {
             Ok(current) => {
-                if let Some(fingerprint) = stable_pod_fingerprint(&current) {
+                if let Some(fingerprint) = stable_pod_fingerprint(&current, expected_pod_count) {
                     if stable_fingerprint.as_ref() != Some(&fingerprint) {
                         stable_since = Some(Instant::now());
                         stable_fingerprint = Some(fingerprint);
@@ -2345,7 +3088,7 @@ mod tests {
             FaultKind::RustfsVolumeIoError,
             FaultBackend::ChaosMeshIoChaos,
             FaultTarget::RustfsVolume {
-                path: DEFAULT_RUSTFS_DATA_VOLUME,
+                path: DEFAULT_RUSTFS_DATA_VOLUME.to_string(),
             },
             FaultSelection::Percent(20),
             std::time::Duration::from_secs(60),
@@ -2530,7 +3273,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            stable_pod_fingerprint(&pods),
+            stable_pod_fingerprint(&pods, 4),
             Some(vec![
                 ("uid-0".to_string(), 0),
                 ("uid-1".to_string(), 1),
@@ -2538,10 +3281,10 @@ mod tests {
                 ("uid-3".to_string(), 3),
             ])
         );
-        assert!(stable_pod_fingerprint(&pods[..3]).is_none());
+        assert!(stable_pod_fingerprint(&pods[..3], 4).is_none());
 
         let mut unready = pods;
         unready[0].containers_ready = false;
-        assert!(stable_pod_fingerprint(&unready).is_none());
+        assert!(stable_pod_fingerprint(&unready, 4).is_none());
     }
 }
