@@ -50,6 +50,9 @@ pub struct TlsCertificateStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_secret_ref: Option<SecretStatusRef>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub certificates: Vec<TlsServerCertificateStatus>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_secret_ref: Option<SecretStatusRef>,
 
@@ -91,6 +94,29 @@ pub struct TlsCertificateStatus {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error_message: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsServerCertificateStatus {
+    pub name: String,
+
+    #[serde(default)]
+    pub default: bool,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_certificate: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_ref: Option<CertificateObjectRef>,
+
+    pub server_secret_ref: SecretStatusRef,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_names: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq)]

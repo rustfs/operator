@@ -374,7 +374,9 @@ Important fields:
 | `rotationStrategy` | `Rollout` is supported. `HotReload` is accepted by the CRD but currently blocks reconciliation. |
 | `enableInternodeHttps` | Use HTTPS for RustFS peer communication. |
 | `requireSanMatch` | Require generated DNS names to match certificate SANs. Defaults to `true`. |
-| `certManager` | Certificate settings when using cert-manager. `secretName` is required for `mode: certManager`. |
+| `certManager` | Backward-compatible single certificate settings. `secretName` is required for `mode: certManager` when `certificates` is empty. |
+| `certificates` | Multiple server certificate entries rendered into the RustFS TLS directory for SNI. Exactly one entry must set `default: true`; non-default entries must set `hosts`. |
+| `caTrust` | Process-wide RustFS trust settings. This controls `ca.crt`, `client_ca.crt`, `RUSTFS_TRUST_SYSTEM_CA`, and server mTLS; it is not selected per SNI host. |
 
 For cert-manager managed certificates:
 
@@ -395,6 +397,45 @@ spec:
 ```
 
 When `manageCertificate: true`, `issuerRef` is also required. The operator creates or reconciles the cert-manager `Certificate`, waits for the referenced Secret, validates `tls.crt` and `tls.key`, and uses `ca.crt` unless another CA trust source is configured.
+
+For separate public and internal certificates:
+
+```yaml
+spec:
+  tls:
+    mode: certManager
+    rotationStrategy: Rollout
+    enableInternodeHttps: true
+    caTrust:
+      source: CertificateSecretCa
+    certificates:
+      - name: internal
+        default: true
+        hosts:
+          - rustfs.internal.example.local
+        certManager:
+          manageCertificate: true
+          secretName: rustfs-internal-tls
+          issuerRef:
+            group: cert-manager.io
+            kind: Issuer
+            name: private-ca
+          includeGeneratedDnsNames: true
+      - name: public
+        hosts:
+          - s3.example.com
+        certManager:
+          manageCertificate: true
+          secretName: rustfs-public-tls
+          issuerRef:
+            group: cert-manager.io
+            kind: ClusterIssuer
+            name: letsencrypt-prod
+          includeGeneratedDnsNames: false
+```
+
+The default certificate is projected to `rustfs_cert.pem` and `rustfs_key.pem` at `mountPath`, so RustFS can use it as the fallback certificate and for internode HTTPS. Each `hosts` value is projected as a RustFS SNI directory, for example `s3.example.com/rustfs_cert.pem` and `s3.example.com/rustfs_key.pem`.
+When `certificates` is set, configure process-wide trust with top-level `caTrust` or the `caTrust` on the `default: true` certificate. The legacy `certManager.caTrust` field is only used by the single-certificate form.
 
 ### 7.6 Logging
 

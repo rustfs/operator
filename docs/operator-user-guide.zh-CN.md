@@ -376,7 +376,9 @@ Tenant TLS 通过 `spec.tls` 配置。
 | `rotationStrategy` | 当前支持 `Rollout`。`HotReload` 会被 CRD 接受，但目前会阻塞 reconcile。 |
 | `enableInternodeHttps` | RustFS 节点间通信是否使用 HTTPS。 |
 | `requireSanMatch` | 是否要求证书 SAN 匹配生成的 DNS 名称。默认 `true`。 |
-| `certManager` | 使用 cert-manager 时的证书配置。`mode: certManager` 必须设置 `secretName`。 |
+| `certManager` | 兼容旧版本的单证书配置。`certificates` 为空且 `mode: certManager` 时必须设置 `secretName`。 |
+| `certificates` | 多个服务端证书配置，会被渲染到 RustFS TLS 目录供 SNI 使用。必须且只能有一个条目设置 `default: true`，非默认条目必须设置 `hosts`。 |
+| `caTrust` | RustFS 进程级信任配置。它控制 `ca.crt`、`client_ca.crt`、`RUSTFS_TRUST_SYSTEM_CA` 和服务端 mTLS，不会按 SNI host 分别生效。 |
 
 cert-manager 证书示例：
 
@@ -397,6 +399,45 @@ spec:
 ```
 
 当 `manageCertificate: true` 时，`issuerRef` 也是必填项。Operator 会创建或更新 cert-manager `Certificate`，等待引用的 Secret 就绪，校验 `tls.crt` 和 `tls.key`，并在未配置其它 CA trust source 时使用 `ca.crt`。
+
+公有域名和内部域名使用不同证书时：
+
+```yaml
+spec:
+  tls:
+    mode: certManager
+    rotationStrategy: Rollout
+    enableInternodeHttps: true
+    caTrust:
+      source: CertificateSecretCa
+    certificates:
+      - name: internal
+        default: true
+        hosts:
+          - rustfs.internal.example.local
+        certManager:
+          manageCertificate: true
+          secretName: rustfs-internal-tls
+          issuerRef:
+            group: cert-manager.io
+            kind: Issuer
+            name: private-ca
+          includeGeneratedDnsNames: true
+      - name: public
+        hosts:
+          - s3.example.com
+        certManager:
+          manageCertificate: true
+          secretName: rustfs-public-tls
+          issuerRef:
+            group: cert-manager.io
+            kind: ClusterIssuer
+            name: letsencrypt-prod
+          includeGeneratedDnsNames: false
+```
+
+默认条目会被投影到 `mountPath` 根目录下的 `rustfs_cert.pem` 和 `rustfs_key.pem`，供 RustFS 作为 fallback 证书和节点间 HTTPS 证书使用。每个 `hosts` 值会被投影为 RustFS SNI 子目录，例如 `s3.example.com/rustfs_cert.pem` 和 `s3.example.com/rustfs_key.pem`。
+配置了 `certificates` 时，进程级 trust 应放在顶层 `caTrust` 或 `default: true` 证书条目的 `caTrust` 中。旧的 `certManager.caTrust` 只对单证书写法生效。
 
 ### 7.6 日志配置
 

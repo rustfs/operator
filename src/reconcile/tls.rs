@@ -17,18 +17,19 @@ use crate::context::{self, Context};
 use crate::status::{StatusBuilder, StatusError};
 use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::certificate::{
-    CertificateObjectRef, SecretStatusRef, TlsCertificateStatus,
+    CertificateObjectRef, SecretStatusRef, TlsCertificateStatus, TlsServerCertificateStatus,
 };
 use crate::types::v1alpha1::tenant::Tenant;
 use crate::types::v1alpha1::tls::{
-    CaTrustSource, CertManagerIssuerRef, CertManagerTlsConfig, SecretKeyReference, TlsConfig,
-    TlsMode, TlsPlan, TlsRotationStrategy,
+    CaTrustSource, CertManagerIssuerRef, CertManagerTlsConfig, SecretKeyReference,
+    TlsCertificateConfig, TlsConfig, TlsMode, TlsPlan, TlsRotationStrategy,
+    TlsServerCertificateMount,
 };
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, Patch, PatchParams};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
-use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::pki_types::{CertificateDer, DnsName, ServerName};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -77,6 +78,24 @@ struct CertManagerCertificateObservation {
     ready: bool,
     reason: Option<String>,
     message: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct TlsCertificateEntry {
+    name: String,
+    default: bool,
+    hosts: Vec<String>,
+    cert_manager: CertManagerTlsConfig,
+    legacy: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ObservedTlsCertificate {
+    entry: TlsCertificateEntry,
+    secret_name: String,
+    secret: Secret,
+    certificate_ref: Option<CertificateObjectRef>,
+    san_dns_names: Vec<String>,
 }
 
 impl CertManagerCertificateObservation {
@@ -151,188 +170,217 @@ async fn reconcile_cert_manager_tls(
     namespace: &str,
     config: &TlsConfig,
 ) -> Result<TlsPlan, Error> {
-    let Some(cert_manager) = config.cert_manager.as_ref() else {
-        return tls_blocked(
+    let entries = match certificate_entries(config) {
+        Ok(entries) => entries,
+        Err(failure) => return tls_validation_blocked(ctx, tenant, config, failure).await,
+    };
+
+    if entries
+        .iter()
+        .any(|entry| entry.cert_manager.manage_certificate)
+        && let Err(error) = ensure_cert_manager_certificate_crd(ctx).await
+    {
+        return cert_manager_prerequisite_failed(
             ctx,
             tenant,
             config,
-            Reason::CertificateSecretNotFound,
-            "spec.tls.certManager.secretName is required for certManager TLS mode".to_string(),
+            CertManagerPrerequisite::CertificateCrd,
+            error,
+            format!(
+                "cert-manager Certificate CRD '{}' is not installed",
+                CERT_MANAGER_CERTIFICATE_CRD
+            ),
         )
         .await;
-    };
+    }
 
-    let Some(secret_name) = cert_manager
-        .secret_name
-        .as_deref()
-        .filter(|name| !name.is_empty())
+    let mut observed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let cert_manager = &entry.cert_manager;
+        let Some(secret_name) = cert_manager
+            .secret_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map(ToString::to_string)
+        else {
+            return tls_blocked(
+                ctx,
+                tenant,
+                config,
+                Reason::CertificateSecretNotFound,
+                format!(
+                    "spec.tls certificate '{}' requires certManager.secretName",
+                    entry.name
+                ),
+            )
+            .await;
+        };
+
+        let mut certificate_ref = None;
+        if cert_manager.manage_certificate {
+            let Some(issuer_ref) = cert_manager.issuer_ref.as_ref() else {
+                return tls_blocked(
+                    ctx,
+                    tenant,
+                    config,
+                    Reason::CertManagerIssuerNotFound,
+                    format!(
+                        "spec.tls certificate '{}' requires certManager.issuerRef when manageCertificate=true",
+                        entry.name
+                    ),
+                )
+                .await;
+            };
+            let certificate_name = certificate_name(tenant, &entry);
+
+            if let Err(error) = ensure_cert_manager_issuer(ctx, namespace, issuer_ref).await {
+                return cert_manager_prerequisite_failed(
+                    ctx,
+                    tenant,
+                    config,
+                    issuer_prerequisite(issuer_ref),
+                    error,
+                    format!(
+                        "cert-manager {} '{}' was not found",
+                        issuer_ref.kind, issuer_ref.name
+                    ),
+                )
+                .await;
+            }
+
+            let desired_certificate = build_cert_manager_certificate(
+                tenant,
+                namespace,
+                cert_manager,
+                &entry.hosts,
+                &secret_name,
+                &certificate_name,
+            );
+            let observed_certificate = match apply_cert_manager_certificate(
+                ctx,
+                namespace,
+                &certificate_name,
+                &desired_certificate,
+            )
+            .await
+            {
+                Ok(certificate) => certificate,
+                Err(error) if context::is_kube_not_found(&error) => {
+                    return tls_blocked(
+                        ctx,
+                        tenant,
+                        config,
+                        Reason::CertManagerCrdMissing,
+                        format!(
+                            "cert-manager Certificate API was not found while applying '{}'",
+                            certificate_name
+                        ),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    return tls_blocked(
+                        ctx,
+                        tenant,
+                        config,
+                        Reason::CertManagerCertificateApplyFailed,
+                        format!(
+                            "failed to apply cert-manager Certificate '{}': {}",
+                            certificate_name,
+                            sanitize_status_message(&error.to_string())
+                        ),
+                    )
+                    .await;
+                }
+            };
+            let observation = observe_cert_manager_certificate(&observed_certificate);
+            certificate_ref = Some(observation.status_ref());
+            if !observation.ready {
+                return tls_pending_with_certificate_ref(
+                    ctx,
+                    tenant,
+                    config,
+                    Reason::CertManagerCertificateNotReady,
+                    certificate_not_ready_message(&certificate_name, &observation),
+                    certificate_ref.clone(),
+                )
+                .await;
+            }
+        }
+
+        let secret = get_server_secret_or_tls_error(
+            ctx,
+            tenant,
+            config,
+            namespace,
+            &secret_name,
+            cert_manager.manage_certificate,
+            certificate_ref.clone(),
+        )
+        .await?;
+
+        if let Err(failure) = validate_tls_secret_type(
+            &secret,
+            &secret_name,
+            cert_manager
+                .secret_type
+                .as_deref()
+                .filter(|secret_type| !secret_type.is_empty()),
+        ) {
+            return tls_validation_blocked(ctx, tenant, config, failure).await;
+        }
+
+        let cert_bytes = require_secret_key(
+            ctx,
+            tenant,
+            config,
+            &secret,
+            &secret_name,
+            TLS_CERT_KEY,
+            Reason::CertificateSecretMissingKey,
+        )
+        .await?;
+        require_secret_key(
+            ctx,
+            tenant,
+            config,
+            &secret,
+            &secret_name,
+            TLS_KEY_KEY,
+            Reason::CertificateSecretMissingKey,
+        )
+        .await?;
+
+        let san_dns_names = san_validation_dns_names(tenant, namespace, config, &entry);
+        if config.require_san_match
+            && let Err(failure) =
+                validate_tls_secret_san_match(&secret_name, &cert_bytes, &san_dns_names)
+        {
+            return tls_validation_blocked(ctx, tenant, config, failure).await;
+        }
+
+        observed.push(ObservedTlsCertificate {
+            entry,
+            secret_name,
+            secret,
+            certificate_ref,
+            san_dns_names,
+        });
+    }
+
+    let Some(default_certificate) = observed
+        .iter()
+        .find(|certificate| certificate.entry.default)
     else {
         return tls_blocked(
             ctx,
             tenant,
             config,
-            Reason::CertificateSecretNotFound,
-            "spec.tls.certManager.secretName is required for certManager TLS mode".to_string(),
+            Reason::CertificateInvalid,
+            "spec.tls.certificates must contain exactly one default=true certificate".to_string(),
         )
         .await;
     };
-
-    let mut certificate_ref = None;
-    if cert_manager.manage_certificate {
-        let Some(issuer_ref) = cert_manager.issuer_ref.as_ref() else {
-            return tls_blocked(
-                ctx,
-                tenant,
-                config,
-                Reason::CertManagerIssuerNotFound,
-                "spec.tls.certManager.issuerRef is required when manageCertificate=true"
-                    .to_string(),
-            )
-            .await;
-        };
-        let certificate_name = certificate_name(tenant, cert_manager);
-
-        if let Err(error) = ensure_cert_manager_certificate_crd(ctx).await {
-            return cert_manager_prerequisite_failed(
-                ctx,
-                tenant,
-                config,
-                CertManagerPrerequisite::CertificateCrd,
-                error,
-                format!(
-                    "cert-manager Certificate CRD '{}' is not installed",
-                    CERT_MANAGER_CERTIFICATE_CRD
-                ),
-            )
-            .await;
-        }
-
-        if let Err(error) = ensure_cert_manager_issuer(ctx, namespace, issuer_ref).await {
-            return cert_manager_prerequisite_failed(
-                ctx,
-                tenant,
-                config,
-                issuer_prerequisite(issuer_ref),
-                error,
-                format!(
-                    "cert-manager {} '{}' was not found",
-                    issuer_ref.kind, issuer_ref.name
-                ),
-            )
-            .await;
-        }
-
-        let desired_certificate = build_cert_manager_certificate(
-            tenant,
-            namespace,
-            config,
-            cert_manager,
-            secret_name,
-            &certificate_name,
-        );
-        let observed_certificate = match apply_cert_manager_certificate(
-            ctx,
-            namespace,
-            &certificate_name,
-            &desired_certificate,
-        )
-        .await
-        {
-            Ok(certificate) => certificate,
-            Err(error) if context::is_kube_not_found(&error) => {
-                return tls_blocked(
-                    ctx,
-                    tenant,
-                    config,
-                    Reason::CertManagerCrdMissing,
-                    format!(
-                        "cert-manager Certificate API was not found while applying '{}'",
-                        certificate_name
-                    ),
-                )
-                .await;
-            }
-            Err(error) => {
-                return tls_blocked(
-                    ctx,
-                    tenant,
-                    config,
-                    Reason::CertManagerCertificateApplyFailed,
-                    format!(
-                        "failed to apply cert-manager Certificate '{}': {}",
-                        certificate_name,
-                        sanitize_status_message(&error.to_string())
-                    ),
-                )
-                .await;
-            }
-        };
-        let observation = observe_cert_manager_certificate(&observed_certificate);
-        certificate_ref = Some(observation.status_ref());
-        if !observation.ready {
-            return tls_pending_with_certificate_ref(
-                ctx,
-                tenant,
-                config,
-                Reason::CertManagerCertificateNotReady,
-                certificate_not_ready_message(&certificate_name, &observation),
-                certificate_ref.clone(),
-            )
-            .await;
-        }
-    }
-
-    let secret = get_server_secret_or_tls_error(
-        ctx,
-        tenant,
-        config,
-        namespace,
-        secret_name,
-        cert_manager.manage_certificate,
-        certificate_ref.clone(),
-    )
-    .await?;
-
-    if let Err(failure) = validate_tls_secret_type(
-        &secret,
-        secret_name,
-        cert_manager
-            .secret_type
-            .as_deref()
-            .filter(|secret_type| !secret_type.is_empty()),
-    ) {
-        return tls_validation_blocked(ctx, tenant, config, failure).await;
-    }
-
-    let cert_bytes = require_secret_key(
-        ctx,
-        tenant,
-        config,
-        &secret,
-        secret_name,
-        TLS_CERT_KEY,
-        Reason::CertificateSecretMissingKey,
-    )
-    .await?;
-    require_secret_key(
-        ctx,
-        tenant,
-        config,
-        &secret,
-        secret_name,
-        TLS_KEY_KEY,
-        Reason::CertificateSecretMissingKey,
-    )
-    .await?;
-
-    if config.require_san_match && config.enable_internode_https {
-        let expected_dns_names = certificate_dns_names(tenant, namespace, cert_manager);
-        if let Err(failure) =
-            validate_tls_secret_san_match(secret_name, &cert_bytes, &expected_dns_names)
-        {
-            return tls_validation_blocked(ctx, tenant, config, failure).await;
-        }
-    }
 
     let ca_trust = config.ca_trust();
     let trust_system_ca = ca_trust.trust_system_ca || ca_trust.source == CaTrustSource::SystemCa;
@@ -343,8 +391,8 @@ async fn reconcile_cert_manager_tls(
 
     match ca_trust.source {
         CaTrustSource::CertificateSecretCa => match certificate_secret_ca_material(
-            &secret,
-            secret_name,
+            &default_certificate.secret,
+            &default_certificate.secret_name,
             config.enable_internode_https,
             trust_system_ca,
         ) {
@@ -442,7 +490,7 @@ async fn reconcile_cert_manager_tls(
 
     let hash = tls_hash(
         config,
-        &secret,
+        &observed,
         explicit_ca.as_ref(),
         explicit_ca_bytes.as_deref(),
         client_ca.as_ref(),
@@ -451,19 +499,28 @@ async fn reconcile_cert_manager_tls(
     );
     let status = cert_manager_tls_status(
         config,
-        secret_name,
-        &secret,
+        &observed,
         explicit_ca.as_ref().zip(explicit_ca_secret.as_ref()),
         client_ca.as_ref().zip(client_ca_secret.as_ref()),
         &hash,
-        certificate_ref,
     );
+    let server_certificates = observed
+        .iter()
+        .map(|certificate| TlsServerCertificateMount {
+            secret_name: certificate.secret_name.clone(),
+            domains: rustfs_certificate_domains(certificate),
+            ca_key: certificate
+                .entry
+                .default
+                .then(|| server_ca_key.clone())
+                .flatten(),
+        })
+        .collect();
 
-    Ok(TlsPlan::rollout(
+    Ok(TlsPlan::rollout_certificates(
         config.mount_path.clone(),
         hash,
-        secret_name.to_string(),
-        server_ca_key,
+        server_certificates,
         explicit_ca,
         client_ca,
         config.enable_internode_https,
@@ -514,6 +571,143 @@ async fn get_server_secret_or_tls_error(
             Err(error.into())
         }
     }
+}
+
+fn certificate_entries(
+    config: &TlsConfig,
+) -> Result<Vec<TlsCertificateEntry>, TlsValidationFailure> {
+    let entries = if config.certificates.is_empty() {
+        let Some(cert_manager) = config.cert_manager.clone() else {
+            return Err(TlsValidationFailure {
+                reason: Reason::CertificateSecretNotFound,
+                message: "spec.tls.certManager.secretName or spec.tls.certificates is required for certManager TLS mode".to_string(),
+            });
+        };
+        vec![TlsCertificateEntry {
+            name: "default".to_string(),
+            default: true,
+            hosts: Vec::new(),
+            cert_manager,
+            legacy: true,
+        }]
+    } else {
+        config.certificates.iter().map(certificate_entry).collect()
+    };
+
+    validate_certificate_entries(entries)
+}
+
+fn certificate_entry(config: &TlsCertificateConfig) -> TlsCertificateEntry {
+    TlsCertificateEntry {
+        name: config.name.clone(),
+        default: config.default,
+        hosts: config.hosts.clone(),
+        cert_manager: config.cert_manager.clone(),
+        legacy: false,
+    }
+}
+
+fn validate_certificate_entries(
+    entries: Vec<TlsCertificateEntry>,
+) -> Result<Vec<TlsCertificateEntry>, TlsValidationFailure> {
+    if entries.is_empty() {
+        return Err(TlsValidationFailure {
+            reason: Reason::CertificateSecretNotFound,
+            message: "spec.tls.certificates must contain at least one certificate".to_string(),
+        });
+    }
+
+    let mut names = BTreeSet::new();
+    let mut hosts = BTreeSet::new();
+    let mut default_count = 0;
+    for entry in &entries {
+        validate_certificate_entry_name(&entry.name)?;
+        if !names.insert(entry.name.clone()) {
+            return Err(TlsValidationFailure {
+                reason: Reason::CertificateInvalid,
+                message: format!(
+                    "spec.tls.certificates contains duplicate name '{}'",
+                    entry.name
+                ),
+            });
+        }
+        if entry.default {
+            default_count += 1;
+        } else if entry.hosts.is_empty() {
+            return Err(TlsValidationFailure {
+                reason: Reason::CertificateInvalid,
+                message: format!(
+                    "spec.tls certificate '{}' must set hosts unless default=true",
+                    entry.name
+                ),
+            });
+        }
+        for host in &entry.hosts {
+            validate_rustfs_sni_host(host)?;
+            if !hosts.insert(host.clone()) {
+                return Err(TlsValidationFailure {
+                    reason: Reason::CertificateInvalid,
+                    message: format!("spec.tls.certificates contains duplicate host '{}'", host),
+                });
+            }
+        }
+    }
+
+    if default_count != 1 {
+        return Err(TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: "spec.tls.certificates must contain exactly one default=true certificate"
+                .to_string(),
+        });
+    }
+
+    Ok(entries)
+}
+
+fn validate_certificate_entry_name(name: &str) -> Result<(), TlsValidationFailure> {
+    let valid = !name.is_empty()
+        && name.len() <= 63
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if valid {
+        return Ok(());
+    }
+    Err(TlsValidationFailure {
+        reason: Reason::CertificateInvalid,
+        message: format!(
+            "spec.tls certificate name '{}' must be a DNS label (lowercase alphanumeric or '-', 1-63 chars)",
+            name
+        ),
+    })
+}
+
+fn validate_rustfs_sni_host(host: &str) -> Result<(), TlsValidationFailure> {
+    let valid_path = !host.is_empty()
+        && host != "."
+        && host != ".."
+        && !host.starts_with('.')
+        && !host.contains('/')
+        && !host.contains('\\')
+        && !host.contains('*');
+    if valid_path && DnsName::try_from(host).is_ok() {
+        return Ok(());
+    }
+    Err(TlsValidationFailure {
+        reason: Reason::CertificateInvalid,
+        message: format!(
+            "spec.tls certificate host '{}' must be a concrete DNS name usable as a RustFS SNI directory",
+            host
+        ),
+    })
 }
 
 async fn ensure_cert_manager_certificate_crd(ctx: &Context) -> Result<(), context::Error> {
@@ -590,8 +784,8 @@ async fn cert_manager_prerequisite_failed<T>(
 fn build_cert_manager_certificate(
     tenant: &Tenant,
     namespace: &str,
-    _config: &TlsConfig,
     cert_manager: &CertManagerTlsConfig,
+    hosts: &[String],
     secret_name: &str,
     certificate_name: &str,
 ) -> DynamicObject {
@@ -609,7 +803,12 @@ fn build_cert_manager_certificate(
     }
     spec.insert(
         "dnsNames".to_string(),
-        json!(certificate_dns_names(tenant, namespace, cert_manager)),
+        json!(certificate_dns_names(
+            tenant,
+            namespace,
+            cert_manager,
+            hosts
+        )),
     );
     spec.insert(
         "usages".to_string(),
@@ -768,13 +967,20 @@ fn missing_cert_manager_prerequisite_reason(prerequisite: CertManagerPrerequisit
     }
 }
 
-fn certificate_name(tenant: &Tenant, cert_manager: &CertManagerTlsConfig) -> String {
-    cert_manager
+fn certificate_name(tenant: &Tenant, entry: &TlsCertificateEntry) -> String {
+    entry
+        .cert_manager
         .certificate_name
         .as_deref()
         .filter(|name| !name.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| format!("{}-server-tls", tenant.name()))
+        .unwrap_or_else(|| {
+            if entry.legacy {
+                format!("{}-server-tls", tenant.name())
+            } else {
+                format!("{}-{}-tls", tenant.name(), entry.name)
+            }
+        })
 }
 
 fn issuer_ref_value(issuer_ref: &CertManagerIssuerRef) -> Value {
@@ -789,8 +995,10 @@ fn certificate_dns_names(
     tenant: &Tenant,
     namespace: &str,
     cert_manager: &CertManagerTlsConfig,
+    hosts: &[String],
 ) -> Vec<String> {
     let mut names = BTreeSet::new();
+    names.extend(hosts.iter().filter(|name| !name.is_empty()).cloned());
     names.extend(
         cert_manager
             .dns_names
@@ -816,6 +1024,57 @@ fn certificate_dns_names(
         }
     }
     names.into_iter().collect()
+}
+
+fn san_validation_dns_names(
+    tenant: &Tenant,
+    namespace: &str,
+    config: &TlsConfig,
+    entry: &TlsCertificateEntry,
+) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    names.extend(entry.hosts.iter().filter(|name| !name.is_empty()).cloned());
+    names.extend(
+        entry
+            .cert_manager
+            .dns_names
+            .iter()
+            .filter(|name| !name.is_empty())
+            .cloned(),
+    );
+    if entry.default && config.enable_internode_https {
+        names.extend(generated_dns_names(tenant, namespace));
+    }
+    names.into_iter().collect()
+}
+
+fn generated_dns_names(tenant: &Tenant, namespace: &str) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    let tenant_name = tenant.name();
+    let io_service = format!("{tenant_name}-io");
+    let headless_service = tenant.headless_service_name();
+    names.insert(format!("{io_service}.{namespace}.svc"));
+    names.insert(format!("{io_service}.{namespace}.svc.cluster.local"));
+    names.insert(format!("{headless_service}.{namespace}.svc"));
+    names.insert(format!("{headless_service}.{namespace}.svc.cluster.local"));
+    for pool in &tenant.spec.pools {
+        for ordinal in 0..pool.servers.max(0) {
+            names.insert(format!(
+                "{tenant_name}-{}-{ordinal}.{headless_service}.{namespace}.svc.cluster.local",
+                pool.name
+            ));
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn rustfs_certificate_domains(certificate: &ObservedTlsCertificate) -> Vec<Option<String>> {
+    let mut domains = Vec::new();
+    if certificate.entry.default {
+        domains.push(None);
+    }
+    domains.extend(certificate.entry.hosts.iter().cloned().map(Some));
+    domains
 }
 
 fn certificate_usages(cert_manager: &CertManagerTlsConfig) -> Vec<String> {
@@ -1182,46 +1441,80 @@ async fn patch_tls_error_with_certificate_ref(
 
 fn cert_manager_tls_status(
     config: &TlsConfig,
-    secret_name: &str,
-    secret: &Secret,
+    certificates: &[ObservedTlsCertificate],
     explicit_ca: Option<(&SecretKeyReference, &Secret)>,
     client_ca: Option<(&SecretKeyReference, &Secret)>,
     hash: &str,
-    certificate_ref: Option<CertificateObjectRef>,
 ) -> TlsCertificateStatus {
     let ca_trust = config.ca_trust();
+    let Some(default_certificate) = certificates
+        .iter()
+        .find(|certificate| certificate.entry.default)
+        .or_else(|| certificates.first())
+    else {
+        return TlsCertificateStatus {
+            mode: tls_mode_name(config.mode).to_string(),
+            ready: false,
+            rotation_strategy: Some(rotation_strategy_name(config.rotation_strategy).to_string()),
+            mount_path: Some(config.mount_path.clone()),
+            trust_source: Some(ca_trust_source_name(ca_trust.source).to_string()),
+            last_error_reason: Some(Reason::CertificateInvalid.as_str().to_string()),
+            last_error_message: Some("no TLS server certificates were observed".to_string()),
+            ..Default::default()
+        };
+    };
+    let server_secret_ref = SecretStatusRef {
+        name: default_certificate.secret_name.clone(),
+        key: None,
+        resource_version: default_certificate.secret.metadata.resource_version.clone(),
+    };
     TlsCertificateStatus {
         mode: tls_mode_name(config.mode).to_string(),
         ready: true,
-        managed_certificate: config
-            .cert_manager
-            .as_ref()
-            .map(|cert_manager| cert_manager.manage_certificate),
+        managed_certificate: Some(default_certificate.entry.cert_manager.manage_certificate),
         rotation_strategy: Some(rotation_strategy_name(config.rotation_strategy).to_string()),
         mount_path: Some(config.mount_path.clone()),
-        certificate_ref,
-        server_secret_ref: Some(SecretStatusRef {
-            name: secret_name.to_string(),
-            key: None,
-            resource_version: secret.metadata.resource_version.clone(),
-        }),
-        ca_secret_ref: ca_status_ref(secret_name, secret, explicit_ca),
+        certificate_ref: default_certificate.certificate_ref.clone(),
+        server_secret_ref: Some(server_secret_ref.clone()),
+        certificates: certificates
+            .iter()
+            .map(tls_server_certificate_status)
+            .collect(),
+        ca_secret_ref: ca_status_ref(
+            &default_certificate.secret_name,
+            &default_certificate.secret,
+            explicit_ca,
+        ),
         client_ca_secret_ref: client_ca.map(|(secret_ref, ca_secret)| SecretStatusRef {
             name: secret_ref.name.clone(),
             key: Some(secret_ref.key.clone()),
             resource_version: ca_secret.metadata.resource_version.clone(),
         }),
         observed_hash: Some(hash.to_string()),
-        dns_names: config
-            .cert_manager
-            .as_ref()
-            .map(|cert_manager| cert_manager.dns_names.clone())
-            .unwrap_or_default(),
+        dns_names: default_certificate.san_dns_names.clone(),
         trust_source: Some(ca_trust_source_name(ca_trust.source).to_string()),
         last_validated_time: Some(
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         ),
         ..Default::default()
+    }
+}
+
+fn tls_server_certificate_status(
+    certificate: &ObservedTlsCertificate,
+) -> TlsServerCertificateStatus {
+    TlsServerCertificateStatus {
+        name: certificate.entry.name.clone(),
+        default: certificate.entry.default,
+        hosts: certificate.entry.hosts.clone(),
+        managed_certificate: Some(certificate.entry.cert_manager.manage_certificate),
+        certificate_ref: certificate.certificate_ref.clone(),
+        server_secret_ref: SecretStatusRef {
+            name: certificate.secret_name.clone(),
+            key: None,
+            resource_version: certificate.secret.metadata.resource_version.clone(),
+        },
+        dns_names: certificate.san_dns_names.clone(),
     }
 }
 
@@ -1274,7 +1567,7 @@ fn error_tls_status_with_certificate_ref(
 
 fn tls_hash(
     config: &TlsConfig,
-    secret: &Secret,
+    certificates: &[ObservedTlsCertificate],
     explicit_ca: Option<&SecretKeyReference>,
     explicit_ca_bytes: Option<&[u8]>,
     client_ca: Option<&SecretKeyReference>,
@@ -1302,17 +1595,44 @@ fn tls_hash(
         "trustSystemCa",
         if trust_system_ca { "true" } else { "false" },
     );
-    hash_str(
-        &mut hasher,
-        "serverSecret.resourceVersion",
-        secret.metadata.resource_version.as_deref().unwrap_or(""),
-    );
-    hash_bytes(&mut hasher, "tls.crt", secret_bytes(secret, TLS_CERT_KEY));
-    hash_bytes(
-        &mut hasher,
-        "secret.ca.crt",
-        secret_bytes(secret, CA_CERT_KEY),
-    );
+    for certificate in certificates {
+        hash_str(&mut hasher, "certificate.name", &certificate.entry.name);
+        hash_str(
+            &mut hasher,
+            "certificate.default",
+            if certificate.entry.default {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        for host in &certificate.entry.hosts {
+            hash_str(&mut hasher, "certificate.host", host);
+        }
+        hash_str(&mut hasher, "serverSecret.name", &certificate.secret_name);
+        hash_str(
+            &mut hasher,
+            "serverSecret.resourceVersion",
+            certificate
+                .secret
+                .metadata
+                .resource_version
+                .as_deref()
+                .unwrap_or(""),
+        );
+        hash_bytes(
+            &mut hasher,
+            "tls.crt",
+            secret_bytes(&certificate.secret, TLS_CERT_KEY),
+        );
+        if certificate.entry.default {
+            hash_bytes(
+                &mut hasher,
+                "secret.ca.crt",
+                secret_bytes(&certificate.secret, CA_CERT_KEY),
+            );
+        }
+    }
     if let Some(secret_ref) = explicit_ca {
         hash_str(&mut hasher, "explicitCa.name", &secret_ref.name);
         hash_str(&mut hasher, "explicitCa.key", &secret_ref.key);
@@ -1382,7 +1702,7 @@ const fn ca_trust_source_name(source: CaTrustSource) -> &'static str {
 mod tests {
     use super::*;
     use crate::types::v1alpha1::tls::{
-        CaTrustConfig, CertManagerPrivateKeyConfig, CertManagerTlsConfig,
+        CaTrustConfig, CertManagerPrivateKeyConfig, CertManagerTlsConfig, TlsCertificateConfig,
     };
     use k8s_openapi::ByteString;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -1635,19 +1955,56 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             Some(b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n"),
         );
 
-        let baseline = tls_hash(&config, &first, None, None, None, None, false);
+        let baseline_certs = vec![observed_tls_certificate(
+            "default",
+            true,
+            vec![],
+            "server-tls",
+            first,
+            CertManagerTlsConfig::default(),
+            vec![],
+        )];
+        let private_key_certs = vec![observed_tls_certificate(
+            "default",
+            true,
+            vec![],
+            "server-tls",
+            changed_private_key,
+            CertManagerTlsConfig::default(),
+            vec![],
+        )];
+        let resource_version_certs = vec![observed_tls_certificate(
+            "default",
+            true,
+            vec![],
+            "server-tls",
+            changed_resource_version,
+            CertManagerTlsConfig::default(),
+            vec![],
+        )];
+        let ca_certs = vec![observed_tls_certificate(
+            "default",
+            true,
+            vec![],
+            "server-tls",
+            changed_ca,
+            CertManagerTlsConfig::default(),
+            vec![],
+        )];
+
+        let baseline = tls_hash(&config, &baseline_certs, None, None, None, None, false);
         let private_key_changed =
-            tls_hash(&config, &changed_private_key, None, None, None, None, false);
+            tls_hash(&config, &private_key_certs, None, None, None, None, false);
         let resource_version_changed = tls_hash(
             &config,
-            &changed_resource_version,
+            &resource_version_certs,
             None,
             None,
             None,
             None,
             false,
         );
-        let ca_changed = tls_hash(&config, &changed_ca, None, None, None, None, false);
+        let ca_changed = tls_hash(&config, &ca_certs, None, None, None, None, false);
 
         assert_eq!(baseline, private_key_changed);
         assert_ne!(baseline, resource_version_changed);
@@ -1742,14 +2099,21 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             Some(PUBLIC_CERT_PEM),
         );
 
+        let observed = vec![observed_tls_certificate(
+            "default",
+            true,
+            vec![],
+            "server-tls",
+            server,
+            config.cert_manager.as_ref().unwrap().clone(),
+            vec![],
+        )];
         let status = cert_manager_tls_status(
             &config,
-            "server-tls",
-            &server,
+            &observed,
             Some((&secret_ref("server-ca", "ca.crt"), &ca)),
             Some((&secret_ref("client-ca", "client_ca.crt"), &client_ca)),
             "sha256:test",
-            None,
         );
 
         assert_eq!(
@@ -1806,8 +2170,8 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         let certificate = build_cert_manager_certificate(
             &tenant,
             "storage",
-            &config,
             cert_manager,
+            &[],
             "tenant-a-server-tls",
             "tenant-a-server",
         );
@@ -1880,6 +2244,209 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
                 "tenant-a-pool-0-0.tenant-a-hl.storage.svc.cluster.local".to_string(),
                 "tenant-a-pool-0-1.tenant-a-hl.storage.svc.cluster.local".to_string(),
             ])
+        );
+    }
+
+    #[test]
+    fn managed_certificate_manifest_includes_sni_hosts() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        let cert_manager = CertManagerTlsConfig {
+            secret_name: Some("tenant-a-public-tls".to_string()),
+            dns_names: vec!["custom.example.com".to_string()],
+            include_generated_dns_names: false,
+            ..Default::default()
+        };
+
+        let certificate = build_cert_manager_certificate(
+            &tenant,
+            "storage",
+            &cert_manager,
+            &["s3.example.com".to_string()],
+            "tenant-a-public-tls",
+            "tenant-a-public-tls",
+        );
+        let dns_names = certificate
+            .data
+            .pointer("/spec/dnsNames")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            });
+
+        assert_eq!(
+            dns_names,
+            Some(vec![
+                "custom.example.com".to_string(),
+                "s3.example.com".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn multi_certificate_entries_validate_default_and_hosts() {
+        let valid = TlsConfig {
+            mode: TlsMode::CertManager,
+            certificates: vec![
+                TlsCertificateConfig {
+                    name: "internal".to_string(),
+                    default: true,
+                    hosts: vec![],
+                    cert_manager: CertManagerTlsConfig {
+                        secret_name: Some("internal-tls".to_string()),
+                        ..Default::default()
+                    },
+                },
+                TlsCertificateConfig {
+                    name: "public".to_string(),
+                    default: false,
+                    hosts: vec!["s3.example.com".to_string()],
+                    cert_manager: CertManagerTlsConfig {
+                        secret_name: Some("public-tls".to_string()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+
+        let entries = certificate_entries(&valid).expect("valid multi-cert config should pass");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "internal");
+        assert!(entries[0].default);
+        assert_eq!(entries[1].hosts, vec!["s3.example.com".to_string()]);
+
+        let ip_host = TlsConfig {
+            mode: TlsMode::CertManager,
+            certificates: vec![
+                TlsCertificateConfig {
+                    name: "internal".to_string(),
+                    default: true,
+                    hosts: vec![],
+                    cert_manager: CertManagerTlsConfig::default(),
+                },
+                TlsCertificateConfig {
+                    name: "public".to_string(),
+                    default: false,
+                    hosts: vec!["127.0.0.1".to_string()],
+                    cert_manager: CertManagerTlsConfig::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let failure = certificate_entries(&ip_host).expect_err("SNI host should reject IP values");
+
+        assert_eq!(failure.reason, Reason::CertificateInvalid);
+        assert!(failure.message.contains("concrete DNS name"));
+
+        let missing_host = TlsConfig {
+            certificates: vec![
+                TlsCertificateConfig {
+                    name: "internal".to_string(),
+                    default: true,
+                    hosts: vec![],
+                    cert_manager: CertManagerTlsConfig::default(),
+                },
+                TlsCertificateConfig {
+                    name: "public".to_string(),
+                    default: false,
+                    hosts: vec![],
+                    cert_manager: CertManagerTlsConfig::default(),
+                },
+            ],
+            ..valid
+        };
+        let failure =
+            certificate_entries(&missing_host).expect_err("non-default cert requires hosts");
+
+        assert_eq!(failure.reason, Reason::CertificateInvalid);
+        assert!(failure.message.contains("must set hosts"));
+    }
+
+    #[test]
+    fn multi_certificate_status_keeps_default_fields_and_lists_all_certs() {
+        let config = TlsConfig {
+            mode: TlsMode::CertManager,
+            certificates: vec![
+                TlsCertificateConfig {
+                    name: "internal".to_string(),
+                    default: true,
+                    hosts: vec![],
+                    cert_manager: CertManagerTlsConfig {
+                        secret_name: Some("internal-tls".to_string()),
+                        ..Default::default()
+                    },
+                },
+                TlsCertificateConfig {
+                    name: "public".to_string(),
+                    default: false,
+                    hosts: vec!["s3.example.com".to_string()],
+                    cert_manager: CertManagerTlsConfig {
+                        secret_name: Some("public-tls".to_string()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let observed = vec![
+            observed_tls_certificate(
+                "internal",
+                true,
+                vec![],
+                "internal-tls",
+                tls_secret(
+                    "internal-tls",
+                    "7",
+                    Some("kubernetes.io/tls"),
+                    true,
+                    true,
+                    Some(PUBLIC_CERT_PEM),
+                ),
+                config.certificates[0].cert_manager.clone(),
+                vec!["tenant-a-io.storage.svc"],
+            ),
+            observed_tls_certificate(
+                "public",
+                false,
+                vec!["s3.example.com"],
+                "public-tls",
+                tls_secret(
+                    "public-tls",
+                    "9",
+                    Some("kubernetes.io/tls"),
+                    true,
+                    true,
+                    None,
+                ),
+                config.certificates[1].cert_manager.clone(),
+                vec!["s3.example.com"],
+            ),
+        ];
+
+        let status = cert_manager_tls_status(&config, &observed, None, None, "sha256:multi");
+
+        assert_eq!(
+            status
+                .server_secret_ref
+                .as_ref()
+                .map(|secret| secret.name.as_str()),
+            Some("internal-tls")
+        );
+        assert_eq!(status.certificates.len(), 2);
+        assert!(status.certificates[0].default);
+        assert_eq!(status.certificates[1].hosts, vec!["s3.example.com"]);
+        assert_eq!(
+            status.certificates[1]
+                .server_secret_ref
+                .resource_version
+                .as_deref(),
+            Some("9")
         );
     }
 
@@ -2033,6 +2600,30 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         SecretKeyReference {
             name: name.to_string(),
             key: key.to_string(),
+        }
+    }
+
+    fn observed_tls_certificate(
+        name: &str,
+        default: bool,
+        hosts: Vec<&str>,
+        secret_name: &str,
+        secret: Secret,
+        cert_manager: CertManagerTlsConfig,
+        san_dns_names: Vec<&str>,
+    ) -> ObservedTlsCertificate {
+        ObservedTlsCertificate {
+            entry: TlsCertificateEntry {
+                name: name.to_string(),
+                default,
+                hosts: hosts.into_iter().map(ToString::to_string).collect(),
+                cert_manager,
+                legacy: false,
+            },
+            secret_name: secret_name.to_string(),
+            secret,
+            certificate_ref: None,
+            san_dns_names: san_dns_names.into_iter().map(ToString::to_string).collect(),
         }
     }
 

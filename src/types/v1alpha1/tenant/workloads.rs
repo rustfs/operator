@@ -1203,6 +1203,29 @@ mod tests {
                 .iter()
                 .any(|volume| volume.name == "rustfs-tls-server")
         );
+        let server_volume = volumes
+            .iter()
+            .find(|volume| volume.name == "rustfs-tls-server")
+            .expect("TLS server volume should exist");
+        let projected_items = server_volume
+            .projected
+            .as_ref()
+            .and_then(|projected| projected.sources.as_ref())
+            .expect("TLS server volume should be projected")
+            .iter()
+            .flat_map(|source| {
+                source
+                    .secret
+                    .as_ref()
+                    .and_then(|secret| secret.items.as_ref())
+                    .into_iter()
+                    .flatten()
+            })
+            .map(|item| (item.key.as_str(), item.path.as_str()))
+            .collect::<Vec<_>>();
+        assert!(projected_items.contains(&("tls.crt", "rustfs_cert.pem")));
+        assert!(projected_items.contains(&("tls.key", "rustfs_key.pem")));
+        assert!(projected_items.contains(&("ca.crt", "ca.crt")));
 
         let container = &pod_spec.containers[0];
         let env = container.env.as_ref().expect("TLS env should be present");
@@ -1223,18 +1246,8 @@ mod tests {
             .expect("TLS volume mounts should be present");
         assert!(mounts.iter().any(|mount| {
             mount.name == "rustfs-tls-server"
-                && mount.mount_path == "/var/run/rustfs/tls/rustfs_cert.pem"
-                && mount.sub_path.as_deref() == Some("rustfs_cert.pem")
-        }));
-        assert!(mounts.iter().any(|mount| {
-            mount.name == "rustfs-tls-server"
-                && mount.mount_path == "/var/run/rustfs/tls/rustfs_key.pem"
-                && mount.sub_path.as_deref() == Some("rustfs_key.pem")
-        }));
-        assert!(mounts.iter().any(|mount| {
-            mount.name == "rustfs-tls-server"
-                && mount.mount_path == "/var/run/rustfs/tls/ca.crt"
-                && mount.sub_path.as_deref() == Some("ca.crt")
+                && mount.mount_path == "/var/run/rustfs/tls"
+                && mount.sub_path.is_none()
         }));
 
         assert_eq!(

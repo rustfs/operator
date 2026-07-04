@@ -1443,6 +1443,45 @@ spec:
               tls:
                 nullable: true
                 properties:
+                  caTrust:
+                    nullable: true
+                    properties:
+                      caSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            default: ca.crt
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      clientCaSecretRef:
+                        nullable: true
+                        properties:
+                          key:
+                            default: ca.crt
+                            type: string
+                          name:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      source:
+                        default: CertificateSecretCa
+                        enum:
+                        - CertificateSecretCa
+                        - SecretRef
+                        - SystemCa
+                        type: string
+                      trustLeafCertificateAsCa:
+                        default: false
+                        type: boolean
+                      trustSystemCa:
+                        default: false
+                        type: boolean
+                    type: object
                   certManager:
                     nullable: true
                     properties:
@@ -1549,6 +1588,128 @@ spec:
                           type: string
                         type: array
                     type: object
+                  certificates:
+                    items:
+                      properties:
+                        certManager:
+                          properties:
+                            caTrust:
+                              nullable: true
+                              properties:
+                                caSecretRef:
+                                  nullable: true
+                                  properties:
+                                    key:
+                                      default: ca.crt
+                                      type: string
+                                    name:
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                clientCaSecretRef:
+                                  nullable: true
+                                  properties:
+                                    key:
+                                      default: ca.crt
+                                      type: string
+                                    name:
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                source:
+                                  default: CertificateSecretCa
+                                  enum:
+                                  - CertificateSecretCa
+                                  - SecretRef
+                                  - SystemCa
+                                  type: string
+                                trustLeafCertificateAsCa:
+                                  default: false
+                                  type: boolean
+                                trustSystemCa:
+                                  default: false
+                                  type: boolean
+                              type: object
+                            certificateName:
+                              nullable: true
+                              type: string
+                            commonName:
+                              nullable: true
+                              type: string
+                            dnsNames:
+                              items:
+                                type: string
+                              type: array
+                            duration:
+                              nullable: true
+                              type: string
+                            includeGeneratedDnsNames:
+                              default: true
+                              type: boolean
+                            issuerRef:
+                              nullable: true
+                              properties:
+                                group:
+                                  default: cert-manager.io
+                                  type: string
+                                kind:
+                                  default: Issuer
+                                  type: string
+                                name:
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            manageCertificate:
+                              default: false
+                              type: boolean
+                            privateKey:
+                              nullable: true
+                              properties:
+                                algorithm:
+                                  nullable: true
+                                  type: string
+                                encoding:
+                                  nullable: true
+                                  type: string
+                                rotationPolicy:
+                                  nullable: true
+                                  type: string
+                                size:
+                                  format: int32
+                                  nullable: true
+                                  type: integer
+                              type: object
+                            renewBefore:
+                              nullable: true
+                              type: string
+                            secretName:
+                              nullable: true
+                              type: string
+                            secretType:
+                              nullable: true
+                              type: string
+                            usages:
+                              items:
+                                type: string
+                              type: array
+                          type: object
+                        default:
+                          default: false
+                          type: boolean
+                        hosts:
+                          items:
+                            type: string
+                          type: array
+                        name:
+                          type: string
+                      required:
+                      - certManager
+                      - name
+                      type: object
+                    type: array
                   enableInternodeHttps:
                     default: false
                     type: boolean
@@ -1659,6 +1820,67 @@ spec:
                         - kind
                         - name
                         type: object
+                      certificates:
+                        items:
+                          properties:
+                            certificateRef:
+                              nullable: true
+                              properties:
+                                apiVersion:
+                                  type: string
+                                kind:
+                                  type: string
+                                name:
+                                  type: string
+                                observedGeneration:
+                                  format: int64
+                                  nullable: true
+                                  type: integer
+                                ready:
+                                  nullable: true
+                                  type: boolean
+                                reason:
+                                  nullable: true
+                                  type: string
+                              required:
+                              - apiVersion
+                              - kind
+                              - name
+                              type: object
+                            default:
+                              default: false
+                              type: boolean
+                            dnsNames:
+                              items:
+                                type: string
+                              type: array
+                            hosts:
+                              items:
+                                type: string
+                              type: array
+                            managedCertificate:
+                              nullable: true
+                              type: boolean
+                            name:
+                              type: string
+                            serverSecretRef:
+                              properties:
+                                key:
+                                  nullable: true
+                                  type: string
+                                name:
+                                  type: string
+                                resourceVersion:
+                                  nullable: true
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                          required:
+                          - name
+                          - serverSecretRef
+                          type: object
+                        type: array
                       clientCaSecretRef:
                         nullable: true
                         properties:

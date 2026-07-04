@@ -12,6 +12,7 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 | [simple-tenant.yaml](./simple-tenant.yaml) | Documentation Reference | ⭐⭐ Moderate | Configurable | Learning all options |
 | [secret-credentials-tenant.yaml](./secret-credentials-tenant.yaml) | Secret-based Credentials | ⭐ Simple | Configurable | **Production credential security** |
 | [provisioning-tenant.yaml](./provisioning-tenant.yaml) | Policy/User/Bucket Provisioning | ⭐⭐ Moderate | 40Gi | Tenant bootstrap automation |
+| [multi-cert-tls-tenant.yaml](./multi-cert-tls-tenant.yaml) | Public/Internal TLS | ⭐⭐ Moderate | 40Gi | Separate SNI certificates |
 | [multi-pool-tenant.yaml](./multi-pool-tenant.yaml) | Multiple Pools | ⭐⭐ Moderate | ~160Gi | Multi-pool setups |
 | [production-ha-tenant.yaml](./production-ha-tenant.yaml) | Production HA | ⭐⭐⭐ Advanced | 6.4TB | HA with zone distribution |
 | [cluster-expansion-tenant.yaml](./cluster-expansion-tenant.yaml) | Capacity Expansion | ⭐⭐⭐ Advanced | 384TB | Growing cluster capacity |

@@ -1,0 +1,65 @@
+# RustFS Tenant example for separate internal and public TLS certificates.
+#
+# This manifest does not create cert-manager Issuers. Before applying it, create
+# the private Issuer and public ClusterIssuer referenced below, or adjust the
+# issuerRef values to match your cluster.
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: multi-cert-tls
+  namespace: rustfs-system
+spec:
+  image: rustfs/rustfs:latest
+
+  tls:
+    mode: certManager
+    mountPath: /var/run/rustfs/tls
+    rotationStrategy: Rollout
+    enableInternodeHttps: true
+    requireSanMatch: true
+    caTrust:
+      source: CertificateSecretCa
+      trustSystemCa: false
+      trustLeafCertificateAsCa: false
+    certificates:
+      - name: internal
+        default: true
+        hosts:
+          - rustfs.internal.example.local
+        certManager:
+          manageCertificate: true
+          certificateName: multi-cert-tls-internal
+          secretName: multi-cert-tls-internal
+          issuerRef:
+            group: cert-manager.io
+            kind: Issuer
+            name: rustfs-private-ca
+          includeGeneratedDnsNames: true
+          usages:
+            - server auth
+      - name: public
+        hosts:
+          - s3.example.com
+        certManager:
+          manageCertificate: true
+          certificateName: multi-cert-tls-public
+          secretName: multi-cert-tls-public
+          issuerRef:
+            group: cert-manager.io
+            kind: ClusterIssuer
+            name: letsencrypt-prod
+          includeGeneratedDnsNames: false
+          usages:
+            - server auth
+
+  pools:
+    - name: primary
+      servers: 1
+      persistence:
+        volumesPerServer: 4
+        volumeClaimTemplate:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
