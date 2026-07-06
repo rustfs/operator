@@ -123,7 +123,7 @@ pub struct CertManagerPrivateKeyConfig {
     pub rotation_policy: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, KubeSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CertManagerTlsConfig {
     #[serde(default)]
@@ -147,8 +147,8 @@ pub struct CertManagerTlsConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dns_names: Vec<String>,
 
-    #[serde(default = "default_include_generated_dns_names")]
-    pub include_generated_dns_names: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_generated_dns_names: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<String>,
@@ -178,30 +178,6 @@ pub struct TlsCertificateConfig {
     pub hosts: Vec<String>,
 
     pub cert_manager: CertManagerTlsConfig,
-}
-
-fn default_include_generated_dns_names() -> bool {
-    true
-}
-
-impl Default for CertManagerTlsConfig {
-    fn default() -> Self {
-        Self {
-            manage_certificate: false,
-            secret_name: None,
-            secret_type: None,
-            certificate_name: None,
-            issuer_ref: None,
-            common_name: None,
-            dns_names: Vec::new(),
-            include_generated_dns_names: default_include_generated_dns_names(),
-            duration: None,
-            renew_before: None,
-            private_key: None,
-            usages: Vec::new(),
-            ca_trust: None,
-        }
-    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, PartialEq)]

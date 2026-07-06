@@ -27,7 +27,7 @@ use crate::types::v1alpha1::tls::{
 };
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use rustls::pki_types::{CertificateDer, DnsName, ServerName};
 use serde_json::{Map, Value, json};
@@ -195,6 +195,7 @@ async fn reconcile_cert_manager_tls(
     }
 
     let mut observed = Vec::with_capacity(entries.len());
+    let mut desired_managed_certificate_names = BTreeSet::new();
     for entry in entries {
         let cert_manager = &entry.cert_manager;
         let Some(secret_name) = cert_manager
@@ -232,6 +233,13 @@ async fn reconcile_cert_manager_tls(
                 .await;
             };
             let certificate_name = certificate_name(tenant, &entry);
+            desired_managed_certificate_names.insert(certificate_name.clone());
+
+            if let Err(failure) =
+                validate_managed_certificate_san_config(tenant, namespace, config, &entry)
+            {
+                return tls_validation_blocked(ctx, tenant, config, failure).await;
+            }
 
             if let Err(error) = ensure_cert_manager_issuer(ctx, namespace, issuer_ref).await {
                 return cert_manager_prerequisite_failed(
@@ -253,6 +261,7 @@ async fn reconcile_cert_manager_tls(
                 namespace,
                 cert_manager,
                 &entry.hosts,
+                include_generated_dns_names(&entry),
                 &secret_name,
                 &certificate_name,
             );
@@ -410,7 +419,7 @@ async fn reconcile_cert_manager_tls(
                     tenant,
                     config,
                     Reason::CaBundleMissing,
-                    "spec.tls.certManager.caTrust.caSecretRef is required when caTrust.source=SecretRef".to_string(),
+                    "spec.tls.caTrust.caSecretRef or the default certificate certManager.caTrust.caSecretRef is required when caTrust.source=SecretRef".to_string(),
                 )
                 .await;
             };
@@ -486,6 +495,27 @@ async fn reconcile_cert_manager_tls(
         }
         client_ca = Some(client_ca_secret_ref);
         client_ca_secret = Some(ca_secret);
+    }
+
+    if let Err(error) = cleanup_stale_cert_manager_certificates(
+        ctx,
+        tenant,
+        namespace,
+        &desired_managed_certificate_names,
+    )
+    .await
+    {
+        return tls_blocked(
+            ctx,
+            tenant,
+            config,
+            Reason::CertManagerCertificateApplyFailed,
+            format!(
+                "failed to clean up stale cert-manager Certificates: {}",
+                sanitize_status_message(&error.to_string())
+            ),
+        )
+        .await;
     }
 
     let hash = tls_hash(
@@ -642,6 +672,15 @@ fn validate_certificate_entries(
                 ),
             });
         }
+        if !entry.default && entry.cert_manager.ca_trust.is_some() {
+            return Err(TlsValidationFailure {
+                reason: Reason::CertificateInvalid,
+                message: format!(
+                    "spec.tls certificate '{}' must not set certManager.caTrust; CA trust is process-wide and must be configured with spec.tls.caTrust or the default certificate",
+                    entry.name
+                ),
+            });
+        }
         for host in &entry.hosts {
             validate_rustfs_sni_host(host)?;
             if !hosts.insert(host.clone()) {
@@ -757,6 +796,72 @@ async fn apply_cert_manager_certificate(
     .map_err(|source| context::Error::Kube { source })
 }
 
+async fn cleanup_stale_cert_manager_certificates(
+    ctx: &Context,
+    tenant: &Tenant,
+    namespace: &str,
+    desired_names: &BTreeSet<String>,
+) -> Result<(), context::Error> {
+    let resource = certificate_api_resource();
+    let api: Api<DynamicObject> = Api::namespaced_with(ctx.client.clone(), namespace, &resource);
+    let selector = format!("rustfs.tenant={}", tenant.name());
+    let certificates = match api.list(&ListParams::default().labels(&selector)).await {
+        Ok(certificates) => certificates,
+        Err(source) => {
+            let error = context::Error::Kube { source };
+            if desired_names.is_empty() && context::is_kube_not_found(&error) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
+
+    for name in stale_cert_manager_certificate_names(tenant, &certificates.items, desired_names) {
+        if let Err(source) = api.delete(name, &DeleteParams::default()).await {
+            let error = context::Error::Kube { source };
+            if !context::is_kube_not_found(&error) {
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn stale_cert_manager_certificate_names<'a>(
+    tenant: &Tenant,
+    certificates: &'a [DynamicObject],
+    desired_names: &BTreeSet<String>,
+) -> Vec<&'a str> {
+    certificates
+        .iter()
+        .filter_map(|certificate| {
+            let name = certificate.metadata.name.as_deref()?;
+            if desired_names.contains(name)
+                || !cert_manager_certificate_owned_by_tenant(certificate, tenant)
+            {
+                return None;
+            }
+            Some(name)
+        })
+        .collect()
+}
+
+fn cert_manager_certificate_owned_by_tenant(certificate: &DynamicObject, tenant: &Tenant) -> bool {
+    let tenant_uid = tenant.metadata.uid.as_deref().unwrap_or("");
+    certificate
+        .metadata
+        .owner_references
+        .as_ref()
+        .is_some_and(|refs| {
+            refs.iter().any(|owner| {
+                owner.kind == "Tenant"
+                    && owner.name == tenant.name()
+                    && (tenant_uid.is_empty() || owner.uid == tenant_uid)
+            })
+        })
+}
+
 async fn cert_manager_prerequisite_failed<T>(
     ctx: &Context,
     tenant: &Tenant,
@@ -786,6 +891,7 @@ fn build_cert_manager_certificate(
     namespace: &str,
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
+    include_generated_dns_names: bool,
     secret_name: &str,
     certificate_name: &str,
 ) -> DynamicObject {
@@ -807,7 +913,8 @@ fn build_cert_manager_certificate(
             tenant,
             namespace,
             cert_manager,
-            hosts
+            hosts,
+            include_generated_dns_names,
         )),
     );
     spec.insert(
@@ -996,6 +1103,7 @@ fn certificate_dns_names(
     namespace: &str,
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
+    include_generated_dns_names: bool,
 ) -> Vec<String> {
     let mut names = BTreeSet::new();
     names.extend(hosts.iter().filter(|name| !name.is_empty()).cloned());
@@ -1006,7 +1114,7 @@ fn certificate_dns_names(
             .filter(|name| !name.is_empty())
             .cloned(),
     );
-    if cert_manager.include_generated_dns_names {
+    if include_generated_dns_names {
         let tenant_name = tenant.name();
         let io_service = format!("{tenant_name}-io");
         let headless_service = tenant.headless_service_name();
@@ -1026,26 +1134,62 @@ fn certificate_dns_names(
     names.into_iter().collect()
 }
 
+fn include_generated_dns_names(entry: &TlsCertificateEntry) -> bool {
+    entry
+        .cert_manager
+        .include_generated_dns_names
+        .unwrap_or(entry.default || entry.legacy)
+}
+
+fn validate_managed_certificate_san_config(
+    tenant: &Tenant,
+    namespace: &str,
+    config: &TlsConfig,
+    entry: &TlsCertificateEntry,
+) -> Result<(), TlsValidationFailure> {
+    if !config.enable_internode_https || !entry.default || include_generated_dns_names(entry) {
+        return Ok(());
+    }
+
+    let generated_names = generated_dns_names(tenant, namespace);
+    let configured_names =
+        certificate_dns_names(tenant, namespace, &entry.cert_manager, &entry.hosts, false)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+    let missing_names = generated_names
+        .iter()
+        .filter(|name| !configured_names.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing_names.is_empty() {
+        return Ok(());
+    }
+
+    Err(TlsValidationFailure {
+        reason: Reason::CertificateInvalid,
+        message: format!(
+            "spec.tls certificate '{}' cannot set certManager.includeGeneratedDnsNames=false while enableInternodeHttps=true unless certManager.dnsNames or hosts explicitly cover generated peer DNS names such as '{}'",
+            entry.name, missing_names[0]
+        ),
+    })
+}
+
 fn san_validation_dns_names(
     tenant: &Tenant,
     namespace: &str,
     config: &TlsConfig,
     entry: &TlsCertificateEntry,
 ) -> Vec<String> {
-    let mut names = BTreeSet::new();
-    names.extend(entry.hosts.iter().filter(|name| !name.is_empty()).cloned());
-    names.extend(
-        entry
-            .cert_manager
-            .dns_names
-            .iter()
-            .filter(|name| !name.is_empty())
-            .cloned(),
-    );
-    if entry.default && config.enable_internode_https {
-        names.extend(generated_dns_names(tenant, namespace));
-    }
-    names.into_iter().collect()
+    let include_generated_dns_names =
+        include_generated_dns_names(entry) || (entry.default && config.enable_internode_https);
+    certificate_dns_names(
+        tenant,
+        namespace,
+        &entry.cert_manager,
+        &entry.hosts,
+        include_generated_dns_names,
+    )
 }
 
 fn generated_dns_names(tenant: &Tenant, namespace: &str) -> Vec<String> {
@@ -2172,6 +2316,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             "storage",
             cert_manager,
             &[],
+            true,
             "tenant-a-server-tls",
             "tenant-a-server",
         );
@@ -2254,7 +2399,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         let cert_manager = CertManagerTlsConfig {
             secret_name: Some("tenant-a-public-tls".to_string()),
             dns_names: vec!["custom.example.com".to_string()],
-            include_generated_dns_names: false,
+            include_generated_dns_names: Some(false),
             ..Default::default()
         };
 
@@ -2263,6 +2408,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             "storage",
             &cert_manager,
             &["s3.example.com".to_string()],
+            false,
             "tenant-a-public-tls",
             "tenant-a-public-tls",
         );
@@ -2284,6 +2430,238 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
                 "custom.example.com".to_string(),
                 "s3.example.com".to_string()
             ])
+        );
+    }
+
+    #[test]
+    fn cert_manager_certificate_ownership_requires_current_tenant_owner_ref() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.uid = Some("uid-a".to_string());
+
+        let mut owned = DynamicObject::new("tenant-a-server", &certificate_api_resource());
+        owned.metadata.owner_references = Some(vec![tenant.new_owner_ref()]);
+        assert!(cert_manager_certificate_owned_by_tenant(&owned, &tenant));
+
+        let mut wrong_uid = owned.clone();
+        wrong_uid
+            .metadata
+            .owner_references
+            .as_mut()
+            .expect("owner ref should exist")[0]
+            .uid = "uid-b".to_string();
+        assert!(!cert_manager_certificate_owned_by_tenant(
+            &wrong_uid, &tenant
+        ));
+
+        let mut unowned = owned;
+        unowned.metadata.owner_references = None;
+        assert!(!cert_manager_certificate_owned_by_tenant(&unowned, &tenant));
+    }
+
+    #[test]
+    fn stale_cert_manager_certificate_cleanup_only_selects_owned_stale_certs() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.uid = Some("uid-a".to_string());
+
+        let mut desired_names = BTreeSet::new();
+        desired_names.insert("tenant-a-internal-tls".to_string());
+
+        let desired = owned_certificate(&tenant, "tenant-a-internal-tls");
+        let stale = owned_certificate(&tenant, "tenant-a-old-tls");
+        let mut wrong_uid = owned_certificate(&tenant, "tenant-a-other-uid-tls");
+        wrong_uid
+            .metadata
+            .owner_references
+            .as_mut()
+            .expect("owner ref should exist")[0]
+            .uid = "uid-b".to_string();
+        let mut unowned = owned_certificate(&tenant, "tenant-a-unowned-tls");
+        unowned.metadata.owner_references = None;
+        let mut nameless = owned_certificate(&tenant, "tenant-a-nameless-tls");
+        nameless.metadata.name = None;
+        let certificates = vec![desired, stale, wrong_uid, unowned, nameless];
+
+        let stale_names =
+            stale_cert_manager_certificate_names(&tenant, &certificates, &desired_names)
+                .into_iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+
+        assert_eq!(stale_names, vec!["tenant-a-old-tls".to_string()]);
+    }
+
+    #[test]
+    fn non_default_certificate_omits_generated_dns_by_default() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.namespace = Some("storage".to_string());
+        tenant.spec.pools[0].servers = 2;
+        let entry = TlsCertificateEntry {
+            name: "public".to_string(),
+            default: false,
+            hosts: vec!["s3.example.com".to_string()],
+            cert_manager: CertManagerTlsConfig::default(),
+            legacy: false,
+        };
+
+        let certificate = build_cert_manager_certificate(
+            &tenant,
+            "storage",
+            &entry.cert_manager,
+            &entry.hosts,
+            include_generated_dns_names(&entry),
+            "tenant-a-public-tls",
+            "tenant-a-public-tls",
+        );
+        let dns_names = certificate
+            .data
+            .pointer("/spec/dnsNames")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            });
+
+        assert_eq!(dns_names, Some(vec!["s3.example.com".to_string()]));
+    }
+
+    #[test]
+    fn non_default_certificate_can_explicitly_include_generated_dns() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.namespace = Some("storage".to_string());
+        tenant.spec.pools[0].servers = 1;
+        let entry = TlsCertificateEntry {
+            name: "public".to_string(),
+            default: false,
+            hosts: vec!["s3.example.com".to_string()],
+            cert_manager: CertManagerTlsConfig {
+                include_generated_dns_names: Some(true),
+                ..Default::default()
+            },
+            legacy: false,
+        };
+
+        let certificate = build_cert_manager_certificate(
+            &tenant,
+            "storage",
+            &entry.cert_manager,
+            &entry.hosts,
+            include_generated_dns_names(&entry),
+            "tenant-a-public-tls",
+            "tenant-a-public-tls",
+        );
+        let dns_names = certificate
+            .data
+            .pointer("/spec/dnsNames")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .expect("dnsNames should render");
+
+        assert!(dns_names.contains(&"s3.example.com".to_string()));
+        assert!(dns_names.contains(&"tenant-a-io.storage.svc".to_string()));
+        assert!(dns_names.contains(&"tenant-a-hl.storage.svc.cluster.local".to_string()));
+    }
+
+    #[test]
+    fn san_validation_dns_names_follow_certificate_generation_and_internode_requirements() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.namespace = Some("storage".to_string());
+        tenant.spec.pools[0].servers = 1;
+        let config = TlsConfig {
+            enable_internode_https: true,
+            ..Default::default()
+        };
+        let generated_pod_dns = generated_dns_names(&tenant, "storage")
+            .into_iter()
+            .find(|name| name.contains("-0."))
+            .expect("generated names should include a pod DNS name");
+
+        let default_entry = TlsCertificateEntry {
+            name: "internal".to_string(),
+            default: true,
+            hosts: Vec::new(),
+            cert_manager: CertManagerTlsConfig {
+                include_generated_dns_names: Some(false),
+                ..Default::default()
+            },
+            legacy: false,
+        };
+        let names = san_validation_dns_names(&tenant, "storage", &config, &default_entry);
+        assert!(names.contains(&generated_pod_dns));
+
+        let non_default_entry = TlsCertificateEntry {
+            name: "public".to_string(),
+            default: false,
+            hosts: vec!["s3.example.com".to_string()],
+            cert_manager: CertManagerTlsConfig {
+                include_generated_dns_names: Some(true),
+                ..Default::default()
+            },
+            legacy: false,
+        };
+        let names = san_validation_dns_names(&tenant, "storage", &config, &non_default_entry);
+        assert!(names.contains(&"s3.example.com".to_string()));
+        assert!(names.contains(&generated_pod_dns));
+
+        let public_default = TlsCertificateEntry {
+            cert_manager: CertManagerTlsConfig::default(),
+            ..non_default_entry
+        };
+        let names = san_validation_dns_names(&tenant, "storage", &config, &public_default);
+        assert_eq!(names, vec!["s3.example.com".to_string()]);
+    }
+
+    #[test]
+    fn managed_default_certificate_rejects_missing_internode_dns_when_generated_dns_disabled() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.namespace = Some("storage".to_string());
+        tenant.spec.pools[0].servers = 1;
+        let config = TlsConfig {
+            enable_internode_https: true,
+            ..Default::default()
+        };
+        let mut entry = TlsCertificateEntry {
+            name: "internal".to_string(),
+            default: true,
+            hosts: Vec::new(),
+            cert_manager: CertManagerTlsConfig {
+                manage_certificate: true,
+                include_generated_dns_names: Some(false),
+                ..Default::default()
+            },
+            legacy: false,
+        };
+
+        let failure = validate_managed_certificate_san_config(&tenant, "storage", &config, &entry)
+            .expect_err("managed internode cert must cover generated peer DNS names");
+
+        assert_eq!(failure.reason, Reason::CertificateInvalid);
+        assert!(
+            failure
+                .message
+                .contains("includeGeneratedDnsNames=false while enableInternodeHttps=true"),
+            "{}",
+            failure.message
+        );
+
+        entry.cert_manager.dns_names = generated_dns_names(&tenant, "storage");
+        assert_eq!(
+            validate_managed_certificate_san_config(&tenant, "storage", &config, &entry),
+            Ok(())
         );
     }
 
@@ -2366,6 +2744,32 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
 
         assert_eq!(failure.reason, Reason::CertificateInvalid);
         assert!(failure.message.contains("must set hosts"));
+
+        let non_default_ca_trust = TlsConfig {
+            certificates: vec![
+                TlsCertificateConfig {
+                    name: "internal".to_string(),
+                    default: true,
+                    hosts: vec![],
+                    cert_manager: CertManagerTlsConfig::default(),
+                },
+                TlsCertificateConfig {
+                    name: "public".to_string(),
+                    default: false,
+                    hosts: vec!["s3.example.com".to_string()],
+                    cert_manager: CertManagerTlsConfig {
+                        ca_trust: Some(CaTrustConfig::default()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let failure = certificate_entries(&non_default_ca_trust)
+            .expect_err("non-default cert must not accept process-wide CA trust");
+
+        assert_eq!(failure.reason, Reason::CertificateInvalid);
+        assert!(failure.message.contains("must not set certManager.caTrust"));
     }
 
     #[test]
@@ -2630,6 +3034,12 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
     fn certificate_object(name: &str, generation: Option<i64>, data: Value) -> DynamicObject {
         let mut object = DynamicObject::new(name, &certificate_api_resource()).data(data);
         object.metadata.generation = generation;
+        object
+    }
+
+    fn owned_certificate(tenant: &Tenant, name: &str) -> DynamicObject {
+        let mut object = DynamicObject::new(name, &certificate_api_resource());
+        object.metadata.owner_references = Some(vec![tenant.new_owner_ref()]);
         object
     }
 

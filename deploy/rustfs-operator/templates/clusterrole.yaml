@@ -48,7 +48,7 @@ rules:
   # cert-manager Certificate orchestration and readiness watches
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
-    verbs: ["get", "list", "watch", "create", "patch", "update"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   - apiGroups: ["cert-manager.io"]
     resources: ["issuers", "clusterissuers"]
     verbs: ["get", "list", "watch"]

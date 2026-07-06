@@ -168,7 +168,7 @@ fn tls_certificate_dns_names(config: &E2eConfig, tenant: &Tenant) -> Vec<String>
                 .cloned(),
         );
 
-        if cert_manager.include_generated_dns_names {
+        if cert_manager.include_generated_dns_names.unwrap_or(true) {
             let tenant_name = &config.tenant_name;
             let namespace = &config.test_namespace;
             let io_service = format!("{tenant_name}-io");

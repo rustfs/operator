@@ -399,6 +399,7 @@ spec:
 ```
 
 当 `manageCertificate: true` 时，`issuerRef` 也是必填项。Operator 会创建或更新 cert-manager `Certificate`，等待引用的 Secret 就绪，校验 `tls.crt` 和 `tls.key`，并在未配置其它 CA trust source 时使用 `ca.crt`。
+兼容旧版本的单证书写法中，省略 `includeGeneratedDnsNames` 时按 `true` 处理。
 
 公有域名和内部域名使用不同证书时：
 
@@ -437,7 +438,9 @@ spec:
 ```
 
 默认条目会被投影到 `mountPath` 根目录下的 `rustfs_cert.pem` 和 `rustfs_key.pem`，供 RustFS 作为 fallback 证书和节点间 HTTPS 证书使用。每个 `hosts` 值会被投影为 RustFS SNI 子目录，例如 `s3.example.com/rustfs_cert.pem` 和 `s3.example.com/rustfs_key.pem`。
-配置了 `certificates` 时，进程级 trust 应放在顶层 `caTrust` 或 `default: true` 证书条目的 `caTrust` 中。旧的 `certManager.caTrust` 只对单证书写法生效。
+配置了 `certificates` 时，省略 `includeGeneratedDnsNames` 只有在 `default: true` 证书条目中才按 `true` 处理。非默认条目只包含 `hosts` 和 `certManager.dnsNames`，除非显式设置 `includeGeneratedDnsNames: true`。
+当 `enableInternodeHttps: true` 时，默认的托管证书必须覆盖 RustFS 自动生成的节点间 DNS 名称。应保持 `includeGeneratedDnsNames` 启用，或在 `hosts` / `certManager.dnsNames` 中显式列出这些节点间名称。
+配置了 `certificates` 时，进程级 trust 应放在顶层 `caTrust` 或 `default: true` 证书条目的 `caTrust` 中。旧的 `certManager.caTrust` 只对单证书写法生效，非默认条目上的 `certManager.caTrust` 会被拒绝。
 
 ### 7.6 日志配置
 

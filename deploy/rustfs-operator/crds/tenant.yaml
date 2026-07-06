@@ -1538,7 +1538,7 @@ spec:
                         nullable: true
                         type: string
                       includeGeneratedDnsNames:
-                        default: true
+                        nullable: true
                         type: boolean
                       issuerRef:
                         nullable: true
@@ -1646,7 +1646,7 @@ spec:
                               nullable: true
                               type: string
                             includeGeneratedDnsNames:
-                              default: true
+                              nullable: true
                               type: boolean
                             issuerRef:
                               nullable: true
