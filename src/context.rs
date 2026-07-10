@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::types;
+use crate::types::v1alpha1::encryption::LocalKmsMasterKeySecretRef;
 use crate::types::v1alpha1::tenant::Tenant;
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::core::v1::Secret;
@@ -24,6 +25,7 @@ use serde::de::DeserializeOwned;
 use snafu::Snafu;
 use snafu::futures::TryFutureExt;
 use std::fmt::Debug;
+use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
 #[derive(Debug, Snafu)]
@@ -75,19 +77,129 @@ pub enum Error {
     Serde { source: serde_json::Error },
 }
 
-/// Validates Local KMS: absolute `keyDirectory` and at most one server replica across pools.
+fn local_kms_key_directory(
+    local: Option<&types::v1alpha1::encryption::LocalKmsConfig>,
+    pools: &[types::v1alpha1::pool::Pool],
+) -> String {
+    local
+        .and_then(|l| l.key_directory.clone())
+        .unwrap_or_else(|| {
+            let base_path = pools
+                .first()
+                .and_then(|pool| pool.persistence.path.as_deref());
+            types::v1alpha1::persistence::default_local_kms_key_directory(base_path)
+        })
+}
+
+fn normalize_absolute_path(path: &str) -> Option<PathBuf> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) => return None,
+        }
+    }
+
+    Some(normalized)
+}
+
+fn local_kms_key_dir_is_on_data_volume(
+    key_dir: &str,
+    pools: &[types::v1alpha1::pool::Pool],
+) -> bool {
+    let Some(key_dir) = normalize_absolute_path(key_dir) else {
+        return false;
+    };
+
+    pools.iter().any(|pool| {
+        (0..pool.persistence.volumes_per_server).any(|shard| {
+            let mount_path = types::v1alpha1::persistence::data_volume_mount_path(
+                pool.persistence.path.as_deref(),
+                shard,
+            );
+            normalize_absolute_path(&mount_path)
+                .is_some_and(|mount_path| key_dir != mount_path && key_dir.starts_with(mount_path))
+        })
+    })
+}
+
+fn local_kms_data_volume_hint(pools: &[types::v1alpha1::pool::Pool]) -> String {
+    pools
+        .first()
+        .map(|pool| {
+            types::v1alpha1::persistence::default_local_kms_key_directory(
+                pool.persistence.path.as_deref(),
+            )
+        })
+        .unwrap_or_else(|| types::v1alpha1::persistence::default_local_kms_key_directory(None))
+}
+
+fn local_kms_legacy_path_migration_message(
+    key_dir: &str,
+    pools: &[types::v1alpha1::pool::Pool],
+) -> String {
+    let target_dir = local_kms_data_volume_hint(pools);
+    format!(
+        "Local KMS keyDirectory '{}' is the legacy non-PVC path. Copy existing key files and .master-key.salt into '{}', then set spec.encryption.local.keyDirectory to that PVC-backed subdirectory before rolling RustFS pods.",
+        key_dir, target_dir
+    )
+}
+
+fn reserved_kms_env_var_name(tenant: &Tenant) -> Option<&str> {
+    tenant
+        .spec
+        .env
+        .iter()
+        .find(|env| env.name.starts_with("RUSTFS_KMS_"))
+        .map(|env| env.name.as_str())
+}
+
+fn validate_no_reserved_kms_env(tenant: &Tenant) -> Result<(), Error> {
+    if let Some(env_name) = reserved_kms_env_var_name(tenant) {
+        return Err(Error::KmsConfigInvalid {
+            message: format!(
+                "spec.env must not set reserved KMS environment variable '{}'. Configure KMS through spec.encryption so the operator can validate persistence, migration, and Secret references.",
+                env_name
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validates Local KMS: absolute persistent `keyDirectory` and at most one server replica across pools.
 fn validate_local_kms_tenant(
     local: Option<&types::v1alpha1::encryption::LocalKmsConfig>,
     pools: &[types::v1alpha1::pool::Pool],
 ) -> Result<(), Error> {
-    let key_dir = local
-        .and_then(|l| l.key_directory.as_deref())
-        .unwrap_or("/data/kms-keys");
+    let key_dir = local_kms_key_directory(local, pools);
     if !key_dir.starts_with('/') {
         return Err(Error::KmsConfigInvalid {
             message: format!(
                 "Local KMS keyDirectory must be an absolute path (got \"{}\")",
                 key_dir
+            ),
+        });
+    }
+    if key_dir == types::v1alpha1::persistence::LEGACY_LOCAL_KMS_KEY_DIR {
+        return Err(Error::KmsConfigInvalid {
+            message: local_kms_legacy_path_migration_message(&key_dir, pools),
+        });
+    }
+    if !local_kms_key_dir_is_on_data_volume(&key_dir, pools) {
+        return Err(Error::KmsConfigInvalid {
+            message: format!(
+                "Local KMS keyDirectory must be in a subdirectory under a RustFS data PVC mount (got \"{}\"). Use the default or a path such as \"{}\".",
+                key_dir,
+                local_kms_data_volume_hint(pools)
             ),
         });
     }
@@ -97,6 +209,65 @@ fn validate_local_kms_tenant(
             message: "Local KMS is only supported when the tenant has a single RustFS server replica (sum of pool servers must be 1). For multiple servers use Vault KMS, or use a single-server pool.".to_string(),
         });
     }
+    Ok(())
+}
+
+fn validate_local_kms_master_key_ref(
+    local: Option<&types::v1alpha1::encryption::LocalKmsConfig>,
+) -> Result<Option<&LocalKmsMasterKeySecretRef>, Error> {
+    let allow_insecure_dev_defaults = local.is_some_and(|l| l.allow_insecure_dev_defaults);
+    let selector = local.and_then(|l| l.master_key_secret_ref.as_ref());
+
+    let Some(selector) = selector else {
+        if allow_insecure_dev_defaults {
+            return Ok(None);
+        }
+        return Err(Error::KmsConfigInvalid {
+            message: "Local KMS requires spec.encryption.local.masterKeySecretRef unless spec.encryption.local.allowInsecureDevDefaults is true for development-only plaintext key storage".to_string(),
+        });
+    };
+
+    if selector.name.is_empty() {
+        return Err(Error::KmsConfigInvalid {
+            message: "Local KMS masterKeySecretRef.name must not be empty".to_string(),
+        });
+    }
+    if selector.key.is_empty() {
+        return Err(Error::KmsConfigInvalid {
+            message: "Local KMS masterKeySecretRef.key must not be empty".to_string(),
+        });
+    }
+    Ok(Some(selector))
+}
+
+fn validate_secret_utf8_non_blank(
+    secret: &Secret,
+    secret_name: &str,
+    key: &str,
+) -> Result<(), Error> {
+    let Some(value) = secret.data.as_ref().and_then(|data| data.get(key)) else {
+        return KmsSecretMissingKeySnafu {
+            secret_name: secret_name.to_string(),
+            key: key.to_string(),
+        }
+        .fail();
+    };
+
+    let value = std::str::from_utf8(&value.0).map_err(|_| Error::KmsConfigInvalid {
+        message: format!(
+            "KMS Secret '{}' key '{}' must contain valid UTF-8",
+            secret_name, key
+        ),
+    })?;
+    if value.trim().is_empty() {
+        return Err(Error::KmsConfigInvalid {
+            message: format!(
+                "KMS Secret '{}' key '{}' must not be blank",
+                secret_name, key
+            ),
+        });
+    }
+
     Ok(())
 }
 
@@ -426,11 +597,14 @@ impl Context {
     /// Validates encryption configuration and the KMS Secret.
     ///
     /// Checks:
-    /// 1. Local KMS: absolute key directory and single replica (sum of pool servers).
+    /// 1. Local KMS: absolute key directory, single replica, and a local master key Secret
+    ///    unless explicit development-only insecure defaults are enabled.
     /// 2. Vault endpoint is non-empty when backend is Vault.
     /// 3. KMS Secret exists and contains the correct keys for the auth type.
     pub async fn validate_kms_secret(&self, tenant: &Tenant) -> Result<(), Error> {
         use crate::types::v1alpha1::encryption::KmsBackendType;
+
+        validate_no_reserved_kms_env(tenant)?;
 
         let Some(ref enc) = tenant.spec.encryption else {
             return Ok(());
@@ -439,14 +613,24 @@ impl Context {
             return Ok(());
         }
 
-        // Local KMS: RustFS requires an absolute key directory; multi-replica tenants need Vault
-        // (or a shared filesystem) because each Pod would otherwise have its own key files.
         if enc.backend == KmsBackendType::Local {
             validate_local_kms_tenant(enc.local.as_ref(), &tenant.spec.pools)?;
-        }
-
-        // Vault: non-empty endpoint and `kmsSecret` with `vault-token` (RustFS `build_vault_kms_config`).
-        if enc.backend == KmsBackendType::Vault {
+            if let Some(selector) = validate_local_kms_master_key_ref(enc.local.as_ref())? {
+                let secret: Secret = match self.get(&selector.name, &tenant.namespace()?).await {
+                    Ok(secret) => secret,
+                    Err(error) => {
+                        return Err(map_secret_get_error(
+                            error,
+                            selector.name.clone(),
+                            SecretValidationKind::Kms,
+                        ));
+                    }
+                };
+                validate_secret_utf8_non_blank(&secret, &selector.name, &selector.key)?;
+            }
+            return Ok(());
+        } else if enc.backend == KmsBackendType::Vault {
+            // Vault: non-empty endpoint and `kmsSecret` with `vault-token` (RustFS `build_vault_kms_config`).
             let endpoint_empty = enc
                 .vault
                 .as_ref()
@@ -469,27 +653,25 @@ impl Context {
                             .to_string(),
                 });
             }
-        }
 
-        let Some(ref secret_ref) = enc.kms_secret else {
-            return Ok(());
-        };
-        if secret_ref.name.is_empty() {
-            return Ok(());
-        }
+            let Some(secret_ref) = enc.kms_secret.as_ref() else {
+                return Err(Error::KmsConfigInvalid {
+                    message:
+                        "Vault backend requires kmsSecret referencing a Secret with key vault-token"
+                            .to_string(),
+                });
+            };
+            let secret: Secret = match self.get(&secret_ref.name, &tenant.namespace()?).await {
+                Ok(secret) => secret,
+                Err(error) => {
+                    return Err(map_secret_get_error(
+                        error,
+                        secret_ref.name.clone(),
+                        SecretValidationKind::Kms,
+                    ));
+                }
+            };
 
-        let secret: Secret = match self.get(&secret_ref.name, &tenant.namespace()?).await {
-            Ok(secret) => secret,
-            Err(error) => {
-                return Err(map_secret_get_error(
-                    error,
-                    secret_ref.name.clone(),
-                    SecretValidationKind::Kms,
-                ));
-            }
-        };
-
-        if enc.backend == KmsBackendType::Vault {
             let has_token = secret
                 .data
                 .as_ref()
@@ -591,18 +773,29 @@ impl Context {
 #[cfg(test)]
 mod validate_local_kms_tests {
     use super::Error;
-    use super::validate_local_kms_tenant;
     use super::{SecretValidationKind, map_secret_get_error};
-    use crate::types::v1alpha1::encryption::LocalKmsConfig;
+    use super::{
+        validate_local_kms_master_key_ref, validate_local_kms_tenant, validate_no_reserved_kms_env,
+        validate_secret_utf8_non_blank,
+    };
+    use crate::types::v1alpha1::encryption::{LocalKmsConfig, LocalKmsMasterKeySecretRef};
     use crate::types::v1alpha1::persistence::PersistenceConfig;
     use crate::types::v1alpha1::pool::Pool;
+    use k8s_openapi::ByteString;
+    use k8s_openapi::api::core::v1 as corev1;
+    use std::collections::BTreeMap;
 
     fn pool(servers: i32) -> Pool {
+        pool_with_path(servers, None)
+    }
+
+    fn pool_with_path(servers: i32, path: Option<&str>) -> Pool {
         Pool {
             name: "p".to_string(),
             servers,
             persistence: PersistenceConfig {
                 volumes_per_server: 4,
+                path: path.map(ToOwned::to_owned),
                 ..Default::default()
             },
             scheduling: Default::default(),
@@ -617,6 +810,13 @@ mod validate_local_kms_tests {
                 reason: reason.to_string(),
                 code,
             }),
+        }
+    }
+
+    fn master_key_selector() -> LocalKmsMasterKeySecretRef {
+        LocalKmsMasterKeySecretRef {
+            name: "local-kms-master-key".to_string(),
+            key: "local-master-key".to_string(),
         }
     }
 
@@ -661,6 +861,24 @@ mod validate_local_kms_tests {
     }
 
     #[test]
+    fn local_kms_accepts_key_dir_on_data_volume() {
+        let local = LocalKmsConfig {
+            key_directory: Some("/data/rustfs0/kms".to_string()),
+            ..Default::default()
+        };
+        validate_local_kms_tenant(Some(&local), &[pool(1)]).unwrap();
+    }
+
+    #[test]
+    fn local_kms_accepts_key_dir_on_custom_data_volume() {
+        let local = LocalKmsConfig {
+            key_directory: Some("/mnt/rustfs/rustfs0/kms".to_string()),
+            ..Default::default()
+        };
+        validate_local_kms_tenant(Some(&local), &[pool_with_path(1, Some("/mnt/rustfs"))]).unwrap();
+    }
+
+    #[test]
     fn local_kms_rejects_relative_key_dir() {
         let local = LocalKmsConfig {
             key_directory: Some("data/kms".to_string()),
@@ -671,9 +889,166 @@ mod validate_local_kms_tests {
     }
 
     #[test]
+    fn local_kms_rejects_key_dir_outside_data_volume() {
+        let local = LocalKmsConfig {
+            key_directory: Some("/opt/rustfs-kms".to_string()),
+            ..Default::default()
+        };
+        let err = validate_local_kms_tenant(Some(&local), &[pool(1)]).unwrap_err();
+        assert!(
+            matches!(err, Error::KmsConfigInvalid { message } if message.contains("data PVC mount"))
+        );
+    }
+
+    #[test]
+    fn local_kms_rejects_legacy_key_dir_with_migration_guidance() {
+        let local = LocalKmsConfig {
+            key_directory: Some("/data/kms-keys".to_string()),
+            ..Default::default()
+        };
+        let err = validate_local_kms_tenant(Some(&local), &[pool(1)]).unwrap_err();
+        assert!(matches!(err, Error::KmsConfigInvalid { message }
+                if message.contains("legacy non-PVC path")
+                    && message.contains("/data/rustfs0/.kms-keys")
+                    && message.contains(".master-key.salt")
+                    && message.contains("spec.encryption.local.keyDirectory")));
+    }
+
+    #[test]
+    fn local_kms_rejects_data_volume_root() {
+        let local = LocalKmsConfig {
+            key_directory: Some("/data/rustfs0".to_string()),
+            ..Default::default()
+        };
+        let err = validate_local_kms_tenant(Some(&local), &[pool(1)]).unwrap_err();
+        assert!(
+            matches!(err, Error::KmsConfigInvalid { message } if message.contains("subdirectory"))
+        );
+    }
+
+    #[test]
+    fn local_kms_rejects_prefix_match_outside_data_volume() {
+        let local = LocalKmsConfig {
+            key_directory: Some("/data/rustfs01/kms".to_string()),
+            ..Default::default()
+        };
+        let err = validate_local_kms_tenant(Some(&local), &[pool(1)]).unwrap_err();
+        assert!(
+            matches!(err, Error::KmsConfigInvalid { message } if message.contains("data PVC mount"))
+        );
+    }
+
+    #[test]
     fn local_kms_rejects_multi_pool_multi_replica() {
         let local = LocalKmsConfig::default();
         let err = validate_local_kms_tenant(Some(&local), &[pool(2), pool(2)]).unwrap_err();
         assert!(matches!(err, Error::KmsConfigInvalid { .. }));
+    }
+
+    #[test]
+    fn local_kms_requires_master_key_secret_ref_by_default() {
+        let local = LocalKmsConfig::default();
+        let err = validate_local_kms_master_key_ref(Some(&local)).unwrap_err();
+        assert!(matches!(err, Error::KmsConfigInvalid { message }
+                if message.contains("masterKeySecretRef")));
+    }
+
+    #[test]
+    fn local_kms_allows_explicit_insecure_dev_defaults_without_master_key() {
+        let local = LocalKmsConfig {
+            allow_insecure_dev_defaults: true,
+            ..Default::default()
+        };
+
+        let selector = validate_local_kms_master_key_ref(Some(&local)).unwrap();
+
+        assert!(selector.is_none());
+    }
+
+    #[test]
+    fn local_kms_rejects_empty_master_key_secret_ref_name() {
+        let local = LocalKmsConfig {
+            master_key_secret_ref: Some(LocalKmsMasterKeySecretRef {
+                name: String::new(),
+                ..master_key_selector()
+            }),
+            ..Default::default()
+        };
+
+        let err = validate_local_kms_master_key_ref(Some(&local)).unwrap_err();
+
+        assert!(matches!(err, Error::KmsConfigInvalid { message }
+                if message.contains("name must not be empty")));
+    }
+
+    #[test]
+    fn local_kms_secret_key_must_be_utf8_and_non_blank() {
+        let mut data = BTreeMap::new();
+        data.insert("blank".to_string(), ByteString(b"   \n".to_vec()));
+        data.insert("invalid".to_string(), ByteString(vec![0xff]));
+        let secret = corev1::Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+
+        let missing =
+            validate_secret_utf8_non_blank(&secret, "local-kms-master-key", "missing").unwrap_err();
+        assert!(matches!(missing, Error::KmsSecretMissingKey { key, .. } if key == "missing"));
+
+        let invalid =
+            validate_secret_utf8_non_blank(&secret, "local-kms-master-key", "invalid").unwrap_err();
+        assert!(matches!(invalid, Error::KmsConfigInvalid { message }
+                if message.contains("valid UTF-8")));
+
+        let blank =
+            validate_secret_utf8_non_blank(&secret, "local-kms-master-key", "blank").unwrap_err();
+        assert!(matches!(blank, Error::KmsConfigInvalid { message }
+                if message.contains("must not be blank")));
+    }
+
+    #[test]
+    fn local_kms_secret_key_accepts_non_empty_data() {
+        let mut data = BTreeMap::new();
+        data.insert(
+            "local-master-key".to_string(),
+            ByteString(b"test-master-key".to_vec()),
+        );
+        let secret = corev1::Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+
+        validate_secret_utf8_non_blank(&secret, "local-kms-master-key", "local-master-key")
+            .unwrap();
+    }
+
+    #[test]
+    fn reserved_kms_env_is_rejected_without_encryption_spec() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.encryption = None;
+        tenant.spec.env = vec![corev1::EnvVar {
+            name: "RUSTFS_KMS_ENABLE".to_string(),
+            value: Some("true".to_string()),
+            ..Default::default()
+        }];
+
+        let err = validate_no_reserved_kms_env(&tenant).unwrap_err();
+        assert!(matches!(err, Error::KmsConfigInvalid { message }
+                if message.contains("RUSTFS_KMS_ENABLE")
+                    && message.contains("spec.encryption")));
+    }
+
+    #[test]
+    fn reserved_kms_env_rejects_unmodelled_rustfs_kms_vars() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.env = vec![corev1::EnvVar {
+            name: "RUSTFS_KMS_LOCAL_MASTER_KEY".to_string(),
+            value: Some("secret".to_string()),
+            ..Default::default()
+        }];
+
+        let err = validate_no_reserved_kms_env(&tenant).unwrap_err();
+        assert!(matches!(err, Error::KmsConfigInvalid { message }
+                if message.contains("RUSTFS_KMS_LOCAL_MASTER_KEY")));
     }
 }

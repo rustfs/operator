@@ -49,24 +49,58 @@ pub struct VaultKmsConfig {
     pub endpoint: String,
 }
 
+/// Secret key selector for the Local KMS master key.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalKmsMasterKeySecretRef {
+    /// Secret name in the Tenant namespace.
+    #[schemars(length(min = 1))]
+    pub name: String,
+
+    /// Secret data key containing the local master key string.
+    #[schemars(length(min = 1))]
+    pub key: String,
+}
+
 /// Local file-based KMS: key material directory inside the container.
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalKmsConfig {
-    /// Absolute directory for KMS key files (default: `/data/kms-keys`).
+    /// Absolute directory for KMS key files.
+    ///
+    /// Must be in a subdirectory under a RustFS data PVC mount. Defaults to the first data PVC mount
+    /// under `persistence.path`, for example `/data/rustfs0/.kms-keys`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_directory: Option<String>,
+
+    /// Secret key selector for `RUSTFS_KMS_LOCAL_MASTER_KEY`.
+    ///
+    /// Required for Local KMS unless `allowInsecureDevDefaults` is explicitly set to `true`.
+    /// The referenced Secret key should contain the local master key string used to encrypt
+    /// Local KMS key files at rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_key_secret_ref: Option<LocalKmsMasterKeySecretRef>,
+
+    /// Explicitly allow RustFS development-only insecure KMS defaults.
+    ///
+    /// When true, the operator sets `RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS=true`, allowing
+    /// Local KMS to start without a master key and store key material as plaintext-dev-only.
+    /// Do not use this in production.
+    #[serde(default)]
+    pub allow_insecure_dev_defaults: bool,
 }
 
 /// Encryption / KMS configuration for a Tenant.
 ///
 /// Injected env vars match the RustFS server (`rustfs/src/config/cli.rs`, `init_kms_system`):
-/// `RUSTFS_KMS_ENABLE`, `RUSTFS_KMS_BACKEND`, `RUSTFS_KMS_KEY_DIR`, `RUSTFS_KMS_LOCAL_KEY_DIR`,
+/// `RUSTFS_KMS_ENABLE`, `RUSTFS_KMS_BACKEND`, `RUSTFS_KMS_KEY_DIR`,
+/// `RUSTFS_KMS_LOCAL_MASTER_KEY`, `RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS`,
 /// `RUSTFS_KMS_DEFAULT_KEY_ID`, `RUSTFS_KMS_VAULT_ADDRESS`, `RUSTFS_KMS_VAULT_TOKEN`.
 ///
 /// **Vault Secret:** key `vault-token` (required).
 ///
-/// **Local:** no Secret; use a single-server tenant (operator validates replica count).
+/// **Local:** use `local.masterKeySecretRef` unless explicitly enabling development-only
+/// insecure defaults; use a single-server tenant (operator validates replica count).
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EncryptionConfig {

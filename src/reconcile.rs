@@ -17,11 +17,13 @@ use crate::status::{StatusBuilder, StatusError};
 use crate::types::v1alpha1::status::{ConditionType, Reason, Status};
 use crate::types::v1alpha1::tenant::Tenant;
 use crate::{context, types};
+use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
-use kube::ResourceExt;
-use kube::api::{DeleteParams, ListParams, PropagationPolicy};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
+use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
+use kube::{Resource, ResourceExt};
 use snafu::Snafu;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +33,8 @@ mod phases;
 mod pool_lifecycle;
 mod provisioning;
 mod tls;
+
+const OUT_OF_SERVICE_TAINT_KEY: &str = "node.kubernetes.io/out-of-service";
 
 use phases::{
     cleanup_removed_decommissioned_pool_statefulsets, finalize_tenant_status,
@@ -338,17 +342,110 @@ fn condition_marker(
         .map(|condition| (condition.status.clone(), condition.reason.clone()))
 }
 
-fn statefulset_owned_by_tenant(
-    ss: &k8s_openapi::api::apps::v1::StatefulSet,
-    tenant: &Tenant,
-) -> bool {
-    ss.metadata.owner_references.as_ref().is_some_and(|refs| {
+fn object_owned_by_tenant(metadata: &metav1::ObjectMeta, tenant: &Tenant) -> bool {
+    let Some(tenant_uid) = tenant.metadata.uid.as_deref().filter(|uid| !uid.is_empty()) else {
+        return false;
+    };
+
+    metadata.owner_references.as_ref().is_some_and(|refs| {
         refs.iter().any(|owner| {
-            owner.kind == "Tenant"
+            owner.api_version == Tenant::api_version(&())
+                && owner.kind == Tenant::kind(&())
                 && owner.name == tenant.name()
-                && owner.uid == tenant.metadata.uid.as_deref().unwrap_or("")
+                && owner.uid == tenant_uid
+                && owner.controller == Some(true)
         })
     })
+}
+
+fn statefulset_owned_by_tenant(ss: &appsv1::StatefulSet, tenant: &Tenant) -> bool {
+    object_owned_by_tenant(&ss.metadata, tenant)
+}
+
+fn statefulset_matches_pod_controller_and_tenant(
+    pod: &corev1::Pod,
+    statefulset: &appsv1::StatefulSet,
+    tenant: &Tenant,
+) -> bool {
+    let Some((_, statefulset_uid)) = pod_controller_owner_name_and_uid(pod, "StatefulSet") else {
+        return false;
+    };
+
+    statefulset_owned_by_tenant(statefulset, tenant)
+        && statefulset.metadata.uid.as_deref() == Some(statefulset_uid.as_str())
+}
+
+fn replicaset_matches_pod_controller_and_tenant(
+    pod: &corev1::Pod,
+    replicaset: &appsv1::ReplicaSet,
+    owning_deployment: Option<&appsv1::Deployment>,
+    tenant: &Tenant,
+) -> bool {
+    let Some((_, replicaset_uid)) = pod_controller_owner_name_and_uid(pod, "ReplicaSet") else {
+        return false;
+    };
+    if replicaset.metadata.uid.as_deref() != Some(replicaset_uid.as_str()) {
+        return false;
+    }
+    if object_owned_by_tenant(&replicaset.metadata, tenant) {
+        return true;
+    }
+
+    let Some((_, deployment_uid)) =
+        controller_owner_name_and_uid(replicaset.metadata.owner_references.as_ref(), "Deployment")
+    else {
+        return false;
+    };
+    let Some(deployment) = owning_deployment else {
+        return false;
+    };
+
+    object_owned_by_tenant(&deployment.metadata, tenant)
+        && deployment.metadata.uid.as_deref() == Some(deployment_uid.as_str())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NodePodDeletionSafety {
+    Ready,
+    DownUnfenced,
+    Fenced,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PodDeletionPlan {
+    force: bool,
+    precondition_uid: Option<String>,
+    event_reason: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PodCleanupDecision {
+    Skip,
+    SkipForceDeleteNeedsFencing,
+    Delete(PodDeletionPlan),
+}
+
+impl PodDeletionPlan {
+    fn delete_params(&self) -> DeleteParams {
+        let preconditions = self.precondition_uid.clone().map(|uid| Preconditions {
+            uid: Some(uid),
+            resource_version: None,
+        });
+
+        if self.force {
+            DeleteParams {
+                grace_period_seconds: Some(0),
+                propagation_policy: Some(PropagationPolicy::Background),
+                preconditions,
+                ..DeleteParams::default()
+            }
+        } else {
+            DeleteParams {
+                preconditions,
+                ..DeleteParams::default()
+            }
+        }
+    }
 }
 
 async fn cleanup_stuck_terminating_pods_on_down_nodes(
@@ -359,6 +456,12 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
 ) -> Result<(), Error> {
     let pods_api: kube::Api<corev1::Pod> = kube::Api::namespaced(ctx.client.clone(), namespace);
     let nodes_api: kube::Api<corev1::Node> = kube::Api::all(ctx.client.clone());
+    let statefulsets_api: kube::Api<appsv1::StatefulSet> =
+        kube::Api::namespaced(ctx.client.clone(), namespace);
+    let replicasets_api: kube::Api<appsv1::ReplicaSet> =
+        kube::Api::namespaced(ctx.client.clone(), namespace);
+    let deployments_api: kube::Api<appsv1::Deployment> =
+        kube::Api::namespaced(ctx.client.clone(), namespace);
 
     let selector = format!("rustfs.tenant={}", tenant.name());
     let pods = pods_api
@@ -382,13 +485,105 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
             continue;
         }
 
+        let mut verified_tenant_owner = object_owned_by_tenant(&pod.metadata, tenant);
+        if let Some((statefulset_name, _statefulset_uid)) =
+            pod_controller_owner_name_and_uid(&pod, "StatefulSet")
+        {
+            let owned_by_tenant = match statefulsets_api.get(&statefulset_name).await {
+                Ok(statefulset) => {
+                    statefulset_matches_pod_controller_and_tenant(&pod, &statefulset, tenant)
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => false,
+                Err(source) => {
+                    return Err(Error::Context {
+                        source: context::Error::Kube { source },
+                    });
+                }
+            };
+
+            if !owned_by_tenant {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pod = %pod.name_any(),
+                    statefulset = %statefulset_name,
+                    "skipping terminating StatefulSet pod because the owner StatefulSet is not owned by this tenant"
+                );
+                continue;
+            }
+            verified_tenant_owner = true;
+        }
+        if let Some((replicaset_name, _replicaset_uid)) =
+            pod_controller_owner_name_and_uid(&pod, "ReplicaSet")
+        {
+            let owned_by_tenant = match replicasets_api.get(&replicaset_name).await {
+                Ok(replicaset) => {
+                    let deployment = if object_owned_by_tenant(&replicaset.metadata, tenant) {
+                        None
+                    } else if let Some((deployment_name, _deployment_uid)) =
+                        controller_owner_name_and_uid(
+                            replicaset.metadata.owner_references.as_ref(),
+                            "Deployment",
+                        )
+                    {
+                        match deployments_api.get(&deployment_name).await {
+                            Ok(deployment) => Some(deployment),
+                            Err(kube::Error::Api(ae)) if ae.code == 404 => None,
+                            Err(source) => {
+                                return Err(Error::Context {
+                                    source: context::Error::Kube { source },
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    replicaset_matches_pod_controller_and_tenant(
+                        &pod,
+                        &replicaset,
+                        deployment.as_ref(),
+                        tenant,
+                    )
+                }
+                Err(kube::Error::Api(ae)) if ae.code == 404 => false,
+                Err(source) => {
+                    return Err(Error::Context {
+                        source: context::Error::Kube { source },
+                    });
+                }
+            };
+
+            if !owned_by_tenant {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pod = %pod.name_any(),
+                    replicaset = %replicaset_name,
+                    "skipping terminating ReplicaSet pod because the owner chain is not owned by this tenant"
+                );
+                continue;
+            }
+            verified_tenant_owner = true;
+        }
+
+        if !verified_tenant_owner {
+            warn!(
+                tenant = %tenant.name(),
+                namespace = %namespace,
+                pod = %pod.name_any(),
+                "skipping terminating pod because it does not have a verified Tenant owner chain"
+            );
+            continue;
+        }
+
         let Some(node_name) = pod.spec.as_ref().and_then(|s| s.node_name.clone()) else {
             continue;
         };
 
-        let node_is_down = match nodes_api.get(&node_name).await {
-            Ok(node) => is_node_down(&node),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => true,
+        let node_deletion_safety = match nodes_api.get(&node_name).await {
+            Ok(node) => node_pod_deletion_safety(&node, &pod),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => NodePodDeletionSafety::Fenced,
             Err(source) => {
                 return Err(Error::Context {
                     source: context::Error::Kube { source },
@@ -396,9 +591,25 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
             }
         };
 
-        if !node_is_down {
+        if node_deletion_safety == NodePodDeletionSafety::Ready {
             continue;
         }
+
+        let deletion_plan = match cleanup_decision_for_pod(&pod, &policy, node_deletion_safety) {
+            PodCleanupDecision::Skip => continue,
+            PodCleanupDecision::SkipForceDeleteNeedsFencing => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    node = %node_name,
+                    pod = %pod.name_any(),
+                    policy = ?policy,
+                    "skipping pod force deletion because the node is not fenced"
+                );
+                continue;
+            }
+            PodCleanupDecision::Delete(plan) => plan,
+        };
 
         let pod_name = pod.name_any();
         warn!(
@@ -409,49 +620,15 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
             policy = ?policy,
             "terminating pod is scheduled on a down node"
         );
-        let delete_params = match policy {
-            crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing => continue,
-            // Legacy option: normal delete.
-            crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::Delete => {
-                DeleteParams::default()
-            }
-            // Legacy option: explicit force delete.
-            crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete
-            // Longhorn-compatible options: always force delete.
-            | crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DeleteStatefulSetPod
-            | crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DeleteDeploymentPod
-            | crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DeleteBothStatefulSetAndDeploymentPod => {
-                DeleteParams {
-                    grace_period_seconds: Some(0),
-                    propagation_policy: Some(PropagationPolicy::Background),
-                    ..DeleteParams::default()
-                }
-            }
-        };
+        let delete_params = deletion_plan.delete_params();
 
         match pods_api.delete(&pod_name, &delete_params).await {
             Ok(_) => {
-                let reason = match policy {
-                    crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete => {
-                        "ForceDeletedPodOnDownNode"
-                    }
-                    crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::Delete => {
-                        "DeletedPodOnDownNode"
-                    }
-                    crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DeleteStatefulSetPod
-                    | crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DeleteDeploymentPod
-                    | crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DeleteBothStatefulSetAndDeploymentPod => {
-                        "LonghornLikeForceDeletedPodOnDownNode"
-                    }
-                    crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing => {
-                        ""
-                    }
-                };
                 let _ = ctx
                     .record(
                         tenant,
                         EventType::Warning,
-                        reason,
+                        deletion_plan.event_reason,
                         &format!(
                             "Pod '{}' is terminating on down node '{}'; applied policy {:?}",
                             pod_name, node_name, policy
@@ -461,6 +638,15 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
             }
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
                 // Pod already gone.
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                // UID precondition failed; a new object may already exist with the same pod name.
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pod = %pod_name,
+                    "skipping pod deletion because the pod changed before delete"
+                );
             }
             Err(source) => {
                 return Err(Error::Context {
@@ -492,10 +678,152 @@ fn pod_matches_policy_controller_kind(
 }
 
 fn pod_has_owner_kind(pod: &corev1::Pod, kind: &str) -> bool {
-    pod.metadata
-        .owner_references
+    pod_controller_owner_name_and_uid(pod, kind).is_some()
+}
+
+fn pod_controller_owner_name_and_uid(pod: &corev1::Pod, kind: &str) -> Option<(String, String)> {
+    controller_owner_name_and_uid(pod.metadata.owner_references.as_ref(), kind)
+}
+
+fn controller_owner_name_and_uid(
+    owner_references: Option<&Vec<metav1::OwnerReference>>,
+    kind: &str,
+) -> Option<(String, String)> {
+    owner_references.and_then(|refs| {
+        refs.iter()
+            .find(|r| r.kind == kind && r.api_version == "apps/v1" && r.controller == Some(true))
+            .map(|r| (r.name.clone(), r.uid.clone()))
+    })
+}
+
+fn force_delete_requires_fencing(
+    policy: &crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown,
+) -> bool {
+    use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+    matches!(
+        policy,
+        P::ForceDelete
+            | P::DeleteStatefulSetPod
+            | P::DeleteDeploymentPod
+            | P::DeleteBothStatefulSetAndDeploymentPod
+    )
+}
+
+fn cleanup_decision_for_pod(
+    pod: &corev1::Pod,
+    policy: &crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown,
+    node_deletion_safety: NodePodDeletionSafety,
+) -> PodCleanupDecision {
+    use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+    if !pod_matches_policy_controller_kind(pod, policy)
+        || node_deletion_safety == NodePodDeletionSafety::Ready
+    {
+        return PodCleanupDecision::Skip;
+    }
+
+    if force_delete_requires_fencing(policy)
+        && node_deletion_safety != NodePodDeletionSafety::Fenced
+    {
+        return PodCleanupDecision::SkipForceDeleteNeedsFencing;
+    }
+
+    let precondition_uid = pod.metadata.uid.clone();
+    match policy {
+        P::DoNothing => PodCleanupDecision::Skip,
+        P::Delete => PodCleanupDecision::Delete(PodDeletionPlan {
+            force: false,
+            precondition_uid,
+            event_reason: "DeletedPodOnDownNode",
+        }),
+        P::ForceDelete => PodCleanupDecision::Delete(PodDeletionPlan {
+            force: true,
+            precondition_uid,
+            event_reason: "ForceDeletedPodOnDownNode",
+        }),
+        P::DeleteStatefulSetPod
+        | P::DeleteDeploymentPod
+        | P::DeleteBothStatefulSetAndDeploymentPod => PodCleanupDecision::Delete(PodDeletionPlan {
+            force: true,
+            precondition_uid,
+            event_reason: "LonghornLikeForceDeletedPodOnDownNode",
+        }),
+    }
+}
+
+fn node_pod_deletion_safety(node: &corev1::Node, pod: &corev1::Pod) -> NodePodDeletionSafety {
+    if !is_node_down(node) {
+        return NodePodDeletionSafety::Ready;
+    }
+
+    if node_has_effective_out_of_service_taint(node, pod) {
+        NodePodDeletionSafety::Fenced
+    } else {
+        NodePodDeletionSafety::DownUnfenced
+    }
+}
+
+fn node_has_effective_out_of_service_taint(node: &corev1::Node, pod: &corev1::Pod) -> bool {
+    node.spec
         .as_ref()
-        .is_some_and(|refs| refs.iter().any(|r| r.kind == kind))
+        .and_then(|spec| spec.taints.as_ref())
+        .is_some_and(|taints| {
+            taints.iter().any(|taint| {
+                taint.key == OUT_OF_SERVICE_TAINT_KEY
+                    && !pod_tolerates_taint(pod, taint)
+                    && (taint.effect == "NoExecute" || taint.effect == "NoSchedule")
+            })
+        })
+}
+
+fn pod_tolerates_taint(pod: &corev1::Pod, taint: &corev1::Taint) -> bool {
+    pod.spec
+        .as_ref()
+        .and_then(|spec| spec.tolerations.as_ref())
+        .is_some_and(|tolerations| {
+            tolerations
+                .iter()
+                .any(|toleration| toleration_matches_taint(toleration, taint))
+        })
+}
+
+fn toleration_matches_taint(toleration: &corev1::Toleration, taint: &corev1::Taint) -> bool {
+    let effect_matches = toleration
+        .effect
+        .as_deref()
+        .is_none_or(|effect| effect == taint.effect.as_str());
+    if !effect_matches {
+        return false;
+    }
+
+    let key_value_matches = match toleration.operator.as_deref().unwrap_or("Equal") {
+        "Exists" => toleration
+            .key
+            .as_deref()
+            .is_none_or(|key| key.is_empty() || key == taint.key),
+        _ => {
+            toleration.key.as_deref() == Some(taint.key.as_str())
+                && toleration.value.as_deref() == taint.value.as_deref()
+        }
+    };
+    if !key_value_matches {
+        return false;
+    }
+
+    if taint.effect == "NoExecute"
+        && let Some(seconds) = toleration.toleration_seconds
+    {
+        if seconds <= 0 {
+            return false;
+        }
+
+        return taint.time_added.as_ref().is_none_or(|time_added| {
+            chrono::Utc::now() < time_added.0 + chrono::Duration::seconds(seconds)
+        });
+    }
+
+    true
 }
 
 fn is_node_down(node: &corev1::Node) -> bool {
@@ -556,6 +884,7 @@ pub fn error_policy(object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> A
             // Use 60-second requeue to reduce event/log spam while user fixes the issue
             types::error::Error::ImmutableFieldModified { .. }
             | types::error::Error::InvalidTenantName { .. }
+            | types::error::Error::KmsMigrationBlocked { .. }
             | types::error::Error::PoolDeleteBlocked { .. } => Duration::from_secs(60),
 
             // Other type errors - use moderate requeue
@@ -600,6 +929,7 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
             types::error::Error::InvalidPoolSpec { .. } => "InvalidPoolSpec",
             types::error::Error::ImmutableFieldModified { .. } => "ImmutableFieldModified",
             types::error::Error::PoolDeleteBlocked { .. } => "PoolDeleteBlocked",
+            types::error::Error::KmsMigrationBlocked { .. } => "KmsMigrationBlocked",
             types::error::Error::NoNamespace => "NoNamespace",
             types::error::Error::InternalError { .. } => "InternalError",
             types::error::Error::SerdeJson { .. } => "SerdeJsonError",
@@ -613,12 +943,206 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
 mod tests {
     use super::is_node_down;
     use super::{
-        pod_has_owner_kind, pod_matches_policy_controller_kind, should_create_rbac,
-        should_mark_reconcile_started,
+        NodePodDeletionSafety, PodCleanupDecision, cleanup_decision_for_pod,
+        force_delete_requires_fencing, node_pod_deletion_safety, object_owned_by_tenant,
+        pod_controller_owner_name_and_uid, pod_has_owner_kind, pod_matches_policy_controller_kind,
+        replicaset_matches_pod_controller_and_tenant, should_create_rbac,
+        should_mark_reconcile_started, statefulset_matches_pod_controller_and_tenant,
     };
     use crate::types::v1alpha1::status::Status;
+    use k8s_openapi::api::apps::v1 as appsv1;
     use k8s_openapi::api::core::v1 as corev1;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
+
+    fn node_with_ready_status(status: &str) -> corev1::Node {
+        corev1::Node {
+            status: Some(corev1::NodeStatus {
+                conditions: Some(vec![corev1::NodeCondition {
+                    type_: "Ready".to_string(),
+                    status: status.to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn node_with_out_of_service_taint() -> corev1::Node {
+        let mut node = node_with_ready_status("Unknown");
+        node.spec = Some(corev1::NodeSpec {
+            taints: Some(vec![corev1::Taint {
+                key: super::OUT_OF_SERVICE_TAINT_KEY.to_string(),
+                value: Some("nodeshutdown".to_string()),
+                effect: "NoExecute".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        node
+    }
+
+    fn owner_reference(kind: &str) -> metav1::OwnerReference {
+        metav1::OwnerReference {
+            api_version: "apps/v1".to_string(),
+            kind: kind.to_string(),
+            name: "owner".to_string(),
+            uid: "uid".to_string(),
+            controller: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn pod_with_owner(kind: &str) -> corev1::Pod {
+        corev1::Pod {
+            metadata: metav1::ObjectMeta {
+                uid: Some("pod-uid".to_string()),
+                deletion_timestamp: Some(metav1::Time(chrono::Utc::now())),
+                owner_references: Some(vec![owner_reference(kind)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn statefulset_owned_by_test_tenant(uid: &str, tenant_uid: &str) -> appsv1::StatefulSet {
+        appsv1::StatefulSet {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner".to_string()),
+                uid: Some(uid.to_string()),
+                owner_references: Some(vec![tenant_owner_reference(tenant_uid)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn tenant_owner_reference(uid: &str) -> metav1::OwnerReference {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.uid = Some(uid.to_string());
+        tenant.new_owner_ref()
+    }
+
+    fn deployment_owner_reference(uid: &str) -> metav1::OwnerReference {
+        metav1::OwnerReference {
+            api_version: "apps/v1".to_string(),
+            kind: "Deployment".to_string(),
+            name: "owner-deployment".to_string(),
+            uid: uid.to_string(),
+            controller: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn replicaset_owned_by_test_tenant(uid: &str, tenant_uid: &str) -> appsv1::ReplicaSet {
+        appsv1::ReplicaSet {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner".to_string()),
+                uid: Some(uid.to_string()),
+                owner_references: Some(vec![tenant_owner_reference(tenant_uid)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn replicaset_owned_by_deployment(uid: &str, deployment_uid: &str) -> appsv1::ReplicaSet {
+        appsv1::ReplicaSet {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner".to_string()),
+                uid: Some(uid.to_string()),
+                owner_references: Some(vec![deployment_owner_reference(deployment_uid)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn deployment_owned_by_test_tenant(uid: &str, tenant_uid: &str) -> appsv1::Deployment {
+        appsv1::Deployment {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner-deployment".to_string()),
+                uid: Some(uid.to_string()),
+                owner_references: Some(vec![tenant_owner_reference(tenant_uid)]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn object_meta_with_owner_reference(owner: metav1::OwnerReference) -> metav1::ObjectMeta {
+        metav1::ObjectMeta {
+            owner_references: Some(vec![owner]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_object_owner_match_requires_tenant_api_version() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let mut owner_ref = tenant_owner_reference("test-uid-123");
+
+        assert!(object_owned_by_tenant(
+            &object_meta_with_owner_reference(owner_ref.clone()),
+            &tenant
+        ));
+
+        owner_ref.api_version = "rustfs.com/v1beta1".to_string();
+        assert!(!object_owned_by_tenant(
+            &object_meta_with_owner_reference(owner_ref),
+            &tenant
+        ));
+    }
+
+    #[test]
+    fn test_object_owner_match_requires_controller_tenant_ref() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let mut non_controller_owner = tenant_owner_reference("test-uid-123");
+        non_controller_owner.controller = Some(false);
+        let mut missing_controller_owner = tenant_owner_reference("test-uid-123");
+        missing_controller_owner.controller = None;
+
+        assert!(!object_owned_by_tenant(
+            &object_meta_with_owner_reference(non_controller_owner),
+            &tenant
+        ));
+        assert!(!object_owned_by_tenant(
+            &object_meta_with_owner_reference(missing_controller_owner),
+            &tenant
+        ));
+    }
+
+    #[test]
+    fn test_object_owner_match_requires_tenant_uid() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.uid = None;
+
+        assert!(!object_owned_by_tenant(
+            &object_meta_with_owner_reference(tenant_owner_reference("")),
+            &tenant
+        ));
+    }
+
+    #[test]
+    fn test_legacy_delete_policy_does_not_make_bare_labeled_pod_owned() {
+        use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pod = corev1::Pod {
+            metadata: metav1::ObjectMeta {
+                name: Some("bare-labeled-pod".to_string()),
+                labels: Some(std::collections::BTreeMap::from([(
+                    "rustfs.tenant".to_string(),
+                    "test-tenant".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(pod_matches_policy_controller_kind(&pod, &P::ForceDelete));
+        assert!(!object_owned_by_tenant(&pod.metadata, &tenant));
+    }
 
     #[test]
     fn should_not_mark_reconcile_started_when_generation_is_current() {
@@ -698,54 +1222,126 @@ mod tests {
 
     #[test]
     fn test_is_node_down_ready_true() {
-        let node = corev1::Node {
-            status: Some(corev1::NodeStatus {
-                conditions: Some(vec![corev1::NodeCondition {
-                    type_: "Ready".to_string(),
-                    status: "True".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let node = node_with_ready_status("True");
         assert!(!is_node_down(&node));
     }
 
     #[test]
     fn test_is_node_down_ready_false() {
-        let node = corev1::Node {
-            status: Some(corev1::NodeStatus {
-                conditions: Some(vec![corev1::NodeCondition {
-                    type_: "Ready".to_string(),
-                    status: "False".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let node = node_with_ready_status("False");
         assert!(is_node_down(&node));
     }
 
     #[test]
     fn test_is_node_down_ready_unknown() {
-        let node = corev1::Node {
-            status: Some(corev1::NodeStatus {
-                conditions: Some(vec![corev1::NodeCondition {
-                    type_: "Ready".to_string(),
-                    status: "Unknown".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+        let node = node_with_ready_status("Unknown");
         assert!(is_node_down(&node));
     }
 
     #[test]
+    fn test_node_deletion_safety_ready_unknown_without_taint_is_unfenced() {
+        let node = node_with_ready_status("Unknown");
+        let pod = pod_with_owner("StatefulSet");
+
+        assert_eq!(
+            node_pod_deletion_safety(&node, &pod),
+            NodePodDeletionSafety::DownUnfenced
+        );
+    }
+
+    #[test]
+    fn test_node_deletion_safety_out_of_service_taint_is_fenced() {
+        let node = node_with_out_of_service_taint();
+        let pod = pod_with_owner("StatefulSet");
+
+        assert_eq!(
+            node_pod_deletion_safety(&node, &pod),
+            NodePodDeletionSafety::Fenced
+        );
+    }
+
+    #[test]
+    fn test_node_deletion_safety_ready_true_with_out_of_service_taint_is_ready() {
+        let mut node = node_with_out_of_service_taint();
+        node.status = Some(corev1::NodeStatus {
+            conditions: Some(vec![corev1::NodeCondition {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        let pod = pod_with_owner("StatefulSet");
+
+        assert_eq!(
+            node_pod_deletion_safety(&node, &pod),
+            NodePodDeletionSafety::Ready
+        );
+    }
+
+    #[test]
+    fn test_node_deletion_safety_tolerated_out_of_service_taint_is_unfenced() {
+        let node = node_with_out_of_service_taint();
+        let mut pod = pod_with_owner("StatefulSet");
+        pod.spec = Some(corev1::PodSpec {
+            tolerations: Some(vec![corev1::Toleration {
+                key: Some(super::OUT_OF_SERVICE_TAINT_KEY.to_string()),
+                operator: Some("Exists".to_string()),
+                effect: Some("NoExecute".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            node_pod_deletion_safety(&node, &pod),
+            NodePodDeletionSafety::DownUnfenced
+        );
+    }
+
+    #[test]
+    fn test_node_deletion_safety_expired_toleration_no_longer_blocks_fencing() {
+        let mut node = node_with_out_of_service_taint();
+        node.spec
+            .as_mut()
+            .and_then(|spec| spec.taints.as_mut())
+            .and_then(|taints| taints.first_mut())
+            .expect("out-of-service taint should exist")
+            .time_added = Some(metav1::Time(
+            chrono::Utc::now() - chrono::Duration::seconds(60),
+        ));
+        let mut pod = pod_with_owner("StatefulSet");
+        pod.spec = Some(corev1::PodSpec {
+            tolerations: Some(vec![corev1::Toleration {
+                key: Some(super::OUT_OF_SERVICE_TAINT_KEY.to_string()),
+                operator: Some("Exists".to_string()),
+                effect: Some("NoExecute".to_string()),
+                toleration_seconds: Some(1),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            node_pod_deletion_safety(&node, &pod),
+            NodePodDeletionSafety::Fenced
+        );
+    }
+
+    #[test]
     fn test_pod_owner_kind_helpers() {
+        let pod = pod_with_owner("StatefulSet");
+
+        assert!(pod_has_owner_kind(&pod, "StatefulSet"));
+        assert!(!pod_has_owner_kind(&pod, "ReplicaSet"));
+        assert_eq!(
+            pod_controller_owner_name_and_uid(&pod, "StatefulSet"),
+            Some(("owner".to_string(), "uid".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_pod_owner_kind_requires_controller_owner() {
         let pod = corev1::Pod {
             metadata: metav1::ObjectMeta {
                 owner_references: Some(vec![metav1::OwnerReference {
@@ -753,6 +1349,7 @@ mod tests {
                     kind: "StatefulSet".to_string(),
                     name: "ss".to_string(),
                     uid: "uid".to_string(),
+                    controller: Some(false),
                     ..Default::default()
                 }]),
                 ..Default::default()
@@ -760,43 +1357,203 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(pod_has_owner_kind(&pod, "StatefulSet"));
-        assert!(!pod_has_owner_kind(&pod, "ReplicaSet"));
+        assert!(!pod_has_owner_kind(&pod, "StatefulSet"));
+    }
+
+    #[test]
+    fn test_statefulset_owner_match_requires_tenant_and_statefulset_uid() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pod = pod_with_owner("StatefulSet");
+        let matching_statefulset = statefulset_owned_by_test_tenant("uid", "test-uid-123");
+        let wrong_statefulset_uid = statefulset_owned_by_test_tenant("other-uid", "test-uid-123");
+        let wrong_tenant_uid = statefulset_owned_by_test_tenant("uid", "other-tenant-uid");
+
+        assert!(statefulset_matches_pod_controller_and_tenant(
+            &pod,
+            &matching_statefulset,
+            &tenant
+        ));
+        assert!(!statefulset_matches_pod_controller_and_tenant(
+            &pod,
+            &wrong_statefulset_uid,
+            &tenant
+        ));
+        assert!(!statefulset_matches_pod_controller_and_tenant(
+            &pod,
+            &wrong_tenant_uid,
+            &tenant
+        ));
+    }
+
+    #[test]
+    fn test_replicaset_owner_match_requires_tenant_owner_chain_and_uid() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pod = pod_with_owner("ReplicaSet");
+        let matching_replicaset = replicaset_owned_by_test_tenant("uid", "test-uid-123");
+        let wrong_replicaset_uid = replicaset_owned_by_test_tenant("other-uid", "test-uid-123");
+        let deployment_owned_replicaset = replicaset_owned_by_deployment("uid", "deployment-uid");
+        let matching_deployment = deployment_owned_by_test_tenant("deployment-uid", "test-uid-123");
+        let wrong_deployment_tenant =
+            deployment_owned_by_test_tenant("deployment-uid", "other-tenant-uid");
+
+        assert!(replicaset_matches_pod_controller_and_tenant(
+            &pod,
+            &matching_replicaset,
+            None,
+            &tenant
+        ));
+        assert!(!replicaset_matches_pod_controller_and_tenant(
+            &pod,
+            &wrong_replicaset_uid,
+            None,
+            &tenant
+        ));
+        assert!(replicaset_matches_pod_controller_and_tenant(
+            &pod,
+            &deployment_owned_replicaset,
+            Some(&matching_deployment),
+            &tenant
+        ));
+        assert!(!replicaset_matches_pod_controller_and_tenant(
+            &pod,
+            &deployment_owned_replicaset,
+            Some(&wrong_deployment_tenant),
+            &tenant
+        ));
+        assert!(!replicaset_matches_pod_controller_and_tenant(
+            &pod,
+            &deployment_owned_replicaset,
+            None,
+            &tenant
+        ));
+    }
+
+    #[test]
+    fn test_force_delete_policies_require_fencing() {
+        use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+        assert!(force_delete_requires_fencing(&P::ForceDelete));
+        assert!(force_delete_requires_fencing(&P::DeleteStatefulSetPod));
+        assert!(force_delete_requires_fencing(&P::DeleteDeploymentPod));
+        assert!(force_delete_requires_fencing(
+            &P::DeleteBothStatefulSetAndDeploymentPod
+        ));
+        assert!(!force_delete_requires_fencing(&P::Delete));
+        assert!(!force_delete_requires_fencing(&P::DoNothing));
+    }
+
+    #[test]
+    fn test_cleanup_decision_force_delete_uses_uid_precondition() {
+        use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+        let pod = pod_with_owner("StatefulSet");
+        let decision =
+            cleanup_decision_for_pod(&pod, &P::ForceDelete, NodePodDeletionSafety::Fenced);
+
+        let PodCleanupDecision::Delete(plan) = decision else {
+            panic!("expected force-delete plan");
+        };
+        assert!(plan.force);
+        assert_eq!(plan.precondition_uid.as_deref(), Some("pod-uid"));
+        assert_eq!(plan.event_reason, "ForceDeletedPodOnDownNode");
+
+        let delete_params = plan.delete_params();
+        assert_eq!(delete_params.grace_period_seconds, Some(0));
+        assert_eq!(
+            delete_params
+                .preconditions
+                .as_ref()
+                .and_then(|preconditions| preconditions.uid.as_deref()),
+            Some("pod-uid")
+        );
+    }
+
+    #[test]
+    fn test_cleanup_decision_normal_delete_keeps_uid_precondition_without_force() {
+        use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+        let pod = pod_with_owner("StatefulSet");
+        let decision =
+            cleanup_decision_for_pod(&pod, &P::Delete, NodePodDeletionSafety::DownUnfenced);
+
+        let PodCleanupDecision::Delete(plan) = decision else {
+            panic!("expected normal delete plan");
+        };
+        assert!(!plan.force);
+        assert_eq!(plan.precondition_uid.as_deref(), Some("pod-uid"));
+        assert_eq!(plan.event_reason, "DeletedPodOnDownNode");
+
+        let delete_params = plan.delete_params();
+        assert_eq!(delete_params.grace_period_seconds, None);
+        assert_eq!(
+            delete_params
+                .preconditions
+                .as_ref()
+                .and_then(|preconditions| preconditions.uid.as_deref()),
+            Some("pod-uid")
+        );
+    }
+
+    #[test]
+    fn test_cleanup_decision_skips_unfenced_force_delete() {
+        use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+        let statefulset_pod = pod_with_owner("StatefulSet");
+        let deployment_pod = pod_with_owner("ReplicaSet");
+
+        assert_eq!(
+            cleanup_decision_for_pod(
+                &statefulset_pod,
+                &P::ForceDelete,
+                NodePodDeletionSafety::DownUnfenced
+            ),
+            PodCleanupDecision::SkipForceDeleteNeedsFencing
+        );
+        assert_eq!(
+            cleanup_decision_for_pod(
+                &statefulset_pod,
+                &P::DeleteStatefulSetPod,
+                NodePodDeletionSafety::DownUnfenced
+            ),
+            PodCleanupDecision::SkipForceDeleteNeedsFencing
+        );
+        assert_eq!(
+            cleanup_decision_for_pod(
+                &deployment_pod,
+                &P::DeleteDeploymentPod,
+                NodePodDeletionSafety::DownUnfenced
+            ),
+            PodCleanupDecision::SkipForceDeleteNeedsFencing
+        );
+    }
+
+    #[test]
+    fn test_cleanup_decision_skips_ready_node_and_controller_mismatch() {
+        use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+        let ss_pod = pod_with_owner("StatefulSet");
+        let deploy_pod = pod_with_owner("ReplicaSet");
+
+        assert_eq!(
+            cleanup_decision_for_pod(&ss_pod, &P::Delete, NodePodDeletionSafety::Ready),
+            PodCleanupDecision::Skip
+        );
+        assert_eq!(
+            cleanup_decision_for_pod(
+                &deploy_pod,
+                &P::DeleteStatefulSetPod,
+                NodePodDeletionSafety::Fenced
+            ),
+            PodCleanupDecision::Skip
+        );
     }
 
     #[test]
     fn test_policy_controller_kind_matching_longhorn_like() {
         use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
 
-        let ss_pod = corev1::Pod {
-            metadata: metav1::ObjectMeta {
-                deletion_timestamp: Some(metav1::Time(chrono::Utc::now())),
-                owner_references: Some(vec![metav1::OwnerReference {
-                    api_version: "apps/v1".to_string(),
-                    kind: "StatefulSet".to_string(),
-                    name: "ss".to_string(),
-                    uid: "uid".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let deploy_pod = corev1::Pod {
-            metadata: metav1::ObjectMeta {
-                deletion_timestamp: Some(metav1::Time(chrono::Utc::now())),
-                owner_references: Some(vec![metav1::OwnerReference {
-                    api_version: "apps/v1".to_string(),
-                    kind: "ReplicaSet".to_string(),
-                    name: "rs".to_string(),
-                    uid: "uid".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let ss_pod = pod_with_owner("StatefulSet");
+        let deploy_pod = pod_with_owner("ReplicaSet");
 
         assert!(pod_matches_policy_controller_kind(
             &ss_pod,

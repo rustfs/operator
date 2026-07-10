@@ -345,6 +345,7 @@ The operator reserves these environment variables and manages them automatically
 - `RUSTFS_ADDRESS`
 - `RUSTFS_CONSOLE_ADDRESS`
 - `RUSTFS_CONSOLE_ENABLE`
+- `RUSTFS_KMS_*` variables; use `spec.encryption` instead.
 - TLS-related RustFS variables when Tenant TLS is enabled.
 
 For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered as the local data path, for example `/data/rustfs0`. Multi-pool tenants and other layouts render peer DNS URLs through the Tenant headless Service and are validated by RustFS at runtime.
@@ -358,7 +359,7 @@ For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered a
 - `DeleteDeploymentPod`: Longhorn-compatible force delete for Deployment pods stuck on down nodes.
 - `DeleteBothStatefulSetAndDeploymentPod`: Longhorn-compatible force delete for both StatefulSet and Deployment pods.
 
-Force deletion can have data consistency implications. Use it only when the storage backend and operational procedure are designed for that failure mode.
+Force deletion can have data consistency implications. Use it only when the storage backend and operational procedure are designed for that failure mode. Force deletion requires the Node object to be deleted or marked with an effective `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate, so volume detach fencing is explicit.
 
 ### 7.5 TLS
 
@@ -425,10 +426,46 @@ Supported backends:
 
 | Backend | Purpose |
 |---------|---------|
-| `local` | File-based local KMS key directory. The directory must be absolute, and the Tenant must have exactly one RustFS server replica across all pools. |
+| `local` | File-based local KMS key directory and local master key. The directory must be absolute, must be in a subdirectory under a RustFS data PVC mount, and the Tenant must have exactly one RustFS server replica across all pools. |
 | `vault` | HashiCorp Vault endpoint. Requires a Secret containing `vault-token`. |
 
-Local KMS does not use `kmsSecret`; if you set one, it is ignored. Use Vault KMS for multi-server Tenants.
+Local KMS does not use `kmsSecret`; if you set one, it is ignored. Configure the local master key with `spec.encryption.local.masterKeySecretRef`, which maps to RustFS `RUSTFS_KMS_LOCAL_MASTER_KEY`. By default, Local KMS stores key files under the first data PVC mount, for example `/data/rustfs0/.kms-keys` when `persistence.path` is `/data`. Use Vault KMS for multi-server Tenants. `allowInsecureDevDefaults: true` maps to `RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS=true` and should only be used for development because RustFS may store Local KMS key material as plaintext-dev-only.
+
+Upgrade note: older operator versions defaulted Local KMS to `/data/kms-keys`, which was not on a data PVC. The operator does not migrate key files automatically. For an existing Local KMS Tenant that still uses the old implicit default, or that explicitly set the legacy path, the operator blocks reconciliation or StatefulSet rollout until you copy any existing key files and `.master-key.salt` into the new PVC-backed directory, keep using the same local master key Secret, then set `spec.encryption.local.keyDirectory` explicitly to that subdirectory.
+
+Local example:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-local-kms
+  namespace: storage
+type: Opaque
+stringData:
+  local-master-key: "replace-with-a-strong-local-kms-master-key"
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-local
+  namespace: storage
+spec:
+  pools:
+    - name: pool-0
+      servers: 1
+      persistence:
+        volumesPerServer: 1
+  encryption:
+    enabled: true
+    backend: local
+    local:
+      keyDirectory: /data/rustfs0/.kms-keys
+      masterKeySecretRef:
+        name: rustfs-local-kms
+        key: local-master-key
+    defaultKeyId: tenant-default
+```
 
 Vault example:
 
@@ -765,7 +802,7 @@ Common blocked reasons:
 | `CredentialSecretNotFound` | Secret exists in the Tenant namespace. |
 | `CredentialSecretMissingKey` | Secret contains `accesskey` and `secretkey`. |
 | `CredentialSecretTooShort` | Both credential values are at least 8 characters. |
-| `KmsSecretNotFound` / `KmsSecretMissingKey` | KMS Secret exists and contains required keys such as `vault-token`. |
+| `KmsSecretNotFound` / `KmsSecretMissingKey` | KMS Secret exists and contains required keys, such as Vault `vault-token` or the Local KMS `masterKeySecretRef.key`. |
 | `CertManagerCrdMissing` / `CertManagerIssuerNotFound` | cert-manager is installed and the issuer exists. |
 | `StatefulSetUpdateValidationFailed` | An immutable StatefulSet or pool-shape field was changed. |
 | `ProvisioningFailed` | Check `status.provisioning`, policy ConfigMaps, user Secrets, and RustFS admin credentials. |

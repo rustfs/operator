@@ -15,12 +15,20 @@
 use super::Tenant;
 use crate::types;
 use crate::types::v1alpha1::encryption::KmsBackendType;
+use crate::types::v1alpha1::persistence::{
+    DEFAULT_PERSISTENCE_PATH, LEGACY_LOCAL_KMS_KEY_DIR, data_volume_mount_path,
+    default_local_kms_key_directory,
+};
 use crate::types::v1alpha1::pool::Pool;
 use crate::types::v1alpha1::tls::{TlsPlan, http_probe};
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 
+const LOCAL_KMS_KEY_DIR_ENV: &str = "RUSTFS_KMS_KEY_DIR";
+const LOCAL_KMS_LOCAL_KEY_DIR_ENV: &str = "RUSTFS_KMS_LOCAL_KEY_DIR";
+const LOCAL_KMS_MASTER_KEY_ENV: &str = "RUSTFS_KMS_LOCAL_MASTER_KEY";
+const KMS_ALLOW_INSECURE_DEV_DEFAULTS_ENV: &str = "RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS";
 const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 const DEFAULT_RUN_AS_USER: i64 = 10001;
 const DEFAULT_RUN_AS_GROUP: i64 = 10001;
@@ -38,8 +46,35 @@ fn is_tls_operator_managed_env_var(name: &str) -> bool {
     TLS_OPERATOR_MANAGED_ENV_VARS.contains(&name)
 }
 
+fn is_kms_operator_managed_env_var(name: &str) -> bool {
+    name.starts_with("RUSTFS_KMS_")
+}
+
 fn volume_claim_template_name(shard: i32) -> String {
     format!("{VOLUME_CLAIM_TEMPLATE_PREFIX}-{shard}")
+}
+
+fn container_env_values<'a>(container: &'a corev1::Container, name: &str) -> Vec<&'a str> {
+    container
+        .env
+        .as_ref()
+        .map(|env| {
+            env.iter()
+                .filter(|var| var.name == name)
+                .filter_map(|var| var.value.as_deref())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn local_kms_key_dir_env_values(container: &corev1::Container) -> Vec<&str> {
+    let mut values = container_env_values(container, LOCAL_KMS_KEY_DIR_ENV);
+    values.extend(container_env_values(container, LOCAL_KMS_LOCAL_KEY_DIR_ENV));
+    values
+}
+
+fn first_container(spec: &v1::StatefulSetSpec) -> Option<&corev1::Container> {
+    spec.template.spec.as_ref()?.containers.first()
 }
 
 fn stateful_name(tenant: &Tenant, pool: &Pool) -> String {
@@ -55,7 +90,11 @@ impl Tenant {
     ) -> String {
         let tenant_name = self.name();
         let headless_service = self.headless_service_name();
-        let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
+        let base_path = pool
+            .persistence
+            .path
+            .as_deref()
+            .unwrap_or(DEFAULT_PERSISTENCE_PATH);
         let base_path = base_path.trim_end_matches('/');
 
         if self.spec.pools.len() == 1 && pool.is_single_node_single_disk() {
@@ -243,9 +282,10 @@ impl Tenant {
     /// `build_vault_kms_config`) and CLI env (`rustfs/src/config/cli.rs`): only the variables
     /// parsed into `Config` are set here.
     ///
-    /// Returns `(env_vars, pod_volumes, volume_mounts)` — volumes are unused (no TLS cert mounts).
+    /// Returns `(env_vars, pod_volumes, volume_mounts)` — Local KMS uses the data PVC.
     fn configure_kms(
         &self,
+        pool: &Pool,
     ) -> (
         Vec<corev1::EnvVar>,
         Vec<corev1::Volume>,
@@ -315,18 +355,47 @@ impl Tenant {
                     .local
                     .as_ref()
                     .and_then(|l| l.key_directory.as_deref())
-                    .unwrap_or("/data/kms-keys");
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| {
+                        default_local_kms_key_directory(pool.persistence.path.as_deref())
+                    });
 
                 env.push(corev1::EnvVar {
-                    name: "RUSTFS_KMS_KEY_DIR".to_owned(),
-                    value: Some(key_dir.to_string()),
+                    name: LOCAL_KMS_KEY_DIR_ENV.to_owned(),
+                    value: Some(key_dir),
                     ..Default::default()
                 });
-                env.push(corev1::EnvVar {
-                    name: "RUSTFS_KMS_LOCAL_KEY_DIR".to_owned(),
-                    value: Some(key_dir.to_string()),
-                    ..Default::default()
-                });
+
+                if let Some(selector) = enc
+                    .local
+                    .as_ref()
+                    .and_then(|l| l.master_key_secret_ref.as_ref())
+                {
+                    env.push(corev1::EnvVar {
+                        name: LOCAL_KMS_MASTER_KEY_ENV.to_owned(),
+                        value_from: Some(corev1::EnvVarSource {
+                            secret_key_ref: Some(corev1::SecretKeySelector {
+                                name: selector.name.clone(),
+                                key: selector.key.clone(),
+                                optional: Some(false),
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                }
+
+                if enc
+                    .local
+                    .as_ref()
+                    .is_some_and(|l| l.allow_insecure_dev_defaults)
+                {
+                    env.push(corev1::EnvVar {
+                        name: KMS_ALLOW_INSECURE_DEV_DEFAULTS_ENV.to_owned(),
+                        value: Some("true".to_owned()),
+                        ..Default::default()
+                    });
+                }
 
                 if let Some(ref id) = enc.default_key_id
                     && !id.is_empty()
@@ -362,11 +431,10 @@ impl Tenant {
         // Default path is /data if not specified
         // Volume mount names must match the volume claim template names (vol-0, vol-1, etc.)
         // Mount paths follow RustFS convention: /data/rustfs0, /data/rustfs1, etc.
-        let base_path = pool.persistence.path.as_deref().unwrap_or("/data");
         let mut volume_mounts: Vec<corev1::VolumeMount> = (0..pool.persistence.volumes_per_server)
             .map(|i| corev1::VolumeMount {
                 name: volume_claim_template_name(i),
-                mount_path: format!("{}/rustfs{}", base_path.trim_end_matches('/'), i),
+                mount_path: data_volume_mount_path(pool.persistence.path.as_deref(), i),
                 ..Default::default()
             })
             .collect();
@@ -434,10 +502,13 @@ impl Tenant {
         }
 
         // Merge with user-provided environment variables.
-        // Preserve the legacy override behavior except for TLS runtime values that
-        // must stay aligned with the rendered TLS mounts, probes, status, and hash.
+        // Preserve the legacy override behavior except for operator-managed runtime
+        // values that must stay aligned with rendered mounts, probes, status, and hash.
         for user_env in &self.spec.env {
             if tls_plan.enabled && is_tls_operator_managed_env_var(&user_env.name) {
+                continue;
+            }
+            if is_kms_operator_managed_env_var(&user_env.name) {
                 continue;
             }
             // Remove any existing var with the same name to allow non-reserved overrides.
@@ -453,7 +524,7 @@ impl Tenant {
         volume_mounts.append(&mut log_volume_mounts);
 
         // Configure KMS / encryption environment variables and volumes
-        let (kms_env, mut kms_volumes, mut kms_mounts) = self.configure_kms();
+        let (kms_env, mut kms_volumes, mut kms_mounts) = self.configure_kms(pool);
         env_vars.extend(kms_env);
         pod_volumes.append(&mut kms_volumes);
         volume_mounts.append(&mut kms_mounts);
@@ -789,6 +860,48 @@ impl Tenant {
         Ok(false)
     }
 
+    fn uses_implicit_local_kms_key_directory(&self) -> bool {
+        self.spec.encryption.as_ref().is_some_and(|enc| {
+            enc.enabled
+                && enc.backend == KmsBackendType::Local
+                && enc
+                    .local
+                    .as_ref()
+                    .and_then(|local| local.key_directory.as_deref())
+                    .is_none()
+        })
+    }
+
+    fn blocked_local_kms_implicit_default_migration(
+        &self,
+        existing_spec: &v1::StatefulSetSpec,
+        desired_spec: &v1::StatefulSetSpec,
+    ) -> Option<(String, String)> {
+        if !self.uses_implicit_local_kms_key_directory() {
+            return None;
+        }
+
+        let existing_container = first_container(existing_spec)?;
+        let existing_key_dirs = local_kms_key_dir_env_values(existing_container);
+        if !existing_key_dirs.contains(&LEGACY_LOCAL_KMS_KEY_DIR) {
+            return None;
+        }
+
+        let desired_container = first_container(desired_spec)?;
+        let desired_key_dirs = local_kms_key_dir_env_values(desired_container);
+        let desired_key_dir = desired_key_dirs
+            .iter()
+            .copied()
+            .find(|dir| *dir != LEGACY_LOCAL_KMS_KEY_DIR)
+            .or_else(|| desired_key_dirs.first().copied())?;
+        (desired_key_dir != LEGACY_LOCAL_KMS_KEY_DIR).then(|| {
+            (
+                LEGACY_LOCAL_KMS_KEY_DIR.to_string(),
+                desired_key_dir.to_string(),
+            )
+        })
+    }
+
     /// Validates that a StatefulSet update is safe by checking for changes to
     /// immutable fields that would cause API rejection.
     ///
@@ -836,6 +949,18 @@ impl Tenant {
             .as_ref()
             .unwrap_or(&"<unknown>".to_string())
             .clone();
+
+        if let Some((existing_key_dir, desired_key_dir)) =
+            self.blocked_local_kms_implicit_default_migration(existing_spec, desired_spec)
+        {
+            return Err(types::error::Error::KmsMigrationBlocked {
+                name: self.name(),
+                message: format!(
+                    "Local KMS default key directory migration for StatefulSet '{}' is blocked: existing pods use legacy non-PVC path '{}', while the desired implicit default is '{}'. Copy existing key files and .master-key.salt into '{}', then set spec.encryption.local.keyDirectory explicitly to that PVC-backed path before rolling the StatefulSet.",
+                    ss_name, existing_key_dir, desired_key_dir, desired_key_dir
+                ),
+            });
+        }
 
         // MinIO-compatible expansion model: an existing pool's server count is
         // immutable. Horizontal capacity expansion must add a new pool.
@@ -939,6 +1064,9 @@ impl Tenant {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER};
+    use crate::types::v1alpha1::encryption::{
+        EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef,
+    };
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
     use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
     use k8s_openapi::api::core::v1 as corev1;
@@ -961,6 +1089,29 @@ mod tests {
             .find(|var| var.name == name)?
             .value
             .as_deref()
+    }
+
+    fn set_env_value(container: &mut corev1::Container, name: &str, value: &str) {
+        let env = container
+            .env
+            .as_mut()
+            .expect("container should have environment variables");
+        if let Some(var) = env.iter_mut().find(|var| var.name == name) {
+            var.value = Some(value.to_string());
+        } else {
+            env.push(corev1::EnvVar {
+                name: name.to_string(),
+                value: Some(value.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn local_master_key_selector() -> LocalKmsMasterKeySecretRef {
+        LocalKmsMasterKeySecretRef {
+            name: "local-kms-master-key".to_string(),
+            key: "local-master-key".to_string(),
+        }
     }
 
     #[test]
@@ -1127,6 +1278,374 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn local_kms_default_key_directory_uses_data_pvc_subdirectory() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+        assert_eq!(
+            env_value(container, "RUSTFS_KMS_KEY_DIR"),
+            Some("/data/rustfs0/.kms-keys")
+        );
+        assert_eq!(env_value(container, "RUSTFS_KMS_LOCAL_KEY_DIR"), None);
+        assert!(
+            container
+                .volume_mounts
+                .as_ref()
+                .expect("data mount should be present")
+                .iter()
+                .any(|mount| mount.mount_path == "/data/rustfs0")
+        );
+    }
+
+    #[test]
+    fn local_kms_default_key_directory_uses_custom_persistence_path() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.pools[0].persistence.path = Some("/mnt/rustfs".to_string());
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+        assert_eq!(
+            env_value(container, "RUSTFS_KMS_KEY_DIR"),
+            Some("/mnt/rustfs/rustfs0/.kms-keys")
+        );
+        assert!(
+            container
+                .volume_mounts
+                .as_ref()
+                .expect("data mount should be present")
+                .iter()
+                .any(|mount| mount.mount_path == "/mnt/rustfs/rustfs0")
+        );
+    }
+
+    #[test]
+    fn local_kms_custom_key_directory_is_rendered_unchanged() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            local: Some(LocalKmsConfig {
+                key_directory: Some("/data/rustfs0/custom-kms".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+        assert_eq!(
+            env_value(container, "RUSTFS_KMS_KEY_DIR"),
+            Some("/data/rustfs0/custom-kms")
+        );
+        assert_eq!(env_value(container, "RUSTFS_KMS_LOCAL_KEY_DIR"), None);
+    }
+
+    #[test]
+    fn local_kms_master_key_secret_ref_is_rendered() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            local: Some(LocalKmsConfig {
+                master_key_secret_ref: Some(local_master_key_selector()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+        let master_key_env = container
+            .env
+            .as_ref()
+            .expect("env should be rendered")
+            .iter()
+            .find(|var| var.name == "RUSTFS_KMS_LOCAL_MASTER_KEY")
+            .expect("local master key env should be rendered");
+        let selector = master_key_env
+            .value_from
+            .as_ref()
+            .and_then(|source| source.secret_key_ref.as_ref())
+            .expect("local master key should come from Secret key ref");
+
+        assert_eq!(selector.name, "local-kms-master-key");
+        assert_eq!(selector.key, "local-master-key");
+        assert_eq!(selector.optional, Some(false));
+    }
+
+    #[test]
+    fn local_kms_allow_insecure_dev_defaults_is_explicitly_rendered() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            local: Some(LocalKmsConfig {
+                allow_insecure_dev_defaults: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+        assert_eq!(
+            env_value(container, "RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS"),
+            Some("true")
+        );
+        assert_eq!(env_value(container, "RUSTFS_KMS_LOCAL_MASTER_KEY"), None);
+    }
+
+    #[test]
+    fn local_kms_statefulset_keeps_operator_managed_env_when_spec_env_conflicts() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            ..Default::default()
+        });
+        tenant.spec.env = vec![
+            corev1::EnvVar {
+                name: "RUSTFS_KMS_KEY_DIR".to_string(),
+                value: Some("/data/kms-keys".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "RUSTFS_KMS_LOCAL_KEY_DIR".to_string(),
+                value: Some("/data/kms-keys".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "RUSTFS_KMS_BACKEND".to_string(),
+                value: Some("vault".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "CUSTOM_USER_ENV".to_string(),
+                value: Some("kept".to_string()),
+                ..Default::default()
+            },
+        ];
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+        let env = container.env.as_ref().expect("env should be rendered");
+
+        assert_eq!(
+            env.iter()
+                .filter(|var| var.name == "RUSTFS_KMS_KEY_DIR")
+                .count(),
+            1
+        );
+        assert_eq!(
+            env_value(container, "RUSTFS_KMS_KEY_DIR"),
+            Some("/data/rustfs0/.kms-keys")
+        );
+        assert_eq!(env_value(container, "RUSTFS_KMS_LOCAL_KEY_DIR"), None);
+        assert_eq!(env_value(container, "RUSTFS_KMS_BACKEND"), Some("local"));
+        assert_eq!(env_value(container, "CUSTOM_USER_ENV"), Some("kept"));
+    }
+
+    #[test]
+    fn statefulset_drops_reserved_kms_env_even_when_encryption_is_disabled() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.encryption = None;
+        tenant.spec.env = vec![
+            corev1::EnvVar {
+                name: "RUSTFS_KMS_LOCAL_MASTER_KEY".to_string(),
+                value: Some("secret".to_string()),
+                ..Default::default()
+            },
+            corev1::EnvVar {
+                name: "CUSTOM_USER_ENV".to_string(),
+                value: Some("kept".to_string()),
+                ..Default::default()
+            },
+        ];
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+
+        assert_eq!(env_value(container, "RUSTFS_KMS_LOCAL_MASTER_KEY"), None);
+        assert_eq!(env_value(container, "CUSTOM_USER_ENV"), Some("kept"));
+    }
+
+    #[test]
+    fn local_kms_implicit_default_migration_from_legacy_dir_is_blocked() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+        let mut existing = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+        let container = existing
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_mut()
+            .expect("Pod template should have spec")
+            .containers
+            .first_mut()
+            .expect("Container should exist");
+        set_env_value(container, "RUSTFS_KMS_KEY_DIR", "/data/kms-keys");
+        set_env_value(container, "RUSTFS_KMS_LOCAL_KEY_DIR", "/data/kms-keys");
+
+        let err = tenant
+            .validate_statefulset_update(&existing, pool)
+            .expect_err("implicit Local KMS default migration should be blocked");
+
+        assert!(
+            matches!(err, crate::types::error::Error::KmsMigrationBlocked { message, .. }
+                if message.contains("/data/kms-keys")
+                    && message.contains("/data/rustfs0/.kms-keys")
+                    && message.contains("spec.encryption.local.keyDirectory"))
+        );
+    }
+
+    #[test]
+    fn local_kms_implicit_default_migration_detects_duplicate_legacy_env() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+        let mut existing = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with Local KMS");
+        let container = existing
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_mut()
+            .expect("Pod template should have spec")
+            .containers
+            .first_mut()
+            .expect("Container should exist");
+        container
+            .env
+            .as_mut()
+            .expect("container should have environment variables")
+            .insert(
+                0,
+                corev1::EnvVar {
+                    name: "RUSTFS_KMS_KEY_DIR".to_string(),
+                    value: Some("/data/rustfs0/custom-old-env".to_string()),
+                    ..Default::default()
+                },
+            );
+        set_env_value(container, "RUSTFS_KMS_LOCAL_KEY_DIR", "/data/kms-keys");
+
+        let err = tenant
+            .validate_statefulset_update(&existing, pool)
+            .expect_err("duplicate legacy Local KMS env should still be blocked");
+
+        assert!(matches!(
+            err,
+            crate::types::error::Error::KmsMigrationBlocked { .. }
+        ));
+    }
+
+    #[test]
+    fn local_kms_explicit_key_directory_allows_user_controlled_migration() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            ..Default::default()
+        });
+        let mut existing = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create StatefulSet with Local KMS");
+        let container = existing
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_mut()
+            .expect("Pod template should have spec")
+            .containers
+            .first_mut()
+            .expect("Container should exist");
+        set_env_value(container, "RUSTFS_KMS_KEY_DIR", "/data/kms-keys");
+        set_env_value(container, "RUSTFS_KMS_LOCAL_KEY_DIR", "/data/kms-keys");
+
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            local: Some(LocalKmsConfig {
+                key_directory: Some("/data/rustfs0/.kms-keys".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        tenant
+            .validate_statefulset_update(&existing, pool)
+            .expect("explicit Local KMS keyDirectory should allow user-controlled rollout");
     }
 
     #[test]

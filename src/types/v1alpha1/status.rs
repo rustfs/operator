@@ -245,7 +245,8 @@ pub struct ConditionInput {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
-    /// Type of condition (Ready, Reconciling, Degraded)
+    /// Type of condition (Ready, Reconciling, Degraded, SpecValid, CredentialsReady, KmsReady,
+    /// TlsReady, PoolsReady, WorkloadsReady, ProvisioningReady)
     #[serde(rename = "type")]
     pub type_: String,
 

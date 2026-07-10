@@ -65,7 +65,9 @@ pub enum ImagePullPolicy {
 /// when the node becomes unreachable.
 ///
 /// WARNING: Force-deleting pods can have data consistency implications depending on
-/// your storage backend and workload semantics.
+/// your storage backend and workload semantics. Force deletion requires the Node object
+/// to be deleted or marked with an effective `node.kubernetes.io/out-of-service` taint
+/// that the target Pod does not tolerate.
 #[derive(Default, Deserialize, Serialize, Clone, Debug, Display, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum PodDeletionPolicyWhenNodeIsDown {
@@ -121,7 +123,7 @@ impl JsonSchema for PodDeletionPolicyWhenNodeIsDown {
                     "DeleteDeploymentPod",
                     "DeleteBothStatefulSetAndDeploymentPod"
                 ],
-                "description": "Pod deletion policy when the node hosting the Pod is down (NotReady/Unknown). Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod"
+                "description": "Pod deletion policy when the node hosting the Pod is down (NotReady/Unknown). Force deletion requires the Node object to be deleted or marked with an effective node.kubernetes.io/out-of-service taint that the target Pod does not tolerate. Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod"
             }
         }
     }

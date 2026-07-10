@@ -347,6 +347,7 @@ Operator 会自动管理以下环境变量：
 - `RUSTFS_ADDRESS`
 - `RUSTFS_CONSOLE_ADDRESS`
 - `RUSTFS_CONSOLE_ENABLE`
+- `RUSTFS_KMS_*` 变量；请改用 `spec.encryption` 配置
 - 启用 TLS 时的 RustFS TLS 相关变量
 
 对于单 pool 的单节点单盘 Tenant，`RUSTFS_VOLUMES` 会渲染为本地数据路径，例如 `/data/rustfs0`。多 pool Tenant 和其他布局仍会通过 Tenant headless Service 渲染 peer DNS URL，并由 RustFS 在运行时校验。
@@ -360,7 +361,7 @@ Operator 会自动管理以下环境变量：
 - `DeleteDeploymentPod`：Longhorn 兼容模式，强制删除 down node 上卡住的 Deployment Pod。
 - `DeleteBothStatefulSetAndDeploymentPod`：Longhorn 兼容模式，同时处理 StatefulSet 和 Deployment Pod。
 
-强制删除可能影响数据一致性。只有当存储后端和运维流程明确支持该故障处理方式时才应启用。
+强制删除可能影响数据一致性。只有当存储后端和运维流程明确支持该故障处理方式时才应启用。强制删除要求 Node 对象已删除，或 Node 带有对目标 Pod 生效且未被该 Pod tolerate 的 `node.kubernetes.io/out-of-service` taint，确保 volume detach fencing 是显式的。
 
 ### 7.5 TLS
 
@@ -427,10 +428,46 @@ Tenant 加密通过 `spec.encryption` 配置。
 
 | Backend | 用途 |
 |---------|------|
-| `local` | 文件型本地 KMS key 目录。目录必须是绝对路径，且整个 Tenant 所有 pool 的 server 总数必须为 1。 |
+| `local` | 文件型本地 KMS key 目录和本地 master key。目录必须是绝对路径，必须位于 RustFS 数据 PVC mount 下的子目录，且整个 Tenant 所有 pool 的 server 总数必须为 1。 |
 | `vault` | HashiCorp Vault endpoint，需要包含 `vault-token` 的 Secret。 |
 
-Local KMS 不使用 `kmsSecret`；即使设置也会被忽略。多 server Tenant 应使用 Vault KMS。
+Local KMS 不使用 `kmsSecret`；即使设置也会被忽略。请通过 `spec.encryption.local.masterKeySecretRef` 配置本地 master key，它会映射到 RustFS 的 `RUSTFS_KMS_LOCAL_MASTER_KEY`。默认情况下，Local KMS 会把 key 文件存放在第一块数据 PVC mount 下，例如 `persistence.path` 为 `/data` 时使用 `/data/rustfs0/.kms-keys`。多 server Tenant 应使用 Vault KMS。`allowInsecureDevDefaults: true` 会映射到 `RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS=true`，只能用于开发环境，因为 RustFS 可能用 plaintext-dev-only 方式保存 Local KMS key material。
+
+升级提示：旧版本 Operator 的 Local KMS 默认目录是 `/data/kms-keys`，该路径不在数据 PVC 下。Operator 不会自动迁移 key 文件。对于仍使用旧隐式默认值，或显式设置了旧路径的已有 Local KMS Tenant，Operator 会阻断 reconcile 或 StatefulSet 滚动更新；请先把旧目录中的 key 文件和 `.master-key.salt` 复制到新的 PVC 持久化目录，继续使用同一个本地 master key Secret，然后显式设置 `spec.encryption.local.keyDirectory` 为该子目录。
+
+Local 示例：
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-local-kms
+  namespace: storage
+type: Opaque
+stringData:
+  local-master-key: "replace-with-a-strong-local-kms-master-key"
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-local
+  namespace: storage
+spec:
+  pools:
+    - name: pool-0
+      servers: 1
+      persistence:
+        volumesPerServer: 1
+  encryption:
+    enabled: true
+    backend: local
+    local:
+      keyDirectory: /data/rustfs0/.kms-keys
+      masterKeySecretRef:
+        name: rustfs-local-kms
+        key: local-master-key
+    defaultKeyId: tenant-default
+```
 
 Vault 示例：
 
@@ -767,7 +804,7 @@ kubectl logs -n rustfs-system \
 | `CredentialSecretNotFound` | Secret 是否存在于 Tenant namespace。 |
 | `CredentialSecretMissingKey` | Secret 是否包含 `accesskey` 和 `secretkey`。 |
 | `CredentialSecretTooShort` | 两个凭据值是否都至少 8 个字符。 |
-| `KmsSecretNotFound` / `KmsSecretMissingKey` | KMS Secret 是否存在，并包含 `vault-token` 等必要 key。 |
+| `KmsSecretNotFound` / `KmsSecretMissingKey` | KMS Secret 是否存在，并包含必要 key，例如 Vault 的 `vault-token` 或 Local KMS 的 `masterKeySecretRef.key`。 |
 | `CertManagerCrdMissing` / `CertManagerIssuerNotFound` | cert-manager 是否安装，issuer 是否存在。 |
 | `StatefulSetUpdateValidationFailed` | 是否修改了不可变 StatefulSet 字段或 pool 形态字段。 |
 | `ProvisioningFailed` | 检查 `status.provisioning`、policy ConfigMap、user Secret 和 RustFS 管理员凭据。 |

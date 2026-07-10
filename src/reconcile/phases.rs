@@ -93,13 +93,9 @@ pub(super) async fn validate_tenant_prerequisites(
         return Err(e.into());
     }
 
-    // Validate encryption / KMS: Vault requires endpoint + kmsSecret (and correct keys);
-    // must run whenever encryption is enabled — not only when kmsSecret is set, or Vault
-    // without a Secret reference would skip validation entirely.
-    if let Some(ref enc) = tenant.spec.encryption
-        && enc.enabled
-        && let Err(e) = ctx.validate_kms_secret(tenant).await
-    {
+    // Validate encryption / KMS and reject raw RUSTFS_KMS_* env overrides even when
+    // spec.encryption is omitted or disabled.
+    if let Err(e) = ctx.validate_kms_secret(tenant).await {
         let status_error = StatusError::from_context_error(&e);
         patch_status_error(ctx, tenant, &status_error).await;
         return Err(e.into());
@@ -116,7 +112,7 @@ pub(super) async fn validate_tenant_prerequisites(
                 tenant,
                 EventType::Warning,
                 "KmsConfigWarning",
-                "Local KMS backend does not use kmsSecret; the Secret reference will be ignored",
+                "Local KMS backend ignores kmsSecret; use spec.encryption.local.masterKeySecretRef for the local master key",
             )
             .await;
     }
@@ -625,8 +621,20 @@ async fn reconcile_existing_pool_statefulset(
             "StatefulSet update validation failed"
         );
 
-        let status_error = StatusError::statefulset_update_validation_failed(&ss_name);
+        let status_error = if matches!(e, types::error::Error::KmsMigrationBlocked { .. }) {
+            StatusError::from_types_error(&e)
+        } else {
+            StatusError::statefulset_update_validation_failed(&ss_name)
+        };
         patch_status_error(ctx, tenant, &status_error).await;
+        let _ = ctx
+            .record(
+                tenant,
+                EventType::Warning,
+                "StatefulSetUpdateBlocked",
+                &format!("StatefulSet '{}' update blocked: {}", ss_name, e),
+            )
+            .await;
         return Err(e.into());
     }
 

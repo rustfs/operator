@@ -111,10 +111,44 @@ spec:
                     description: 'Local: optional key directory override.'
                     nullable: true
                     properties:
+                      allowInsecureDevDefaults:
+                        default: false
+                        description: |-
+                          Explicitly allow RustFS development-only insecure KMS defaults.
+
+                          When true, the operator sets `RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS=true`, allowing
+                          Local KMS to start without a master key and store key material as plaintext-dev-only.
+                          Do not use this in production.
+                        type: boolean
                       keyDirectory:
-                        description: 'Absolute directory for KMS key files (default: `/data/kms-keys`).'
+                        description: |-
+                          Absolute directory for KMS key files.
+
+                          Must be in a subdirectory under a RustFS data PVC mount. Defaults to the first data PVC mount
+                          under `persistence.path`, for example `/data/rustfs0/.kms-keys`.
                         nullable: true
                         type: string
+                      masterKeySecretRef:
+                        description: |-
+                          Secret key selector for `RUSTFS_KMS_LOCAL_MASTER_KEY`.
+
+                          Required for Local KMS unless `allowInsecureDevDefaults` is explicitly set to `true`.
+                          The referenced Secret key should contain the local master key string used to encrypt
+                          Local KMS key files at rest.
+                        nullable: true
+                        properties:
+                          key:
+                            description: Secret data key containing the local master key string.
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Secret name in the Tenant namespace.
+                            minLength: 1
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
                     type: object
                   vault:
                     description: 'Vault: HTTP(S) endpoint (required when `backend: vault`).'
@@ -127,7 +161,14 @@ spec:
                     - endpoint
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: Local KMS requires local.masterKeySecretRef unless local.allowInsecureDevDefaults is true
+                  rule: '!self.enabled || self.backend != ''local'' || (has(self.local) && (has(self.local.masterKeySecretRef) || (has(self.local.allowInsecureDevDefaults) && self.local.allowInsecureDevDefaults == true)))'
               env:
+                description: |-
+                  Additional RustFS container environment variables.
+
+                  `RUSTFS_KMS_*` is reserved; configure KMS through `spec.encryption`.
                 items:
                   description: EnvVar represents an environment variable present in a Container.
                   properties:
@@ -426,8 +467,10 @@ spec:
                   Typical use-case: a StatefulSet Pod gets stuck in Terminating when the node goes down.
                   Setting this to `ForceDelete` allows the operator to force delete the Pod object so the
                   StatefulSet controller can recreate it elsewhere.
+                  Force deletion requires the Node object to be deleted or marked with an effective
+                  `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate.
 
-                  Values: DoNothing | Delete | ForceDelete
+                  Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod
                 enum:
                 - DoNothing
                 - Delete
@@ -1725,7 +1768,9 @@ spec:
                       description: Status of the condition (True, False, Unknown)
                       type: string
                     type:
-                      description: Type of condition (Ready, Progressing, Degraded)
+                      description: |-
+                        Type of condition (Ready, Reconciling, Degraded, SpecValid, CredentialsReady, KmsReady,
+                        TlsReady, PoolsReady, WorkloadsReady, ProvisioningReady)
                       type: string
                   required:
                   - message

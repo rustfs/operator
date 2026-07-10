@@ -39,6 +39,15 @@ pub struct VaultInfo {
 #[serde(rename_all = "camelCase")]
 pub struct LocalInfo {
     pub key_directory: Option<String>,
+    pub master_key_secret_ref: Option<LocalMasterKeySecretRefInfo>,
+    pub allow_insecure_dev_defaults: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMasterKeySecretRefInfo {
+    pub name: String,
+    pub key: String,
 }
 
 /// SecurityContext information (TenantSpec; shown alongside encryption for convenience).
@@ -73,6 +82,8 @@ pub struct UpdateVaultRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateLocalRequest {
     pub key_directory: Option<String>,
+    pub master_key_secret_ref: Option<LocalMasterKeySecretRefInfo>,
+    pub allow_insecure_dev_defaults: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

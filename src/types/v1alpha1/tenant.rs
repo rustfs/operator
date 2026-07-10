@@ -91,11 +91,16 @@ pub struct TenantSpec {
     /// Typical use-case: a StatefulSet Pod gets stuck in Terminating when the node goes down.
     /// Setting this to `ForceDelete` allows the operator to force delete the Pod object so the
     /// StatefulSet controller can recreate it elsewhere.
+    /// Force deletion requires the Node object to be deleted or marked with an effective
+    /// `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate.
     ///
-    /// Values: DoNothing | Delete | ForceDelete
+    /// Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_deletion_policy_when_node_is_down: Option<k8s::PodDeletionPolicyWhenNodeIsDown>,
 
+    /// Additional RustFS container environment variables.
+    ///
+    /// `RUSTFS_KMS_*` is reserved; configure KMS through `spec.encryption`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
 
@@ -190,6 +195,7 @@ pub struct TenantSpec {
     /// Encryption / KMS configuration for server-side encryption.
     /// When enabled, the operator injects KMS environment variables and mounts
     /// secrets into RustFS pods so the in-process `rustfs-kms` library is configured.
+    #[x_kube(validation = Rule::new("!self.enabled || self.backend != 'local' || (has(self.local) && (has(self.local.masterKeySecretRef) || (has(self.local.allowInsecureDevDefaults) && self.local.allowInsecureDevDefaults == true)))").message("Local KMS requires local.masterKeySecretRef unless local.allowInsecureDevDefaults is true"))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<EncryptionConfig>,
 

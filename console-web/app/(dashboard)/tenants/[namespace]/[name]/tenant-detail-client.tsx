@@ -162,6 +162,9 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   })
   const [encLocal, setEncLocal] = useState({
     keyDirectory: "",
+    masterKeySecretName: "",
+    masterKeySecretKey: "local-master-key",
+    allowInsecureDevDefaults: false,
   })
   const [encDefaultKeyId, setEncDefaultKeyId] = useState("")
   const [encKmsSecretName, setEncKmsSecretName] = useState("")
@@ -464,10 +467,20 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
       if (data.local) {
         setEncLocal({
           keyDirectory: data.local.keyDirectory || "",
+          masterKeySecretName: data.local.masterKeySecretRef?.name || "",
+          masterKeySecretKey: data.local.masterKeySecretRef?.key || "local-master-key",
+          allowInsecureDevDefaults: data.local.allowInsecureDevDefaults || false,
+        })
+      } else {
+        setEncLocal({
+          keyDirectory: "",
+          masterKeySecretName: "",
+          masterKeySecretKey: "local-master-key",
+          allowInsecureDevDefaults: false,
         })
       }
       setEncDefaultKeyId(data.defaultKeyId || "")
-      setEncKmsSecretName(data.kmsSecretName || "")
+      setEncKmsSecretName(data.backend === "vault" ? data.kmsSecretName || "" : "")
     } catch (e) {
       const err = e as ApiError
       toast.error(err.message || t("Failed to load encryption config"))
@@ -483,21 +496,40 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
       toast.warning(t("Vault endpoint is required"))
       return
     }
+    if (
+      encEnabled &&
+      encBackend === "local" &&
+      !encLocal.allowInsecureDevDefaults &&
+      (!encLocal.masterKeySecretName.trim() || !encLocal.masterKeySecretKey.trim())
+    ) {
+      toast.warning(t("Local KMS master key Secret name and key are required"))
+      return
+    }
     setEncSaving(true)
     try {
       const body: UpdateEncryptionRequest = {
         enabled: encEnabled,
         backend: encBackend,
-        kmsSecretName: encKmsSecretName || undefined,
+        kmsSecretName: encBackend === "vault" ? encKmsSecretName.trim() || undefined : undefined,
         defaultKeyId: encDefaultKeyId.trim() || undefined,
       }
       if (encBackend === "vault") {
         body.vault = {
-          endpoint: encVault.endpoint,
+          endpoint: encVault.endpoint.trim(),
         }
       } else {
         body.local = {
-          keyDirectory: encLocal.keyDirectory || undefined,
+          keyDirectory: encLocal.keyDirectory.trim() || undefined,
+          masterKeySecretRef:
+            !encLocal.allowInsecureDevDefaults &&
+            encLocal.masterKeySecretName.trim() &&
+            encLocal.masterKeySecretKey.trim()
+              ? {
+                  name: encLocal.masterKeySecretName.trim(),
+                  key: encLocal.masterKeySecretKey.trim(),
+                }
+              : undefined,
+          allowInsecureDevDefaults: encLocal.allowInsecureDevDefaults,
         }
       }
       const res = await api.updateEncryption(namespace, name, body)
@@ -1117,12 +1149,52 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                           <div className="space-y-2">
                             <Label>{t("Key Directory")}</Label>
                             <Input
-                              placeholder="/data/kms-keys"
+                              placeholder="{persistence.path}/rustfs0/.kms-keys"
                               value={encLocal.keyDirectory}
                               onChange={(e) => setEncLocal((l) => ({ ...l, keyDirectory: e.target.value }))}
                             />
                           </div>
+                          <div className="space-y-2">
+                            <Label>{t("Master Key Secret Name")}</Label>
+                            <Input
+                              placeholder="local-kms-master-key"
+                              value={encLocal.masterKeySecretName}
+                              onChange={(e) => setEncLocal((l) => ({ ...l, masterKeySecretName: e.target.value }))}
+                              disabled={encLocal.allowInsecureDevDefaults}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>{t("Master Key Secret Key")}</Label>
+                            <Input
+                              placeholder="local-master-key"
+                              value={encLocal.masterKeySecretKey}
+                              onChange={(e) => setEncLocal((l) => ({ ...l, masterKeySecretKey: e.target.value }))}
+                              disabled={encLocal.allowInsecureDevDefaults}
+                            />
+                          </div>
+                          <div className="flex items-end gap-3 pb-2">
+                            <label htmlFor="local-kms-insecure-dev" className="text-sm">
+                              {t("Allow insecure development defaults")}
+                            </label>
+                            <input
+                              id="local-kms-insecure-dev"
+                              type="checkbox"
+                              checked={encLocal.allowInsecureDevDefaults}
+                              onChange={(e) =>
+                                setEncLocal((l) => ({
+                                  ...l,
+                                  allowInsecureDevDefaults: e.target.checked,
+                                }))
+                              }
+                              className="h-4 w-4 rounded border-border"
+                            />
+                          </div>
                         </div>
+                        <p className="text-xs text-muted-foreground">
+                          {t(
+                            "Local KMS requires a master key Secret unless insecure development defaults are explicitly enabled.",
+                          )}
+                        </p>
                       </div>
                     )}
 
@@ -1142,11 +1214,12 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                         placeholder={`${t("Optional")} – ${t("Secret containing vault-token")}`}
                         value={encKmsSecretName}
                         onChange={(e) => setEncKmsSecretName(e.target.value)}
+                        disabled={encBackend !== "vault"}
                       />
                       <p className="text-xs text-muted-foreground">
                         {encBackend === "vault"
                           ? t("Required for Vault: Secret must contain key 'vault-token'.")
-                          : t("Not required for Local backend.")}
+                          : t("Only used for Vault. Local KMS uses masterKeySecretRef.")}
                       </p>
                     </div>
                   </div>

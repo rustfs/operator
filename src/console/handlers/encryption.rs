@@ -18,13 +18,19 @@ use crate::console::{
     state::Claims,
 };
 use crate::types::v1alpha1::encryption::{
-    EncryptionConfig, KmsBackendType, LocalKmsConfig, VaultKmsConfig,
+    EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef, VaultKmsConfig,
 };
 use crate::types::v1alpha1::tenant::Tenant;
 use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
+
+fn trim_to_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 /// GET /namespaces/:namespace/tenants/:name/encryption
 pub async fn get_encryption(
@@ -49,8 +55,17 @@ pub async fn get_encryption(
                 }),
                 local: enc.local.as_ref().map(|l| LocalInfo {
                     key_directory: l.key_directory.clone(),
+                    master_key_secret_ref: l.master_key_secret_ref.as_ref().map(|s| {
+                        LocalMasterKeySecretRefInfo {
+                            name: s.name.clone(),
+                            key: s.key.clone(),
+                        }
+                    }),
+                    allow_insecure_dev_defaults: l.allow_insecure_dev_defaults,
                 }),
-                kms_secret_name: enc.kms_secret.as_ref().map(|s| s.name.clone()),
+                kms_secret_name: (enc.backend == KmsBackendType::Vault)
+                    .then(|| enc.kms_secret.as_ref().map(|s| s.name.clone()))
+                    .flatten(),
                 default_key_id: enc.default_key_id.clone(),
                 security_context: tenant.spec.security_context.as_ref().map(|sc| {
                     SecurityContextInfo {
@@ -101,50 +116,65 @@ pub async fn update_encryption(
             Some("vault") => KmsBackendType::Vault,
             _ => KmsBackendType::Local,
         };
+        let vault_endpoint = body
+            .vault
+            .as_ref()
+            .and_then(|v| trim_to_non_empty(Some(v.endpoint.clone())));
+        let kms_secret_name = trim_to_non_empty(body.kms_secret_name.clone());
+        let default_key_id = trim_to_non_empty(body.default_key_id.clone());
 
         if backend == KmsBackendType::Vault {
-            let vault_ok = body
-                .vault
-                .as_ref()
-                .map(|v| !v.endpoint.is_empty())
-                .unwrap_or(false);
-            if !vault_ok {
+            if vault_endpoint.is_none() {
                 return Err(Error::BadRequest {
                     message: "Vault backend requires vault.endpoint to be non-empty".to_string(),
                 });
             }
-            let secret_ok = body
-                .kms_secret_name
-                .as_ref()
-                .map(|s| !s.is_empty())
-                .unwrap_or(false);
-            if !secret_ok {
+            if kms_secret_name.is_none() {
                 return Err(Error::BadRequest {
                     message: "Vault backend requires kmsSecretName".to_string(),
+                });
+            }
+        } else {
+            let local = body.local.as_ref();
+            let allow_insecure_dev_defaults = local
+                .and_then(|l| l.allow_insecure_dev_defaults)
+                .unwrap_or(false);
+            let master_key_ref_ok = local
+                .and_then(|l| l.master_key_secret_ref.as_ref())
+                .is_some_and(|s| !s.name.trim().is_empty() && !s.key.trim().is_empty());
+            if !allow_insecure_dev_defaults && !master_key_ref_ok {
+                return Err(Error::BadRequest {
+                    message: "Local backend requires local.masterKeySecretRef.name/key unless local.allowInsecureDevDefaults is true".to_string(),
                 });
             }
         }
 
         let vault = if backend == KmsBackendType::Vault {
-            body.vault.map(|v| VaultKmsConfig {
-                endpoint: v.endpoint,
-            })
+            vault_endpoint.map(|endpoint| VaultKmsConfig { endpoint })
         } else {
             None
         };
 
         let local = if backend == KmsBackendType::Local {
             body.local.map(|l| LocalKmsConfig {
-                key_directory: l.key_directory,
+                key_directory: trim_to_non_empty(l.key_directory),
+                master_key_secret_ref: l.master_key_secret_ref.map(|s| {
+                    LocalKmsMasterKeySecretRef {
+                        name: s.name.trim().to_string(),
+                        key: s.key.trim().to_string(),
+                    }
+                }),
+                allow_insecure_dev_defaults: l.allow_insecure_dev_defaults.unwrap_or(false),
             })
         } else {
             None
         };
 
-        let kms_secret = body
-            .kms_secret_name
-            .filter(|s| !s.is_empty())
-            .map(|s| corev1::LocalObjectReference { name: s });
+        let kms_secret = if backend == KmsBackendType::Vault {
+            kms_secret_name.map(|s| corev1::LocalObjectReference { name: s })
+        } else {
+            None
+        };
 
         Some(EncryptionConfig {
             enabled: true,
@@ -152,7 +182,7 @@ pub async fn update_encryption(
             vault,
             local,
             kms_secret,
-            default_key_id: body.default_key_id.filter(|s| !s.is_empty()),
+            default_key_id,
         })
     } else {
         Some(EncryptionConfig {
@@ -189,4 +219,19 @@ async fn create_client(claims: &Claims) -> Result<Client> {
     Client::try_from(config).map_err(|e| Error::InternalServer {
         message: format!("Failed to create K8s client: {}", e),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_to_non_empty;
+
+    #[test]
+    fn trim_to_non_empty_drops_blank_strings() {
+        assert_eq!(trim_to_non_empty(None), None);
+        assert_eq!(trim_to_non_empty(Some("   ".to_string())), None);
+        assert_eq!(
+            trim_to_non_empty(Some("  /data/rustfs0/.kms-keys  ".to_string())),
+            Some("/data/rustfs0/.kms-keys".to_string())
+        );
+    }
 }

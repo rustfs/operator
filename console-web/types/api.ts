@@ -396,6 +396,11 @@ export interface VaultInfo {
 
 export interface LocalKmsInfo {
   keyDirectory: string | null
+  masterKeySecretRef: {
+    name: string
+    key: string
+  } | null
+  allowInsecureDevDefaults: boolean
 }
 
 export interface SecurityContextInfo {
@@ -423,6 +428,11 @@ export interface UpdateEncryptionRequest {
   }
   local?: {
     keyDirectory?: string
+    masterKeySecretRef?: {
+      name: string
+      key: string
+    }
+    allowInsecureDevDefaults?: boolean
   }
   kmsSecretName?: string
   defaultKeyId?: string

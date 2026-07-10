@@ -39,6 +39,9 @@ pub enum Error {
     #[snafu(display("invalid pool specification for tenant '{}': {}", name, message))]
     InvalidPoolSpec { name: String, message: String },
 
+    #[snafu(display("KMS migration is blocked for tenant '{}': {}", name, message))]
+    KmsMigrationBlocked { name: String, message: String },
+
     #[snafu(display("serde_json error: {}", source))]
     SerdeJson { source: serde_json::Error },
 }

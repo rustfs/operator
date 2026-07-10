@@ -145,6 +145,11 @@ impl StatusError {
                 ConditionType::SpecValid,
                 sanitize_message(message),
             ),
+            types::error::Error::KmsMigrationBlocked { message, .. } => Self::blocked(
+                Reason::KmsConfigInvalid,
+                ConditionType::KmsReady,
+                sanitize_message(message),
+            ),
             types::error::Error::NoNamespace => Self::transient(
                 Reason::KubernetesApiError,
                 ConditionType::Ready,
