@@ -653,6 +653,7 @@ curl -sS -X POST \
 - STS 只为启用 TLS 的 Tenant 签发凭据。
 - Operator STS 使用显式 Tenant 路由，路径中同时包含 namespace 和 Tenant name。
 - `PolicyBinding` 至少需要引用一个 policy。
+- 调用方传入的 `Policy` 请求参数会被拒绝；签发凭据只使用匹配的 `PolicyBinding` policies。
 - 如果 Tenant 要求 Operator STS 调用 Tenant 时使用 client certificate，目前会被 Operator STS 拒绝。
 
 ## 10. 监控和状态

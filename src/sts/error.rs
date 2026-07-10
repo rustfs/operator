@@ -25,6 +25,7 @@ pub enum StsError {
     InvalidParameterValue { parameter: &'static str },
     InvalidIdentityToken,
     AccessDenied,
+    UnsupportedRequestPolicy,
     TenantTlsClientCertificateUnsupported,
     InternalError,
     NotImplemented,
@@ -39,7 +40,7 @@ impl StsError {
             Self::MissingParameter { .. } => "MissingParameter",
             Self::InvalidParameterValue { .. } => "InvalidParameterValue",
             Self::InvalidIdentityToken => "InvalidIdentityToken",
-            Self::AccessDenied => "AccessDenied",
+            Self::AccessDenied | Self::UnsupportedRequestPolicy => "AccessDenied",
             Self::TenantTlsClientCertificateUnsupported => "TenantTlsClientCertificateUnsupported",
             Self::InternalError => "InternalError",
             Self::NotImplemented => "NotImplemented",
@@ -59,7 +60,11 @@ impl StsError {
             }
             Self::InvalidIdentityToken => "The provided web identity token is invalid.".to_string(),
             Self::AccessDenied => {
-                "No matching policy binding was found for this identity.".to_string()
+                "The request is not authorized by a matching PolicyBinding.".to_string()
+            }
+            Self::UnsupportedRequestPolicy => {
+                "Caller-supplied Policy request parameters are not supported by Operator STS."
+                    .to_string()
             }
             Self::TenantTlsClientCertificateUnsupported => {
                 "Operator STS does not support Tenants that require TLS client certificates."

@@ -302,7 +302,7 @@ async fn process_assume_role_request(
                 error = %error.code(),
                 "Failed to build merged STS session policy"
             );
-            return xml_response(StatusCode::BAD_REQUEST, error.as_xml());
+            return xml_response(sts_error_status(&error), error.as_xml());
         }
     };
 
@@ -580,7 +580,7 @@ fn xml_response(status_code: StatusCode, body: String) -> Response {
 
 fn sts_error_status(error: &StsError) -> StatusCode {
     match error {
-        StsError::AccessDenied => StatusCode::FORBIDDEN,
+        StsError::AccessDenied | StsError::UnsupportedRequestPolicy => StatusCode::FORBIDDEN,
         StsError::InvalidParameterValue { .. }
         | StsError::TenantTlsClientCertificateUnsupported
         | StsError::MissingParameter { .. }
@@ -695,6 +695,7 @@ mod tests {
                 session_token: "token".to_string(),
                 expiration: "2024-01-01T00:00:00Z".to_string(),
             }))),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let form = AssumeRoleWithWebIdentityForm {
@@ -745,6 +746,7 @@ mod tests {
                 session_token: "token".to_string(),
                 expiration: "2024-01-01T00:00:00Z".to_string(),
             }))),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let form = AssumeRoleWithWebIdentityForm {
@@ -761,7 +763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sts_handler_merges_binding_policy_and_requests_and_succeeds() {
+    async fn sts_handler_uses_binding_policy_without_request_policy_and_succeeds() {
         let runtime = MockStsRuntime {
             identity: Mutex::new(Some(Ok(token_review::ServiceAccountIdentity {
                 namespace: "tenant-a".to_string(),
@@ -797,6 +799,7 @@ mod tests {
                 session_token: "session".to_string(),
                 expiration: "2024-01-01T00:00:00Z".to_string(),
             }))),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let form = AssumeRoleWithWebIdentityForm {
@@ -804,7 +807,7 @@ mod tests {
             action: Some(STS_WEB_IDENTITY_ACTION.to_string()),
             web_identity_token: Some("sa-token".to_string()),
             duration_seconds: Some("3600".to_string()),
-            policy: Some("{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"req\",\"Effect\":\"Allow\"}] }".to_string()),
+            policy: None,
         };
         let parsed = parse_sts_form("tenant-a".to_string(), "tenant-a".to_string(), form).unwrap();
 
@@ -815,6 +818,121 @@ mod tests {
 
         assert!(text.contains("<AssumeRoleWithWebIdentityResponse"));
         assert!(text.contains("<AccessKeyId>ak</AccessKeyId>"));
+
+        let assume_role_policies = runtime.assume_role_policies.lock().unwrap();
+        assert_eq!(assume_role_policies.len(), 1);
+        let policy = assume_role_policies[0]
+            .as_ref()
+            .expect("binding session policy should be passed to RustFS AssumeRole");
+        assert!(policy.contains("\"Sid\":\"b1\""));
+    }
+
+    #[tokio::test]
+    async fn sts_handler_rejects_caller_supplied_request_policy() {
+        let runtime = MockStsRuntime {
+            identity: Mutex::new(Some(Ok(token_review::ServiceAccountIdentity {
+                namespace: "tenant-a".to_string(),
+                service_account: "workload-sa".to_string(),
+            }))),
+            policy_bindings: Mutex::new(Some(Ok(vec![PolicyBinding {
+                metadata: Default::default(),
+                spec: PolicyBindingSpec {
+                    application: PolicyBindingApplication {
+                        namespace: "tenant-a".to_string(),
+                        serviceaccount: "workload-sa".to_string(),
+                    },
+                    policies: vec!["policy-binding".to_string()],
+                },
+                status: None,
+            }]))),
+            tenant: Mutex::new(Some(Ok(crate::types::v1alpha1::tenant::Tenant {
+                metadata: Default::default(),
+                spec: Default::default(),
+                status: None,
+            }))),
+            create_client: Mutex::new(Some(Ok(RustfsAdminClient::new_with_base_url(
+                "http://127.0.0.1:1",
+                "access-key",
+                "secret-key",
+            )))),
+            fetch_policy_results: Mutex::new(VecDeque::from([
+                Ok("{\"Version\": \"2012-10-17\", \"Statement\": [{\"Sid\":\"binding-read\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket-a/*\"}]}".to_string()),
+            ])),
+            assume_role_result: Mutex::new(Some(Err(RustfsClientError::RequestFailed))),
+            assume_role_policies: Mutex::new(Vec::new()),
+        };
+
+        let form = AssumeRoleWithWebIdentityForm {
+            version: Some(STS_API_VERSION.to_string()),
+            action: Some(STS_WEB_IDENTITY_ACTION.to_string()),
+            web_identity_token: Some("sa-token".to_string()),
+            duration_seconds: Some("3600".to_string()),
+            policy: Some("{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"request-admin\",\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}] }".to_string()),
+        };
+        let parsed = parse_sts_form("tenant-a".to_string(), "tenant-a".to_string(), form).unwrap();
+
+        let response = process_assume_role_request(&runtime, parsed).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(text.contains("<Code>AccessDenied</Code>"));
+        assert!(text.contains("Policy request parameters are not supported"));
+        assert!(runtime.assume_role_policies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sts_handler_rejects_malformed_caller_policy_without_assume_role() {
+        let runtime = MockStsRuntime {
+            identity: Mutex::new(Some(Ok(token_review::ServiceAccountIdentity {
+                namespace: "tenant-a".to_string(),
+                service_account: "workload-sa".to_string(),
+            }))),
+            policy_bindings: Mutex::new(Some(Ok(vec![PolicyBinding {
+                metadata: Default::default(),
+                spec: PolicyBindingSpec {
+                    application: PolicyBindingApplication {
+                        namespace: "tenant-a".to_string(),
+                        serviceaccount: "workload-sa".to_string(),
+                    },
+                    policies: vec!["policy-binding".to_string()],
+                },
+                status: None,
+            }]))),
+            tenant: Mutex::new(Some(Ok(crate::types::v1alpha1::tenant::Tenant {
+                metadata: Default::default(),
+                spec: Default::default(),
+                status: None,
+            }))),
+            create_client: Mutex::new(Some(Ok(RustfsAdminClient::new_with_base_url(
+                "http://127.0.0.1:1",
+                "access-key",
+                "secret-key",
+            )))),
+            fetch_policy_results: Mutex::new(VecDeque::from([
+                Ok("{\"Version\": \"2012-10-17\", \"Statement\": [{\"Sid\":\"binding-read\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket-a/*\"}]}".to_string()),
+            ])),
+            assume_role_result: Mutex::new(Some(Err(RustfsClientError::RequestFailed))),
+            assume_role_policies: Mutex::new(Vec::new()),
+        };
+
+        let form = AssumeRoleWithWebIdentityForm {
+            version: Some(STS_API_VERSION.to_string()),
+            action: Some(STS_WEB_IDENTITY_ACTION.to_string()),
+            web_identity_token: Some("sa-token".to_string()),
+            duration_seconds: Some("3600".to_string()),
+            policy: Some("{".to_string()),
+        };
+        let parsed = parse_sts_form("tenant-a".to_string(), "tenant-a".to_string(), form).unwrap();
+
+        let response = process_assume_role_request(&runtime, parsed).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(text.contains("<Code>AccessDenied</Code>"));
+        assert!(text.contains("Policy request parameters are not supported"));
+        assert!(runtime.assume_role_policies.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -847,6 +965,7 @@ mod tests {
             )))),
             fetch_policy_results: Mutex::new(VecDeque::new()),
             assume_role_result: Mutex::new(None),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let form = AssumeRoleWithWebIdentityForm {
@@ -888,6 +1007,7 @@ mod tests {
             create_client: Mutex::new(Some(Err(StsError::TenantTlsClientCertificateUnsupported))),
             fetch_policy_results: Mutex::new(VecDeque::new()),
             assume_role_result: Mutex::new(None),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let form = AssumeRoleWithWebIdentityForm {
@@ -929,6 +1049,7 @@ mod tests {
                 Err(RustfsClientError::RequestFailed),
             ])),
             assume_role_result: Mutex::new(None),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
@@ -967,6 +1088,7 @@ mod tests {
                 RustfsClientError::RequestFailed,
             )])),
             assume_role_result: Mutex::new(None),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
@@ -998,6 +1120,7 @@ mod tests {
             create_client: Mutex::new(None),
             fetch_policy_results: Mutex::new(VecDeque::new()),
             assume_role_result: Mutex::new(None),
+            assume_role_policies: Mutex::new(Vec::new()),
         };
 
         let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
@@ -1028,6 +1151,7 @@ mod tests {
         fetch_policy_results: Mutex<VecDeque<Result<String, RustfsClientError>>>,
         assume_role_result:
             Mutex<Option<Result<crate::sts::types::StsAssumeRoleCredentials, RustfsClientError>>>,
+        assume_role_policies: Mutex<Vec<Option<String>>>,
     }
 
     #[async_trait]
@@ -1093,9 +1217,13 @@ mod tests {
         async fn assume_role(
             &self,
             _rustfs_client: &RustfsAdminClient,
-            _policy: Option<&str>,
+            policy: Option<&str>,
             _duration_seconds: u64,
         ) -> Result<crate::sts::types::StsAssumeRoleCredentials, RustfsClientError> {
+            self.assume_role_policies
+                .lock()
+                .unwrap()
+                .push(policy.map(ToString::to_string));
             self.assume_role_result
                 .lock()
                 .unwrap()

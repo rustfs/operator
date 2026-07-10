@@ -36,19 +36,17 @@ pub fn normalize_policy_for_merge(raw: &str) -> Result<String, StsError> {
     serde_json::to_string(&Value::Object(merged)).map_err(|_| StsError::MalformedPolicyDocument)
 }
 
-/// Merge request policy + binding policies to an inline session policy.
+/// Build the inline session policy from PolicyBinding policies.
 pub fn merge_session_policies(
     request_policy: Option<&str>,
     binding_policies: &[String],
 ) -> Result<Option<String>, StsError> {
+    if request_policy.is_some() {
+        return Err(StsError::UnsupportedRequestPolicy);
+    }
+
     let mut statements = Vec::<Value>::new();
     let mut version: Option<String> = None;
-
-    if let Some(raw_request_policy) = request_policy {
-        let policy = parse_policy(raw_request_policy)?;
-        version.get_or_insert(policy.version);
-        statements.extend(policy.statements);
-    }
 
     for raw_policy in binding_policies {
         let policy = parse_policy(raw_policy)?;
@@ -62,21 +60,11 @@ pub fn merge_session_policies(
         return Ok(None);
     }
 
-    let mut merged = Map::new();
-    merged.insert(
-        "Version".to_string(),
-        Value::String(version.unwrap_or_else(|| DEFAULT_POLICY_VERSION.to_string())),
-    );
-    merged.insert("Statement".to_string(), Value::Array(statements));
-
-    let compacted = serde_json::to_string(&Value::Object(merged))
-        .map_err(|_| StsError::MalformedPolicyDocument)?;
-
-    if compacted.len() > MAX_SESSION_POLICY_SIZE {
-        return Err(StsError::PackedPolicyTooLarge);
-    }
-
-    Ok(Some(compacted))
+    compact_policy(
+        version.unwrap_or_else(|| DEFAULT_POLICY_VERSION.to_string()),
+        statements,
+    )
+    .map(Some)
 }
 
 fn parse_policy(raw: &str) -> Result<ParsedPolicy, StsError> {
@@ -118,22 +106,43 @@ fn parse_policy(raw: &str) -> Result<ParsedPolicy, StsError> {
     })
 }
 
+fn compact_policy(version: String, statements: Vec<Value>) -> Result<String, StsError> {
+    let mut merged = Map::new();
+    merged.insert("Version".to_string(), Value::String(version));
+    merged.insert("Statement".to_string(), Value::Array(statements));
+
+    let compacted = serde_json::to_string(&Value::Object(merged))
+        .map_err(|_| StsError::MalformedPolicyDocument)?;
+
+    if compacted.len() > MAX_SESSION_POLICY_SIZE {
+        return Err(StsError::PackedPolicyTooLarge);
+    }
+
+    Ok(compacted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn policy(statements: &[&str]) -> String {
+    fn policy(statements: &[String]) -> String {
         let statement_lines = statements
             .iter()
-            .map(|value| format!("{{\"Sid\":\"{value}\",\"Effect\":\"Allow\"}}"))
+            .map(String::as_str)
             .collect::<Vec<_>>()
             .join(",");
 
         format!("{{\"Version\":\"2012-10-17\",\"Statement\":[{statement_lines}]}}")
     }
 
+    fn allow_statement(sid: &str, action: &str, resource: &str) -> String {
+        format!(
+            "{{\"Sid\":\"{sid}\",\"Effect\":\"Allow\",\"Action\":\"{action}\",\"Resource\":\"{resource}\"}}"
+        )
+    }
+
     #[test]
-    fn parse_and_compact_policy_rejects_empty_policy() {
+    fn normalize_policy_for_merge_rejects_empty_policy() {
         assert!(matches!(
             normalize_policy_for_merge(""),
             Err(StsError::MalformedPolicyDocument)
@@ -141,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_and_compact_policy_rejects_malformed_json() {
+    fn normalize_policy_for_merge_rejects_malformed_json() {
         assert!(matches!(
             normalize_policy_for_merge("{\"Version\": \"2012-10-17\""),
             Err(StsError::MalformedPolicyDocument)
@@ -149,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_and_compact_policy_rejects_missing_statements() {
+    fn normalize_policy_for_merge_rejects_missing_statements() {
         let without_statements = "{\"Version\":\"2012-10-17\"}";
         assert!(matches!(
             normalize_policy_for_merge(without_statements),
@@ -158,12 +167,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_request_and_binding_policies_keeps_compact_shape() {
-        let request_policy = policy(&["RequestPolicy"]);
-        let binding_policy = policy(&["BindingPolicy"]);
+    fn merge_binding_policies_without_request_keeps_compact_shape() {
+        let binding_policy = policy(&[
+            allow_statement("BindingRead", "s3:GetObject", "arn:aws:s3:::bucket-a/*"),
+            allow_statement("BindingList", "s3:ListBucket", "arn:aws:s3:::bucket-a"),
+        ]);
 
-        let merged = merge_session_policies(Some(&request_policy), &[binding_policy])
-            .expect("merge should succeed");
+        let merged = merge_session_policies(None, &[binding_policy]).expect("merge should succeed");
         let merged = merged.expect("merged policy should exist");
 
         let value = serde_json::from_str::<Value>(&merged).expect("merged policy is json");
@@ -176,22 +186,52 @@ mod tests {
     }
 
     #[test]
+    fn merge_rejects_caller_supplied_request_policy() {
+        let request_policy = policy(&[allow_statement(
+            "RequestRead",
+            "s3:GetObject",
+            "arn:aws:s3:::bucket-a/*",
+        )]);
+        let binding_policy = policy(&[allow_statement(
+            "BindingRead",
+            "s3:GetObject",
+            "arn:aws:s3:::bucket-a/*",
+        )]);
+
+        let error = merge_session_policies(Some(&request_policy), &[binding_policy])
+            .expect_err("caller policy must not be accepted until subset evaluation exists");
+
+        assert!(matches!(error, StsError::UnsupportedRequestPolicy));
+    }
+
+    #[test]
     fn merge_session_policy_returns_none_for_empty_inputs() {
         let merged = merge_session_policies(None, &[]).expect("merge should succeed");
         assert!(merged.is_none());
     }
 
     #[test]
-    fn merge_rejects_oversized_inline_policy() {
-        let long_statement = policy(&["A"; 4000]);
+    fn merge_rejects_request_policy_without_binding_upper_bound() {
+        let request_policy = policy(&[allow_statement("RequestAll", "s3:*", "*")]);
 
-        let err = merge_session_policies(Some(&long_statement), &[])
+        let error = merge_session_policies(Some(&request_policy), &[])
+            .expect_err("request policy without a binding upper bound must be rejected");
+
+        assert!(matches!(error, StsError::UnsupportedRequestPolicy));
+    }
+
+    #[test]
+    fn merge_rejects_oversized_inline_policy() {
+        let long_sid = "A".repeat(4000);
+        let long_statement = policy(&[allow_statement(&long_sid, "s3:GetObject", "*")]);
+
+        let err = merge_session_policies(None, &[long_statement])
             .expect_err("policy should be too large");
         assert!(matches!(err, StsError::PackedPolicyTooLarge));
     }
 
     #[test]
-    fn merge_skips_no_statement_policy_as_malformed() {
+    fn normalize_policy_for_merge_rejects_empty_statement_array() {
         let no_statements = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
         assert!(matches!(
             normalize_policy_for_merge(no_statements),
