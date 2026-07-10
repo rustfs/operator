@@ -40,9 +40,9 @@ rules:
     resources: ["tokenreviews"]
     verbs: ["create"]
 
-  # StatefulSets for tenant pools
+  # StatefulSets for tenant pools and owner lookups for pod cleanup
   - apiGroups: ["apps"]
-    resources: ["statefulsets"]
+    resources: ["statefulsets", "replicasets", "deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
   # cert-manager Certificate orchestration and readiness watches

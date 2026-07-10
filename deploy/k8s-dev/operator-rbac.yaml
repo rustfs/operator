@@ -42,7 +42,7 @@ rules:
     resources: ["tokenreviews"]
     verbs: ["create"]
   - apiGroups: ["apps"]
-    resources: ["statefulsets"]
+    resources: ["statefulsets", "replicasets", "deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
