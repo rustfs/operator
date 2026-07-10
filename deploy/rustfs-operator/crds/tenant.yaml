@@ -1895,6 +1895,9 @@ spec:
                         desiredHash:
                           nullable: true
                           type: string
+                        lastAppliedAccessKeyHash:
+                          nullable: true
+                          type: string
                         lastAppliedGeneration:
                           format: int64
                           nullable: true
@@ -1951,6 +1954,9 @@ spec:
                         desiredHash:
                           nullable: true
                           type: string
+                        lastAppliedAccessKeyHash:
+                          nullable: true
+                          type: string
                         lastAppliedGeneration:
                           format: int64
                           nullable: true
@@ -1993,6 +1999,9 @@ spec:
                     items:
                       properties:
                         desiredHash:
+                          nullable: true
+                          type: string
+                        lastAppliedAccessKeyHash:
                           nullable: true
                           type: string
                         lastAppliedGeneration:

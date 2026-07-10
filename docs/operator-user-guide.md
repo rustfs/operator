@@ -476,6 +476,8 @@ ConfigMaps and user Secrets must live in the Tenant namespace. If managed outsid
 
 For each `spec.users[]` entry, the operator reads a Secret with the same name as the user. The Secret must contain `accesskey` and `secretkey`, or the MinIO-compatible keys `CONSOLE_ACCESS_KEY` and `CONSOLE_SECRET_KEY`. If both key formats are present, their values must match. User access keys must be at least 8 characters and must not contain whitespace, `=`, or `,`; user secret keys must be at least 8 characters.
 
+Updating a user Secret's `secretkey` rotates that RustFS user's credential. The `accesskey` is immutable after the first successful reconciliation; use a new user entry and Secret when it must change, then migrate clients before removing the old entry.
+
 ```yaml
 apiVersion: v1
 kind: ConfigMap

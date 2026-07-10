@@ -201,6 +201,7 @@ impl ProvisioningRun<'_> {
         item.last_applied_hash = previous.last_applied_hash.clone();
         item.last_applied_generation = previous.last_applied_generation;
         item.observed_secret_resource_version = previous.observed_secret_resource_version.clone();
+        item.last_applied_access_key_hash = previous.last_applied_access_key_hash.clone();
         item.policies = previous.policies.clone();
         item.region = previous.region.clone();
         item.object_lock = previous.object_lock;
@@ -234,6 +235,7 @@ impl ProvisioningRun<'_> {
             if let Some(previous) = self.previous_user(&user.name) {
                 item.observed_secret_resource_version =
                     previous.observed_secret_resource_version.clone();
+                item.last_applied_access_key_hash = previous.last_applied_access_key_hash.clone();
                 item.policies = previous.policies.clone();
             }
             self.push_user(item);
@@ -715,7 +717,7 @@ async fn reconcile_user(
             Reason::UserPolicyInvalid,
             message,
         );
-        return annotate_user_item(item, user, None);
+        return annotate_user_item(item, user, previous, None);
     }
 
     let credentials = match load_user_secret(run, user).await {
@@ -728,9 +730,20 @@ async fn reconcile_user(
                 Reason::UserSecretInvalid,
                 message,
             );
-            return annotate_user_item(item, user, None);
+            return annotate_user_item(item, user, previous, None);
         }
     };
+
+    if user_access_key_changed(previous, &credentials) {
+        let item = run.item(
+            previous,
+            &user.name,
+            ProvisioningItemState::Failed,
+            Reason::ImmutableFieldModified,
+            "user access key is immutable after provisioning; create a new user entry to migrate it",
+        );
+        return annotate_user_item(item, user, previous, None);
+    }
 
     if let Some(policy_name) = user
         .policies
@@ -744,7 +757,7 @@ async fn reconcile_user(
             Reason::UserPolicySetFailed,
             format!("referenced policy '{policy_name}' is not ready"),
         );
-        return annotate_user_item(item, user, credentials.resource_version);
+        return annotate_user_item(item, user, previous, None);
     }
 
     if let Some(policy_name) = user
@@ -759,7 +772,7 @@ async fn reconcile_user(
             Reason::UserPolicyNotFound,
             format!("referenced policy '{policy_name}' does not exist"),
         );
-        return annotate_user_item(item, user, credentials.resource_version);
+        return annotate_user_item(item, user, previous, None);
     }
 
     let exists = match client.user_exists(&credentials.access_key).await {
@@ -772,24 +785,24 @@ async fn reconcile_user(
                 Reason::UserSecretInvalid,
                 format!("failed to query RustFS user: {error}"),
             );
-            return annotate_user_item(item, user, credentials.resource_version);
+            return annotate_user_item(item, user, previous, None);
         }
     };
 
-    if !exists
-        && let Err(error) = client
-            .add_user(&credentials.access_key, &credentials.secret_key)
-            .await
-    {
-        let item = run.item(
-            previous,
-            &user.name,
-            ProvisioningItemState::Failed,
-            Reason::UserSecretInvalid,
-            format!("failed to create RustFS user: {error}"),
-        );
-        return annotate_user_item(item, user, credentials.resource_version);
-    }
+    let credentials_applied =
+        match sync_user_credentials(client, previous, &credentials, exists).await {
+            Ok(applied) => applied,
+            Err(error) => {
+                let item = run.item(
+                    previous,
+                    &user.name,
+                    ProvisioningItemState::Failed,
+                    Reason::UserSecretInvalid,
+                    format!("failed to update RustFS user credentials: {error}"),
+                );
+                return annotate_user_item(item, user, previous, None);
+            }
+        };
 
     if let Err(error) = client
         .set_user_policy(&credentials.access_key, &user.policies)
@@ -802,21 +815,21 @@ async fn reconcile_user(
             Reason::UserPolicySetFailed,
             format!("failed to set RustFS user policy mapping: {error}"),
         );
-        return annotate_user_item(item, user, credentials.resource_version);
+        return annotate_user_item(item, user, previous, Some(&credentials));
     }
 
-    let reason = if exists {
-        "UserAlreadyExistsPolicySet"
-    } else {
-        Reason::ProvisioningConfigured.as_str()
-    };
-    let mut item =
-        ProvisioningItemStatus::new(&user.name, ProvisioningItemState::Ready, reason.to_string());
-    let message = if exists {
-        "RustFS user already existed; direct policy mapping was applied"
-    } else {
+    let message = if !exists {
         "RustFS user was created and direct policy mapping was applied"
+    } else if credentials_applied {
+        "RustFS user credentials were updated and direct policy mapping was applied"
+    } else {
+        "RustFS user already matched the observed Secret; direct policy mapping was applied"
     };
+    let mut item = ProvisioningItemStatus::new(
+        &user.name,
+        ProvisioningItemState::Ready,
+        Reason::ProvisioningConfigured.as_str(),
+    );
     item.message = Some(message.to_string());
     item.last_transition_time = match previous {
         Some(previous)
@@ -828,17 +841,80 @@ async fn reconcile_user(
         }
         _ => Some(run.now.clone()),
     };
-    annotate_user_item(item, user, credentials.resource_version)
+    annotate_user_item(item, user, previous, Some(&credentials))
 }
 
 fn annotate_user_item(
     mut item: ProvisioningItemStatus,
     user: &ProvisioningUser,
-    resource_version: Option<String>,
+    previous: Option<&ProvisioningItemStatus>,
+    applied_credentials: Option<&UserCredentials>,
 ) -> ProvisioningItemStatus {
-    item.observed_secret_resource_version = resource_version;
+    match applied_credentials {
+        Some(credentials) => {
+            item.observed_secret_resource_version = credentials.resource_version.clone();
+            item.last_applied_access_key_hash = Some(access_key_hash(&credentials.access_key));
+        }
+        None => {
+            item.observed_secret_resource_version =
+                previous.and_then(|item| item.observed_secret_resource_version.clone());
+            item.last_applied_access_key_hash =
+                previous.and_then(|item| item.last_applied_access_key_hash.clone());
+        }
+    }
     item.policies = user.policies.clone();
     item
+}
+
+fn user_access_key_changed(
+    previous: Option<&ProvisioningItemStatus>,
+    credentials: &UserCredentials,
+) -> bool {
+    let current_hash = access_key_hash(&credentials.access_key);
+    previous
+        .and_then(|item| item.last_applied_access_key_hash.as_deref())
+        .is_some_and(|previous_hash| previous_hash != current_hash)
+}
+
+async fn sync_user_credentials(
+    client: &RustfsAdminClient,
+    previous: Option<&ProvisioningItemStatus>,
+    credentials: &UserCredentials,
+    exists: bool,
+) -> Result<bool, RustfsClientError> {
+    if !user_credentials_need_apply(previous, credentials, exists) {
+        return Ok(false);
+    }
+
+    client
+        .add_user(&credentials.access_key, &credentials.secret_key)
+        .await?;
+    Ok(true)
+}
+
+fn user_credentials_need_apply(
+    previous: Option<&ProvisioningItemStatus>,
+    credentials: &UserCredentials,
+    exists: bool,
+) -> bool {
+    if !exists {
+        return true;
+    }
+
+    let Some(resource_version) = credentials.resource_version.as_deref() else {
+        return true;
+    };
+    let Some(previous) = previous else {
+        return true;
+    };
+    let current_hash = access_key_hash(&credentials.access_key);
+
+    previous.observed_secret_resource_version.as_deref() != Some(resource_version)
+        || previous.last_applied_access_key_hash.as_deref() != Some(current_hash.as_str())
+}
+
+fn access_key_hash(access_key: &str) -> String {
+    hash_document(access_key)
 }
 
 async fn load_user_secret(
@@ -1250,6 +1326,7 @@ fn item_message(item: &ProvisioningItemStatus) -> String {
 fn reason_from_str(reason: &str) -> Reason {
     match reason {
         "ProvisioningUnsupported" => Reason::ProvisioningUnsupported,
+        "ImmutableFieldModified" => Reason::ImmutableFieldModified,
         "PolicyDocumentConfigMapNotFound" => Reason::PolicyDocumentConfigMapNotFound,
         "PolicyDocumentKeyNotFound" => Reason::PolicyDocumentKeyNotFound,
         "PolicyApplyFailed" => Reason::PolicyApplyFailed,
@@ -1280,6 +1357,11 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct PolicyApplyCapture {
+        body: Arc<Mutex<String>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct UserCredentialCapture {
         body: Arc<Mutex<String>>,
     }
 
@@ -1436,6 +1518,102 @@ mod tests {
             )
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn rotated_user_secret_is_upserted_for_existing_user() {
+        let capture = UserCredentialCapture::default();
+        let route_capture = capture.clone();
+        let router = Router::new()
+            .route(
+                "/rustfs/admin/v3/add-user",
+                put(
+                    move |State(c): State<UserCredentialCapture>, req: Request<Body>| async move {
+                        let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                            .await
+                            .expect("request body should be readable");
+                        *c.body.lock().await =
+                            String::from_utf8(body_bytes.to_vec()).expect("body should be UTF-8");
+
+                        StatusCode::OK
+                    },
+                ),
+            )
+            .with_state(route_capture);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let mut previous = ProvisioningItemStatus::new(
+            "app-user",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        );
+        previous.observed_secret_resource_version = Some("1".to_string());
+        previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let credentials = UserCredentials {
+            access_key: "appuser01".to_string(),
+            secret_key: "rotated-secret".to_string(),
+            resource_version: Some("2".to_string()),
+        };
+
+        let applied = sync_user_credentials(&client, Some(&previous), &credentials, true)
+            .await
+            .expect("rotated secret should be applied");
+
+        assert!(applied);
+        assert_eq!(
+            serde_json::from_str::<Value>(&capture.body.lock().await)
+                .expect("request body should be JSON"),
+            serde_json::json!({"secretKey": "rotated-secret", "status": "enabled"})
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn unchanged_user_secret_version_skips_credentials_write() {
+        let mut previous = ProvisioningItemStatus::new(
+            "app-user",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        );
+        previous.observed_secret_resource_version = Some("1".to_string());
+        previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let credentials = UserCredentials {
+            access_key: "appuser01".to_string(),
+            secret_key: "unchanged-secret".to_string(),
+            resource_version: Some("1".to_string()),
+        };
+
+        assert!(!user_credentials_need_apply(
+            Some(&previous),
+            &credentials,
+            true
+        ));
+    }
+
+    #[test]
+    fn changed_user_access_key_is_rejected() {
+        let mut previous = ProvisioningItemStatus::new(
+            "app-user",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        );
+        previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let credentials = UserCredentials {
+            access_key: "otheruser".to_string(),
+            secret_key: "rotated-secret".to_string(),
+            resource_version: Some("2".to_string()),
+        };
+
+        assert!(user_access_key_changed(Some(&previous), &credentials));
     }
 
     #[test]
