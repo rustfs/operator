@@ -317,14 +317,23 @@ Serve the Console service under **one HTTPS host**:
    `CONSOLE_COOKIE_SECURE=false` in `console.env`; do not use that setting for
    production.
 
-No CORS configuration is needed on the backend for this setup.
+No CORS configuration is needed on the backend for this setup. The reverse
+proxy must preserve the public Host/authority; if it rewrites the Host, add the
+public Console origin to `CORS_ALLOWED_ORIGINS` so logout origin checks succeed.
 
-Console sessions are encrypted stateless cookies. Users paste a Kubernetes
-ServiceAccount bearer token only during login; after validation, the Console
-stores that token inside an encrypted `session` cookie for later API requests.
-If you run multiple Console replicas, keep `console.jwtSecret` stable and shared
-across all replicas. The chart reuses the existing generated Secret on upgrade
-when `console.jwtSecret` is not set.
+Console sessions are stored in process. Users paste a Kubernetes ServiceAccount
+bearer token only during login; after validation, the Console encrypts that
+token in memory and stores only a random session ID in the browser cookie.
+Logout removes the session immediately. The chart requires
+`console.replicas=1` and uses a Recreate rollout; restarts and upgrades
+invalidate existing sessions and require users to sign in again. Custom
+deployments must preserve the same replica and rollout constraints.
+
+When upgrading from an older release configured with multiple Console replicas,
+set `console.replicas=1` first and expect brief downtime plus forced sign-in.
+Before rolling back to a release without server-side sessions, scale the Console
+Deployment to zero, perform the rollback, then restore one replica so the two
+cookie formats never overlap.
 
 ### Backend CORS (when frontend is on a different host)
 
@@ -336,7 +345,7 @@ console:
     - name: CORS_ALLOWED_ORIGINS
       value: "https://ui.example.com"
     # Required when the frontend and API are cross-site, so browsers send the
-    # encrypted session cookie on credentialed CORS requests.
+    # session cookie on credentialed CORS requests.
     - name: CONSOLE_COOKIE_SAME_SITE
       value: "None"
 ```

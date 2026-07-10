@@ -180,12 +180,34 @@ use crate::types::v1alpha1::status::provisioning::{
 pub struct ApiDoc;
 
 // --- Auth ---
-#[utoipa::path(post, path = "/api/v1/login", request_body = LoginRequest, responses((status = 200, body = LoginResponse)), tag = "auth")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, body = LoginResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 429, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "auth"
+)]
 fn api_login(_body: Json<LoginRequest>) -> Json<LoginResponse> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(post, path = "/api/v1/logout", responses((status = 200)), tag = "auth")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/logout",
+    responses(
+        (status = 200, body = LoginResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "auth"
+)]
 fn api_logout() {}
 
 #[utoipa::path(get, path = "/api/v1/session", responses((status = 200, body = SessionResponse)), tag = "auth")]

@@ -151,9 +151,12 @@ fn patch_images_and_tags(manifest: &str, image: &str, fallback: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT, E2E_CONTROL_PLANE_DEPLOYMENTS,
+        CONSOLE_DEPLOYMENT, E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT, E2E_CONTROL_PLANE_DEPLOYMENTS,
         E2E_OPERATOR_IMAGE_TAG_DEFAULT, patch_images_and_tags,
     };
+
+    const CONSOLE_DEPLOYMENT_TEMPLATE: &str =
+        include_str!("../../../deploy/rustfs-operator/templates/console-deployment.yaml");
 
     #[test]
     fn patch_images_prefers_explicit_runtime_image_tags() {
@@ -184,5 +187,15 @@ mod tests {
                 "rustfs-operator-console-frontend",
             ]
         );
+    }
+
+    #[test]
+    fn console_session_deployments_are_single_replica_and_recreate() {
+        assert!(CONSOLE_DEPLOYMENT.contains("replicas: 1"));
+        assert!(CONSOLE_DEPLOYMENT.contains("strategy:\n    type: Recreate"));
+        assert!(
+            CONSOLE_DEPLOYMENT_TEMPLATE.contains("ne (toString .Values.console.replicas) \"1\"")
+        );
+        assert!(CONSOLE_DEPLOYMENT_TEMPLATE.contains("strategy:\n    type: Recreate"));
     }
 }

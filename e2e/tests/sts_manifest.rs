@@ -174,6 +174,61 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
     assert!(external_stderr.contains("operator STS currently supports only ClusterIP"));
 }
 
+#[test]
+fn console_session_deployments_enforce_single_recreate_process() {
+    let dev_manifest = std::fs::read_to_string("../deploy/k8s-dev/console-deployment.yaml")
+        .expect("k8s dev Console deployment exists");
+    let dev_deployment = find_yaml_document(&dev_manifest, "Deployment", "rustfs-operator-console")
+        .expect("k8s dev Console deployment is rendered");
+    assert_eq!(dev_deployment["spec"]["replicas"].as_i64(), Some(1));
+    assert_eq!(
+        dev_deployment["spec"]["strategy"]["type"].as_str(),
+        Some("Recreate")
+    );
+
+    let Some(default_render) = helm_template(&[]) else {
+        return;
+    };
+    assert!(
+        default_render.status.success(),
+        "default helm template should render successfully: {}",
+        String::from_utf8_lossy(&default_render.stderr)
+    );
+    let default_stdout = String::from_utf8(default_render.stdout).expect("helm stdout is utf8");
+    let deployment = find_yaml_document(&default_stdout, "Deployment", "rustfs-operator-console")
+        .expect("Helm Console deployment is rendered");
+    assert_eq!(deployment["spec"]["replicas"].as_i64(), Some(1));
+    assert_eq!(
+        deployment["spec"]["strategy"]["type"].as_str(),
+        Some("Recreate")
+    );
+
+    for replicas in ["2", "true"] {
+        let render = helm_template(&["--set", &format!("console.replicas={replicas}")])
+            .expect("helm remains available");
+        assert!(!render.status.success());
+        assert!(
+            String::from_utf8_lossy(&render.stderr).contains(
+                "console.replicas must be 1 because Console sessions are stored in process"
+            )
+        );
+    }
+
+    let disabled_render = helm_template(&[
+        "--set",
+        "console.enabled=false",
+        "--set",
+        "console.replicas=2",
+    ])
+    .expect("helm remains available");
+    assert!(disabled_render.status.success());
+    let disabled_stdout =
+        String::from_utf8(disabled_render.stdout).expect("disabled helm stdout is utf8");
+    assert!(
+        find_yaml_document(&disabled_stdout, "Deployment", "rustfs-operator-console").is_none()
+    );
+}
+
 fn helm_template(args: &[&str]) -> Option<Output> {
     if !helm_is_available() {
         eprintln!("skipping helm template assertions: helm binary is not available");
@@ -213,4 +268,13 @@ fn assert_yaml_documents_parse(yaml: &str, name: &str) {
         had_content,
         "{name} should contain at least one yaml document"
     );
+}
+
+fn find_yaml_document(yaml: &str, kind: &str, name: &str) -> Option<Value> {
+    yaml.split("---")
+        .filter_map(|document| serde_yaml_ng::from_str::<Value>(document).ok())
+        .find(|document| {
+            document["kind"].as_str() == Some(kind)
+                && document["metadata"]["name"].as_str() == Some(name)
+        })
 }
