@@ -651,6 +651,7 @@ Current STS constraints:
 - STS only issues credentials for TLS-enabled Tenants.
 - Operator STS uses the explicit Tenant route with both namespace and name.
 - The `PolicyBinding` must reference at least one policy.
+- Every policy referenced by the matched `PolicyBinding` must resolve to a valid RustFS policy document.
 - Caller-supplied `Policy` request parameters are rejected; issued credentials use the matched `PolicyBinding` policies.
 - Tenants requiring client certificates for upstream Tenant calls are rejected by Operator STS.
 

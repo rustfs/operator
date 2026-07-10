@@ -272,7 +272,7 @@ curl -sS -X POST \
   --data-urlencode "DurationSeconds=3600"
 ```
 
-Operator STS derives the issued session policy from the matched `PolicyBinding` policies. Caller-supplied `Policy` request parameters are rejected until the operator can prove they only narrow the `PolicyBinding` permissions.
+Operator STS derives the issued session policy from the matched `PolicyBinding` policies. Every referenced policy must exist and resolve to a valid RustFS policy document. Caller-supplied `Policy` request parameters are rejected until the operator can prove they only narrow the `PolicyBinding` permissions.
 
 ## Creating Tenant Resources
 

@@ -439,9 +439,9 @@ async fn resolve_binding_policies<R: StsRuntime + Send + Sync>(
                     tracing::warn!(
                         policy = %policy_name,
                         error = %error,
-                        "Failed fetching PolicyBinding policy; skipping policy"
+                        "Failed fetching PolicyBinding policy"
                     );
-                    continue;
+                    return Err(StsError::InternalError);
                 }
             };
 
@@ -451,9 +451,9 @@ async fn resolve_binding_policies<R: StsRuntime + Send + Sync>(
                     tracing::warn!(
                         policy = %policy_name,
                         error = %error.code(),
-                        "Invalid PolicyBinding policy document; skipping policy"
+                        "Invalid PolicyBinding policy document"
                     );
-                    continue;
+                    return Err(error);
                 }
             }
         }
@@ -936,6 +936,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sts_handler_rejects_invalid_binding_policy_without_assume_role() {
+        let runtime = MockStsRuntime {
+            identity: Mutex::new(Some(Ok(token_review::ServiceAccountIdentity {
+                namespace: "tenant-a".to_string(),
+                service_account: "workload-sa".to_string(),
+            }))),
+            policy_bindings: Mutex::new(Some(Ok(vec![PolicyBinding {
+                metadata: Default::default(),
+                spec: PolicyBindingSpec {
+                    application: PolicyBindingApplication {
+                        namespace: "tenant-a".to_string(),
+                        serviceaccount: "workload-sa".to_string(),
+                    },
+                    policies: vec![
+                        "policy-binding-good".to_string(),
+                        "policy-binding-invalid".to_string(),
+                    ],
+                },
+                status: None,
+            }]))),
+            tenant: Mutex::new(Some(Ok(crate::types::v1alpha1::tenant::Tenant {
+                metadata: Default::default(),
+                spec: Default::default(),
+                status: None,
+            }))),
+            create_client: Mutex::new(Some(Ok(RustfsAdminClient::new_with_base_url(
+                "http://127.0.0.1:1",
+                "access-key",
+                "secret-key",
+            )))),
+            fetch_policy_results: Mutex::new(VecDeque::from([
+                Ok("{\"Version\": \"2012-10-17\", \"Statement\": [{\"Sid\":\"binding-read\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket-a/*\"}]}".to_string()),
+                Ok("{\"Version\":\"2012-10-17\",\"Statement\":[]}".to_string()),
+            ])),
+            assume_role_result: Mutex::new(Some(Err(RustfsClientError::RequestFailed))),
+            assume_role_policies: Mutex::new(Vec::new()),
+        };
+
+        let form = AssumeRoleWithWebIdentityForm {
+            version: Some(STS_API_VERSION.to_string()),
+            action: Some(STS_WEB_IDENTITY_ACTION.to_string()),
+            web_identity_token: Some("sa-token".to_string()),
+            duration_seconds: Some("3600".to_string()),
+            policy: None,
+        };
+        let parsed = parse_sts_form("tenant-a".to_string(), "tenant-a".to_string(), form).unwrap();
+
+        let response = process_assume_role_request(&runtime, parsed).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(text.contains("<Code>MalformedPolicyDocument</Code>"));
+        assert!(runtime.assume_role_policies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sts_handler_rejects_binding_policy_fetch_failure_without_assume_role() {
+        let runtime = MockStsRuntime {
+            identity: Mutex::new(Some(Ok(token_review::ServiceAccountIdentity {
+                namespace: "tenant-a".to_string(),
+                service_account: "workload-sa".to_string(),
+            }))),
+            policy_bindings: Mutex::new(Some(Ok(vec![PolicyBinding {
+                metadata: Default::default(),
+                spec: PolicyBindingSpec {
+                    application: PolicyBindingApplication {
+                        namespace: "tenant-a".to_string(),
+                        serviceaccount: "workload-sa".to_string(),
+                    },
+                    policies: vec![
+                        "policy-binding-good".to_string(),
+                        "policy-binding-unavailable".to_string(),
+                    ],
+                },
+                status: None,
+            }]))),
+            tenant: Mutex::new(Some(Ok(crate::types::v1alpha1::tenant::Tenant {
+                metadata: Default::default(),
+                spec: Default::default(),
+                status: None,
+            }))),
+            create_client: Mutex::new(Some(Ok(RustfsAdminClient::new_with_base_url(
+                "http://127.0.0.1:1",
+                "access-key",
+                "secret-key",
+            )))),
+            fetch_policy_results: Mutex::new(VecDeque::from([
+                Ok("{\"Version\": \"2012-10-17\", \"Statement\": [{\"Sid\":\"binding-read\",\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket-a/*\"}]}".to_string()),
+                Err(RustfsClientError::RequestFailed),
+            ])),
+            assume_role_result: Mutex::new(Some(Err(RustfsClientError::RequestFailed))),
+            assume_role_policies: Mutex::new(Vec::new()),
+        };
+
+        let form = AssumeRoleWithWebIdentityForm {
+            version: Some(STS_API_VERSION.to_string()),
+            action: Some(STS_WEB_IDENTITY_ACTION.to_string()),
+            web_identity_token: Some("sa-token".to_string()),
+            duration_seconds: Some("3600".to_string()),
+            policy: None,
+        };
+        let parsed = parse_sts_form("tenant-a".to_string(), "tenant-a".to_string(), form).unwrap();
+
+        let response = process_assume_role_request(&runtime, parsed).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(text.contains("<Code>InternalError</Code>"));
+        assert!(runtime.assume_role_policies.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn sts_handler_rejects_matching_binding_without_valid_policies() {
         let runtime = MockStsRuntime {
             identity: Mutex::new(Some(Ok(token_review::ServiceAccountIdentity {
@@ -1037,7 +1151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_binding_policies_skips_invalid_binding_policies() {
+    async fn resolve_binding_policies_rejects_invalid_binding_policy_document() {
         let runtime = MockStsRuntime {
             identity: Mutex::new(None),
             policy_bindings: Mutex::new(None),
@@ -1069,16 +1183,50 @@ mod tests {
             status: None,
         }];
 
-        let policies = super::resolve_binding_policies(&runtime, &client, &bindings)
+        let error = super::resolve_binding_policies(&runtime, &client, &bindings)
             .await
-            .expect("valid referenced policies should allow the STS request");
+            .expect_err("invalid referenced policies must reject the STS request");
 
-        assert_eq!(policies.len(), 1);
-        assert!(policies[0].contains("\"Sid\":\"good\""));
+        assert!(matches!(error, StsError::MalformedPolicyDocument));
     }
 
     #[tokio::test]
-    async fn resolve_binding_policies_rejects_when_no_valid_binding_policy_exists() {
+    async fn resolve_binding_policies_rejects_fetch_failure_after_valid_policy() {
+        let runtime = MockStsRuntime {
+            identity: Mutex::new(None),
+            policy_bindings: Mutex::new(None),
+            tenant: Mutex::new(None),
+            create_client: Mutex::new(None),
+            fetch_policy_results: Mutex::new(VecDeque::from([
+                Ok("{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"good\",\"Effect\":\"Allow\"}]}".to_string()),
+                Err(RustfsClientError::RequestFailed),
+            ])),
+            assume_role_result: Mutex::new(None),
+            assume_role_policies: Mutex::new(Vec::new()),
+        };
+
+        let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
+        let bindings = vec![PolicyBinding {
+            metadata: Default::default(),
+            spec: PolicyBindingSpec {
+                application: PolicyBindingApplication {
+                    namespace: "tenant-a".to_string(),
+                    serviceaccount: "sa".to_string(),
+                },
+                policies: vec!["policy-good".to_string(), "policy-fail".to_string()],
+            },
+            status: None,
+        }];
+
+        let error = super::resolve_binding_policies(&runtime, &client, &bindings)
+            .await
+            .expect_err("failed referenced policies must reject the STS request");
+
+        assert!(matches!(error, StsError::InternalError));
+    }
+
+    #[tokio::test]
+    async fn resolve_binding_policies_rejects_fetch_failure_without_valid_policy() {
         let runtime = MockStsRuntime {
             identity: Mutex::new(None),
             policy_bindings: Mutex::new(None),
@@ -1106,9 +1254,9 @@ mod tests {
 
         let error = super::resolve_binding_policies(&runtime, &client, &bindings)
             .await
-            .expect_err("no valid binding policy must reject the STS request");
+            .expect_err("failed referenced policies must reject the STS request");
 
-        assert!(matches!(error, StsError::AccessDenied));
+        assert!(matches!(error, StsError::InternalError));
     }
 
     #[tokio::test]
@@ -1141,6 +1289,54 @@ mod tests {
             .expect_err("empty binding policy list must reject the STS request");
 
         assert!(matches!(error, StsError::AccessDenied));
+    }
+
+    #[tokio::test]
+    async fn resolve_binding_policies_rejects_failure_in_any_matched_binding() {
+        let runtime = MockStsRuntime {
+            identity: Mutex::new(None),
+            policy_bindings: Mutex::new(None),
+            tenant: Mutex::new(None),
+            create_client: Mutex::new(None),
+            fetch_policy_results: Mutex::new(VecDeque::from([
+                Ok("{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"good\",\"Effect\":\"Allow\"}]}".to_string()),
+                Err(RustfsClientError::RequestFailed),
+            ])),
+            assume_role_result: Mutex::new(None),
+            assume_role_policies: Mutex::new(Vec::new()),
+        };
+
+        let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
+        let bindings = vec![
+            PolicyBinding {
+                metadata: Default::default(),
+                spec: PolicyBindingSpec {
+                    application: PolicyBindingApplication {
+                        namespace: "tenant-a".to_string(),
+                        serviceaccount: "sa".to_string(),
+                    },
+                    policies: vec!["policy-good".to_string()],
+                },
+                status: None,
+            },
+            PolicyBinding {
+                metadata: Default::default(),
+                spec: PolicyBindingSpec {
+                    application: PolicyBindingApplication {
+                        namespace: "tenant-a".to_string(),
+                        serviceaccount: "sa".to_string(),
+                    },
+                    policies: vec!["policy-fail".to_string()],
+                },
+                status: None,
+            },
+        ];
+
+        let error = super::resolve_binding_policies(&runtime, &client, &bindings)
+            .await
+            .expect_err("any failed binding policy must reject the STS request");
+
+        assert!(matches!(error, StsError::InternalError));
     }
 
     struct MockStsRuntime {
