@@ -179,13 +179,13 @@ impl RustfsAdminClient {
         }
 
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
         if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
             return Ok(false);
         }
 
-        Err(RustfsClientError::unexpected_status_with_body(
-            status, &body,
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
         ))
     }
 

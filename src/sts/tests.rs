@@ -29,7 +29,7 @@ use tokio::sync::Mutex;
 use super::{
     ADD_USER_PATH, CreateBucketResult, LIST_CANNED_POLICIES_PATH, MAX_UPSTREAM_ERROR_BODY_BYTES,
     POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient,
-    RustfsClientError, SERVER_INFO_PATH, SET_POLICY_PATH,
+    RustfsClientError, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
     helpers::{extract_canned_policy_document, extract_credentials, parse_assume_role_response},
 };
 
@@ -43,6 +43,15 @@ fn secret_with_fields(fields: Vec<(&str, &[u8])>) -> corev1::Secret {
         data: Some(data),
         ..Default::default()
     }
+}
+
+fn assert_oversized_upstream_body_hidden(err: RustfsClientError) {
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "upstream returned 502 Bad Gateway: response body exceeded {MAX_UPSTREAM_ERROR_BODY_BYTES} bytes"
+        )
+    );
 }
 
 #[test]
@@ -160,10 +169,10 @@ fn unexpected_status_redacts_sensitive_upstream_error_summary() {
 
 #[test]
 fn unexpected_status_hides_truncated_unstructured_response_body() {
-    let body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES);
+    let retained_body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES);
     let err = RustfsClientError::unexpected_status_with_limited_body(
         StatusCode::BAD_GATEWAY,
-        &body,
+        &retained_body,
         true,
     );
 
@@ -173,6 +182,64 @@ fn unexpected_status_hides_truncated_unstructured_response_body() {
             "upstream returned 502 Bad Gateway: response body exceeded {MAX_UPSTREAM_ERROR_BODY_BYTES} bytes"
         )
     );
+}
+
+#[tokio::test]
+async fn unexpected_response_preserves_exact_limit_unstructured_response_body() {
+    let body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES);
+    let router = Router::new().route(
+        ADD_USER_PATH,
+        put(move || {
+            let body = body.clone();
+            async move { (StatusCode::BAD_GATEWAY, body) }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let err = client
+        .add_user("app-user", "secret123")
+        .await
+        .expect_err("exact limit body should still report the retained body");
+
+    let message = err.to_string();
+    assert!(message.contains("upstream returned 502 Bad Gateway"));
+    assert!(!message.contains("response body exceeded"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn unexpected_response_hides_over_limit_unstructured_response_body() {
+    let body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES + 1);
+    let router = Router::new().route(
+        ADD_USER_PATH,
+        put(move || {
+            let body = body.clone();
+            async move { (StatusCode::BAD_GATEWAY, body) }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let err = client
+        .add_user("app-user", "secret123")
+        .await
+        .expect_err("oversized body should be hidden");
+
+    assert_oversized_upstream_body_hidden(err);
+
+    server.abort();
 }
 
 #[derive(Clone, Default)]
@@ -722,6 +789,34 @@ async fn add_user_uses_expected_path_query_and_body() {
 }
 
 #[tokio::test]
+async fn user_exists_limits_unexpected_error_response_body() {
+    let body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES + 1);
+    let router = Router::new().route(
+        USER_INFO_PATH,
+        get(move || {
+            let body = body.clone();
+            async move { (StatusCode::BAD_GATEWAY, body) }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let err = client
+        .user_exists("app-user")
+        .await
+        .expect_err("unexpected user lookup error should hide oversized body");
+
+    assert_oversized_upstream_body_hidden(err);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn set_user_policy_uses_single_authoritative_mapping_call() {
     let capture = Capture::default();
     let route_capture = capture.clone();
@@ -802,6 +897,37 @@ async fn bucket_object_lock_enabled_parses_enabled_response() {
 }
 
 #[tokio::test]
+async fn bucket_object_lock_enabled_limits_unexpected_error_response_body() {
+    let body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES + 1);
+    let router = Router::new().route(
+        "/app-data",
+        get(move |req: Request<Body>| {
+            let body = body.clone();
+            async move {
+                assert_eq!(req.uri().query().unwrap_or(""), "object-lock=");
+                (StatusCode::BAD_GATEWAY, body)
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let err = client
+        .bucket_object_lock_enabled("app-data")
+        .await
+        .expect_err("unexpected object-lock error should hide oversized body");
+
+    assert_oversized_upstream_body_hidden(err);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn create_bucket_sends_object_lock_header_and_region_body() {
     let capture = Capture::default();
     let route_capture = capture.clone();
@@ -850,6 +976,34 @@ async fn create_bucket_sends_object_lock_header_and_region_body() {
             .await
             .contains("<LocationConstraint>us-west-2</LocationConstraint>")
     );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn create_bucket_limits_unexpected_error_response_body() {
+    let body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES + 1);
+    let router = Router::new().route(
+        "/app-data",
+        put(move || {
+            let body = body.clone();
+            async move { (StatusCode::BAD_GATEWAY, body) }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let err = client
+        .create_bucket("app-data", None, false)
+        .await
+        .expect_err("unexpected bucket create error should hide oversized body");
+
+    assert_oversized_upstream_body_hidden(err);
 
     server.abort();
 }

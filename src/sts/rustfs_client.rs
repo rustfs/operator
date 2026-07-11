@@ -262,8 +262,8 @@ impl RustfsClientError {
         Self::unexpected_status_with_limited_body(status, &body, truncated)
     }
 
-    pub(super) fn unexpected_status_with_body(status: StatusCode, body: &str) -> Self {
-        Self::unexpected_status_with_limited_body(status, body, false)
+    pub(super) async fn limited_response_body(response: Response) -> (String, bool) {
+        read_limited_response_body(response).await
     }
 
     fn unexpected_status_with_limited_body(
@@ -276,16 +276,20 @@ impl RustfsClientError {
             detail: summarize_upstream_error_body(body, body_truncated),
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn unexpected_status_with_body(status: StatusCode, body: &str) -> Self {
+        Self::unexpected_status_with_limited_body(status, body, false)
+    }
 }
 
 async fn read_limited_response_body(mut response: Response) -> (String, bool) {
     let mut body = Vec::new();
-    let mut truncated = false;
+    let read_limit = MAX_UPSTREAM_ERROR_BODY_BYTES.saturating_add(1);
 
     loop {
-        let remaining = MAX_UPSTREAM_ERROR_BODY_BYTES.saturating_sub(body.len());
+        let remaining = read_limit.saturating_sub(body.len());
         if remaining == 0 {
-            truncated = true;
             break;
         }
 
@@ -296,10 +300,14 @@ async fn read_limited_response_body(mut response: Response) -> (String, bool) {
         };
         if chunk.len() > remaining {
             body.extend_from_slice(&chunk[..remaining]);
-            truncated = true;
             break;
         }
         body.extend_from_slice(&chunk);
+    }
+
+    let truncated = body.len() > MAX_UPSTREAM_ERROR_BODY_BYTES;
+    if truncated {
+        body.truncate(MAX_UPSTREAM_ERROR_BODY_BYTES);
     }
 
     (String::from_utf8_lossy(&body).into_owned(), truncated)

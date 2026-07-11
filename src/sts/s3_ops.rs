@@ -81,13 +81,13 @@ impl RustfsAdminClient {
         }
 
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
         if bucket_already_exists(status, &body) {
             return Ok(CreateBucketResult::AlreadyExists);
         }
 
-        Err(RustfsClientError::unexpected_status_with_body(
-            status, &body,
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
         ))
     }
 
@@ -121,12 +121,12 @@ impl RustfsAdminClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let (body, truncated) = RustfsClientError::limited_response_body(response).await;
             if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
                 return Ok(false);
             }
-            return Err(RustfsClientError::unexpected_status_with_body(
-                status, &body,
+            return Err(RustfsClientError::unexpected_status_with_limited_body(
+                status, &body, truncated,
             ));
         }
 
