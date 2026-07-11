@@ -155,15 +155,21 @@ fn unexpected_status_includes_upstream_json_error_summary() {
 fn unexpected_status_redacts_sensitive_upstream_error_summary() {
     let err = RustfsClientError::unexpected_status_with_body(
         StatusCode::BAD_REQUEST,
-        r#"{"code":"InvalidRequest","message":"secretkey: SK_TEST clientSecret: oidc-secret <AccessKey>AKIA_XML</AccessKey>"}"#,
+        r#"{"code":"InvalidRequest","message":"secretkey: SK_TEST clientSecret: oidc-secret SecretAccessKey: SK_STS AccessKeyId: AKIA_STS <SecretAccessKey>SK_XML</SecretAccessKey> <AccessKeyId>AKIA_XML</AccessKeyId>"}"#,
     );
 
     let message = err.to_string();
     assert!(message.contains("secretkey: <redacted>"));
     assert!(message.contains("clientSecret: <redacted>"));
-    assert!(message.contains("<AccessKey><redacted></AccessKey>"));
+    assert!(message.contains("SecretAccessKey: <redacted>"));
+    assert!(message.contains("AccessKeyId: <redacted>"));
+    assert!(message.contains("<SecretAccessKey><redacted></SecretAccessKey>"));
+    assert!(message.contains("<AccessKeyId><redacted></AccessKeyId>"));
     assert!(!message.contains("SK_TEST"));
     assert!(!message.contains("oidc-secret"));
+    assert!(!message.contains("SK_STS"));
+    assert!(!message.contains("AKIA_STS"));
+    assert!(!message.contains("SK_XML"));
     assert!(!message.contains("AKIA_XML"));
 }
 

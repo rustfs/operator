@@ -12,15 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const SENSITIVE_KEYS: [&str; 16] = [
+const SENSITIVE_KEYS: [&str; 22] = [
     "token",
     "password",
     "accesskey",
     "access_key",
     "access-key",
+    "accesskeyid",
+    "access_key_id",
+    "access-key-id",
     "secretkey",
     "secret_key",
     "secret-key",
+    "secretaccesskey",
+    "secret_access_key",
+    "secret-access-key",
     "clientsecret",
     "client_secret",
     "client-secret",
@@ -42,7 +48,9 @@ fn is_sensitive_key(key: &str) -> bool {
         "token"
             | "password"
             | "accesskey"
+            | "accesskeyid"
             | "secretkey"
+            | "secretaccesskey"
             | "clientsecret"
             | "sessiontoken"
             | "credential"
@@ -279,6 +287,26 @@ mod tests {
         assert!(sanitized.contains("<SecretKey><redacted></SecretKey>"));
         assert!(!sanitized.contains("oidc-secret"));
         assert!(!sanitized.contains("AKIA_JSON"));
+        assert!(!sanitized.contains("SK_XML"));
+    }
+
+    #[test]
+    fn redacts_sts_credential_field_names() {
+        let message = r#"AccessKeyId: AKIA_TEXT SecretAccessKey: SK_TEXT {"access_key_id":"AKIA_JSON","secret-access-key":"SK_JSON"} <AccessKeyId>AKIA_XML</AccessKeyId> <SecretAccessKey>SK_XML</SecretAccessKey>"#;
+
+        let sanitized = redact_sensitive_pairs(message);
+
+        assert!(sanitized.contains("AccessKeyId: <redacted>"));
+        assert!(sanitized.contains("SecretAccessKey: <redacted>"));
+        assert!(sanitized.contains(r#""access_key_id":"<redacted>""#));
+        assert!(sanitized.contains(r#""secret-access-key":"<redacted>""#));
+        assert!(sanitized.contains("<AccessKeyId><redacted></AccessKeyId>"));
+        assert!(sanitized.contains("<SecretAccessKey><redacted></SecretAccessKey>"));
+        assert!(!sanitized.contains("AKIA_TEXT"));
+        assert!(!sanitized.contains("SK_TEXT"));
+        assert!(!sanitized.contains("AKIA_JSON"));
+        assert!(!sanitized.contains("SK_JSON"));
+        assert!(!sanitized.contains("AKIA_XML"));
         assert!(!sanitized.contains("SK_XML"));
     }
 
