@@ -227,11 +227,11 @@ async fn reconcile_single_pool_lifecycle(
         );
     }
 
-    if request.action == DecommissionAction::Start && tenant.spec.pools.len() <= 1 {
+    if should_block_last_live_pool_decommission(tenant, pool, request) {
         return failed_decision(
             Some(request.request_id.clone()),
             "LastPoolBlocked",
-            "cannot decommission the last pool in a tenant",
+            "cannot decommission the last live pool in a tenant",
         );
     }
 
@@ -893,11 +893,46 @@ fn terminal_decision_from_existing(
     existing: Option<PoolDecommissionStatus>,
 ) -> PoolLifecycleDecision {
     let state = existing_state.unwrap_or(PoolLifecycleState::Active);
+    if matches!(
+        state,
+        PoolLifecycleState::DecommissionCanceled | PoolLifecycleState::DecommissionFailed
+    ) {
+        return active_lifecycle_decision();
+    }
+
     PoolLifecycleDecision {
         skip_workload_reconcile: !matches!(state, PoolLifecycleState::Active),
         state,
         decommission: existing,
     }
+}
+
+fn should_block_last_live_pool_decommission(
+    tenant: &Tenant,
+    pool: &Pool,
+    request: &DecommissionRequest,
+) -> bool {
+    request.action == DecommissionAction::Start
+        && pool_counts_as_live_for_decommission_guard(existing_lifecycle_state(tenant, &pool.name))
+        && live_pool_count_for_decommission_guard(tenant) <= 1
+}
+
+fn live_pool_count_for_decommission_guard(tenant: &Tenant) -> usize {
+    tenant
+        .spec
+        .pools
+        .iter()
+        .filter(|pool| {
+            pool_counts_as_live_for_decommission_guard(existing_lifecycle_state(tenant, &pool.name))
+        })
+        .count()
+}
+
+fn pool_counts_as_live_for_decommission_guard(state: Option<PoolLifecycleState>) -> bool {
+    !matches!(
+        state,
+        Some(PoolLifecycleState::Decommissioning | PoolLifecycleState::Decommissioned)
+    )
 }
 
 fn active_lifecycle_decision() -> PoolLifecycleDecision {
@@ -1101,6 +1136,10 @@ mod tests {
     }
 
     fn test_tenant(pool: Pool) -> Tenant {
+        test_tenant_with_pools(vec![pool])
+    }
+
+    fn test_tenant_with_pools(pools: Vec<Pool>) -> Tenant {
         Tenant {
             metadata: ObjectMeta {
                 name: Some("logs".to_string()),
@@ -1108,10 +1147,42 @@ mod tests {
                 ..Default::default()
             },
             spec: TenantSpec {
-                pools: vec![pool],
+                pools,
                 ..Default::default()
             },
             status: None,
+        }
+    }
+
+    fn test_pool_status(
+        pool_name: &str,
+        lifecycle_state: PoolLifecycleState,
+    ) -> crate::types::v1alpha1::status::pool::Pool {
+        crate::types::v1alpha1::status::pool::Pool {
+            name: Some(pool_name.to_string()),
+            ss_name: format!("logs-{pool_name}"),
+            state: crate::types::v1alpha1::status::pool::PoolState::RolloutComplete,
+            lifecycle_state: Some(lifecycle_state),
+            workload_state: Some(crate::types::v1alpha1::status::pool::PoolState::RolloutComplete),
+            decommission: None,
+            replicas: Some(4),
+            ready_replicas: Some(4),
+            current_replicas: Some(4),
+            updated_replicas: Some(4),
+            current_revision: Some("rev-a".to_string()),
+            update_revision: Some("rev-a".to_string()),
+            last_update_time: None,
+        }
+    }
+
+    fn start_request(pool_name: &str) -> DecommissionRequest {
+        DecommissionRequest {
+            pool_name: pool_name.to_string(),
+            request_id: "request-1".to_string(),
+            action: DecommissionAction::Start,
+            requested_at: Some("2026-05-20T00:00:05Z".to_string()),
+            cancel_requested_at: None,
+            reason: None,
         }
     }
 
@@ -1174,6 +1245,56 @@ mod tests {
 
         assert!(decision.skip_workload_reconcile);
         assert_eq!(decision.state, PoolLifecycleState::Decommissioned);
+    }
+
+    #[test]
+    fn canceled_or_failed_terminal_state_without_request_restores_active_reconcile() {
+        for state in [
+            PoolLifecycleState::DecommissionCanceled,
+            PoolLifecycleState::DecommissionFailed,
+        ] {
+            let decision =
+                terminal_decision_from_existing(Some(state), Some(empty_decommission_status()));
+
+            assert_eq!(decision.state, PoolLifecycleState::Active);
+            assert!(!decision.skip_workload_reconcile);
+            assert!(decision.decommission.is_none());
+        }
+    }
+
+    #[test]
+    fn start_decommission_blocks_last_live_pool() {
+        let old_pool = test_pool("old-pool");
+        let active_pool = test_pool("active-pool");
+        let mut tenant = test_tenant_with_pools(vec![old_pool, active_pool.clone()]);
+        tenant.status = Some(crate::types::v1alpha1::status::Status {
+            pools: vec![
+                test_pool_status("old-pool", PoolLifecycleState::Decommissioned),
+                test_pool_status("active-pool", PoolLifecycleState::Active),
+            ],
+            ..Default::default()
+        });
+
+        assert_eq!(live_pool_count_for_decommission_guard(&tenant), 1);
+        assert!(should_block_last_live_pool_decommission(
+            &tenant,
+            &active_pool,
+            &start_request("active-pool")
+        ));
+    }
+
+    #[test]
+    fn start_decommission_allows_one_of_multiple_live_pools() {
+        let pool_a = test_pool("pool-a");
+        let pool_b = test_pool("pool-b");
+        let tenant = test_tenant_with_pools(vec![pool_a.clone(), pool_b]);
+
+        assert_eq!(live_pool_count_for_decommission_guard(&tenant), 2);
+        assert!(!should_block_last_live_pool_decommission(
+            &tenant,
+            &pool_a,
+            &start_request("pool-a")
+        ));
     }
 
     #[test]
