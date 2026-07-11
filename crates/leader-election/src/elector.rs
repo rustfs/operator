@@ -269,7 +269,7 @@ impl<L: Lock> LeaderElector<L> {
             let record = self.build_record(now).await;
             match self.lock.update(record.clone()).await {
                 Ok(()) => {
-                    self.update_observed(record, now).await;
+                    self.set_observed_record(record, now).await;
                     return true;
                 }
                 Err(e) => {
@@ -282,7 +282,7 @@ impl<L: Lock> LeaderElector<L> {
         // Slow path: Get current record
         let old_record = match self.lock.get().await {
             Ok(Some(r)) => {
-                self.update_observed(r.clone(), now).await;
+                self.observe_record(r.clone(), now).await;
                 r
             }
             Ok(None) => {
@@ -291,7 +291,7 @@ impl<L: Lock> LeaderElector<L> {
                 return match self.lock.create(record.clone()).await {
                     Ok(()) => {
                         debug!(identity = %self.config.identity, "created new lease");
-                        self.update_observed(record, now).await;
+                        self.set_observed_record(record, now).await;
                         true
                     }
                     Err(e) => {
@@ -308,7 +308,7 @@ impl<L: Lock> LeaderElector<L> {
 
         // Check if we can take over
         if !old_record.holder_identity.is_empty()
-            && self.is_lease_valid_with(&old_record, now)
+            && self.is_observed_lease_valid(&old_record, now).await
             && !self.is_leader_with(&old_record)
         {
             // Lease is held by someone else and still valid — give up this attempt
@@ -328,7 +328,7 @@ impl<L: Lock> LeaderElector<L> {
 
         match self.lock.update(record.clone()).await {
             Ok(()) => {
-                self.update_observed(record, now).await;
+                self.set_observed_record(record, now).await;
                 true
             }
             Err(e) => {
@@ -403,11 +403,24 @@ impl<L: Lock> LeaderElector<L> {
         }
     }
 
-    /// Check if a specific record's lease is still valid relative to now.
-    fn is_lease_valid_with(&self, record: &LeaderElectionRecord, now: DateTime<Utc>) -> bool {
-        let duration = Duration::from_secs(record.lease_duration_seconds as u64);
-        // Use renew_time as the basis for validity (the last time the lease was refreshed)
-        now < record.renew_time + duration
+    /// Check if a specific record's lease is still valid based on local observation time.
+    async fn is_observed_lease_valid(
+        &self,
+        record: &LeaderElectionRecord,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let observed = self.observed.read().await;
+        if observed.record.as_ref() != Some(record) {
+            return false;
+        }
+
+        match observed.observed_time {
+            Some(observed_time) => {
+                let duration = Duration::from_secs(record.lease_duration_seconds as u64);
+                now < observed_time + duration
+            }
+            None => false,
+        }
     }
 
     /// Build a new election record for this identity.
@@ -446,8 +459,19 @@ impl<L: Lock> LeaderElector<L> {
             .unwrap_or(false)
     }
 
-    /// Update observed state after a successful get or update.
-    async fn update_observed(&self, record: LeaderElectionRecord, now: DateTime<Utc>) {
+    /// Observe a record fetched from the lock backend.
+    async fn observe_record(&self, record: LeaderElectionRecord, now: DateTime<Utc>) {
+        let mut observed = self.observed.write().await;
+        if observed.record.as_ref() != Some(&record) {
+            observed.record = Some(record);
+            observed.observed_time = Some(now);
+        } else if observed.observed_time.is_none() {
+            observed.observed_time = Some(now);
+        }
+    }
+
+    /// Record a successful local create/update acknowledged by the lock backend.
+    async fn set_observed_record(&self, record: LeaderElectionRecord, now: DateTime<Utc>) {
         let mut observed = self.observed.write().await;
         observed.record = Some(record);
         observed.observed_time = Some(now);
@@ -608,25 +632,57 @@ mod tests {
         assert!(!elector.is_leader_with(&record_other));
     }
 
-    #[test]
-    fn test_is_lease_valid_with() {
+    #[tokio::test]
+    async fn test_observed_lease_valid_uses_local_observed_time() {
         let config = test_config("node-1");
         let elector = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock).unwrap();
         let now = Utc::now();
 
-        // Valid: renew_time + duration is in the future
         let record = LeaderElectionRecord {
-            holder_identity: "node-1".to_string(),
+            holder_identity: "node-2".to_string(),
+            lease_duration_seconds: 15,
+            acquire_time: now - chrono::Duration::seconds(30),
+            renew_time: now - chrono::Duration::seconds(30),
+            leader_transitions: 0,
+        };
+        elector.observe_record(record.clone(), now).await;
+
+        assert!(elector.is_observed_lease_valid(&record, now).await);
+        assert!(
+            elector
+                .is_observed_lease_valid(&record, now + chrono::Duration::seconds(14))
+                .await
+        );
+        assert!(
+            !elector
+                .is_observed_lease_valid(&record, now + chrono::Duration::seconds(16))
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_same_observed_record_does_not_refresh_observed_time() {
+        let config = test_config("node-1");
+        let elector = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock).unwrap();
+        let now = Utc::now();
+
+        let record = LeaderElectionRecord {
+            holder_identity: "node-2".to_string(),
             lease_duration_seconds: 15,
             acquire_time: now,
             renew_time: now,
             leader_transitions: 0,
         };
-        assert!(elector.is_lease_valid_with(&record, now));
+        elector.observe_record(record.clone(), now).await;
+        elector
+            .observe_record(record.clone(), now + chrono::Duration::seconds(10))
+            .await;
 
-        // Expired: check time is past renew_time + duration
-        let future = now + chrono::Duration::seconds(20);
-        assert!(!elector.is_lease_valid_with(&record, future));
+        assert!(
+            !elector
+                .is_observed_lease_valid(&record, now + chrono::Duration::seconds(16))
+                .await
+        );
     }
 
     // ─── Dummy lock for unit tests ────────────────────────────────────

@@ -30,6 +30,7 @@ use kube_leader_election::{
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
 /// Fake lock with controllable behavior for testing.
+#[derive(Clone)]
 struct FakeLock {
     identity: String,
     record: Arc<RwLock<Option<LeaderElectionRecord>>>,
@@ -115,6 +116,10 @@ impl MockClock {
         Self {
             now: Arc::new(RwLock::new(time)),
         }
+    }
+
+    async fn set(&self, time: DateTime<Utc>) {
+        *self.now.write().await = time;
     }
 }
 
@@ -318,13 +323,15 @@ async fn test_acquire_no_holder() {
     );
 }
 
-/// Test 3: Acquire when lease is expired.
+/// Test 3: Acquire only after the locally observed lease window expires.
 #[tokio::test]
 async fn test_acquire_expired_lease() {
     let lock = FakeLock::new("node-2");
+    let now = Utc::now();
 
-    // Set an expired lease held by another node
-    let expired_time = Utc::now() - chrono::Duration::seconds(30);
+    // The remote renew_time is old, but a candidate must not use that
+    // remote wall clock to take over immediately.
+    let expired_time = now - chrono::Duration::seconds(30);
     let expired_record = LeaderElectionRecord {
         holder_identity: "node-1".to_string(),
         lease_duration_seconds: 15,
@@ -334,7 +341,8 @@ async fn test_acquire_expired_lease() {
     };
     lock.set_record(expired_record).await;
 
-    let clock = MockClock::new(Utc::now());
+    let clock = MockClock::new(now);
+    let test_clock = clock.clone();
     let config = test_config("node-2");
     let callbacks = Arc::new(TestCallbacks::new());
 
@@ -345,13 +353,21 @@ async fn test_acquire_expired_lease() {
     let cb = callbacks.clone();
     let handle = tokio::spawn(async move { elector.run(SharedCallbacks(cb), cancel_clone).await });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        callbacks.started_count().await,
+        0,
+        "should not acquire immediately from stale remote renew_time"
+    );
+
+    test_clock.set(now + chrono::Duration::seconds(16)).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     cancel.cancel();
 
     let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
     assert!(result.is_ok(), "elector should complete");
 
-    // node-2 should have acquired the expired lease
+    // node-2 should acquire after the local observed lease duration elapses.
     assert_eq!(
         callbacks.started_count().await,
         1,
@@ -398,6 +414,79 @@ async fn test_acquire_active_lease() {
 
     cancel.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+}
+
+#[tokio::test]
+async fn test_clock_skewed_candidate_waits_while_remote_record_changes() {
+    let lock = FakeLock::new("shared");
+    let remote_start = Utc::now();
+    let candidate_start = remote_start + chrono::Duration::seconds(60);
+    let leader_record = LeaderElectionRecord {
+        holder_identity: "node-1".to_string(),
+        lease_duration_seconds: 15,
+        acquire_time: remote_start,
+        renew_time: remote_start,
+        leader_transitions: 0,
+    };
+    lock.set_record(leader_record.clone()).await;
+
+    let clock = MockClock::new(candidate_start);
+    let test_clock = clock.clone();
+    let mut config = test_config("node-2");
+    config.release_on_cancel = false;
+    let callbacks = Arc::new(TestCallbacks::new());
+
+    let elector = LeaderElector::new(config, lock.clone(), clock).unwrap();
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    let cb = callbacks.clone();
+    let handle = tokio::spawn(async move { elector.run(SharedCallbacks(cb), cancel_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        callbacks.started_count().await,
+        0,
+        "skewed candidate should not acquire immediately"
+    );
+
+    for step in 1..=3 {
+        test_clock
+            .set(candidate_start + chrono::Duration::seconds(step * 10))
+            .await;
+        lock.set_record(LeaderElectionRecord {
+            renew_time: remote_start + chrono::Duration::seconds(step * 10),
+            ..leader_record.clone()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            callbacks.started_count().await,
+            0,
+            "candidate should not acquire while renewals keep changing the record"
+        );
+    }
+
+    test_clock
+        .set(candidate_start + chrono::Duration::seconds(46))
+        .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    cancel.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    assert!(result.is_ok(), "elector should complete");
+    assert_eq!(
+        callbacks.started_count().await,
+        1,
+        "candidate should acquire after renewals stop and local observation expires"
+    );
+
+    let final_record = lock
+        .get()
+        .await
+        .expect("fake lock get should succeed")
+        .expect("record should exist");
+    assert_eq!(final_record.holder_identity, "node-2");
 }
 
 /// Test 5: Successful renewal.

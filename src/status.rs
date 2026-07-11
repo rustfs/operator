@@ -606,32 +606,48 @@ fn redact_sensitive_pairs(message: &str) -> String {
     }
 
     fn parse_value_end(input: &str, start: usize) -> usize {
-        let bytes = input.as_bytes();
-        if start >= bytes.len() {
+        if start >= input.len() {
             return start;
         }
-        let first = bytes[start];
-        if first == b'"' || first == b'\'' {
-            let quote = first;
-            let mut index = start + 1;
-            while index < bytes.len() {
-                if bytes[index] == quote && bytes.get(index.wrapping_sub(1)) != Some(&b'\\') {
-                    return index + 1;
+
+        let mut chars = input[start..].char_indices();
+        let Some((_, first)) = chars.next() else {
+            return start;
+        };
+        if first == '"' || first == '\'' {
+            let mut previous = first;
+            for (offset, ch) in chars {
+                if ch == first && previous != '\\' {
+                    return start + offset + ch.len_utf8();
                 }
-                index += 1;
+                previous = ch;
             }
-            return bytes.len();
+            return input.len();
         }
 
-        let mut index = start;
-        while index < bytes.len() {
-            let ch = bytes[index] as char;
+        for (offset, ch) in input[start..].char_indices() {
             if ch.is_whitespace() || matches!(ch, ',' | ';' | '}' | ']' | ')') {
-                break;
+                return start + offset;
             }
-            index += 1;
         }
-        index
+        input.len()
+    }
+
+    fn skip_whitespace(input: &str, start: usize) -> usize {
+        for (offset, ch) in input[start..].char_indices() {
+            if !ch.is_whitespace() {
+                return start + offset;
+            }
+        }
+        input.len()
+    }
+
+    fn matches_key_at(message: &str, start: usize, key: &str) -> bool {
+        let end = start + key.len();
+        end <= message.len()
+            && message.is_char_boundary(start)
+            && message.is_char_boundary(end)
+            && message[start..end].eq_ignore_ascii_case(key)
     }
 
     fn redacted_value(original: &str) -> String {
@@ -657,12 +673,11 @@ fn redact_sensitive_pairs(message: &str) -> String {
         for key in SENSITIVE_KEYS {
             let key_len = key.len();
 
-            let unquoted_match = cursor + key_len <= bytes.len()
-                && message[cursor..cursor + key_len].eq_ignore_ascii_case(key);
+            let unquoted_match = matches_key_at(message, cursor, key);
             let quoted_match = cursor + key_len + 2 <= bytes.len()
                 && matches!(bytes[cursor] as char, '"' | '\'')
                 && bytes[cursor + key_len + 1] == bytes[cursor]
-                && message[cursor + 1..cursor + 1 + key_len].eq_ignore_ascii_case(key);
+                && matches_key_at(message, cursor + 1, key);
 
             let (key_start, key_end, cursor_after_key) = if unquoted_match {
                 if cursor > 0 {
@@ -681,18 +696,12 @@ fn redact_sensitive_pairs(message: &str) -> String {
 
             let candidate = &message[key_start..key_end];
 
-            let mut sep_index = cursor_after_key;
-            while sep_index < bytes.len() && (bytes[sep_index] as char).is_whitespace() {
-                sep_index += 1;
-            }
+            let sep_index = skip_whitespace(message, cursor_after_key);
             if sep_index >= bytes.len() || !matches!(bytes[sep_index] as char, '=' | ':') {
                 continue;
             }
 
-            let mut value_start = sep_index + 1;
-            while value_start < bytes.len() && (bytes[value_start] as char).is_whitespace() {
-                value_start += 1;
-            }
+            let value_start = skip_whitespace(message, sep_index + 1);
             let value_end = parse_value_end(message, value_start);
             if value_end <= value_start {
                 continue;
@@ -711,8 +720,11 @@ fn redact_sensitive_pairs(message: &str) -> String {
         }
 
         if !matched {
-            output.push(bytes[cursor] as char);
-            cursor += 1;
+            let Some(ch) = message[cursor..].chars().next() else {
+                break;
+            };
+            output.push(ch);
+            cursor += ch.len_utf8();
         }
     }
 
@@ -1030,6 +1042,44 @@ mod tests {
         assert!(sanitized.contains("\"secretkey\""));
         assert!(!sanitized.contains("AKIA_JSON"));
         assert!(!sanitized.contains("SECRET_JSON"));
+    }
+
+    #[test]
+    fn sanitize_message_handles_unicode_without_panicking() {
+        let message = "错误🔐 token: tok_123 用户=测试 secretkey: SK_TEST 完成";
+
+        let sanitized = sanitize_message(message);
+
+        assert!(sanitized.contains("错误🔐"));
+        assert!(sanitized.contains("用户=测试"));
+        assert!(sanitized.contains("完成"));
+        assert!(sanitized.contains("token: <redacted>"));
+        assert!(sanitized.contains("secretkey: <redacted>"));
+        assert!(!sanitized.contains("tok_123"));
+        assert!(!sanitized.contains("SK_TEST"));
+    }
+
+    #[test]
+    fn sanitize_message_redacts_unicode_quoted_values() {
+        let message = "{\"说明\":\"🔐\",\"secretkey\":\"秘密值\"}";
+
+        let sanitized = sanitize_message(message);
+
+        assert!(sanitized.contains("\"说明\":\"🔐\""));
+        assert!(sanitized.contains("\"secretkey\":\"<redacted>\""));
+        assert!(!sanitized.contains("秘密值"));
+    }
+
+    #[test]
+    fn sanitize_message_redacts_after_unicode_whitespace() {
+        let message = "token:\u{3000}tok_123 secretkey:\u{2003}SK_TEST";
+
+        let sanitized = sanitize_message(message);
+
+        assert!(sanitized.contains("token:\u{3000}<redacted>"));
+        assert!(sanitized.contains("secretkey:\u{2003}<redacted>"));
+        assert!(!sanitized.contains("tok_123"));
+        assert!(!sanitized.contains("SK_TEST"));
     }
 
     fn condition(type_: &str, status: &str, reason: &str) -> Condition {

@@ -17,7 +17,7 @@
 use chrono::{DateTime, Utc};
 
 /// Record stored in the Lease object, representing the current election state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderElectionRecord {
     /// Identity of the current leader (empty if released).
     pub holder_identity: String,
