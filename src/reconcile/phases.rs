@@ -49,6 +49,7 @@ pub(super) struct PoolReconcileSummary {
 }
 
 const REMOVED_POOL_CLEANUP_REQUEUE_INTERVAL: Duration = Duration::from_secs(10);
+const POD_DELETION_POLICY_REQUEUE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 pub(super) struct RemovedDecommissionedPoolCleanup {
@@ -514,6 +515,41 @@ fn earliest_requeue_after(left: Option<Duration>, right: Option<Duration>) -> Op
     }
 }
 
+fn pod_deletion_policy_is_enabled(tenant: &Tenant) -> bool {
+    tenant
+        .spec
+        .pod_deletion_policy_when_node_is_down
+        .as_ref()
+        .is_some_and(|policy| {
+            policy != &crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing
+        })
+}
+
+fn pod_deletion_policy_requeue_after(
+    tenant: &Tenant,
+    summary: &PoolReconcileSummary,
+) -> Option<Duration> {
+    if pod_deletion_policy_is_enabled(tenant)
+        && summary.total_replicas > 0
+        && summary.ready_replicas < summary.total_replicas
+    {
+        Some(POD_DELETION_POLICY_REQUEUE_INTERVAL)
+    } else {
+        None
+    }
+}
+
+fn reconcile_requeue_after(tenant: &Tenant, summary: &PoolReconcileSummary) -> Option<Duration> {
+    let lifecycle_requeue = summary.lifecycle_requeue_after;
+    let updating_requeue = summary.any_updating.then_some(Duration::from_secs(10));
+    let pod_cleanup_requeue = pod_deletion_policy_requeue_after(tenant, summary);
+
+    earliest_requeue_after(
+        earliest_requeue_after(lifecycle_requeue, updating_requeue),
+        pod_cleanup_requeue,
+    )
+}
+
 fn is_not_found_context_error(error: &context::Error) -> bool {
     matches!(
         error,
@@ -810,6 +846,7 @@ pub(super) async fn finalize_tenant_status(
 ) -> Result<Action, Error> {
     let mut builder = StatusBuilder::from_tenant(tenant);
     let pool_count = summary.pool_statuses.len();
+    let requeue_after = reconcile_requeue_after(tenant, &summary);
     builder.set_pool_statuses(summary.pool_statuses);
     if let Some(tls_status) = tls_plan.status {
         builder.set_tls_status(tls_status);
@@ -976,22 +1013,14 @@ pub(super) async fn finalize_tenant_status(
     )
     .await?;
 
-    if let Some(requeue_after) = summary.lifecycle_requeue_after {
+    if let Some(requeue_after) = requeue_after {
         debug!(
             tenant = %tenant.name(),
             namespace = ?tenant.namespace(),
             seconds = requeue_after.as_secs(),
-            "Pool lifecycle is active, requeuing"
+            "tenant reconcile has active follow-up work, requeuing"
         );
         Ok(Action::requeue(requeue_after))
-    } else if summary.any_updating {
-        debug!(
-            tenant = %tenant.name(),
-            namespace = ?tenant.namespace(),
-            seconds = 10,
-            "Pools are updating, requeuing"
-        );
-        Ok(Action::requeue(Duration::from_secs(10)))
     } else {
         Ok(Action::await_change())
     }
@@ -1022,6 +1051,65 @@ mod tests {
         );
         assert_eq!(
             earliest_requeue_after(None, Some(Duration::from_secs(10))),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn pod_deletion_policy_requeues_not_ready_tenant() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pod_deletion_policy_when_node_is_down =
+            Some(crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete);
+        let summary = PoolReconcileSummary {
+            total_replicas: 4,
+            ready_replicas: 3,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pod_deletion_policy_requeue_after(&tenant, &summary),
+            Some(POD_DELETION_POLICY_REQUEUE_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn pod_deletion_policy_requeue_skips_ready_or_disabled_tenant() {
+        let mut enabled = crate::tests::create_test_tenant(None, None);
+        enabled.spec.pod_deletion_policy_when_node_is_down =
+            Some(crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete);
+        let ready = PoolReconcileSummary {
+            total_replicas: 4,
+            ready_replicas: 4,
+            ..Default::default()
+        };
+        assert_eq!(pod_deletion_policy_requeue_after(&enabled, &ready), None);
+
+        let disabled = crate::tests::create_test_tenant(None, None);
+        let not_ready = PoolReconcileSummary {
+            total_replicas: 4,
+            ready_replicas: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            pod_deletion_policy_requeue_after(&disabled, &not_ready),
+            None
+        );
+    }
+
+    #[test]
+    fn reconcile_requeue_after_prefers_existing_shorter_work() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pod_deletion_policy_when_node_is_down =
+            Some(crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete);
+        let summary = PoolReconcileSummary {
+            any_updating: true,
+            total_replicas: 4,
+            ready_replicas: 3,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            reconcile_requeue_after(&tenant, &summary),
             Some(Duration::from_secs(10))
         );
     }

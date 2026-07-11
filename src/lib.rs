@@ -200,9 +200,10 @@ async fn run_controller(client: Client, cancel: CancellationToken) {
             Api::<corev1::ServiceAccount>::all(client.clone()),
             watcher::Config::default(),
         )
-        .owns(
+        .watches(
             Api::<corev1::Pod>::all(client.clone()),
             watcher::Config::default(),
+            tenant_refs_for_pod,
         )
         .owns(
             Api::<appsv1::StatefulSet>::all(client.clone()),
@@ -573,6 +574,14 @@ fn tenant_refs_for_config_map(config_map: corev1::ConfigMap) -> Vec<ObjectRef<Te
     )
 }
 
+fn tenant_refs_for_pod(pod: corev1::Pod) -> Vec<ObjectRef<Tenant>> {
+    tenant_refs_from_metadata(
+        pod.metadata.namespace.as_deref(),
+        pod.metadata.owner_references.as_deref(),
+        pod.metadata.labels.as_ref(),
+    )
+}
+
 fn tenant_refs_for_cert_manager_certificate(certificate: DynamicObject) -> Vec<ObjectRef<Tenant>> {
     tenant_refs_from_metadata(
         certificate.metadata.namespace.as_deref(),
@@ -751,6 +760,34 @@ mod controller_watch_tests {
 
         let refs = tenant_refs_for_config_map(labeled);
         assert_single_ref(&refs, "tenant-policy-label", "storage");
+    }
+
+    #[test]
+    fn pod_mapper_uses_rustfs_tenant_label_for_statefulset_pods() {
+        let pod = corev1::Pod {
+            metadata: metav1::ObjectMeta {
+                name: Some("tenant-a-pool-0-0".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![metav1::OwnerReference {
+                    api_version: "apps/v1".to_string(),
+                    kind: "StatefulSet".to_string(),
+                    name: "tenant-a-pool-0".to_string(),
+                    uid: "statefulset-uid".to_string(),
+                    controller: Some(true),
+                    ..Default::default()
+                }]),
+                labels: Some(BTreeMap::from([(
+                    "rustfs.tenant".to_string(),
+                    "tenant-a".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let refs = tenant_refs_for_pod(pod);
+
+        assert_single_ref(&refs, "tenant-a", "storage");
     }
 
     #[test]

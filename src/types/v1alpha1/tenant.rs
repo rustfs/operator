@@ -93,6 +93,8 @@ pub struct TenantSpec {
     /// StatefulSet controller can recreate it elsewhere.
     /// Force deletion requires the Node object to be deleted or marked with an effective
     /// `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate.
+    /// Before using force policies, operators must confirm the node is powered off or
+    /// otherwise isolated; deleting the Node object is treated as that operational assertion.
     ///
     /// Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod
     #[serde(default, skip_serializing_if = "Option::is_none")]

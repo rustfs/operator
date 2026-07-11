@@ -380,6 +380,7 @@ fn replicaset_matches_pod_controller_and_tenant(
     replicaset: &appsv1::ReplicaSet,
     owning_deployment: Option<&appsv1::Deployment>,
     tenant: &Tenant,
+    require_deployment_owner: bool,
 ) -> bool {
     let Some((_, replicaset_uid)) = pod_controller_owner_name_and_uid(pod, "ReplicaSet") else {
         return false;
@@ -387,7 +388,7 @@ fn replicaset_matches_pod_controller_and_tenant(
     if replicaset.metadata.uid.as_deref() != Some(replicaset_uid.as_str()) {
         return false;
     }
-    if object_owned_by_tenant(&replicaset.metadata, tenant) {
+    if !require_deployment_owner && object_owned_by_tenant(&replicaset.metadata, tenant) {
         return true;
     }
 
@@ -402,6 +403,17 @@ fn replicaset_matches_pod_controller_and_tenant(
 
     object_owned_by_tenant(&deployment.metadata, tenant)
         && deployment.metadata.uid.as_deref() == Some(deployment_uid.as_str())
+}
+
+fn policy_requires_deployment_owner_for_replicaset(
+    policy: &crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown,
+) -> bool {
+    use crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown as P;
+
+    matches!(
+        policy,
+        P::DeleteDeploymentPod | P::DeleteBothStatefulSetAndDeploymentPod
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -518,14 +530,11 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
         {
             let owned_by_tenant = match replicasets_api.get(&replicaset_name).await {
                 Ok(replicaset) => {
-                    let deployment = if object_owned_by_tenant(&replicaset.metadata, tenant) {
-                        None
-                    } else if let Some((deployment_name, _deployment_uid)) =
+                    let deployment = if let Some((deployment_name, _deployment_uid)) =
                         controller_owner_name_and_uid(
                             replicaset.metadata.owner_references.as_ref(),
                             "Deployment",
-                        )
-                    {
+                        ) {
                         match deployments_api.get(&deployment_name).await {
                             Ok(deployment) => Some(deployment),
                             Err(kube::Error::Api(ae)) if ae.code == 404 => None,
@@ -544,6 +553,7 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
                         &replicaset,
                         deployment.as_ref(),
                         tenant,
+                        policy_requires_deployment_owner_for_replicaset(&policy),
                     )
                 }
                 Err(kube::Error::Api(ae)) if ae.code == 404 => false,
@@ -598,14 +608,26 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
         let deletion_plan = match cleanup_decision_for_pod(&pod, &policy, node_deletion_safety) {
             PodCleanupDecision::Skip => continue,
             PodCleanupDecision::SkipForceDeleteNeedsFencing => {
+                let pod_name = pod.name_any();
                 warn!(
                     tenant = %tenant.name(),
                     namespace = %namespace,
                     node = %node_name,
-                    pod = %pod.name_any(),
+                    pod = %pod_name,
                     policy = ?policy,
                     "skipping pod force deletion because the node is not fenced"
                 );
+                let _ = ctx
+                    .record(
+                        tenant,
+                        EventType::Warning,
+                        "PodForceDeleteSkippedNodeNotFenced",
+                        &format!(
+                            "Pod '{}' is terminating on down node '{}', but policy {:?} requires the Node to be deleted or marked with an effective node.kubernetes.io/out-of-service taint before force deletion",
+                            pod_name, node_name, policy
+                        ),
+                    )
+                    .await;
                 continue;
             }
             PodCleanupDecision::Delete(plan) => plan,
@@ -735,7 +757,7 @@ fn cleanup_decision_for_pod(
         P::Delete => PodCleanupDecision::Delete(PodDeletionPlan {
             force: false,
             precondition_uid,
-            event_reason: "DeletedPodOnDownNode",
+            event_reason: "RequestedPodDeleteOnDownNode",
         }),
         P::ForceDelete => PodCleanupDecision::Delete(PodDeletionPlan {
             force: true,
@@ -1400,31 +1422,60 @@ mod tests {
             &pod,
             &matching_replicaset,
             None,
-            &tenant
+            &tenant,
+            false
         ));
         assert!(!replicaset_matches_pod_controller_and_tenant(
             &pod,
             &wrong_replicaset_uid,
             None,
-            &tenant
+            &tenant,
+            false
         ));
         assert!(replicaset_matches_pod_controller_and_tenant(
             &pod,
             &deployment_owned_replicaset,
             Some(&matching_deployment),
-            &tenant
+            &tenant,
+            false
         ));
         assert!(!replicaset_matches_pod_controller_and_tenant(
             &pod,
             &deployment_owned_replicaset,
             Some(&wrong_deployment_tenant),
-            &tenant
+            &tenant,
+            false
         ));
         assert!(!replicaset_matches_pod_controller_and_tenant(
             &pod,
             &deployment_owned_replicaset,
             None,
-            &tenant
+            &tenant,
+            false
+        ));
+    }
+
+    #[test]
+    fn test_deployment_policy_requires_deployment_owned_replicaset() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pod = pod_with_owner("ReplicaSet");
+        let direct_tenant_replicaset = replicaset_owned_by_test_tenant("uid", "test-uid-123");
+        let deployment_owned_replicaset = replicaset_owned_by_deployment("uid", "deployment-uid");
+        let matching_deployment = deployment_owned_by_test_tenant("deployment-uid", "test-uid-123");
+
+        assert!(!replicaset_matches_pod_controller_and_tenant(
+            &pod,
+            &direct_tenant_replicaset,
+            None,
+            &tenant,
+            true
+        ));
+        assert!(replicaset_matches_pod_controller_and_tenant(
+            &pod,
+            &deployment_owned_replicaset,
+            Some(&matching_deployment),
+            &tenant,
+            true
         ));
     }
 
@@ -1481,7 +1532,7 @@ mod tests {
         };
         assert!(!plan.force);
         assert_eq!(plan.precondition_uid.as_deref(), Some("pod-uid"));
-        assert_eq!(plan.event_reason, "DeletedPodOnDownNode");
+        assert_eq!(plan.event_reason, "RequestedPodDeleteOnDownNode");
 
         let delete_params = plan.delete_params();
         assert_eq!(delete_params.grace_period_seconds, None);

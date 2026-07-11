@@ -353,13 +353,13 @@ For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered a
 `podDeletionPolicyWhenNodeIsDown` accepts:
 
 - `DoNothing`: do not delete pods automatically.
-- `Delete`: request a normal pod delete.
+- `Delete`: request a best-effort normal pod delete; this does not force-release a StatefulSet identity when the kubelet is unreachable.
 - `ForceDelete`: force delete the pod with `gracePeriodSeconds=0`.
 - `DeleteStatefulSetPod`: Longhorn-compatible force delete for StatefulSet pods stuck on down nodes.
 - `DeleteDeploymentPod`: Longhorn-compatible force delete for Deployment pods stuck on down nodes.
 - `DeleteBothStatefulSetAndDeploymentPod`: Longhorn-compatible force delete for both StatefulSet and Deployment pods.
 
-Force deletion can have data consistency implications. Use it only when the storage backend and operational procedure are designed for that failure mode. Force deletion requires the Node object to be deleted or marked with an effective `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate, so volume detach fencing is explicit.
+Force deletion can have data consistency implications. Use it only when the storage backend and operational procedure are designed for that failure mode. Force deletion requires the Node object to be deleted or marked with an effective `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate, so volume detach fencing is explicit. Before using force policies, confirm the node is powered off or otherwise isolated; deleting the Node object is treated as that operational assertion.
 
 ### 7.5 TLS
 

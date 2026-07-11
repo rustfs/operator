@@ -67,7 +67,9 @@ pub enum ImagePullPolicy {
 /// WARNING: Force-deleting pods can have data consistency implications depending on
 /// your storage backend and workload semantics. Force deletion requires the Node object
 /// to be deleted or marked with an effective `node.kubernetes.io/out-of-service` taint
-/// that the target Pod does not tolerate.
+/// that the target Pod does not tolerate. Before using force policies, operators must
+/// confirm the node is powered off or otherwise isolated; deleting the Node object is
+/// treated as that operational assertion.
 #[derive(Default, Deserialize, Serialize, Clone, Debug, Display, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum PodDeletionPolicyWhenNodeIsDown {
@@ -76,7 +78,8 @@ pub enum PodDeletionPolicyWhenNodeIsDown {
     #[default]
     DoNothing,
 
-    /// Request a normal delete for the pod.
+    /// Request a best-effort normal delete for the pod. This does not force-release a
+    /// StatefulSet identity when the kubelet is unreachable.
     #[strum(to_string = "Delete")]
     Delete,
 
@@ -123,7 +126,7 @@ impl JsonSchema for PodDeletionPolicyWhenNodeIsDown {
                     "DeleteDeploymentPod",
                     "DeleteBothStatefulSetAndDeploymentPod"
                 ],
-                "description": "Pod deletion policy when the node hosting the Pod is down (NotReady/Unknown). Force deletion requires the Node object to be deleted or marked with an effective node.kubernetes.io/out-of-service taint that the target Pod does not tolerate. Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod"
+                "description": "Pod deletion policy when the node hosting the Pod is down (NotReady/Unknown). Force deletion requires the Node object to be deleted or marked with an effective node.kubernetes.io/out-of-service taint that the target Pod does not tolerate. Before using force policies, operators must confirm the node is powered off or otherwise isolated; deleting the Node object is treated as that operational assertion. Values: DoNothing | Delete | ForceDelete | DeleteStatefulSetPod | DeleteDeploymentPod | DeleteBothStatefulSetAndDeploymentPod"
             }
         }
     }

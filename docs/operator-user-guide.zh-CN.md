@@ -355,13 +355,13 @@ Operator 会自动管理以下环境变量：
 `podDeletionPolicyWhenNodeIsDown` 支持以下值：
 
 - `DoNothing`：不自动删除 Pod。
-- `Delete`：发起普通 Pod 删除。
+- `Delete`：发起 best-effort 普通 Pod 删除；当 kubelet 不可达时，它不会强制释放 StatefulSet identity。
 - `ForceDelete`：使用 `gracePeriodSeconds=0` 强制删除 Pod。
 - `DeleteStatefulSetPod`：Longhorn 兼容模式，强制删除 down node 上卡住的 StatefulSet Pod。
 - `DeleteDeploymentPod`：Longhorn 兼容模式，强制删除 down node 上卡住的 Deployment Pod。
 - `DeleteBothStatefulSetAndDeploymentPod`：Longhorn 兼容模式，同时处理 StatefulSet 和 Deployment Pod。
 
-强制删除可能影响数据一致性。只有当存储后端和运维流程明确支持该故障处理方式时才应启用。强制删除要求 Node 对象已删除，或 Node 带有对目标 Pod 生效且未被该 Pod tolerate 的 `node.kubernetes.io/out-of-service` taint，确保 volume detach fencing 是显式的。
+强制删除可能影响数据一致性。只有当存储后端和运维流程明确支持该故障处理方式时才应启用。强制删除要求 Node 对象已删除，或 Node 带有对目标 Pod 生效且未被该 Pod tolerate 的 `node.kubernetes.io/out-of-service` taint，确保 volume detach fencing 是显式的。启用 force 类策略前，必须先确认节点已经关机或被隔离；删除 Node 对象会被视为这一运维断言。
 
 ### 7.5 TLS
 
