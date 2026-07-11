@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, time::Duration};
 
 use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client};
-use reqwest::{Certificate, Client as HttpClient, StatusCode};
+use reqwest::{Certificate, Client as HttpClient, Response, StatusCode};
 
 use crate::Tenant;
 
@@ -57,6 +57,7 @@ const ADMIN_SIGNING_SERVICE: &str = "s3";
 const STS_SIGNING_SERVICE: &str = "sts";
 const ADMIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const ADMIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_UPSTREAM_ERROR_DETAIL_CHARS: usize = 512;
 
 /// Credentials read from Tenant `.spec.credsSecret`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,22 +174,36 @@ pub struct RustfsErasureSetInfo {
 pub enum RustfsClientError {
     MissingTenantNamespace,
     MissingCredsSecret,
-    MissingCredentialKey { key: &'static str },
-    EmptyCredentialValue { key: &'static str },
-    InvalidCredentialValue { key: &'static str },
+    MissingCredentialKey {
+        key: &'static str,
+    },
+    EmptyCredentialValue {
+        key: &'static str,
+    },
+    InvalidCredentialValue {
+        key: &'static str,
+    },
     TenantSecretLookupFailed,
     InvalidPolicyName,
     InvalidPolicyDocument,
     TenantTlsRequired,
     TenantTlsNotReady,
     TenantTlsClientCertificateRequired,
-    MissingTenantTlsCaKey { secret: String, key: String },
-    TenantTlsCaSecretLookupFailed { secret: String },
+    MissingTenantTlsCaKey {
+        secret: String,
+        key: String,
+    },
+    TenantTlsCaSecretLookupFailed {
+        secret: String,
+    },
     InvalidTenantTlsCa,
     TlsClientBuildFailed,
     RequestBuildFailed,
     RequestFailed,
-    UnexpectedStatus(StatusCode),
+    UnexpectedStatus {
+        status: StatusCode,
+        detail: Option<String>,
+    },
     ParseResponseFailed,
     SigningFailed,
 }
@@ -223,7 +238,13 @@ impl std::fmt::Display for RustfsClientError {
             Self::TlsClientBuildFailed => write!(f, "failed to build TLS HTTP client"),
             Self::RequestBuildFailed => write!(f, "failed to construct request"),
             Self::RequestFailed => write!(f, "request failed"),
-            Self::UnexpectedStatus(status) => write!(f, "upstream returned {status}"),
+            Self::UnexpectedStatus { status, detail } => {
+                write!(f, "upstream returned {status}")?;
+                if let Some(detail) = detail {
+                    write!(f, ": {detail}")?;
+                }
+                Ok(())
+            }
             Self::ParseResponseFailed => write!(f, "failed to parse AssumeRole response"),
             Self::SigningFailed => write!(f, "failed to compute request signature"),
         }
@@ -231,6 +252,91 @@ impl std::fmt::Display for RustfsClientError {
 }
 
 impl std::error::Error for RustfsClientError {}
+
+impl RustfsClientError {
+    pub(super) async fn unexpected_response(response: Response) -> Self {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Self::unexpected_status_with_body(status, &body)
+    }
+
+    pub(super) fn unexpected_status_with_body(status: StatusCode, body: &str) -> Self {
+        Self::UnexpectedStatus {
+            status,
+            detail: summarize_upstream_error_body(body),
+        }
+    }
+}
+
+fn summarize_upstream_error_body(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    if let Some(message) = helpers::extract_xml_tag(body, "Message") {
+        let message = decode_basic_xml_entities(&message);
+        let detail = match helpers::extract_xml_tag(body, "Code") {
+            Some(code) if !code.trim().is_empty() => {
+                format!("{}: {message}", decode_basic_xml_entities(&code))
+            }
+            _ => message,
+        };
+        return Some(truncate_error_detail(collapse_whitespace(&detail)));
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(detail) = summarize_json_error(&value)
+    {
+        return Some(truncate_error_detail(collapse_whitespace(&detail)));
+    }
+
+    Some(truncate_error_detail(collapse_whitespace(body)))
+}
+
+fn summarize_json_error(value: &serde_json::Value) -> Option<String> {
+    if let Some(message) = value.as_str() {
+        return Some(message.to_string());
+    }
+
+    let object = value.as_object()?;
+    let message = ["message", "Message", "error", "Error"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))?;
+    let code = ["code", "Code"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str));
+
+    Some(match code {
+        Some(code) if !code.trim().is_empty() => format!("{code}: {message}"),
+        _ => message.to_string(),
+    })
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_error_detail(value: String) -> String {
+    let mut truncated = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= MAX_UPSTREAM_ERROR_DETAIL_CHARS {
+            truncated.push_str("...");
+            return truncated;
+        }
+        truncated.push(ch);
+    }
+    truncated
+}
+
+fn decode_basic_xml_entities(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
 
 #[derive(Debug)]
 struct SignedRequest {

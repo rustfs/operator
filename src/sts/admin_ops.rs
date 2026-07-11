@@ -61,7 +61,7 @@ impl RustfsAdminClient {
             .map_err(|_| RustfsClientError::RequestFailed)?;
 
         if !response.status().is_success() {
-            return Err(RustfsClientError::UnexpectedStatus(response.status()));
+            return Err(RustfsClientError::unexpected_response(response).await);
         }
 
         let body = response
@@ -112,7 +112,7 @@ impl RustfsAdminClient {
             .map_err(|_| RustfsClientError::RequestFailed)?;
 
         if !response.status().is_success() {
-            return Err(RustfsClientError::UnexpectedStatus(response.status()));
+            return Err(RustfsClientError::unexpected_response(response).await);
         }
 
         Ok(())
@@ -184,7 +184,9 @@ impl RustfsAdminClient {
             return Ok(false);
         }
 
-        Err(RustfsClientError::UnexpectedStatus(status))
+        Err(RustfsClientError::unexpected_status_with_body(
+            status, &body,
+        ))
     }
 
     pub async fn add_user(

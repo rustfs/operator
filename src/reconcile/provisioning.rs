@@ -1521,6 +1521,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_policy_includes_upstream_policy_parse_error() {
+        let router = Router::new().route(
+            "/rustfs/admin/v3/add-canned-policy",
+            put(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    r#"<Error><Code>InvalidRequest</Code><Message>invalid resource: unknown &quot;*&quot;</Message></Error>"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let mut live_policies = BTreeMap::new();
+        let raw = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+
+        let error = apply_policy(&client, &mut live_policies, "tenant-policy", raw)
+            .await
+            .expect_err("RustFS policy parse error should fail provisioning");
+
+        assert_eq!(
+            error,
+            r#"failed to apply RustFS policy 'tenant-policy': upstream returned 400 Bad Request: InvalidRequest: invalid resource: unknown "*""#
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn rotated_user_secret_is_upserted_for_existing_user() {
         let capture = UserCredentialCapture::default();
         let route_capture = capture.clone();

@@ -71,7 +71,7 @@ impl RustfsAdminClient {
             .map_err(|_| RustfsClientError::RequestFailed)?;
 
         if !response.status().is_success() {
-            return Err(RustfsClientError::UnexpectedStatus(response.status()));
+            return Err(RustfsClientError::unexpected_response(response).await);
         }
 
         let body = response

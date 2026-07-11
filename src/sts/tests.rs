@@ -114,6 +114,34 @@ fn parse_assume_role_xml_success_and_failure() {
     assert!(parse_assume_role_response("<NotFound />").is_none());
 }
 
+#[test]
+fn unexpected_status_includes_upstream_xml_error_summary() {
+    let err = RustfsClientError::unexpected_status_with_body(
+        StatusCode::BAD_REQUEST,
+        r#"<Error><Code>InvalidRequest</Code><Message>invalid resource: unknown &quot;*&quot;</Message><RequestId>abc</RequestId></Error>"#,
+    );
+
+    let message = err.to_string();
+    assert_eq!(
+        message,
+        r#"upstream returned 400 Bad Request: InvalidRequest: invalid resource: unknown "*""#
+    );
+    assert!(!message.contains("<Error>"));
+}
+
+#[test]
+fn unexpected_status_includes_upstream_json_error_summary() {
+    let err = RustfsClientError::unexpected_status_with_body(
+        StatusCode::BAD_REQUEST,
+        r#"{"code":"InvalidRequest","message":"policy Resource must use ARN form"}"#,
+    );
+
+    assert_eq!(
+        err.to_string(),
+        "upstream returned 400 Bad Request: InvalidRequest: policy Resource must use ARN form"
+    );
+}
+
 #[derive(Clone, Default)]
 struct Capture {
     path: Arc<Mutex<String>>,
@@ -379,6 +407,38 @@ async fn add_canned_policy_uses_expected_path_query_body_and_admin_signing() {
             .await
             .contains("/s3/aws4_request")
     );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn add_canned_policy_reports_upstream_policy_parse_error() {
+    let router = Router::new().route(
+        "/rustfs/admin/v3/add-canned-policy",
+        put(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                r#"<Error><Code>InvalidRequest</Code><Message>invalid resource: unknown &quot;*&quot;</Message></Error>"#,
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let err = client
+        .add_canned_policy("tenant-policy", policy)
+        .await
+        .expect_err("invalid RustFS policy should include upstream parse details");
+
+    let message = err.to_string();
+    assert!(message.contains("upstream returned 400 Bad Request"));
+    assert!(message.contains(r#"InvalidRequest: invalid resource: unknown "*""#));
+    assert!(!message.contains("<Error>"));
 
     server.abort();
 }
