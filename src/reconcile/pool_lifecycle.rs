@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use k8s_openapi::api::apps::v1::StatefulSet;
@@ -57,6 +57,12 @@ struct MatchedRustfsPool {
     item: RustfsPoolListItem,
     expected_cmd_line: String,
     expected_endpoint_set_hash: String,
+}
+
+struct PoolLifecycleSnapshot {
+    state: Option<PoolLifecycleState>,
+    decommission: Option<PoolDecommissionStatus>,
+    block_start_decommission: bool,
 }
 
 enum PoolMappingError {
@@ -125,6 +131,7 @@ pub(super) async fn reconcile_pool_lifecycle(
     namespace: &str,
 ) -> Result<PoolLifecycleDecisions, Error> {
     let mut decisions = PoolLifecycleDecisions::default();
+    let blocked_start_pools = start_decommission_requests_that_would_remove_all_live_pools(tenant);
 
     for pool in &tenant.spec.pools {
         let request = tenant
@@ -134,6 +141,11 @@ pub(super) async fn reconcile_pool_lifecycle(
             .and_then(|lifecycle| lifecycle.request_for_pool(&pool.name));
         let existing = existing_decommission_status(tenant, &pool.name);
         let existing_state = existing_lifecycle_state(tenant, &pool.name);
+        let snapshot = PoolLifecycleSnapshot {
+            state: existing_state.clone(),
+            decommission: existing,
+            block_start_decommission: blocked_start_pools.contains(&pool.name),
+        };
 
         let should_continue = matches!(
             existing_state,
@@ -149,16 +161,8 @@ pub(super) async fn reconcile_pool_lifecycle(
             continue;
         }
 
-        let decision = reconcile_single_pool_lifecycle(
-            ctx,
-            tenant,
-            namespace,
-            pool,
-            request,
-            existing_state,
-            existing,
-        )
-        .await;
+        let decision =
+            reconcile_single_pool_lifecycle(ctx, tenant, namespace, pool, request, snapshot).await;
 
         decisions.insert(pool.name.clone(), decision);
     }
@@ -172,9 +176,14 @@ async fn reconcile_single_pool_lifecycle(
     namespace: &str,
     pool: &Pool,
     request: Option<&DecommissionRequest>,
-    existing_state: Option<PoolLifecycleState>,
-    existing: Option<PoolDecommissionStatus>,
+    existing: PoolLifecycleSnapshot,
 ) -> PoolLifecycleDecision {
+    let PoolLifecycleSnapshot {
+        state: existing_state,
+        decommission: existing,
+        block_start_decommission,
+    } = existing;
+
     if matches!(existing_state, Some(PoolLifecycleState::Decommissioned)) {
         let status = existing.unwrap_or_else(|| PoolDecommissionStatus {
             phase: Some(PoolDecommissionPhase::Complete),
@@ -227,7 +236,7 @@ async fn reconcile_single_pool_lifecycle(
         );
     }
 
-    if should_block_last_live_pool_decommission(tenant, pool, request) {
+    if should_block_last_live_pool_decommission(request, block_start_decommission) {
         return failed_decision(
             Some(request.request_id.clone()),
             "LastPoolBlocked",
@@ -907,17 +916,46 @@ fn terminal_decision_from_existing(
     }
 }
 
-fn should_block_last_live_pool_decommission(
+fn start_decommission_requests_that_would_remove_all_live_pools(
     tenant: &Tenant,
-    pool: &Pool,
-    request: &DecommissionRequest,
-) -> bool {
-    request.action == DecommissionAction::Start
-        && pool_counts_as_live_for_decommission_guard(existing_lifecycle_state(tenant, &pool.name))
-        && live_pool_count_for_decommission_guard(tenant) <= 1
+) -> BTreeSet<String> {
+    let live_pool_names = live_pool_names_for_decommission_guard(tenant);
+    if live_pool_names.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let requested_live_starts = tenant
+        .spec
+        .pool_lifecycle
+        .as_ref()
+        .map(|lifecycle| {
+            lifecycle
+                .decommission_requests
+                .iter()
+                .filter(|request| {
+                    request.action == DecommissionAction::Start
+                        && live_pool_names.contains(&request.pool_name)
+                })
+                .map(|request| request.pool_name.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    if requested_live_starts.len() >= live_pool_names.len() {
+        requested_live_starts
+    } else {
+        BTreeSet::new()
+    }
 }
 
-fn live_pool_count_for_decommission_guard(tenant: &Tenant) -> usize {
+fn should_block_last_live_pool_decommission(
+    request: &DecommissionRequest,
+    block_start_decommission: bool,
+) -> bool {
+    request.action == DecommissionAction::Start && block_start_decommission
+}
+
+fn live_pool_names_for_decommission_guard(tenant: &Tenant) -> BTreeSet<String> {
     tenant
         .spec
         .pools
@@ -925,7 +963,8 @@ fn live_pool_count_for_decommission_guard(tenant: &Tenant) -> usize {
         .filter(|pool| {
             pool_counts_as_live_for_decommission_guard(existing_lifecycle_state(tenant, &pool.name))
         })
-        .count()
+        .map(|pool| pool.name.clone())
+        .collect()
 }
 
 fn pool_counts_as_live_for_decommission_guard(state: Option<PoolLifecycleState>) -> bool {
@@ -1176,14 +1215,27 @@ mod tests {
     }
 
     fn start_request(pool_name: &str) -> DecommissionRequest {
+        start_request_with_id(pool_name, "request-1")
+    }
+
+    fn start_request_with_id(pool_name: &str, request_id: &str) -> DecommissionRequest {
         DecommissionRequest {
             pool_name: pool_name.to_string(),
-            request_id: "request-1".to_string(),
+            request_id: request_id.to_string(),
             action: DecommissionAction::Start,
             requested_at: Some("2026-05-20T00:00:05Z".to_string()),
             cancel_requested_at: None,
             reason: None,
         }
+    }
+
+    fn set_decommission_requests(tenant: &mut Tenant, requests: Vec<DecommissionRequest>) {
+        tenant.spec.pool_lifecycle =
+            Some(crate::types::v1alpha1::pool_lifecycle::PoolLifecycleSpec {
+                pvc_retention_policy:
+                    crate::types::v1alpha1::pool_lifecycle::PvcRetentionPolicy::Retain,
+                decommission_requests: requests,
+            });
     }
 
     #[test]
@@ -1267,6 +1319,8 @@ mod tests {
         let old_pool = test_pool("old-pool");
         let active_pool = test_pool("active-pool");
         let mut tenant = test_tenant_with_pools(vec![old_pool, active_pool.clone()]);
+        let request = start_request("active-pool");
+        set_decommission_requests(&mut tenant, vec![request.clone()]);
         tenant.status = Some(crate::types::v1alpha1::status::Status {
             pools: vec![
                 test_pool_status("old-pool", PoolLifecycleState::Decommissioned),
@@ -1275,11 +1329,12 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(live_pool_count_for_decommission_guard(&tenant), 1);
+        assert_eq!(live_pool_names_for_decommission_guard(&tenant).len(), 1);
+        let blocked_pools = start_decommission_requests_that_would_remove_all_live_pools(&tenant);
+        assert!(blocked_pools.contains("active-pool"));
         assert!(should_block_last_live_pool_decommission(
-            &tenant,
-            &active_pool,
-            &start_request("active-pool")
+            &request,
+            blocked_pools.contains(&active_pool.name)
         ));
     }
 
@@ -1287,13 +1342,38 @@ mod tests {
     fn start_decommission_allows_one_of_multiple_live_pools() {
         let pool_a = test_pool("pool-a");
         let pool_b = test_pool("pool-b");
-        let tenant = test_tenant_with_pools(vec![pool_a.clone(), pool_b]);
+        let mut tenant = test_tenant_with_pools(vec![pool_a.clone(), pool_b]);
+        let request = start_request("pool-a");
+        set_decommission_requests(&mut tenant, vec![request.clone()]);
 
-        assert_eq!(live_pool_count_for_decommission_guard(&tenant), 2);
+        assert_eq!(live_pool_names_for_decommission_guard(&tenant).len(), 2);
+        let blocked_pools = start_decommission_requests_that_would_remove_all_live_pools(&tenant);
+        assert!(blocked_pools.is_empty());
         assert!(!should_block_last_live_pool_decommission(
-            &tenant,
-            &pool_a,
-            &start_request("pool-a")
+            &request,
+            blocked_pools.contains(&pool_a.name)
+        ));
+    }
+
+    #[test]
+    fn start_decommission_blocks_batch_that_would_remove_all_live_pools() {
+        let pool_a = test_pool("pool-a");
+        let pool_b = test_pool("pool-b");
+        let mut tenant = test_tenant_with_pools(vec![pool_a.clone(), pool_b.clone()]);
+        let request_a = start_request_with_id("pool-a", "request-a");
+        let request_b = start_request_with_id("pool-b", "request-b");
+        set_decommission_requests(&mut tenant, vec![request_a.clone(), request_b.clone()]);
+
+        assert_eq!(live_pool_names_for_decommission_guard(&tenant).len(), 2);
+        let blocked_pools = start_decommission_requests_that_would_remove_all_live_pools(&tenant);
+        assert_eq!(blocked_pools.len(), 2);
+        assert!(should_block_last_live_pool_decommission(
+            &request_a,
+            blocked_pools.contains(&pool_a.name)
+        ));
+        assert!(should_block_last_live_pool_decommission(
+            &request_b,
+            blocked_pools.contains(&pool_b.name)
         ));
     }
 
