@@ -105,6 +105,9 @@ jobs:
       - name: Run clippy lints
         run: cargo clippy --all-features -- -D warnings
 
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+
       - name: Check Rust-native e2e harness
         run: make e2e-check
 

@@ -132,8 +132,12 @@ kubectl --context kind-rustfs-e2e -n rustfs-system port-forward svc/rustfs-opera
 
 Get a login token for the e2e Console. The Console login form expects a
 Kubernetes ServiceAccount bearer token with permissions granted to the Console
-ServiceAccount. After login, the Console stores it in an encrypted session
-cookie; users do not pass this token on later API requests:
+ServiceAccount. After login, the Console encrypts it in process and stores only
+a random session ID in the browser cookie; users do not pass this token on later
+API requests:
+
+The Console must run as one process with a Recreate rollout. The Helm chart
+enforces this; custom deployments must preserve both constraints.
 
 ```bash
 TOKEN=$(kubectl --context kind-rustfs-e2e -n rustfs-system create token rustfs-operator-console --duration=24h)

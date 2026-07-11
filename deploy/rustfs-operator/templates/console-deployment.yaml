@@ -1,3 +1,6 @@
+{{- if and .Values.console.enabled (ne (toString .Values.console.replicas) "1") -}}
+{{- fail "console.replicas must be 1 because Console sessions are stored in process" -}}
+{{- end -}}
 {{- if .Values.console.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -12,6 +15,8 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
+  strategy:
+    type: Recreate
   replicas: {{ .Values.console.replicas }}
   selector:
     matchLabels:
