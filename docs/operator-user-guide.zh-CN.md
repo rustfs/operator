@@ -668,6 +668,7 @@ kubectl -n rustfs-system create token rustfs-operator-console --duration=24h
 ```
 
 将 token 粘贴到 Console 登录页。Console 会把验证后的 token 存入加密 session cookie。
+如果 Helm release 使用了自定义 namespace 或 `console.serviceAccount.name`，请以 Helm 安装提示中输出的命令为准。
 
 本地 port-forward 调试：
 

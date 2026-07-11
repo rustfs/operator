@@ -101,8 +101,7 @@ export default function LoginPage() {
               <div className="flex flex-col gap-2 border border-border bg-muted p-3">
                 <p className="text-xs text-muted-foreground">{t("Run the following command to generate a token:")}</p>
                 <pre className="overflow-x-auto bg-background p-2 font-mono text-xs text-foreground">
-                  {`kubectl create token rustfs-operator \\
-  -n rustfs-system \\
+                  {`kubectl -n rustfs-system create token rustfs-operator-console \\
   --duration=24h`}
                 </pre>
                 <p className="text-xs text-muted-foreground">{t("Paste the token above to sign in.")}</p>

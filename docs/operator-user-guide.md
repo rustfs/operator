@@ -666,6 +666,8 @@ kubectl -n rustfs-system create token rustfs-operator-console --duration=24h
 ```
 
 Paste the token into the login form. The Console stores the validated token in an encrypted session cookie.
+If your Helm release uses a custom namespace or `console.serviceAccount.name`,
+use the command printed in the Helm install notes.
 
 For local port-forward testing:
 

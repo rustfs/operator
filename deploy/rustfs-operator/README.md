@@ -362,7 +362,8 @@ kubectl -n rustfs-system create token rustfs-operator-console --duration=24h
 ```
 
 Paste the printed token into the Console login form. Use the namespace and
-ServiceAccount name from your Helm release if they differ from the defaults.
+ServiceAccount name from your Helm release if they differ from the defaults;
+the Helm install notes print the exact command for the deployed release.
 
 ## Verifying the Installation
 
