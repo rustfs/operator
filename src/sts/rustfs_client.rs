@@ -19,6 +19,7 @@ use kube::{Api, Client};
 use reqwest::{Certificate, Client as HttpClient, Response, StatusCode};
 
 use crate::Tenant;
+use crate::utils::sanitize::redact_sensitive_pairs;
 
 /// admin_ops: tenant admin operations (user/policy APIs).
 #[path = "admin_ops.rs"]
@@ -57,6 +58,7 @@ const ADMIN_SIGNING_SERVICE: &str = "s3";
 const STS_SIGNING_SERVICE: &str = "sts";
 const ADMIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const ADMIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_UPSTREAM_ERROR_BODY_BYTES: usize = 8 * 1024;
 const MAX_UPSTREAM_ERROR_DETAIL_CHARS: usize = 512;
 
 /// Credentials read from Tenant `.spec.credsSecret`.
@@ -256,19 +258,54 @@ impl std::error::Error for RustfsClientError {}
 impl RustfsClientError {
     pub(super) async fn unexpected_response(response: Response) -> Self {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Self::unexpected_status_with_body(status, &body)
+        let (body, truncated) = read_limited_response_body(response).await;
+        Self::unexpected_status_with_limited_body(status, &body, truncated)
     }
 
     pub(super) fn unexpected_status_with_body(status: StatusCode, body: &str) -> Self {
+        Self::unexpected_status_with_limited_body(status, body, false)
+    }
+
+    fn unexpected_status_with_limited_body(
+        status: StatusCode,
+        body: &str,
+        body_truncated: bool,
+    ) -> Self {
         Self::UnexpectedStatus {
             status,
-            detail: summarize_upstream_error_body(body),
+            detail: summarize_upstream_error_body(body, body_truncated),
         }
     }
 }
 
-fn summarize_upstream_error_body(body: &str) -> Option<String> {
+async fn read_limited_response_body(mut response: Response) -> (String, bool) {
+    let mut body = Vec::new();
+    let mut truncated = false;
+
+    loop {
+        let remaining = MAX_UPSTREAM_ERROR_BODY_BYTES.saturating_sub(body.len());
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => break,
+        };
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    (String::from_utf8_lossy(&body).into_owned(), truncated)
+}
+
+fn summarize_upstream_error_body(body: &str, body_truncated: bool) -> Option<String> {
     let body = body.trim();
     if body.is_empty() {
         return None;
@@ -282,16 +319,22 @@ fn summarize_upstream_error_body(body: &str) -> Option<String> {
             }
             _ => message,
         };
-        return Some(truncate_error_detail(collapse_whitespace(&detail)));
+        return Some(sanitize_error_detail(&detail));
     }
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
         && let Some(detail) = summarize_json_error(&value)
     {
-        return Some(truncate_error_detail(collapse_whitespace(&detail)));
+        return Some(sanitize_error_detail(&detail));
     }
 
-    Some(truncate_error_detail(collapse_whitespace(body)))
+    if body_truncated {
+        return Some(format!(
+            "response body exceeded {MAX_UPSTREAM_ERROR_BODY_BYTES} bytes"
+        ));
+    }
+
+    Some(sanitize_error_detail(body))
 }
 
 fn summarize_json_error(value: &serde_json::Value) -> Option<String> {
@@ -315,6 +358,12 @@ fn summarize_json_error(value: &serde_json::Value) -> Option<String> {
 
 fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sanitize_error_detail(value: &str) -> String {
+    let detail = collapse_whitespace(value);
+    let detail = redact_sensitive_pairs(&detail);
+    truncate_error_detail(detail)
 }
 
 fn truncate_error_detail(value: String) -> String {

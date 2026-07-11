@@ -555,7 +555,7 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 
 ConfigMaps and user Secrets must live in the Tenant namespace. If managed outside the Operator Console, label them with `rustfs.tenant=<tenant-name>` so updates enqueue the owning Tenant.
 
-Policy documents are parsed by RustFS. Use S3 ARN resource patterns such as `arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/*`; a bare `Resource: "*"` is not accepted by RustFS policy parsing.
+Policy documents are parsed by RustFS. Use S3 ARN resource patterns such as `arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/*`; for all buckets, use `arn:aws:s3:::*`. A bare `Resource: "*"` is not accepted by RustFS policy parsing.
 
 For each `spec.users[]` entry, the operator reads a Secret with the same name as the user. The Secret must contain `accesskey` and `secretkey`, or the MinIO-compatible keys `CONSOLE_ACCESS_KEY` and `CONSOLE_SECRET_KEY`. If both key formats are present, their values must match. User access keys must be at least 8 characters and must not contain whitespace, `=`, or `,`; user secret keys must be at least 8 characters.
 

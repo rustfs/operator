@@ -27,9 +27,9 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use super::{
-    ADD_USER_PATH, CreateBucketResult, LIST_CANNED_POLICIES_PATH, POOLS_DECOMMISSION_PATH,
-    POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient, RustfsClientError, SERVER_INFO_PATH,
-    SET_POLICY_PATH,
+    ADD_USER_PATH, CreateBucketResult, LIST_CANNED_POLICIES_PATH, MAX_UPSTREAM_ERROR_BODY_BYTES,
+    POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient,
+    RustfsClientError, SERVER_INFO_PATH, SET_POLICY_PATH,
     helpers::{extract_canned_policy_document, extract_credentials, parse_assume_role_response},
 };
 
@@ -139,6 +139,39 @@ fn unexpected_status_includes_upstream_json_error_summary() {
     assert_eq!(
         err.to_string(),
         "upstream returned 400 Bad Request: InvalidRequest: policy Resource must use ARN form"
+    );
+}
+
+#[test]
+fn unexpected_status_redacts_sensitive_upstream_error_summary() {
+    let err = RustfsClientError::unexpected_status_with_body(
+        StatusCode::BAD_REQUEST,
+        r#"{"code":"InvalidRequest","message":"secretkey: SK_TEST clientSecret: oidc-secret <AccessKey>AKIA_XML</AccessKey>"}"#,
+    );
+
+    let message = err.to_string();
+    assert!(message.contains("secretkey: <redacted>"));
+    assert!(message.contains("clientSecret: <redacted>"));
+    assert!(message.contains("<AccessKey><redacted></AccessKey>"));
+    assert!(!message.contains("SK_TEST"));
+    assert!(!message.contains("oidc-secret"));
+    assert!(!message.contains("AKIA_XML"));
+}
+
+#[test]
+fn unexpected_status_hides_truncated_unstructured_response_body() {
+    let body = "x".repeat(MAX_UPSTREAM_ERROR_BODY_BYTES);
+    let err = RustfsClientError::unexpected_status_with_limited_body(
+        StatusCode::BAD_GATEWAY,
+        &body,
+        true,
+    );
+
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "upstream returned 502 Bad Gateway: response body exceeded {MAX_UPSTREAM_ERROR_BODY_BYTES} bytes"
+        )
     );
 }
 
