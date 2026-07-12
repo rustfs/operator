@@ -647,7 +647,12 @@ async fn reconcile_existing_pool_statefulset(
         "checking existing pool StatefulSet"
     );
 
-    if let Err(e) = tenant.validate_statefulset_update_with_tls_plan(&existing_ss, pool, tls_plan) {
+    if let Err(e) = tenant.validate_statefulset_update_with_tls_plan_and_cluster_domain(
+        &existing_ss,
+        pool,
+        tls_plan,
+        ctx.cluster_domain(),
+    ) {
         warn!(
             tenant = %tenant.name(),
             namespace = %namespace,
@@ -675,7 +680,12 @@ async fn reconcile_existing_pool_statefulset(
     }
 
     if types_result(
-        tenant.statefulset_needs_update_with_tls_plan(&existing_ss, pool, tls_plan),
+        tenant.statefulset_needs_update_with_tls_plan_and_cluster_domain(
+            &existing_ss,
+            pool,
+            tls_plan,
+            ctx.cluster_domain(),
+        ),
         ctx,
         tenant,
     )
@@ -699,7 +709,11 @@ async fn reconcile_existing_pool_statefulset(
             .await;
 
         let desired = types_result(
-            tenant.new_statefulset_with_tls_plan(pool, tls_plan),
+            tenant.new_statefulset_with_tls_plan_and_cluster_domain(
+                pool,
+                tls_plan,
+                ctx.cluster_domain(),
+            ),
             ctx,
             tenant,
         )
@@ -767,7 +781,11 @@ async fn reconcile_missing_pool_statefulset(
         .await;
 
     let desired = types_result(
-        tenant.new_statefulset_with_tls_plan(pool, tls_plan),
+        tenant.new_statefulset_with_tls_plan_and_cluster_domain(
+            pool,
+            tls_plan,
+            ctx.cluster_domain(),
+        ),
         ctx,
         tenant,
     )

@@ -121,12 +121,15 @@ helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
 | `sts` | Operator STS 端点、Service 端口、TokenReview audience 和 TLS。 |
 | `serviceAccount` / `rbac` | Operator ServiceAccount 和 RBAC 创建策略。 |
 | `console` | Operator Console 后端/UI Deployment、Service、session cookie 密钥、Ingress、资源和可选独立前端。 |
+| `clusterDomain` | Kubernetes 集群 DNS 域，用于 Tenant peer URL、自动生成的 TLS SAN 和 operator STS 自动 TLS。默认 `cluster.local`。 |
 | `namespace` | Chart 资源命名空间覆盖；默认使用 Helm release namespace。 |
 | `commonLabels` / `commonAnnotations` | 添加到 Chart 管理资源上的统一 label 和 annotation。 |
 
 生产风格 values 示例：
 
 ```yaml
+clusterDomain: cluster.local
+
 operator:
   replicas: 2
   image:
@@ -350,7 +353,7 @@ Operator 会自动管理以下环境变量：
 - `RUSTFS_KMS_*` 变量；请改用 `spec.encryption` 配置
 - 启用 TLS 时的 RustFS TLS 相关变量
 
-对于单 pool 的单节点单盘 Tenant，`RUSTFS_VOLUMES` 会渲染为本地数据路径，例如 `/data/rustfs0`。多 pool Tenant 和其他布局仍会通过 Tenant headless Service 渲染 peer DNS URL，并由 RustFS 在运行时校验。
+对于单 pool 的单节点单盘 Tenant，`RUSTFS_VOLUMES` 会渲染为本地数据路径，例如 `/data/rustfs0`。多 pool Tenant 和其他布局仍会通过 Tenant headless Service 渲染 peer DNS URL，并由 RustFS 在运行时校验。当 Kubernetes 集群 DNS 域不是 `cluster.local` 时，请设置 Helm chart 的 `clusterDomain`；自动生成的 TLS SAN 也会使用同一个域。
 
 `podDeletionPolicyWhenNodeIsDown` 支持以下值：
 
@@ -439,7 +442,7 @@ spec:
 
 默认条目会被投影到 `mountPath` 根目录下的 `rustfs_cert.pem` 和 `rustfs_key.pem`，供 RustFS 作为 fallback 证书和节点间 HTTPS 证书使用。每个 `hosts` 值会被投影为 RustFS SNI 子目录，例如 `s3.example.com/rustfs_cert.pem` 和 `s3.example.com/rustfs_key.pem`。
 配置了 `certificates` 时，省略 `includeGeneratedDnsNames` 只有在 `default: true` 证书条目中才按 `true` 处理。非默认条目只包含 `hosts` 和 `certManager.dnsNames`，除非显式设置 `includeGeneratedDnsNames: true`。
-当 `enableInternodeHttps: true` 时，默认的托管证书必须覆盖 RustFS 自动生成的节点间 DNS 名称。应保持 `includeGeneratedDnsNames` 启用，或在 `hosts` / `certManager.dnsNames` 中显式列出这些节点间名称。
+当 `enableInternodeHttps: true` 时，默认托管证书必须覆盖 operator 和 `RUSTFS_VOLUMES` 实际使用的 RustFS peer DNS 名称。应保持 `includeGeneratedDnsNames` 启用，或在 `hosts` / `certManager.dnsNames` 中显式列出必需名称。使用自定义 Kubernetes DNS 域的集群应设置 Helm chart 的 `clusterDomain`；必需名称会使用 `.svc.<clusterDomain>`。外部证书必须覆盖 headless Service FQDN（`<tenant>-hl.<namespace>.svc.<clusterDomain>`）和 pod FQDN；类似 `*.<tenant>-hl.<namespace>.svc.<clusterDomain>` 的 wildcard 可以覆盖生成的 pod FQDN。
 配置了 `certificates` 时，进程级 trust 应放在顶层 `caTrust` 或 `default: true` 证书条目的 `caTrust` 中。旧的 `certManager.caTrust` 只对单证书写法生效，非默认条目上的 `certManager.caTrust` 会被拒绝。
 
 ### 7.6 日志配置

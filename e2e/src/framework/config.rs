@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::framework::cluster_dns;
 use operator::types::v1alpha1::k8s::PodManagementPolicy;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
@@ -45,6 +46,7 @@ pub struct E2eConfig {
     pub operator_image: String,
     pub console_web_image: String,
     pub cert_manager_version: String,
+    pub cluster_domain: String,
     pub kind_config: PathBuf,
     pub live_enabled: bool,
 }
@@ -112,6 +114,11 @@ impl E2eConfig {
                 "RUSTFS_E2E_CERT_MANAGER_VERSION",
                 DEFAULT_CERT_MANAGER_VERSION,
             ),
+            cluster_domain: cluster_dns::configured_cluster_domain(&env_or(
+                &get_env,
+                "RUSTFS_E2E_CLUSTER_DOMAIN",
+                cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+            )),
             kind_config: PathBuf::from(env_or(
                 &get_env,
                 "RUSTFS_E2E_KIND_CONFIG",
@@ -190,6 +197,7 @@ mod tests {
         assert_eq!(config.pv_count, 12);
         assert_eq!(config.rustfs_image, DEFAULT_RUSTFS_IMAGE);
         assert_eq!(config.cert_manager_version, "v1.16.2");
+        assert_eq!(config.cluster_domain, "cluster.local");
         assert_eq!(
             config.kind_config,
             std::path::PathBuf::from("e2e/manifests/kind-rustfs-e2e.yaml")
@@ -207,6 +215,7 @@ mod tests {
             "RUSTFS_E2E_CONSOLE_WEB_IMAGE" => Some("rustfs/console-web:other".to_string()),
             "RUSTFS_E2E_SERVER_IMAGE" => Some("rustfs/rustfs:dev".to_string()),
             "RUSTFS_E2E_CERT_MANAGER_VERSION" => Some("v9.9.9".to_string()),
+            "RUSTFS_E2E_CLUSTER_DOMAIN" => Some("K8S.MSE.Cloud.".to_string()),
             "RUSTFS_E2E_LIVE" => Some("true".to_string()),
             _ => None,
         });
@@ -217,6 +226,7 @@ mod tests {
         assert_eq!(config.console_web_image, "rustfs/console-web:e2e");
         assert_eq!(config.rustfs_image, "rustfs/rustfs:dev");
         assert_eq!(config.cert_manager_version, "v9.9.9");
+        assert_eq!(config.cluster_domain, "k8s.mse.cloud");
         assert!(config.live_enabled);
     }
 }

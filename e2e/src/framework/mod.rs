@@ -15,6 +15,7 @@
 pub mod artifacts;
 pub mod assertions;
 pub mod cert_manager_tls;
+pub mod cluster_dns;
 pub mod command;
 pub mod config;
 pub mod console_client;

@@ -19,6 +19,7 @@ use kube::{Api, Client};
 use reqwest::{Certificate, Client as HttpClient, Response, StatusCode};
 
 use crate::Tenant;
+use crate::cluster_dns;
 use crate::utils::sanitize::redact_sensitive_pairs;
 
 /// admin_ops: tenant admin operations (user/policy APIs).
@@ -501,6 +502,7 @@ impl RustfsAdminClient {
         kube_client: &Client,
         tenant: &Tenant,
         credentials: RustfsCredentials,
+        cluster_domain: &str,
     ) -> Result<Self, RustfsClientError> {
         if !helpers::tenant_tls_enabled(tenant) {
             return Err(RustfsClientError::TenantTlsRequired);
@@ -512,12 +514,9 @@ impl RustfsAdminClient {
         let namespace = tenant
             .namespace()
             .map_err(|_| RustfsClientError::MissingTenantNamespace)?;
-        let service_name = tenant
-            .new_io_service()
-            .metadata
-            .name
-            .unwrap_or_else(|| format!("{}-io", tenant.name()));
-        let base_url = format!("https://{service_name}.{namespace}.svc:9000");
+        let service_name = tenant.headless_service_name();
+        let service_fqdn = cluster_dns::service_fqdn(&service_name, &namespace, cluster_domain);
+        let base_url = format!("https://{service_fqdn}:9000");
 
         match Self::load_tenant_tls_ca(kube_client, tenant).await? {
             Some(ca_pem) => Self::new_with_base_url_and_ca_pem(

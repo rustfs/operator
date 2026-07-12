@@ -17,6 +17,7 @@ use std::io::Cursor;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use crate::cluster_dns;
 use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
@@ -102,6 +103,7 @@ pub struct OperatorStsTlsConfig {
     pub auto_generate: bool,
     pub namespace: String,
     pub service_name: String,
+    pub cluster_domain: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +121,14 @@ impl OperatorStsTlsConfig {
             auto_generate: env_bool("OPERATOR_STS_TLS_AUTO", true),
             namespace: operator_namespace(),
             service_name: env_string("OPERATOR_STS_SERVICE_NAME", DEFAULT_STS_SERVICE_NAME),
+            cluster_domain: cluster_dns::DEFAULT_CLUSTER_DOMAIN.to_string(),
+        }
+    }
+
+    pub fn from_env_with_cluster_domain(cluster_domain: &str) -> Self {
+        Self {
+            cluster_domain: cluster_domain.to_string(),
+            ..Self::from_env()
         }
     }
 }
@@ -265,7 +275,11 @@ async fn wait_for_secret_material(
 }
 
 fn generated_sts_tls_secret(config: &OperatorStsTlsConfig) -> TlsResult<corev1::Secret> {
-    let generated = generate_sts_tls_material(&config.namespace, &config.service_name)?;
+    let generated = generate_sts_tls_material(
+        &config.namespace,
+        &config.service_name,
+        &config.cluster_domain,
+    )?;
     let mut data = BTreeMap::new();
     data.insert(TLS_CERT_KEY.to_string(), ByteString(generated.cert_pem));
     data.insert(TLS_KEY_KEY.to_string(), ByteString(generated.key_pem));
@@ -298,6 +312,7 @@ fn generated_sts_tls_secret(config: &OperatorStsTlsConfig) -> TlsResult<corev1::
 fn generate_sts_tls_material(
     namespace: &str,
     service_name: &str,
+    cluster_domain: &str,
 ) -> TlsResult<OperatorStsTlsMaterial> {
     let ca_key = KeyPair::generate().context(GenerateCertificateSnafu)?;
     let mut ca_params = CertificateParams::default();
@@ -312,7 +327,7 @@ fn generate_sts_tls_material(
         .context(GenerateCertificateSnafu)?;
 
     let server_key = KeyPair::generate().context(GenerateCertificateSnafu)?;
-    let mut server_names = service_dns_names(namespace, service_name);
+    let mut server_names = service_dns_names(namespace, service_name, cluster_domain);
     server_names.push("localhost".to_string());
     server_names.push(Ipv4Addr::LOCALHOST.to_string());
     let mut server_params =
@@ -378,12 +393,12 @@ fn secret_data(
         })
 }
 
-fn service_dns_names(namespace: &str, service_name: &str) -> Vec<String> {
+fn service_dns_names(namespace: &str, service_name: &str, cluster_domain: &str) -> Vec<String> {
     vec![
         service_name.to_string(),
         format!("{service_name}.{namespace}"),
         format!("{service_name}.{namespace}.svc"),
-        format!("{service_name}.{namespace}.svc.cluster.local"),
+        cluster_dns::service_fqdn(service_name, namespace, cluster_domain),
     ]
 }
 
@@ -438,7 +453,11 @@ mod tests {
     #[test]
     fn service_dns_names_cover_short_and_cluster_forms() {
         assert_eq!(
-            service_dns_names("rustfs-system", "rustfs-operator-sts"),
+            service_dns_names(
+                "rustfs-system",
+                "rustfs-operator-sts",
+                cluster_dns::DEFAULT_CLUSTER_DOMAIN
+            ),
             vec![
                 "rustfs-operator-sts",
                 "rustfs-operator-sts.rustfs-system",
@@ -449,8 +468,21 @@ mod tests {
     }
 
     #[test]
+    fn service_dns_names_use_custom_cluster_domain() {
+        assert_eq!(
+            service_dns_names("rustfs-system", "rustfs-operator-sts", "k8s.mse.cloud")[3],
+            "rustfs-operator-sts.rustfs-system.svc.k8s.mse.cloud"
+        );
+    }
+
+    #[test]
     fn generated_material_builds_rustls_server_config() {
-        let material = generate_sts_tls_material("rustfs-system", "rustfs-operator-sts").unwrap();
+        let material = generate_sts_tls_material(
+            "rustfs-system",
+            "rustfs-operator-sts",
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        )
+        .unwrap();
 
         assert!(!material.cert_pem.is_empty());
         assert!(!material.key_pem.is_empty());
@@ -465,8 +497,14 @@ mod tests {
             auto_generate: true,
             namespace: "rustfs-system".to_string(),
             service_name: "rustfs-operator-sts".to_string(),
+            cluster_domain: cluster_dns::DEFAULT_CLUSTER_DOMAIN.to_string(),
         };
-        let generated = generate_sts_tls_material(&config.namespace, &config.service_name).unwrap();
+        let generated = generate_sts_tls_material(
+            &config.namespace,
+            &config.service_name,
+            &config.cluster_domain,
+        )
+        .unwrap();
         let mut data = BTreeMap::new();
         data.insert(TLS_CERT_KEY.to_string(), ByteString(generated.cert_pem));
         data.insert(TLS_KEY_KEY.to_string(), ByteString(generated.key_pem));

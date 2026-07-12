@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::{Error, patch_status_and_record, patch_status_error};
+use crate::cluster_dns;
 use crate::context::{self, Context};
 use crate::status::{StatusBuilder, StatusError};
 use crate::types::v1alpha1::status::Reason;
@@ -196,6 +197,7 @@ async fn reconcile_cert_manager_tls(
 
     let mut observed = Vec::with_capacity(entries.len());
     let mut desired_managed_certificate_names = BTreeSet::new();
+    let cluster_domain = ctx.cluster_domain();
     for entry in entries {
         let cert_manager = &entry.cert_manager;
         let Some(secret_name) = cert_manager
@@ -235,9 +237,13 @@ async fn reconcile_cert_manager_tls(
             let certificate_name = certificate_name(tenant, &entry);
             desired_managed_certificate_names.insert(certificate_name.clone());
 
-            if let Err(failure) =
-                validate_managed_certificate_san_config(tenant, namespace, config, &entry)
-            {
+            if let Err(failure) = validate_managed_certificate_san_config(
+                tenant,
+                namespace,
+                config,
+                &entry,
+                cluster_domain,
+            ) {
                 return tls_validation_blocked(ctx, tenant, config, failure).await;
             }
 
@@ -262,8 +268,11 @@ async fn reconcile_cert_manager_tls(
                 cert_manager,
                 &entry.hosts,
                 include_generated_dns_names(&entry),
-                &secret_name,
-                &certificate_name,
+                cluster_domain,
+                CertManagerCertificateNames {
+                    secret: &secret_name,
+                    certificate: &certificate_name,
+                },
             );
             let observed_certificate = match apply_cert_manager_certificate(
                 ctx,
@@ -360,7 +369,8 @@ async fn reconcile_cert_manager_tls(
         )
         .await?;
 
-        let san_dns_names = san_validation_dns_names(tenant, namespace, config, &entry);
+        let san_dns_names =
+            san_validation_dns_names(tenant, namespace, config, &entry, cluster_domain);
         if config.require_san_match
             && let Err(failure) =
                 validate_tls_secret_san_match(&secret_name, &cert_bytes, &san_dns_names)
@@ -886,17 +896,22 @@ async fn cert_manager_prerequisite_failed<T>(
     Err(error.into())
 }
 
+struct CertManagerCertificateNames<'a> {
+    secret: &'a str,
+    certificate: &'a str,
+}
+
 fn build_cert_manager_certificate(
     tenant: &Tenant,
     namespace: &str,
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
     include_generated_dns_names: bool,
-    secret_name: &str,
-    certificate_name: &str,
+    cluster_domain: &str,
+    names: CertManagerCertificateNames<'_>,
 ) -> DynamicObject {
     let mut spec = Map::new();
-    spec.insert("secretName".to_string(), json!(secret_name));
+    spec.insert("secretName".to_string(), json!(names.secret));
     if let Some(issuer_ref) = cert_manager.issuer_ref.as_ref() {
         spec.insert("issuerRef".to_string(), issuer_ref_value(issuer_ref));
     }
@@ -915,6 +930,7 @@ fn build_cert_manager_certificate(
             cert_manager,
             hosts,
             include_generated_dns_names,
+            cluster_domain,
         )),
     );
     spec.insert(
@@ -944,7 +960,7 @@ fn build_cert_manager_certificate(
     );
 
     let resource = certificate_api_resource();
-    let mut certificate = DynamicObject::new(certificate_name, &resource)
+    let mut certificate = DynamicObject::new(names.certificate, &resource)
         .within(namespace)
         .data(json!({ "spec": Value::Object(spec) }));
     certificate.metadata.labels = Some(tenant.common_labels());
@@ -1104,6 +1120,7 @@ fn certificate_dns_names(
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
     include_generated_dns_names: bool,
+    cluster_domain: &str,
 ) -> Vec<String> {
     let mut names = BTreeSet::new();
     names.extend(hosts.iter().filter(|name| !name.is_empty()).cloned());
@@ -1119,14 +1136,25 @@ fn certificate_dns_names(
         let io_service = format!("{tenant_name}-io");
         let headless_service = tenant.headless_service_name();
         names.insert(format!("{io_service}.{namespace}.svc"));
-        names.insert(format!("{io_service}.{namespace}.svc.cluster.local"));
+        names.insert(cluster_dns::service_fqdn(
+            &io_service,
+            namespace,
+            cluster_domain,
+        ));
         names.insert(format!("{headless_service}.{namespace}.svc"));
-        names.insert(format!("{headless_service}.{namespace}.svc.cluster.local"));
+        names.insert(cluster_dns::service_fqdn(
+            &headless_service,
+            namespace,
+            cluster_domain,
+        ));
         for pool in &tenant.spec.pools {
             for ordinal in 0..pool.servers.max(0) {
-                names.insert(format!(
-                    "{tenant_name}-{}-{ordinal}.{headless_service}.{namespace}.svc.cluster.local",
-                    pool.name
+                let pod_name = format!("{tenant_name}-{}-{ordinal}", pool.name);
+                names.insert(cluster_dns::pod_fqdn(
+                    &pod_name,
+                    &headless_service,
+                    namespace,
+                    cluster_domain,
                 ));
             }
         }
@@ -1146,19 +1174,30 @@ fn validate_managed_certificate_san_config(
     namespace: &str,
     config: &TlsConfig,
     entry: &TlsCertificateEntry,
+    cluster_domain: &str,
 ) -> Result<(), TlsValidationFailure> {
     if !config.enable_internode_https || !entry.default || include_generated_dns_names(entry) {
         return Ok(());
     }
 
-    let generated_names = generated_dns_names(tenant, namespace);
-    let configured_names =
-        certificate_dns_names(tenant, namespace, &entry.cert_manager, &entry.hosts, false)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+    let generated_names = required_tls_dns_names(tenant, namespace, cluster_domain);
+    let configured_names = certificate_dns_names(
+        tenant,
+        namespace,
+        &entry.cert_manager,
+        &entry.hosts,
+        false,
+        cluster_domain,
+    )
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     let missing_names = generated_names
         .iter()
-        .filter(|name| !configured_names.contains(*name))
+        .filter(|name| {
+            !configured_names
+                .iter()
+                .any(|configured| dns_name_covers(configured, name))
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -1180,36 +1219,97 @@ fn san_validation_dns_names(
     namespace: &str,
     config: &TlsConfig,
     entry: &TlsCertificateEntry,
+    cluster_domain: &str,
 ) -> Vec<String> {
-    let include_generated_dns_names =
-        include_generated_dns_names(entry) || (entry.default && config.enable_internode_https);
-    certificate_dns_names(
-        tenant,
-        namespace,
-        &entry.cert_manager,
-        &entry.hosts,
-        include_generated_dns_names,
-    )
+    let mut names = BTreeSet::new();
+    names.extend(entry.hosts.iter().filter(|name| !name.is_empty()).cloned());
+    names.extend(
+        entry
+            .cert_manager
+            .dns_names
+            .iter()
+            .filter(|name| !name.is_empty())
+            .cloned(),
+    );
+    if entry.default && config.enable_internode_https {
+        names.extend(required_tls_dns_names(tenant, namespace, cluster_domain));
+    } else if include_generated_dns_names(entry) {
+        names.extend(generated_dns_names(tenant, namespace, cluster_domain));
+    }
+    names.into_iter().collect()
 }
 
-fn generated_dns_names(tenant: &Tenant, namespace: &str) -> Vec<String> {
+fn required_tls_dns_names(tenant: &Tenant, namespace: &str, cluster_domain: &str) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    let tenant_name = tenant.name();
+    let headless_service = tenant.headless_service_name();
+    names.insert(cluster_dns::service_fqdn(
+        &headless_service,
+        namespace,
+        cluster_domain,
+    ));
+    for pool in &tenant.spec.pools {
+        if tenant.spec.pools.len() == 1 && pool.is_single_node_single_disk() {
+            continue;
+        }
+        for ordinal in 0..pool.servers.max(0) {
+            let pod_name = format!("{tenant_name}-{}-{ordinal}", pool.name);
+            names.insert(cluster_dns::pod_fqdn(
+                &pod_name,
+                &headless_service,
+                namespace,
+                cluster_domain,
+            ));
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn generated_dns_names(tenant: &Tenant, namespace: &str, cluster_domain: &str) -> Vec<String> {
     let mut names = BTreeSet::new();
     let tenant_name = tenant.name();
     let io_service = format!("{tenant_name}-io");
     let headless_service = tenant.headless_service_name();
     names.insert(format!("{io_service}.{namespace}.svc"));
-    names.insert(format!("{io_service}.{namespace}.svc.cluster.local"));
+    names.insert(cluster_dns::service_fqdn(
+        &io_service,
+        namespace,
+        cluster_domain,
+    ));
     names.insert(format!("{headless_service}.{namespace}.svc"));
-    names.insert(format!("{headless_service}.{namespace}.svc.cluster.local"));
+    names.insert(cluster_dns::service_fqdn(
+        &headless_service,
+        namespace,
+        cluster_domain,
+    ));
     for pool in &tenant.spec.pools {
         for ordinal in 0..pool.servers.max(0) {
-            names.insert(format!(
-                "{tenant_name}-{}-{ordinal}.{headless_service}.{namespace}.svc.cluster.local",
-                pool.name
+            let pod_name = format!("{tenant_name}-{}-{ordinal}", pool.name);
+            names.insert(cluster_dns::pod_fqdn(
+                &pod_name,
+                &headless_service,
+                namespace,
+                cluster_domain,
             ));
         }
     }
     names.into_iter().collect()
+}
+
+fn dns_name_covers(pattern: &str, dns_name: &str) -> bool {
+    if pattern == dns_name {
+        return true;
+    }
+    let Some(suffix) = pattern.strip_prefix("*.") else {
+        return false;
+    };
+    let Some(label) = dns_name
+        .strip_suffix(suffix)
+        .and_then(|prefix| prefix.strip_suffix('.'))
+    else {
+        return false;
+    };
+    !label.is_empty() && !label.contains('.')
 }
 
 fn rustfs_certificate_domains(certificate: &ObservedTlsCertificate) -> Vec<Option<String>> {
@@ -2317,8 +2417,11 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             cert_manager,
             &[],
             true,
-            "tenant-a-server-tls",
-            "tenant-a-server",
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+            CertManagerCertificateNames {
+                secret: "tenant-a-server-tls",
+                certificate: "tenant-a-server",
+            },
         );
         let dns_names = certificate
             .data
@@ -2393,6 +2496,52 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
     }
 
     #[test]
+    fn managed_certificate_manifest_uses_custom_cluster_domain_for_generated_dns() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("prod-rustfs".to_string());
+        tenant.metadata.namespace = Some("mse".to_string());
+        tenant.spec.pools[0].name = "mse-nvme-500".to_string();
+        tenant.spec.pools[0].servers = 3;
+
+        let certificate = build_cert_manager_certificate(
+            &tenant,
+            "mse",
+            &CertManagerTlsConfig::default(),
+            &[],
+            true,
+            "k8s.mse.cloud",
+            CertManagerCertificateNames {
+                secret: "prod-rustfs-private-certificate-secret",
+                certificate: "prod-rustfs-private-certificate",
+            },
+        );
+        let dns_names = certificate
+            .data
+            .pointer("/spec/dnsNames")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .expect("dnsNames should render");
+
+        assert!(dns_names.contains(&"prod-rustfs-io.mse.svc".to_string()));
+        assert!(dns_names.contains(&"prod-rustfs-io.mse.svc.k8s.mse.cloud".to_string()));
+        assert!(dns_names.contains(&"prod-rustfs-hl.mse.svc.k8s.mse.cloud".to_string()));
+        assert!(dns_names.contains(
+            &"prod-rustfs-mse-nvme-500-2.prod-rustfs-hl.mse.svc.k8s.mse.cloud".to_string()
+        ));
+        assert!(
+            !dns_names
+                .iter()
+                .any(|name| name.ends_with(".svc.cluster.local"))
+        );
+    }
+
+    #[test]
     fn managed_certificate_manifest_includes_sni_hosts() {
         let mut tenant = crate::tests::create_test_tenant(None, None);
         tenant.metadata.name = Some("tenant-a".to_string());
@@ -2409,8 +2558,11 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             &cert_manager,
             &["s3.example.com".to_string()],
             false,
-            "tenant-a-public-tls",
-            "tenant-a-public-tls",
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+            CertManagerCertificateNames {
+                secret: "tenant-a-public-tls",
+                certificate: "tenant-a-public-tls",
+            },
         );
         let dns_names = certificate
             .data
@@ -2512,8 +2664,11 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             &entry.cert_manager,
             &entry.hosts,
             include_generated_dns_names(&entry),
-            "tenant-a-public-tls",
-            "tenant-a-public-tls",
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+            CertManagerCertificateNames {
+                secret: "tenant-a-public-tls",
+                certificate: "tenant-a-public-tls",
+            },
         );
         let dns_names = certificate
             .data
@@ -2553,8 +2708,11 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             &entry.cert_manager,
             &entry.hosts,
             include_generated_dns_names(&entry),
-            "tenant-a-public-tls",
-            "tenant-a-public-tls",
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+            CertManagerCertificateNames {
+                secret: "tenant-a-public-tls",
+                certificate: "tenant-a-public-tls",
+            },
         );
         let dns_names = certificate
             .data
@@ -2584,10 +2742,11 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             enable_internode_https: true,
             ..Default::default()
         };
-        let generated_pod_dns = generated_dns_names(&tenant, "storage")
-            .into_iter()
-            .find(|name| name.contains("-0."))
-            .expect("generated names should include a pod DNS name");
+        let generated_pod_dns =
+            generated_dns_names(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN)
+                .into_iter()
+                .find(|name| name.contains("-0."))
+                .expect("generated names should include a pod DNS name");
 
         let default_entry = TlsCertificateEntry {
             name: "internal".to_string(),
@@ -2599,7 +2758,13 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             },
             legacy: false,
         };
-        let names = san_validation_dns_names(&tenant, "storage", &config, &default_entry);
+        let names = san_validation_dns_names(
+            &tenant,
+            "storage",
+            &config,
+            &default_entry,
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        );
         assert!(names.contains(&generated_pod_dns));
 
         let non_default_entry = TlsCertificateEntry {
@@ -2612,7 +2777,13 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             },
             legacy: false,
         };
-        let names = san_validation_dns_names(&tenant, "storage", &config, &non_default_entry);
+        let names = san_validation_dns_names(
+            &tenant,
+            "storage",
+            &config,
+            &non_default_entry,
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        );
         assert!(names.contains(&"s3.example.com".to_string()));
         assert!(names.contains(&generated_pod_dns));
 
@@ -2620,7 +2791,13 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             cert_manager: CertManagerTlsConfig::default(),
             ..non_default_entry
         };
-        let names = san_validation_dns_names(&tenant, "storage", &config, &public_default);
+        let names = san_validation_dns_names(
+            &tenant,
+            "storage",
+            &config,
+            &public_default,
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        );
         assert_eq!(names, vec!["s3.example.com".to_string()]);
     }
 
@@ -2646,8 +2823,14 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             legacy: false,
         };
 
-        let failure = validate_managed_certificate_san_config(&tenant, "storage", &config, &entry)
-            .expect_err("managed internode cert must cover generated peer DNS names");
+        let failure = validate_managed_certificate_san_config(
+            &tenant,
+            "storage",
+            &config,
+            &entry,
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        )
+        .expect_err("managed internode cert must cover generated peer DNS names");
 
         assert_eq!(failure.reason, Reason::CertificateInvalid);
         assert!(
@@ -2658,9 +2841,55 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             failure.message
         );
 
-        entry.cert_manager.dns_names = generated_dns_names(&tenant, "storage");
+        entry.cert_manager.dns_names =
+            generated_dns_names(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
         assert_eq!(
-            validate_managed_certificate_san_config(&tenant, "storage", &config, &entry),
+            validate_managed_certificate_san_config(
+                &tenant,
+                "storage",
+                &config,
+                &entry,
+                cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn managed_default_certificate_accepts_issue_152_headless_wildcard_dns() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("prod-rustfs".to_string());
+        tenant.metadata.namespace = Some("mse".to_string());
+        tenant.spec.pools[0].name = "mse-nvme-500".to_string();
+        tenant.spec.pools[0].servers = 3;
+        let config = TlsConfig {
+            enable_internode_https: true,
+            ..Default::default()
+        };
+        let entry = TlsCertificateEntry {
+            name: "private".to_string(),
+            default: true,
+            hosts: Vec::new(),
+            cert_manager: CertManagerTlsConfig {
+                manage_certificate: true,
+                include_generated_dns_names: Some(false),
+                dns_names: vec![
+                    "prod-rustfs-hl.mse.svc.k8s.mse.cloud".to_string(),
+                    "*.prod-rustfs-hl.mse.svc.k8s.mse.cloud".to_string(),
+                ],
+                ..Default::default()
+            },
+            legacy: false,
+        };
+
+        assert_eq!(
+            validate_managed_certificate_san_config(
+                &tenant,
+                "mse",
+                &config,
+                &entry,
+                "k8s.mse.cloud",
+            ),
             Ok(())
         );
     }

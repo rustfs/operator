@@ -47,7 +47,7 @@ pub fn interval() -> Duration {
     }
 }
 
-pub async fn run(client: Client, cancel: CancellationToken) {
+pub async fn run(client: Client, cancel: CancellationToken, cluster_domain: String) {
     let interval = interval();
     info!(
         interval_seconds = interval.as_secs(),
@@ -55,7 +55,7 @@ pub async fn run(client: Client, cancel: CancellationToken) {
     );
 
     loop {
-        poll_all_tenants(client.clone()).await;
+        poll_all_tenants(client.clone(), &cluster_domain).await;
 
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -67,7 +67,7 @@ pub async fn run(client: Client, cancel: CancellationToken) {
     }
 }
 
-async fn poll_all_tenants(client: Client) {
+async fn poll_all_tenants(client: Client, cluster_domain: &str) {
     let started = Instant::now();
     let tenants = match list_all_tenants(client.clone()).await {
         Ok(tenants) => tenants,
@@ -91,14 +91,15 @@ async fn poll_all_tenants(client: Client) {
     stream::iter(tenants)
         .for_each_concurrent(MAX_CONCURRENT_TENANT_POLLS, |tenant| {
             let client = client.clone();
+            let cluster_domain = cluster_domain.to_string();
             async move {
-                poll_tenant(client, tenant).await;
+                poll_tenant(client, tenant, &cluster_domain).await;
             }
         })
         .await;
 }
 
-async fn poll_tenant(client: Client, tenant: Tenant) {
+async fn poll_tenant(client: Client, tenant: Tenant, cluster_domain: &str) {
     let started = Instant::now();
     let tenant_name = tenant.name();
     let namespace = match tenant.namespace() {
@@ -120,7 +121,7 @@ async fn poll_tenant(client: Client, tenant: Tenant) {
         return;
     }
 
-    match poll_tenant_storage(&client, &tenant).await {
+    match poll_tenant_storage(&client, &tenant, cluster_domain).await {
         Ok(storage) => {
             metrics::record_tenant_storage(&namespace, &tenant_name, storage);
             metrics::record_tenant_monitor_poll("success", started.elapsed());
@@ -164,10 +165,12 @@ async fn list_all_tenants(client: Client) -> Result<Vec<Tenant>, kube::Error> {
 async fn poll_tenant_storage(
     client: &Client,
     tenant: &Tenant,
+    cluster_domain: &str,
 ) -> Result<TenantStorageMetrics, Box<dyn std::error::Error + Send + Sync>> {
     let credentials = RustfsAdminClient::load_tenant_credentials(client, tenant).await?;
     let rustfs_client = if tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled()) {
-        RustfsAdminClient::from_tls_tenant_for_sts(client, tenant, credentials).await?
+        RustfsAdminClient::from_tls_tenant_for_sts(client, tenant, credentials, cluster_domain)
+            .await?
     } else {
         RustfsAdminClient::from_tenant(tenant, credentials)?
     };

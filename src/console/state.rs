@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::cluster_dns;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use kube::Client;
 use ring::{
@@ -40,6 +41,9 @@ pub struct AppState {
     ///
     /// Most unit tests run without a live cluster, so this is optional.
     pub kube_client: Option<Client>,
+
+    /// Kubernetes cluster DNS domain used by handlers that call Tenant services.
+    pub cluster_domain: Arc<String>,
 }
 
 impl AppState {
@@ -48,12 +52,18 @@ impl AppState {
         Self {
             jwt_secret: Arc::new(jwt_secret),
             kube_client: None,
+            cluster_domain: Arc::new(cluster_dns::DEFAULT_CLUSTER_DOMAIN.to_string()),
         }
     }
 
     /// Attach a Kubernetes client for request handlers that need cluster reads.
     pub fn with_kube_client(mut self, kube_client: Client) -> Self {
         self.kube_client = Some(kube_client);
+        self
+    }
+
+    pub fn with_cluster_domain(mut self, cluster_domain: &str) -> Self {
+        self.cluster_domain = Arc::new(cluster_domain.to_string());
         self
     }
 

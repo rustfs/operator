@@ -61,6 +61,8 @@ spec:
               value: "true"
             - name: OPERATOR_TENANT_MONITOR_INTERVAL_SECONDS
               value: "300"
+            - name: OPERATOR_CLUSTER_DOMAIN
+              value: "cluster.local"
             - name: POD_NAME
               valueFrom:
                 fieldRef:

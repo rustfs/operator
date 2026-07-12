@@ -1,5 +1,8 @@
 # Default values for rustfs-operator.
 
+# Kubernetes cluster DNS domain used for Tenant peer URLs and generated TLS SANs.
+clusterDomain: cluster.local
+
 # Operator deployment configuration
 operator:
   # Number of operator replicas

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::Tenant;
+use crate::cluster_dns;
 use crate::types;
 use crate::types::v1alpha1::encryption::KmsBackendType;
 use crate::types::v1alpha1::persistence::{
@@ -87,6 +88,7 @@ impl Tenant {
         pool: &Pool,
         scheme: &str,
         namespace: &str,
+        cluster_domain: &str,
     ) -> String {
         let tenant_name = self.name();
         let headless_service = self.headless_service_name();
@@ -101,10 +103,11 @@ impl Tenant {
             return format!("{base_path}/rustfs0");
         }
 
+        let pod_name = format!("{tenant_name}-{}-{{0...{}}}", pool.name, pool.servers - 1);
+        let peer_host =
+            cluster_dns::pod_fqdn(&pod_name, &headless_service, namespace, cluster_domain);
         format!(
-            "{scheme}://{tenant_name}-{}-{{0...{}}}.{headless_service}.{namespace}.svc.cluster.local:9000{}/rustfs{{0...{}}}",
-            pool.name,
-            pool.servers - 1,
+            "{scheme}://{peer_host}:9000{}/rustfs{{0...{}}}",
             base_path,
             pool.persistence.volumes_per_server - 1
         )
@@ -113,13 +116,17 @@ impl Tenant {
     /// Constructs the RUSTFS_VOLUMES environment variable value
     /// Distributed and multi-pool tenants use peer DNS entries, while a single-pool
     /// single-node single-disk tenant uses its local data path.
-    fn rustfs_volumes_env_value(&self, scheme: &str) -> Result<String, types::error::Error> {
+    fn rustfs_volumes_env_value(
+        &self,
+        scheme: &str,
+        cluster_domain: &str,
+    ) -> Result<String, types::error::Error> {
         let namespace = self.namespace()?;
         let volume_specs = self
             .spec
             .pools
             .iter()
-            .map(|pool| self.rustfs_pool_volume_spec(pool, scheme, &namespace))
+            .map(|pool| self.rustfs_pool_volume_spec(pool, scheme, &namespace, cluster_domain))
             .collect::<Vec<_>>();
 
         Ok(volume_specs.join(" "))
@@ -421,6 +428,19 @@ impl Tenant {
         pool: &Pool,
         tls_plan: &TlsPlan,
     ) -> Result<v1::StatefulSet, types::error::Error> {
+        self.new_statefulset_with_tls_plan_and_cluster_domain(
+            pool,
+            tls_plan,
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        )
+    }
+
+    pub(crate) fn new_statefulset_with_tls_plan_and_cluster_domain(
+        &self,
+        pool: &Pool,
+        tls_plan: &TlsPlan,
+        cluster_domain: &str,
+    ) -> Result<v1::StatefulSet, types::error::Error> {
         let labels = self.pool_labels(pool);
         let selector_labels = self.pool_selector_labels(pool);
 
@@ -443,7 +463,8 @@ impl Tenant {
         let mut env_vars = Vec::new();
 
         // Add RUSTFS_VOLUMES environment variable for the inferred storage layout.
-        let rustfs_volumes = self.rustfs_volumes_env_value(tls_plan.internode_scheme)?;
+        let rustfs_volumes =
+            self.rustfs_volumes_env_value(tls_plan.internode_scheme, cluster_domain)?;
         env_vars.push(corev1::EnvVar {
             name: "RUSTFS_VOLUMES".to_owned(),
             value: Some(rustfs_volumes),
@@ -675,7 +696,23 @@ impl Tenant {
         pool: &Pool,
         tls_plan: &TlsPlan,
     ) -> Result<bool, types::error::Error> {
-        let desired = self.new_statefulset_with_tls_plan(pool, tls_plan)?;
+        self.statefulset_needs_update_with_tls_plan_and_cluster_domain(
+            existing,
+            pool,
+            tls_plan,
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        )
+    }
+
+    pub(crate) fn statefulset_needs_update_with_tls_plan_and_cluster_domain(
+        &self,
+        existing: &v1::StatefulSet,
+        pool: &Pool,
+        tls_plan: &TlsPlan,
+        cluster_domain: &str,
+    ) -> Result<bool, types::error::Error> {
+        let desired =
+            self.new_statefulset_with_tls_plan_and_cluster_domain(pool, tls_plan, cluster_domain)?;
 
         // Compare key spec fields that should trigger updates
         let existing_spec = existing
@@ -927,7 +964,23 @@ impl Tenant {
         pool: &Pool,
         tls_plan: &TlsPlan,
     ) -> Result<(), types::error::Error> {
-        let desired = self.new_statefulset_with_tls_plan(pool, tls_plan)?;
+        self.validate_statefulset_update_with_tls_plan_and_cluster_domain(
+            existing,
+            pool,
+            tls_plan,
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+        )
+    }
+
+    pub(crate) fn validate_statefulset_update_with_tls_plan_and_cluster_domain(
+        &self,
+        existing: &v1::StatefulSet,
+        pool: &Pool,
+        tls_plan: &TlsPlan,
+        cluster_domain: &str,
+    ) -> Result<(), types::error::Error> {
+        let desired =
+            self.new_statefulset_with_tls_plan_and_cluster_domain(pool, tls_plan, cluster_domain)?;
 
         let existing_spec = existing
             .spec
@@ -1688,6 +1741,23 @@ mod tests {
         assert!(rustfs_volumes.contains(
             "http://test-tenant-pool-1-{0...1}.test-tenant-hl.default.svc.cluster.local:9000/data/rustfs{0...0}"
         ));
+    }
+
+    #[test]
+    fn rustfs_pool_volume_spec_uses_custom_cluster_domain() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("prod-rustfs".to_string());
+        tenant.spec.pools[0].name = "mse-nvme-500".to_string();
+        tenant.spec.pools[0].servers = 3;
+        tenant.spec.pools[0].persistence.volumes_per_server = 1;
+        let pool = &tenant.spec.pools[0];
+
+        let volume_spec = tenant.rustfs_pool_volume_spec(pool, "https", "mse", "k8s.mse.cloud");
+
+        assert_eq!(
+            volume_spec,
+            "https://prod-rustfs-mse-nvme-500-{0...2}.prod-rustfs-hl.mse.svc.k8s.mse.cloud:9000/data/rustfs{0...0}"
+        );
     }
 
     #[test]

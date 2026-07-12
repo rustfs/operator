@@ -3,6 +3,11 @@
 {{- if and (not .Values.operator.metrics.enabled) (or (hasKey $livenessProbe "httpGet") (hasKey $readinessProbe "httpGet")) -}}
 {{- fail "operator.metrics.enabled=false requires overriding operator.livenessProbe and operator.readinessProbe because the chart defaults use the metrics port" -}}
 {{- end -}}
+{{- range $env := .Values.operator.env }}
+{{- if eq $env.name "OPERATOR_CLUSTER_DOMAIN" -}}
+{{- fail "operator.env must not set OPERATOR_CLUSTER_DOMAIN; use clusterDomain instead" -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -81,6 +86,8 @@ spec:
               value: {{ .Values.operator.tenantMonitor.enabled | quote }}
             - name: OPERATOR_TENANT_MONITOR_INTERVAL_SECONDS
               value: {{ .Values.operator.tenantMonitor.intervalSeconds | quote }}
+            - name: OPERATOR_CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | default "cluster.local" | quote }}
             - name: OPERATOR_STS_ENABLED
               value: {{ .Values.sts.enabled | quote }}
             - name: OPERATOR_STS_AUDIENCE

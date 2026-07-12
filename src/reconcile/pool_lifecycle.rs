@@ -213,13 +213,19 @@ async fn reconcile_single_pool_lifecycle(
             }
         };
 
-        let status =
-            match verify_decommissioned_pool_for_cleanup(&client, tenant, namespace, pool, &status)
-                .await
-            {
-                Ok(status) => status,
-                Err(decision) => return decision,
-            };
+        let status = match verify_decommissioned_pool_for_cleanup(
+            &client,
+            tenant,
+            namespace,
+            pool,
+            &status,
+            ctx.cluster_domain(),
+        )
+        .await
+        {
+            Ok(status) => status,
+            Err(decision) => return decision,
+        };
 
         return cleanup_decommissioned_pool(ctx, tenant, namespace, pool, status).await;
     }
@@ -264,41 +270,42 @@ async fn reconcile_single_pool_lifecycle(
         }
     };
 
-    let matched_pool = match find_rustfs_pool(&client, tenant, namespace, pool).await {
-        Ok(pool_item) => pool_item,
-        Err(error) if error.is_retriable() => {
-            warn!(
-                tenant = %tenant.name(),
-                namespace = %namespace,
-                pool = %pool.name,
-                request_id = %request.request_id,
-                reason = error.reason(),
-                message = error.message(),
-                "RustFS pool mapping is not ready"
-            );
-            return retriable_decision(
-                Some(request.request_id.clone()),
-                error.reason(),
-                error.message(),
-            );
-        }
-        Err(error) => {
-            warn!(
-                tenant = %tenant.name(),
-                namespace = %namespace,
-                pool = %pool.name,
-                request_id = %request.request_id,
-                reason = error.reason(),
-                message = error.message(),
-                "RustFS pool mapping failed"
-            );
-            return failed_decision(
-                Some(request.request_id.clone()),
-                error.reason(),
-                error.message(),
-            );
-        }
-    };
+    let matched_pool =
+        match find_rustfs_pool(&client, tenant, namespace, pool, ctx.cluster_domain()).await {
+            Ok(pool_item) => pool_item,
+            Err(error) if error.is_retriable() => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    request_id = %request.request_id,
+                    reason = error.reason(),
+                    message = error.message(),
+                    "RustFS pool mapping is not ready"
+                );
+                return retriable_decision(
+                    Some(request.request_id.clone()),
+                    error.reason(),
+                    error.message(),
+                );
+            }
+            Err(error) => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    pool = %pool.name,
+                    request_id = %request.request_id,
+                    reason = error.reason(),
+                    message = error.message(),
+                    "RustFS pool mapping failed"
+                );
+                return failed_decision(
+                    Some(request.request_id.clone()),
+                    error.reason(),
+                    error.message(),
+                );
+            }
+        };
     let pool_id = matched_pool.item.id.to_string();
 
     if cancel_without_decommission_info_is_noop(request, matched_pool.item.decommission.as_ref()) {
@@ -448,7 +455,13 @@ async fn rustfs_admin_client(
 ) -> Result<RustfsAdminClient, RustfsClientError> {
     let credentials = RustfsAdminClient::load_tenant_credentials(&ctx.client, tenant).await?;
     if tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled()) {
-        RustfsAdminClient::from_tls_tenant_for_sts(&ctx.client, tenant, credentials).await
+        RustfsAdminClient::from_tls_tenant_for_sts(
+            &ctx.client,
+            tenant,
+            credentials,
+            ctx.cluster_domain(),
+        )
+        .await
     } else {
         RustfsAdminClient::from_tenant(tenant, credentials)
     }
@@ -459,8 +472,9 @@ async fn find_rustfs_pool(
     tenant: &Tenant,
     namespace: &str,
     pool: &Pool,
+    cluster_domain: &str,
 ) -> Result<MatchedRustfsPool, PoolMappingError> {
-    let expected_cmd_line = expected_pool_cmd_line(tenant, namespace, pool)
+    let expected_cmd_line = expected_pool_cmd_line(tenant, namespace, pool, cluster_domain)
         .map_err(PoolMappingError::TenantNamespace)?;
     let expected_endpoint_set_hash = endpoint_set_hash(&expected_cmd_line);
     let pools = client
@@ -496,7 +510,12 @@ async fn find_rustfs_pool(
         })
 }
 
-fn expected_pool_cmd_line(tenant: &Tenant, namespace: &str, pool: &Pool) -> Result<String, String> {
+fn expected_pool_cmd_line(
+    tenant: &Tenant,
+    namespace: &str,
+    pool: &Pool,
+    cluster_domain: &str,
+) -> Result<String, String> {
     let scheme = if tenant
         .spec
         .tls
@@ -514,7 +533,7 @@ fn expected_pool_cmd_line(tenant: &Tenant, namespace: &str, pool: &Pool) -> Resu
         ));
     }
 
-    Ok(tenant.rustfs_pool_volume_spec(pool, scheme, namespace))
+    Ok(tenant.rustfs_pool_volume_spec(pool, scheme, namespace, cluster_domain))
 }
 
 fn same_cmd_line(left: &str, right: &str) -> bool {
@@ -550,8 +569,10 @@ async fn verify_decommissioned_pool_for_cleanup(
     namespace: &str,
     pool: &Pool,
     existing: &PoolDecommissionStatus,
+    cluster_domain: &str,
 ) -> Result<PoolDecommissionStatus, PoolLifecycleDecision> {
-    let matched_pool = match find_rustfs_pool(client, tenant, namespace, pool).await {
+    let matched_pool = match find_rustfs_pool(client, tenant, namespace, pool, cluster_domain).await
+    {
         Ok(matched_pool) => matched_pool,
         Err(error) if error.is_retriable() => {
             return Err(cleanup_retriable_decision(
@@ -1404,8 +1425,18 @@ mod tests {
         let tenant = test_tenant(pool.clone());
 
         assert_eq!(
-            expected_pool_cmd_line(&tenant, "rustfs-system", &pool).unwrap(),
+            expected_pool_cmd_line(
+                &tenant,
+                "rustfs-system",
+                &pool,
+                crate::cluster_dns::DEFAULT_CLUSTER_DOMAIN
+            )
+            .unwrap(),
             "http://logs-pool-a-{0...3}.logs-hl.rustfs-system.svc.cluster.local:9000/data/rustfs{0...1}"
+        );
+        assert_eq!(
+            expected_pool_cmd_line(&tenant, "rustfs-system", &pool, "k8s.mse.cloud").unwrap(),
+            "http://logs-pool-a-{0...3}.logs-hl.rustfs-system.svc.k8s.mse.cloud:9000/data/rustfs{0...1}"
         );
     }
 

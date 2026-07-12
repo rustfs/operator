@@ -53,10 +53,13 @@ The following table lists the configurable parameters of the RustFS Operator cha
 | `operator.prometheusRule.enabled` | Create Prometheus alert rules for operator and tenant storage health | `false` |
 | `operator.tenantMonitor.enabled` | Poll RustFS tenant storage health and capacity metrics | `true` |
 | `operator.tenantMonitor.intervalSeconds` | Tenant storage monitor interval | `300` |
+| `clusterDomain` | Kubernetes cluster DNS domain used for Tenant peer URLs, generated TLS SANs, and operator STS auto TLS | `cluster.local` |
 | `operator.env` | Environment variables | `[{name: RUST_LOG, value: info}]` |
 | `operator.nodeSelector` | Node selector for pod placement | `{}` |
 | `operator.tolerations` | Tolerations for pod scheduling | `[]` |
 | `operator.affinity` | Affinity rules for pod scheduling | `{}` |
+
+Use `clusterDomain` for custom Kubernetes DNS domains; `operator.env` must not set `OPERATOR_CLUSTER_DOMAIN`.
 
 ### Operator STS Configuration
 

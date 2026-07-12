@@ -30,6 +30,7 @@ use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 
+use crate::framework::cluster_dns;
 use crate::framework::{
     assertions, command::CommandSpec, config::E2eConfig, kubectl::Kubectl, resources, storage,
     tenant_factory::TenantTemplate, wait,
@@ -171,17 +172,29 @@ fn tls_certificate_dns_names(config: &E2eConfig, tenant: &Tenant) -> Vec<String>
         if cert_manager.include_generated_dns_names.unwrap_or(true) {
             let tenant_name = &config.tenant_name;
             let namespace = &config.test_namespace;
+            let cluster_domain = &config.cluster_domain;
             let io_service = format!("{tenant_name}-io");
             let headless_service = format!("{tenant_name}-hl");
             names.insert(format!("{io_service}.{namespace}.svc"));
-            names.insert(format!("{io_service}.{namespace}.svc.cluster.local"));
+            names.insert(cluster_dns::service_fqdn(
+                &io_service,
+                namespace,
+                cluster_domain,
+            ));
             names.insert(format!("{headless_service}.{namespace}.svc"));
-            names.insert(format!("{headless_service}.{namespace}.svc.cluster.local"));
+            names.insert(cluster_dns::service_fqdn(
+                &headless_service,
+                namespace,
+                cluster_domain,
+            ));
             for pool in &tenant.spec.pools {
                 for ordinal in 0..pool.servers.max(0) {
-                    names.insert(format!(
-                        "{tenant_name}-{}-{ordinal}.{headless_service}.{namespace}.svc.cluster.local",
-                        pool.name
+                    let pod_name = format!("{tenant_name}-{}-{ordinal}", pool.name);
+                    names.insert(cluster_dns::pod_fqdn(
+                        &pod_name,
+                        &headless_service,
+                        namespace,
+                        cluster_domain,
                     ));
                 }
             }

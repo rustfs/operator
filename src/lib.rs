@@ -83,6 +83,7 @@ pub fn init_tracing() {
     });
 }
 
+mod cluster_dns;
 mod context;
 pub mod metrics;
 pub mod reconcile;
@@ -102,6 +103,12 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
     install_rustls_crypto_provider();
     init_tracing();
 
+    let cluster_domain = cluster_dns::ClusterDomain::from_env()?;
+    info!(
+        cluster_domain = %cluster_domain.as_str(),
+        "operator cluster DNS domain configured"
+    );
+
     let client = Client::try_default().await?;
     if operator_metrics_enabled() {
         let metrics_port = operator_metrics_port();
@@ -119,9 +126,12 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
 
     if operator_sts_enabled() {
         let sts_port = operator_sts_port();
-        let sts_state =
-            crate::console::state::AppState::new(String::new()).with_kube_client(client.clone());
-        let sts_tls_config = crate::sts::tls::OperatorStsTlsConfig::from_env();
+        let sts_state = crate::console::state::AppState::new(String::new())
+            .with_kube_client(client.clone())
+            .with_cluster_domain(cluster_domain.as_str());
+        let sts_tls_config = crate::sts::tls::OperatorStsTlsConfig::from_env_with_cluster_domain(
+            cluster_domain.as_str(),
+        );
         let tls_server_config = if sts_tls_config.enabled {
             let material =
                 crate::sts::tls::load_or_create_sts_tls_material(&client, &sts_tls_config).await?;
@@ -166,6 +176,7 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
 
         let callbacks = ControllerCallbacks {
             client: client.clone(),
+            cluster_domain: cluster_domain.clone(),
         };
 
         let cancel = CancellationToken::new();
@@ -174,7 +185,7 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
     } else {
         info!("starting with leader election disabled");
         metrics::set_operator_leader(true);
-        run_active_leader_tasks(client, CancellationToken::new()).await;
+        run_active_leader_tasks(client, CancellationToken::new(), cluster_domain).await;
         metrics::set_operator_leader(false);
     }
 
@@ -182,9 +193,13 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
 }
 
 /// Build and run the controller reconcile loop.
-async fn run_controller(client: Client, cancel: CancellationToken) {
+async fn run_controller(
+    client: Client,
+    cancel: CancellationToken,
+    cluster_domain: cluster_dns::ClusterDomain,
+) {
     let tenant_client = Api::<Tenant>::all(client.clone());
-    let context = Context::new(client.clone());
+    let context = Context::new_with_cluster_domain(client.clone(), cluster_domain);
     let controller = Controller::new(tenant_client, watcher::Config::default())
         .watches(
             Api::<corev1::ConfigMap>::all(client.clone()),
@@ -269,18 +284,29 @@ async fn instrumented_reconcile_rustfs(
     result
 }
 
-async fn run_active_leader_tasks(client: Client, cancel: CancellationToken) {
+async fn run_active_leader_tasks(
+    client: Client,
+    cancel: CancellationToken,
+    cluster_domain: cluster_dns::ClusterDomain,
+) {
     let tasks_cancel = CancellationToken::new();
     let controller_client = client.clone();
     let controller_cancel = tasks_cancel.clone();
+    let controller_cluster_domain = cluster_domain.clone();
     let mut controller_handle = tokio::spawn(async move {
-        run_controller(controller_client, controller_cancel).await;
+        run_controller(
+            controller_client,
+            controller_cancel,
+            controller_cluster_domain,
+        )
+        .await;
     });
 
     let mut monitor_handle = if tenant_monitor::is_enabled() {
         let monitor_cancel = tasks_cancel.clone();
+        let monitor_cluster_domain = cluster_domain.as_str().to_string();
         Some(tokio::spawn(async move {
-            tenant_monitor::run(client, monitor_cancel).await;
+            tenant_monitor::run(client, monitor_cancel, monitor_cluster_domain).await;
         }))
     } else {
         info!("tenant storage monitor disabled by OPERATOR_TENANT_MONITOR_ENABLED=false");
@@ -325,6 +351,7 @@ async fn stop_task(name: &str, mut handle: JoinHandle<()>) {
 /// Callbacks for running the controller inside leader election.
 struct ControllerCallbacks {
     client: Client,
+    cluster_domain: cluster_dns::ClusterDomain,
 }
 
 #[async_trait::async_trait]
@@ -332,7 +359,7 @@ impl LeaderCallbacks for ControllerCallbacks {
     async fn on_started_leading(&self, cancel: CancellationToken) {
         info!("acquired leader lease, starting active leader tasks");
         metrics::set_operator_leader(true);
-        run_active_leader_tasks(self.client.clone(), cancel).await;
+        run_active_leader_tasks(self.client.clone(), cancel, self.cluster_domain.clone()).await;
         metrics::set_operator_leader(false);
     }
 

@@ -119,12 +119,15 @@ Common chart sections:
 | `sts` | Operator STS endpoint, service port, TokenReview audience, and TLS handling. |
 | `serviceAccount` / `rbac` | Operator ServiceAccount and RBAC creation. |
 | `console` | Operator Console backend/UI Deployment, service, session cookie secret, ingress, resources, and optional split frontend. |
+| `clusterDomain` | Kubernetes cluster DNS domain used for Tenant peer URLs, generated TLS SANs, and operator STS auto TLS. Defaults to `cluster.local`. |
 | `namespace` | Namespace override for chart resources; defaults to the Helm release namespace. |
 | `commonLabels` / `commonAnnotations` | Labels and annotations added to chart-managed resources. |
 
 Example production-oriented values:
 
 ```yaml
+clusterDomain: cluster.local
+
 operator:
   replicas: 2
   image:
@@ -348,7 +351,7 @@ The operator reserves these environment variables and manages them automatically
 - `RUSTFS_KMS_*` variables; use `spec.encryption` instead.
 - TLS-related RustFS variables when Tenant TLS is enabled.
 
-For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered as the local data path, for example `/data/rustfs0`. Multi-pool tenants and other layouts render peer DNS URLs through the Tenant headless Service and are validated by RustFS at runtime.
+For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered as the local data path, for example `/data/rustfs0`. Multi-pool tenants and other layouts render peer DNS URLs through the Tenant headless Service and are validated by RustFS at runtime. Set the Helm chart `clusterDomain` value when the Kubernetes cluster DNS domain is not `cluster.local`; the same domain is used for generated TLS SANs.
 
 `podDeletionPolicyWhenNodeIsDown` accepts:
 
@@ -437,7 +440,7 @@ spec:
 
 The default certificate is projected to `rustfs_cert.pem` and `rustfs_key.pem` at `mountPath`, so RustFS can use it as the fallback certificate and for internode HTTPS. Each `hosts` value is projected as a RustFS SNI directory, for example `s3.example.com/rustfs_cert.pem` and `s3.example.com/rustfs_key.pem`.
 When `certificates` is set, omitted `includeGeneratedDnsNames` is treated as `true` only on the `default: true` certificate. Non-default entries include only `hosts` and `certManager.dnsNames` unless they explicitly set `includeGeneratedDnsNames: true`.
-When `enableInternodeHttps: true`, the default managed certificate must cover the generated RustFS peer DNS names. Keep `includeGeneratedDnsNames` enabled, or list the generated peer names explicitly in `hosts` or `certManager.dnsNames`.
+When `enableInternodeHttps: true`, the default managed certificate must cover the RustFS peer DNS names used by the operator and `RUSTFS_VOLUMES`. Keep `includeGeneratedDnsNames` enabled, or list the required names explicitly in `hosts` or `certManager.dnsNames`. Clusters with a custom Kubernetes DNS domain should set the Helm chart `clusterDomain`; required names then use `.svc.<clusterDomain>`. External certificates must cover the headless Service FQDN (`<tenant>-hl.<namespace>.svc.<clusterDomain>`) and pod FQDNs; a wildcard such as `*.<tenant>-hl.<namespace>.svc.<clusterDomain>` covers the generated pod FQDNs.
 When `certificates` is set, configure process-wide trust with top-level `caTrust` or the `caTrust` on the `default: true` certificate. The legacy `certManager.caTrust` field is only used by the single-certificate form, and `certManager.caTrust` on non-default entries is rejected.
 
 ### 7.6 Logging

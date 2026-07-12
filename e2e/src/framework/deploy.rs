@@ -62,7 +62,7 @@ pub fn deploy_dev(config: &E2eConfig) -> Result<()> {
 
     kubectl
         .apply_yaml_command(patch_images_and_tags(
-            OPERATOR_DEPLOYMENT,
+            &patch_operator_cluster_domain(OPERATOR_DEPLOYMENT, &config.cluster_domain),
             &config.operator_image,
             E2E_OPERATOR_IMAGE_TAG_DEFAULT,
         ))
@@ -140,6 +140,15 @@ stringData:
     )
 }
 
+fn patch_operator_cluster_domain(yaml: &str, cluster_domain: &str) -> String {
+    yaml.replace(
+        "            - name: OPERATOR_CLUSTER_DOMAIN\n              value: \"cluster.local\"",
+        &format!(
+            "            - name: OPERATOR_CLUSTER_DOMAIN\n              value: \"{cluster_domain}\""
+        ),
+    )
+}
+
 fn patch_images_and_tags(manifest: &str, image: &str, fallback: &str) -> String {
     if image == fallback {
         manifest.to_string()
@@ -152,7 +161,7 @@ fn patch_images_and_tags(manifest: &str, image: &str, fallback: &str) -> String 
 mod tests {
     use super::{
         E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT, E2E_CONTROL_PLANE_DEPLOYMENTS,
-        E2E_OPERATOR_IMAGE_TAG_DEFAULT, patch_images_and_tags,
+        E2E_OPERATOR_IMAGE_TAG_DEFAULT, patch_images_and_tags, patch_operator_cluster_domain,
     };
 
     #[test]
@@ -172,6 +181,17 @@ mod tests {
         assert!(!operator.contains(E2E_OPERATOR_IMAGE_TAG_DEFAULT));
         assert!(web.contains("image: rustfs/console-web:e2e"));
         assert!(!web.contains(E2E_CONSOLE_WEB_IMAGE_TAG_DEFAULT));
+    }
+
+    #[test]
+    fn patch_operator_cluster_domain_updates_managed_env() {
+        let patched = patch_operator_cluster_domain(
+            "env:\n            - name: OPERATOR_CLUSTER_DOMAIN\n              value: \"cluster.local\"\n",
+            "k8s.mse.cloud",
+        );
+
+        assert!(patched.contains("value: \"k8s.mse.cloud\""));
+        assert!(!patched.contains("value: \"cluster.local\""));
     }
 
     #[test]

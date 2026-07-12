@@ -26,7 +26,7 @@ use rustfs_operator_e2e::{
     cases::cert_manager_tls,
     framework::{
         artifacts::ArtifactCollector,
-        assertions, cert_manager_tls as tls_e2e,
+        assertions, cert_manager_tls as tls_e2e, cluster_dns,
         command::CommandSpec,
         config::{E2eConfig, KIND_WORKER_COUNT},
         kube_client, live,
@@ -1154,7 +1154,7 @@ fn assert_positive_tls_fixture_uses_minimal_four_volume_https_erasure_set(
     let pod_spec = statefulset_pod_spec(&statefulset)?;
     let rustfs_container = rustfs_container(pod_spec)?;
     let rustfs_volumes = env_value(rustfs_container, "RUSTFS_VOLUMES")?;
-    require_single_volume_https_rustfs_volumes(case_name, rustfs_volumes)?;
+    require_single_volume_https_rustfs_volumes(config, case_name, rustfs_volumes)?;
 
     let expected_sans = expected_tls_dns_names(config, tenant);
     for host in expand_rustfs_volume_hosts(rustfs_volumes)? {
@@ -1201,7 +1201,11 @@ fn env_value<'a>(container: &'a corev1::Container, name: &str) -> Result<&'a str
         .with_context(|| format!("rustfs container should set {name}"))
 }
 
-fn require_single_volume_https_rustfs_volumes(case_name: &str, volumes_value: &str) -> Result<()> {
+fn require_single_volume_https_rustfs_volumes(
+    config: &E2eConfig,
+    case_name: &str,
+    volumes_value: &str,
+) -> Result<()> {
     let specs = volumes_value.split_whitespace().collect::<Vec<_>>();
     ensure!(
         specs.len() == 1,
@@ -1218,8 +1222,9 @@ fn require_single_volume_https_rustfs_volumes(case_name: &str, volumes_value: &s
             .with_context(|| {
                 format!("{case_name} RUSTFS_VOLUMES entry should include :9000: {spec}")
             })?;
+        let expected_cluster_suffix = format!(".svc.{}", config.cluster_domain);
         ensure!(
-            host_pattern.contains(".svc.cluster.local"),
+            host_pattern.contains(&expected_cluster_suffix),
             "{case_name} RUSTFS_VOLUMES should use peer FQDNs, got host pattern {host_pattern}"
         );
         ensure!(
@@ -1258,17 +1263,29 @@ fn expected_tls_dns_names(config: &E2eConfig, tenant: &Tenant) -> BTreeSet<Strin
         if cert_manager.include_generated_dns_names.unwrap_or(true) {
             let tenant_name = &config.tenant_name;
             let namespace = &config.test_namespace;
+            let cluster_domain = &config.cluster_domain;
             let io_service = format!("{tenant_name}-io");
             let headless_service = format!("{tenant_name}-hl");
             names.insert(format!("{io_service}.{namespace}.svc"));
-            names.insert(format!("{io_service}.{namespace}.svc.cluster.local"));
+            names.insert(cluster_dns::service_fqdn(
+                &io_service,
+                namespace,
+                cluster_domain,
+            ));
             names.insert(format!("{headless_service}.{namespace}.svc"));
-            names.insert(format!("{headless_service}.{namespace}.svc.cluster.local"));
+            names.insert(cluster_dns::service_fqdn(
+                &headless_service,
+                namespace,
+                cluster_domain,
+            ));
             for pool in &tenant.spec.pools {
                 for ordinal in 0..pool.servers.max(0) {
-                    names.insert(format!(
-                        "{tenant_name}-{}-{ordinal}.{headless_service}.{namespace}.svc.cluster.local",
-                        pool.name
+                    let pod_name = format!("{tenant_name}-{}-{ordinal}", pool.name);
+                    names.insert(cluster_dns::pod_fqdn(
+                        &pod_name,
+                        &headless_service,
+                        namespace,
+                        cluster_domain,
                     ));
                 }
             }

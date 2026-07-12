@@ -88,6 +88,7 @@ async fn assume_role_with_web_identity(
 
     let runtime = RealStsRuntime {
         kube_client: kube_client.clone(),
+        cluster_domain: state.cluster_domain.as_ref().clone(),
     };
 
     process_assume_role_request(&runtime, parsed_request).await
@@ -133,6 +134,7 @@ trait StsRuntime {
 
 struct RealStsRuntime {
     kube_client: Client,
+    cluster_domain: String,
 }
 
 #[async_trait]
@@ -164,7 +166,7 @@ impl StsRuntime for RealStsRuntime {
         &self,
         tenant: &Tenant,
     ) -> Result<RustfsAdminClient, StsError> {
-        create_rustfs_admin_client(&self.kube_client, tenant).await
+        create_rustfs_admin_client(&self.kube_client, tenant, &self.cluster_domain).await
     }
 
     async fn fetch_canned_policy(
@@ -541,6 +543,7 @@ async fn select_tenant(
 async fn create_rustfs_admin_client(
     client: &Client,
     tenant: &Tenant,
+    cluster_domain: &str,
 ) -> Result<RustfsAdminClient, StsError> {
     if !tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled()) {
         return Err(StsError::InvalidParameterValue {
@@ -552,7 +555,7 @@ async fn create_rustfs_admin_client(
         .await
         .map_err(|_| StsError::InternalError)?;
 
-    RustfsAdminClient::from_tls_tenant_for_sts(client, tenant, credentials)
+    RustfsAdminClient::from_tls_tenant_for_sts(client, tenant, credentials, cluster_domain)
         .await
         .map_err(map_rustfs_client_creation_error)
 }

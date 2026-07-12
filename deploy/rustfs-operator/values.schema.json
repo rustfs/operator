@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "clusterDomain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)(\\.([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?))*\\.?$",
+      "description": "Kubernetes cluster DNS domain used for Tenant peer URLs, generated TLS SANs, and operator STS auto TLS."
+    }
+  }
+}

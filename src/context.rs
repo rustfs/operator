@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::cluster_dns::ClusterDomain;
 use crate::types;
 use crate::types::v1alpha1::encryption::LocalKmsMasterKeySecretRef;
 use crate::types::v1alpha1::tenant::Tenant;
@@ -325,17 +326,33 @@ pub(crate) fn map_secret_get_error(
 pub struct Context {
     pub(crate) client: kube::Client,
     pub(crate) recorder: Recorder,
+    cluster_domain: ClusterDomain,
 }
 
 impl Context {
     pub fn new(client: kube::Client) -> Self {
+        Self::new_with_cluster_domain(client, ClusterDomain::default())
+    }
+
+    pub(crate) fn new_with_cluster_domain(
+        client: kube::Client,
+        cluster_domain: ClusterDomain,
+    ) -> Self {
         let reporter = Reporter {
             controller: "rustfs-operator".into(),
             instance: std::env::var("HOSTNAME").ok(),
         };
 
         let recorder = Recorder::new(client.clone(), reporter);
-        Self { client, recorder }
+        Self {
+            client,
+            recorder,
+            cluster_domain,
+        }
+    }
+
+    pub(crate) fn cluster_domain(&self) -> &str {
+        self.cluster_domain.as_str()
     }
 
     /// send event
