@@ -1312,6 +1312,10 @@ fn dns_name_covers(pattern: &str, dns_name: &str) -> bool {
     !label.is_empty() && !label.contains('.')
 }
 
+fn is_dns_wildcard_pattern(name: &str) -> bool {
+    name.starts_with("*.")
+}
+
 fn rustfs_certificate_domains(certificate: &ObservedTlsCertificate) -> Vec<Option<String>> {
     let mut domains = Vec::new();
     if certificate.entry.default {
@@ -1517,9 +1521,19 @@ fn validate_tls_secret_san_match(
             secret_name, TLS_CERT_KEY
         ),
     })?;
+    let presented_dns_names = cert.valid_dns_names().collect::<Vec<_>>();
 
     let mut missing = Vec::new();
     for dns_name in expected_dns_names {
+        if is_dns_wildcard_pattern(dns_name) {
+            if !presented_dns_names
+                .iter()
+                .any(|presented| presented.eq_ignore_ascii_case(dns_name))
+            {
+                missing.push(dns_name.clone());
+            }
+            continue;
+        }
         let server_name =
             ServerName::try_from(dns_name.as_str()).map_err(|_| TlsValidationFailure {
                 reason: Reason::CertificateSanMismatch,
@@ -2891,6 +2905,46 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
                 "k8s.mse.cloud",
             ),
             Ok(())
+        );
+
+        let expected_dns_names =
+            san_validation_dns_names(&tenant, "mse", &config, &entry, "k8s.mse.cloud");
+        assert!(
+            expected_dns_names
+                .iter()
+                .any(|name| is_dns_wildcard_pattern(name)),
+            "SAN validation must retain configured wildcard names"
+        );
+
+        let certificate = rcgen::generate_simple_self_signed(entry.cert_manager.dns_names.clone())
+            .expect("issue #152 DNS names should generate a certificate");
+        assert_eq!(
+            validate_tls_secret_san_match(
+                "prod-rustfs-private-certificate-secret",
+                certificate.cert.pem().as_bytes(),
+                &expected_dns_names,
+            ),
+            Ok(())
+        );
+
+        let concrete_certificate = rcgen::generate_simple_self_signed(
+            expected_dns_names
+                .iter()
+                .filter(|name| !is_dns_wildcard_pattern(name))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .expect("concrete issue #152 DNS names should generate a certificate");
+        let failure = validate_tls_secret_san_match(
+            "prod-rustfs-private-certificate-secret",
+            concrete_certificate.cert.pem().as_bytes(),
+            &expected_dns_names,
+        )
+        .expect_err("certificate missing configured wildcard SAN should fail validation");
+        assert!(
+            failure
+                .message
+                .contains("*.prod-rustfs-hl.mse.svc.k8s.mse.cloud")
         );
     }
 

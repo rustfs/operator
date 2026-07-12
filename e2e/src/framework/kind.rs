@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use anyhow::{Context, Result, bail};
+use serde_yaml_ng::Value;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -36,15 +37,20 @@ impl KindCluster {
         Self { config }
     }
 
-    pub fn create_command(&self) -> CommandSpec {
-        CommandSpec::new("kind").args([
-            "create".to_string(),
-            "cluster".to_string(),
-            "--name".to_string(),
-            self.config.cluster_name.clone(),
-            "--config".to_string(),
-            self.config.kind_config.display().to_string(),
-        ])
+    pub fn create_command(&self) -> Result<CommandSpec> {
+        let source = fs::read_to_string(&self.config.kind_config)
+            .with_context(|| format!("read Kind config {}", self.config.kind_config.display()))?;
+        let rendered = render_kind_config(&source, &self.config.cluster_domain)?;
+
+        Ok(CommandSpec::new("kind")
+            .args([
+                "create".to_string(),
+                "cluster".to_string(),
+                "--name".to_string(),
+                self.config.cluster_name.clone(),
+                "--config=-".to_string(),
+            ])
+            .stdin(rendered))
     }
 
     pub fn host_storage_dirs(&self) -> Vec<PathBuf> {
@@ -245,6 +251,32 @@ impl KindCluster {
     }
 }
 
+fn render_kind_config(source: &str, cluster_domain: &str) -> Result<String> {
+    let mut config: Value = serde_yaml_ng::from_str(source).context("parse Kind config")?;
+    let nodes = config
+        .get_mut("nodes")
+        .and_then(Value::as_sequence_mut)
+        .context("Kind config must contain a nodes list")?;
+    let control_plane = nodes
+        .iter_mut()
+        .find(|node| node.get("role").and_then(Value::as_str) == Some("control-plane"))
+        .context("Kind config must contain a control-plane node")?;
+    let control_plane = control_plane
+        .as_mapping_mut()
+        .context("Kind control-plane node must be an object")?;
+    let patches = control_plane
+        .entry(Value::String("kubeadmConfigPatches".to_string()))
+        .or_insert_with(|| Value::Sequence(Vec::new()))
+        .as_sequence_mut()
+        .context("Kind control-plane kubeadmConfigPatches must be a list")?;
+
+    patches.push(Value::String(format!(
+        "kind: ClusterConfiguration\nnetworking:\n  dnsDomain: \"{cluster_domain}\"\n"
+    )));
+
+    serde_yaml_ng::to_string(&config).context("serialize Kind config")
+}
+
 fn ensure_host_storage_dir_is_empty(dir: &Path) -> Result<()> {
     let mut entries = fs::read_dir(dir)
         .with_context(|| format!("read e2e host storage dir {}", dir.display()))?;
@@ -356,6 +388,7 @@ mod tests {
     use super::{
         KindCluster, ensure_dedicated_host_storage_dir, ensure_host_storage_dir_is_absent,
         ensure_host_storage_dir_is_empty, ensure_host_storage_dir_owner_allows_cleanup,
+        render_kind_config,
     };
     use crate::framework::config::E2eConfig;
 
@@ -381,6 +414,38 @@ mod tests {
                 std::path::PathBuf::from("/tmp/rustfs-e2e-storage-2"),
                 std::path::PathBuf::from("/tmp/rustfs-e2e-storage-3"),
             ]
+        );
+    }
+
+    #[test]
+    fn rendered_kind_config_uses_custom_cluster_domain() {
+        let rendered = render_kind_config(
+            include_str!("../../manifests/kind-rustfs-e2e.yaml"),
+            "k8s.mse.cloud",
+        )
+        .expect("Kind config should render");
+        let config: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&rendered).expect("rendered Kind config should parse");
+        let patches = config["nodes"]
+            .as_sequence()
+            .and_then(|nodes| {
+                nodes.iter().find(|node| {
+                    node.get("role").and_then(serde_yaml_ng::Value::as_str) == Some("control-plane")
+                })
+            })
+            .and_then(|node| node.get("kubeadmConfigPatches"))
+            .and_then(serde_yaml_ng::Value::as_sequence)
+            .expect("control-plane patches should exist");
+        let cluster_config = patches
+            .iter()
+            .filter_map(serde_yaml_ng::Value::as_str)
+            .filter_map(|patch| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(patch).ok())
+            .find(|patch| patch["kind"].as_str() == Some("ClusterConfiguration"))
+            .expect("ClusterConfiguration patch should exist");
+
+        assert_eq!(
+            cluster_config["networking"]["dnsDomain"].as_str(),
+            Some("k8s.mse.cloud")
         );
     }
 

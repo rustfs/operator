@@ -17,6 +17,7 @@ use std::fmt;
 
 pub(crate) const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 pub(crate) const OPERATOR_CLUSTER_DOMAIN_ENV: &str = "OPERATOR_CLUSTER_DOMAIN";
+const MAX_DNS_NAME_LENGTH: usize = 253;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ClusterDomain(String);
@@ -24,7 +25,6 @@ pub(crate) struct ClusterDomain(String);
 impl ClusterDomain {
     pub(crate) fn from_env() -> Result<Self, ClusterDomainError> {
         match std::env::var(OPERATOR_CLUSTER_DOMAIN_ENV) {
-            Ok(value) if value.trim().is_empty() => Ok(Self::default()),
             Ok(value) => Self::parse(&value),
             Err(_) => Ok(Self::default()),
         }
@@ -73,8 +73,14 @@ impl fmt::Display for ClusterDomainError {
 impl Error for ClusterDomainError {}
 
 fn normalize_cluster_domain(value: &str) -> Option<String> {
-    let domain = value.trim().trim_matches('.').to_ascii_lowercase();
-    if domain.is_empty() || !domain.split('.').all(valid_dns_label) {
+    let domain = value
+        .strip_suffix('.')
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    if domain.is_empty()
+        || domain.len() > MAX_DNS_NAME_LENGTH
+        || !domain.split('.').all(valid_dns_label)
+    {
         return None;
     }
     Some(domain)
@@ -114,9 +120,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_cluster_domain_trims_lowercases_and_removes_trailing_dot() {
+    fn normalize_cluster_domain_lowercases_and_removes_trailing_dot() {
         assert_eq!(
-            normalize_cluster_domain(" K8S.MSE.Cloud. "),
+            normalize_cluster_domain("K8S.MSE.Cloud."),
             Some("k8s.mse.cloud".to_string())
         );
     }
@@ -128,6 +134,39 @@ mod tests {
         assert_eq!(normalize_cluster_domain("bad..domain"), None);
         assert_eq!(normalize_cluster_domain("-bad.domain"), None);
         assert_eq!(normalize_cluster_domain("bad_domain"), None);
+        assert_eq!(normalize_cluster_domain(" cluster.local"), None);
+        assert_eq!(normalize_cluster_domain("cluster.local.."), None);
+        assert_eq!(
+            normalize_cluster_domain(&format!("{}.local", "a".repeat(64))),
+            None
+        );
+
+        let max_length_domain = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        );
+        assert_eq!(max_length_domain.len(), MAX_DNS_NAME_LENGTH);
+        assert_eq!(
+            normalize_cluster_domain(&max_length_domain),
+            Some(max_length_domain.clone())
+        );
+        assert_eq!(
+            normalize_cluster_domain(&format!("{max_length_domain}.")),
+            Some(max_length_domain)
+        );
+
+        let oversized_domain = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(62),
+        );
+        assert_eq!(oversized_domain.len(), MAX_DNS_NAME_LENGTH + 1);
+        assert_eq!(normalize_cluster_domain(&oversized_domain), None);
     }
 
     #[test]
@@ -149,7 +188,7 @@ mod tests {
 
     #[test]
     fn parse_cluster_domain_returns_normalized_value() {
-        let domain = ClusterDomain::parse(" K8S.MSE.Cloud. ").unwrap();
+        let domain = ClusterDomain::parse("K8S.MSE.Cloud.").unwrap();
 
         assert_eq!(domain.as_str(), "k8s.mse.cloud");
     }

@@ -31,6 +31,7 @@ use super::{
     POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient,
     RustfsClientError, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
     helpers::{extract_canned_policy_document, extract_credentials, parse_assume_role_response},
+    tls_tenant_base_url,
 };
 
 fn secret_with_fields(fields: Vec<(&str, &[u8])>) -> corev1::Secret {
@@ -51,6 +52,18 @@ fn assert_oversized_upstream_body_hidden(err: RustfsClientError) {
         format!(
             "upstream returned 502 Bad Gateway: response body exceeded {MAX_UPSTREAM_ERROR_BODY_BYTES} bytes"
         )
+    );
+}
+
+#[test]
+fn tls_tenant_base_url_uses_custom_cluster_domain() {
+    let mut tenant = crate::tests::create_test_tenant(None, None);
+    tenant.metadata.name = Some("prod-rustfs".to_string());
+    tenant.metadata.namespace = Some("mse".to_string());
+
+    assert_eq!(
+        tls_tenant_base_url(&tenant, "k8s.mse.cloud").unwrap(),
+        "https://prod-rustfs-hl.mse.svc.k8s.mse.cloud:9000"
     );
 }
 

@@ -14,11 +14,9 @@
 
 pub const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 const E2E_CLUSTER_DOMAIN_ENV: &str = "RUSTFS_E2E_CLUSTER_DOMAIN";
+const MAX_DNS_NAME_LENGTH: usize = 253;
 
 pub fn configured_cluster_domain(value: &str) -> String {
-    if value.trim().is_empty() {
-        return DEFAULT_CLUSTER_DOMAIN.to_string();
-    }
     normalize_cluster_domain(value).unwrap_or_else(|| {
         panic!(
             "{E2E_CLUSTER_DOMAIN_ENV} must be a valid DNS domain, for example 'cluster.local' or 'k8s.mse.cloud'"
@@ -40,8 +38,14 @@ pub fn pod_fqdn(
 }
 
 fn normalize_cluster_domain(value: &str) -> Option<String> {
-    let domain = value.trim().trim_matches('.').to_ascii_lowercase();
-    if domain.is_empty() || !domain.split('.').all(valid_dns_label) {
+    let domain = value
+        .strip_suffix('.')
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    if domain.is_empty()
+        || domain.len() > MAX_DNS_NAME_LENGTH
+        || !domain.split('.').all(valid_dns_label)
+    {
         return None;
     }
     Some(domain)
@@ -61,4 +65,20 @@ fn valid_dns_label(label: &str) -> bool {
             .as_bytes()
             .last()
             .is_some_and(u8::is_ascii_alphanumeric)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_cluster_domain_normalizes_supported_values() {
+        assert_eq!(configured_cluster_domain("K8S.MSE.Cloud."), "k8s.mse.cloud");
+    }
+
+    #[test]
+    #[should_panic(expected = "RUSTFS_E2E_CLUSTER_DOMAIN must be a valid DNS domain")]
+    fn configured_cluster_domain_rejects_invalid_values() {
+        configured_cluster_domain(&format!("{}.local", "a".repeat(64)));
+    }
 }

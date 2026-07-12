@@ -118,7 +118,7 @@ fn create_kind_cluster(config: &E2eConfig) -> Result<()> {
     live::require_live_enabled(config)?;
     let kind = KindCluster::new(config.clone());
     kind.reset_host_storage_dirs()?;
-    kind.create_command().run_checked()?;
+    kind.create_command()?.run_checked()?;
     Ok(())
 }
 

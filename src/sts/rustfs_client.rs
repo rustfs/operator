@@ -420,6 +420,15 @@ fn default_http_client() -> HttpClient {
         .unwrap_or_else(|_| HttpClient::new())
 }
 
+fn tls_tenant_base_url(tenant: &Tenant, cluster_domain: &str) -> Result<String, RustfsClientError> {
+    let namespace = tenant
+        .namespace()
+        .map_err(|_| RustfsClientError::MissingTenantNamespace)?;
+    let service_fqdn =
+        cluster_dns::service_fqdn(&tenant.headless_service_name(), &namespace, cluster_domain);
+    Ok(format!("https://{service_fqdn}:9000"))
+}
+
 impl RustfsAdminClient {
     pub const STS_VERSION: &'static str = "2011-06-15";
     pub const STS_ACTION: &'static str = "AssumeRole";
@@ -511,12 +520,7 @@ impl RustfsAdminClient {
             return Err(RustfsClientError::TenantTlsClientCertificateRequired);
         }
 
-        let namespace = tenant
-            .namespace()
-            .map_err(|_| RustfsClientError::MissingTenantNamespace)?;
-        let service_name = tenant.headless_service_name();
-        let service_fqdn = cluster_dns::service_fqdn(&service_name, &namespace, cluster_domain);
-        let base_url = format!("https://{service_fqdn}:9000");
+        let base_url = tls_tenant_base_url(tenant, cluster_domain)?;
 
         match Self::load_tenant_tls_ca(kube_client, tenant).await? {
             Some(ca_pem) => Self::new_with_base_url_and_ca_pem(

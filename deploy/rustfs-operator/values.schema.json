@@ -5,8 +5,16 @@
     "clusterDomain": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 253,
-      "pattern": "^([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?)(\\.([A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?))*\\.?$",
+      "oneOf": [
+        {
+          "maxLength": 253,
+          "pattern": "^([A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?)(\\.([A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?))*$"
+        },
+        {
+          "maxLength": 254,
+          "pattern": "^([A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?)(\\.([A-Za-z0-9]([-A-Za-z0-9]{0,61}[A-Za-z0-9])?))*\\.$"
+        }
+      ],
       "description": "Kubernetes cluster DNS domain used for Tenant peer URLs, generated TLS SANs, and operator STS auto TLS."
     }
   }
