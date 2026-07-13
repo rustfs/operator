@@ -39,6 +39,17 @@ pub(crate) const MAX_TENANT_POLICIES: u32 = 256;
 pub(crate) const MAX_TENANT_USERS: u32 = 256;
 pub(crate) const MAX_TENANT_BUCKETS: u32 = 1024;
 
+/// Reference to one key in a namespaced Kubernetes Secret.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcSecretRef {
+    #[schemars(length(min = 1))]
+    pub name: String,
+
+    #[schemars(length(min = 1))]
+    pub key: String,
+}
+
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[kube(
     group = "rustfs.com",
@@ -168,6 +179,15 @@ pub struct TenantSpec {
     /// For production use, always configure credentials via Secret or environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creds_secret: Option<corev1::LocalObjectReference>,
+
+    /// Optional Secret key selector for RustFS internode RPC authentication.
+    ///
+    /// When configured, the operator maps this key to `RUSTFS_RPC_SECRET` for every
+    /// RustFS Pod. Keep it stable while rotating `credsSecret`. When omitted, the
+    /// operator does not set `RUSTFS_RPC_SECRET`; RustFS resolves it from its own
+    /// credential configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_secret: Option<RpcSecretRef>,
 
     /// Canned policies that should be applied to the RustFS tenant.
     #[schemars(

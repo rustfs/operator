@@ -1410,6 +1410,26 @@ spec:
               priorityClassName:
                 nullable: true
                 type: string
+              rpcSecret:
+                description: |-
+                  Optional Secret key selector for RustFS internode RPC authentication.
+
+                  When configured, the operator maps this key to `RUSTFS_RPC_SECRET` for every
+                  RustFS Pod. Keep it stable while rotating `credsSecret`. When omitted, the
+                  operator does not set `RUSTFS_RPC_SECRET`; RustFS resolves it from its own
+                  credential configuration.
+                nullable: true
+                properties:
+                  key:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - key
+                - name
+                type: object
               scheduler:
                 nullable: true
                 type: string
