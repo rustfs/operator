@@ -154,6 +154,20 @@ mod tenant_provisioning_crd_tests {
         let spec = &schema["properties"]["spec"];
         let status = &schema["properties"]["status"];
 
+        assert_eq!(spec["properties"]["rpcSecret"]["type"], json!("object"));
+        assert_eq!(
+            spec["properties"]["rpcSecret"]["properties"]["name"]["minLength"],
+            json!(1)
+        );
+        assert_eq!(
+            spec["properties"]["rpcSecret"]["properties"]["key"]["minLength"],
+            json!(1)
+        );
+        assert_eq!(
+            spec["properties"]["rpcSecret"]["required"],
+            json!(["key", "name"])
+        );
+
         assert_eq!(spec["properties"]["policies"]["type"], json!("array"));
         assert_eq!(spec["properties"]["users"]["type"], json!("array"));
         assert_eq!(spec["properties"]["buckets"]["type"], json!("array"));

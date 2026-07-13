@@ -30,6 +30,7 @@ const LOCAL_KMS_KEY_DIR_ENV: &str = "RUSTFS_KMS_KEY_DIR";
 const LOCAL_KMS_LOCAL_KEY_DIR_ENV: &str = "RUSTFS_KMS_LOCAL_KEY_DIR";
 const LOCAL_KMS_MASTER_KEY_ENV: &str = "RUSTFS_KMS_LOCAL_MASTER_KEY";
 const KMS_ALLOW_INSECURE_DEV_DEFAULTS_ENV: &str = "RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS";
+const RPC_SECRET_ENV: &str = "RUSTFS_RPC_SECRET";
 const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 const DEFAULT_RUN_AS_USER: i64 = 10001;
 const DEFAULT_RUN_AS_GROUP: i64 = 10001;
@@ -522,6 +523,24 @@ impl Tenant {
             });
         }
 
+        // Keep internode RPC authentication independent from admin credentials when
+        // the Tenant explicitly selects a dedicated Secret key. If omitted, RustFS
+        // retains ownership of RPC secret resolution.
+        if let Some(ref secret_ref) = self.spec.rpc_secret {
+            env_vars.push(corev1::EnvVar {
+                name: RPC_SECRET_ENV.to_owned(),
+                value_from: Some(corev1::EnvVarSource {
+                    secret_key_ref: Some(corev1::SecretKeySelector {
+                        name: secret_ref.name.clone(),
+                        key: secret_ref.key.clone(),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+
         // Merge with user-provided environment variables.
         // Preserve the legacy override behavior except for operator-managed runtime
         // values that must stay aligned with rendered mounts, probes, status, and hash.
@@ -530,6 +549,9 @@ impl Tenant {
                 continue;
             }
             if is_kms_operator_managed_env_var(&user_env.name) {
+                continue;
+            }
+            if self.spec.rpc_secret.is_some() && user_env.name == RPC_SECRET_ENV {
                 continue;
             }
             // Remove any existing var with the same name to allow non-reserved overrides.
@@ -1121,6 +1143,7 @@ mod tests {
         EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef,
     };
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
+    use crate::types::v1alpha1::tenant::RpcSecretRef;
     use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
     use k8s_openapi::api::core::v1 as corev1;
 
@@ -1231,6 +1254,86 @@ mod tests {
                 .iter()
                 .any(|mount| mount.name.starts_with("rustfs-tls"))
         }));
+    }
+
+    #[test]
+    fn omitted_rpc_secret_leaves_rpc_auth_resolution_to_rustfs() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet without an RPC Secret");
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+
+        assert!(
+            container
+                .env
+                .as_ref()
+                .is_none_or(|env| env.iter().all(|var| var.name != "RUSTFS_RPC_SECRET"))
+        );
+    }
+
+    #[test]
+    fn rpc_secret_maps_selected_secret_key_and_owns_the_env_var() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.rpc_secret = Some(RpcSecretRef {
+            name: "tenant-rpc-auth".to_string(),
+            key: "rpc-secret".to_string(),
+        });
+        tenant.spec.env.push(corev1::EnvVar {
+            name: "RUSTFS_RPC_SECRET".to_string(),
+            value: Some("raw-override-must-not-win".to_string()),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with an RPC Secret");
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+        let rpc_env = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|var| var.name == "RUSTFS_RPC_SECRET")
+            .collect::<Vec<_>>();
+
+        assert_eq!(rpc_env.len(), 1);
+        assert_eq!(rpc_env[0].value, None);
+        assert_eq!(
+            rpc_env[0]
+                .value_from
+                .as_ref()
+                .and_then(|source| source.secret_key_ref.as_ref()),
+            Some(&corev1::SecretKeySelector {
+                name: "tenant-rpc-auth".to_string(),
+                key: "rpc-secret".to_string(),
+                optional: Some(false),
+            })
+        );
+    }
+
+    #[test]
+    fn raw_rpc_secret_env_remains_supported_without_rpc_secret_ref() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.env.push(corev1::EnvVar {
+            name: "RUSTFS_RPC_SECRET".to_string(),
+            value: Some("legacy-explicit-rpc-secret".to_string()),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should preserve the legacy raw RPC Secret environment variable");
+        let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+
+        assert_eq!(
+            env_value(container, "RUSTFS_RPC_SECRET"),
+            Some("legacy-explicit-rpc-secret")
+        );
     }
 
     #[test]
@@ -2436,6 +2539,30 @@ mod tests {
         assert!(
             needs_update,
             "StatefulSet should need update when env vars change"
+        );
+    }
+
+    #[test]
+    fn test_statefulset_rpc_secret_change_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.rpc_secret = Some(RpcSecretRef {
+            name: "tenant-rpc-auth".to_string(),
+            key: "rpc-secret".to_string(),
+        });
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        tenant.spec.rpc_secret.as_mut().unwrap().name = "rotated-rpc-auth".to_string();
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when the RPC Secret reference changes"
         );
     }
 

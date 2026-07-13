@@ -89,6 +89,25 @@ Operator STS does not present a client certificate when calling the Tenant. Tena
 
 When `operator.serviceMonitor.enabled=true`, the chart creates scrape targets for both the operator observability endpoint and the Console API `/metrics` endpoint.
 
+### Tenant RPC Authentication
+
+Use `spec.rpcSecret` to keep RustFS internode RPC authentication independent from
+the administrator credentials in `spec.credsSecret`:
+
+```yaml
+spec:
+  credsSecret:
+    name: rustfs-admin-creds
+  rpcSecret:
+    name: rustfs-rpc-auth
+    key: rpc-secret
+```
+
+The operator maps the selected Secret key to `RUSTFS_RPC_SECRET` in every RustFS
+Pod. Keep this value stable while rotating administrator credentials. If
+`spec.rpcSecret` is omitted, the operator does not set `RUSTFS_RPC_SECRET` and
+RustFS resolves the RPC secret from its own credential configuration.
+
 ### Tenant Provisioning
 
 Tenants can declare RustFS canned policies, regular users, and buckets directly in `spec.policies`, `spec.users`, and `spec.buckets`. Provisioning starts only after the Tenant workload is ready, uses `spec.credsSecret` as the RustFS admin credential source, and reports progress under `status.provisioning`.
