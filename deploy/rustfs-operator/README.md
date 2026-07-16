@@ -104,9 +104,12 @@ spec:
 ```
 
 The operator maps the selected Secret key to `RUSTFS_RPC_SECRET` in every RustFS
-Pod. Keep this value stable while rotating administrator credentials. If
-`spec.rpcSecret` is omitted, the operator does not set `RUSTFS_RPC_SECRET` and
-RustFS resolves the RPC secret from its own credential configuration.
+Pod. Before applying workloads, it verifies that the Secret and selected key
+exist and that the value is valid UTF-8, non-blank, and not the RustFS default
+credential value (`rustfsadmin`). Keep this value stable while rotating
+administrator credentials. If `spec.rpcSecret` is omitted, the operator does not
+set `RUSTFS_RPC_SECRET` and RustFS resolves the RPC secret from its own credential
+configuration.
 
 ### Tenant Provisioning
 

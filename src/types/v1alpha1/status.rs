@@ -26,6 +26,7 @@ pub enum ConditionType {
     Degraded,
     SpecValid,
     CredentialsReady,
+    RpcAuthReady,
     KmsReady,
     TlsReady,
     PoolsReady,
@@ -41,6 +42,7 @@ impl ConditionType {
             Self::Degraded => "Degraded",
             Self::SpecValid => "SpecValid",
             Self::CredentialsReady => "CredentialsReady",
+            Self::RpcAuthReady => "RpcAuthReady",
             Self::KmsReady => "KmsReady",
             Self::TlsReady => "TlsReady",
             Self::PoolsReady => "PoolsReady",
@@ -56,6 +58,7 @@ impl ConditionType {
             Self::Degraded,
             Self::SpecValid,
             Self::CredentialsReady,
+            Self::RpcAuthReady,
             Self::KmsReady,
             Self::TlsReady,
             Self::PoolsReady,
@@ -118,6 +121,11 @@ pub enum Reason {
     CredentialSecretMissingKey,
     CredentialSecretInvalidEncoding,
     CredentialSecretTooShort,
+    RpcSecretNotFound,
+    RpcSecretInvalidReference,
+    RpcSecretMissingKey,
+    RpcSecretInvalidEncoding,
+    RpcSecretInvalidValue,
     KmsSecretNotFound,
     KmsSecretMissingKey,
     KmsConfigInvalid,
@@ -180,6 +188,11 @@ impl Reason {
             Self::CredentialSecretMissingKey => "CredentialSecretMissingKey",
             Self::CredentialSecretInvalidEncoding => "CredentialSecretInvalidEncoding",
             Self::CredentialSecretTooShort => "CredentialSecretTooShort",
+            Self::RpcSecretNotFound => "RpcSecretNotFound",
+            Self::RpcSecretInvalidReference => "RpcSecretInvalidReference",
+            Self::RpcSecretMissingKey => "RpcSecretMissingKey",
+            Self::RpcSecretInvalidEncoding => "RpcSecretInvalidEncoding",
+            Self::RpcSecretInvalidValue => "RpcSecretInvalidValue",
             Self::KmsSecretNotFound => "KmsSecretNotFound",
             Self::KmsSecretMissingKey => "KmsSecretMissingKey",
             Self::KmsConfigInvalid => "KmsConfigInvalid",
@@ -459,6 +472,11 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "CredentialSecretMissingKey"
             | "CredentialSecretInvalidEncoding"
             | "CredentialSecretTooShort"
+            | "RpcSecretNotFound"
+            | "RpcSecretInvalidReference"
+            | "RpcSecretMissingKey"
+            | "RpcSecretInvalidEncoding"
+            | "RpcSecretInvalidValue"
             | "KmsSecretNotFound"
             | "KmsSecretMissingKey"
             | "KmsConfigInvalid"
@@ -517,6 +535,11 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "CredentialSecretMissingKey" => vec!["addRequiredSecretKey"],
         "CredentialSecretInvalidEncoding" => vec!["replaceSecretValueWithUtf8"],
         "CredentialSecretTooShort" => vec!["rotateCredentialSecret"],
+        "RpcSecretNotFound" => vec!["createRpcSecret"],
+        "RpcSecretInvalidReference" => vec!["fixRpcSecretRef"],
+        "RpcSecretMissingKey" => vec!["addRequiredRpcSecretKey"],
+        "RpcSecretInvalidEncoding" => vec!["replaceRpcSecretValueWithUtf8"],
+        "RpcSecretInvalidValue" => vec!["rotateRpcSecret"],
         "KmsSecretNotFound" => vec!["createKmsSecret"],
         "KmsSecretMissingKey" => vec!["addRequiredKmsSecretKey"],
         "KmsConfigInvalid" => vec!["fixKmsConfig"],
