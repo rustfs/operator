@@ -74,6 +74,40 @@ impl StatusError {
                     secret_name, key
                 ),
             ),
+            context::Error::RpcSecretNotFound { name } => Self::blocked(
+                Reason::RpcSecretNotFound,
+                ConditionType::RpcAuthReady,
+                format!("RPC Secret '{}' was not found", name),
+            ),
+            context::Error::RpcSecretInvalidReference { field } => Self::blocked(
+                Reason::RpcSecretInvalidReference,
+                ConditionType::RpcAuthReady,
+                format!("spec.rpcSecret.{} must not be blank", field),
+            ),
+            context::Error::RpcSecretMissingKey { secret_name, key } => Self::blocked(
+                Reason::RpcSecretMissingKey,
+                ConditionType::RpcAuthReady,
+                format!(
+                    "RPC Secret '{}' is missing required key '{}'",
+                    secret_name, key
+                ),
+            ),
+            context::Error::RpcSecretInvalidEncoding { secret_name, key } => Self::blocked(
+                Reason::RpcSecretInvalidEncoding,
+                ConditionType::RpcAuthReady,
+                format!(
+                    "RPC Secret '{}' key '{}' must contain valid UTF-8",
+                    secret_name, key
+                ),
+            ),
+            context::Error::RpcSecretInvalidValue { secret_name, key } => Self::blocked(
+                Reason::RpcSecretInvalidValue,
+                ConditionType::RpcAuthReady,
+                format!(
+                    "RPC Secret '{}' key '{}' must be non-blank and must not use the RustFS default credential value",
+                    secret_name, key
+                ),
+            ),
             context::Error::KmsSecretNotFound { name } => Self::blocked(
                 Reason::KmsSecretNotFound,
                 ConditionType::KmsReady,
@@ -530,6 +564,7 @@ impl StatusBuilder {
         for condition_type in [
             ConditionType::SpecValid,
             ConditionType::CredentialsReady,
+            ConditionType::RpcAuthReady,
             ConditionType::KmsReady,
             ConditionType::PoolsReady,
             ConditionType::WorkloadsReady,
@@ -617,6 +652,27 @@ mod tests {
         assert_eq!(condition.reason, "CredentialSecretMissingKey");
         assert_eq!(status.current_state, "Blocked");
         assert!(status.condition(ConditionType::KmsReady).is_none());
+        assert!(status.condition(ConditionType::WorkloadsReady).is_none());
+    }
+
+    #[test]
+    fn status_builder_maps_rpc_secret_invalid_value() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let err = context::Error::RpcSecretInvalidValue {
+            secret_name: "rpc-auth".to_string(),
+            key: "rpc-secret".to_string(),
+        };
+
+        let status_error = StatusError::from_context_error(&err);
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let status = builder.build();
+
+        let condition = status.condition(ConditionType::RpcAuthReady).unwrap();
+        assert_eq!(condition.status, "False");
+        assert_eq!(condition.reason, "RpcSecretInvalidValue");
+        assert_eq!(status.current_state, "Blocked");
+        assert!(status.condition(ConditionType::CredentialsReady).is_none());
         assert!(status.condition(ConditionType::WorkloadsReady).is_none());
     }
 

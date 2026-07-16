@@ -15,7 +15,7 @@
 use crate::cluster_dns::ClusterDomain;
 use crate::types;
 use crate::types::v1alpha1::encryption::LocalKmsMasterKeySecretRef;
-use crate::types::v1alpha1::tenant::Tenant;
+use crate::types::v1alpha1::tenant::{RpcSecretRef, Tenant};
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams, PostParams};
@@ -64,6 +64,29 @@ pub enum Error {
         key: String,
         length: usize,
     },
+
+    #[snafu(display("RPC Secret '{}' not found", name))]
+    RpcSecretNotFound { name: String },
+
+    #[snafu(display("spec.rpcSecret.{} must not be blank", field))]
+    RpcSecretInvalidReference { field: String },
+
+    #[snafu(display("RPC Secret '{}' missing required key '{}'", secret_name, key))]
+    RpcSecretMissingKey { secret_name: String, key: String },
+
+    #[snafu(display(
+        "RPC Secret '{}' has invalid data encoding for key '{}'",
+        secret_name,
+        key
+    ))]
+    RpcSecretInvalidEncoding { secret_name: String, key: String },
+
+    #[snafu(display(
+        "RPC Secret '{}' key '{}' must be non-blank and must not use the RustFS default credential value",
+        secret_name,
+        key
+    ))]
+    RpcSecretInvalidValue { secret_name: String, key: String },
 
     #[snafu(display("KMS secret '{}' not found", name))]
     KmsSecretNotFound { name: String },
@@ -272,6 +295,46 @@ fn validate_secret_utf8_non_blank(
     Ok(())
 }
 
+const RUSTFS_DEFAULT_CREDENTIAL_VALUE: &str = "rustfsadmin";
+
+fn validate_rpc_secret_ref(secret_ref: &RpcSecretRef) -> Result<(), Error> {
+    for (field, value) in [("name", &secret_ref.name), ("key", &secret_ref.key)] {
+        if value.trim().is_empty() {
+            return RpcSecretInvalidReferenceSnafu {
+                field: field.to_string(),
+            }
+            .fail();
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_rpc_secret_value(secret: &Secret, secret_name: &str, key: &str) -> Result<(), Error> {
+    let Some(value) = secret.data.as_ref().and_then(|data| data.get(key)) else {
+        return RpcSecretMissingKeySnafu {
+            secret_name: secret_name.to_string(),
+            key: key.to_string(),
+        }
+        .fail();
+    };
+
+    let value = std::str::from_utf8(&value.0).map_err(|_| Error::RpcSecretInvalidEncoding {
+        secret_name: secret_name.to_string(),
+        key: key.to_string(),
+    })?;
+    let value = value.trim();
+    if value.is_empty() || value == RUSTFS_DEFAULT_CREDENTIAL_VALUE {
+        return RpcSecretInvalidValueSnafu {
+            secret_name: secret_name.to_string(),
+            key: key.to_string(),
+        }
+        .fail();
+    }
+
+    Ok(())
+}
+
 fn status_semantically_equal(
     current: Option<&types::v1alpha1::status::Status>,
     next: &types::v1alpha1::status::Status,
@@ -296,6 +359,7 @@ fn normalize_status_for_compare(status: &mut types::v1alpha1::status::Status) {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SecretValidationKind {
     Credential,
+    Rpc,
     Kms,
 }
 
@@ -319,6 +383,7 @@ pub(crate) fn map_secret_get_error(
 
     match kind {
         SecretValidationKind::Credential => Error::CredentialSecretNotFound { name },
+        SecretValidationKind::Rpc => Error::RpcSecretNotFound { name },
         SecretValidationKind::Kms => Error::KmsSecretNotFound { name },
     }
 }
@@ -611,6 +676,32 @@ impl Context {
         Ok(())
     }
 
+    /// Validates the dedicated internode RPC authentication Secret when configured.
+    ///
+    /// RustFS trims `RUSTFS_RPC_SECRET` and rejects blank values and its public default
+    /// credential value. Validate those rules before rendering StatefulSets so an invalid
+    /// Secret cannot start a rollout that leaves Pods unable to authenticate to each other.
+    pub async fn validate_rpc_secret(&self, tenant: &Tenant) -> Result<(), Error> {
+        let Some(secret_ref) = tenant.spec.rpc_secret.as_ref() else {
+            return Ok(());
+        };
+
+        validate_rpc_secret_ref(secret_ref)?;
+
+        let secret: Secret = match self.get(&secret_ref.name, &tenant.namespace()?).await {
+            Ok(secret) => secret,
+            Err(error) => {
+                return Err(map_secret_get_error(
+                    error,
+                    secret_ref.name.clone(),
+                    SecretValidationKind::Rpc,
+                ));
+            }
+        };
+
+        validate_rpc_secret_value(&secret, &secret_ref.name, &secret_ref.key)
+    }
+
     /// Validates encryption configuration and the KMS Secret.
     ///
     /// Checks:
@@ -793,11 +884,12 @@ mod validate_local_kms_tests {
     use super::{SecretValidationKind, map_secret_get_error};
     use super::{
         validate_local_kms_master_key_ref, validate_local_kms_tenant, validate_no_reserved_kms_env,
-        validate_secret_utf8_non_blank,
+        validate_rpc_secret_ref, validate_rpc_secret_value, validate_secret_utf8_non_blank,
     };
     use crate::types::v1alpha1::encryption::{LocalKmsConfig, LocalKmsMasterKeySecretRef};
     use crate::types::v1alpha1::persistence::PersistenceConfig;
     use crate::types::v1alpha1::pool::Pool;
+    use crate::types::v1alpha1::tenant::RpcSecretRef;
     use k8s_openapi::ByteString;
     use k8s_openapi::api::core::v1 as corev1;
     use std::collections::BTreeMap;
@@ -870,6 +962,80 @@ mod validate_local_kms_tests {
         );
 
         assert!(matches!(err, Error::KmsSecretNotFound { name } if name == "kms"));
+    }
+
+    #[test]
+    fn rpc_secret_get_maps_only_404_to_not_found() {
+        let err = map_secret_get_error(
+            api_error(404, "NotFound"),
+            "rpc-auth".to_string(),
+            SecretValidationKind::Rpc,
+        );
+
+        assert!(matches!(err, Error::RpcSecretNotFound { name } if name == "rpc-auth"));
+    }
+
+    #[test]
+    fn rpc_secret_ref_rejects_blank_name_and_key() {
+        for secret_ref in [
+            RpcSecretRef {
+                name: "  ".to_string(),
+                key: "rpc-secret".to_string(),
+            },
+            RpcSecretRef {
+                name: "rpc-auth".to_string(),
+                key: "\n".to_string(),
+            },
+        ] {
+            let err = validate_rpc_secret_ref(&secret_ref).unwrap_err();
+            assert!(matches!(err, Error::RpcSecretInvalidReference { .. }));
+        }
+    }
+
+    #[test]
+    fn rpc_secret_value_must_exist_and_be_valid_utf8() {
+        let mut data = BTreeMap::new();
+        data.insert("invalid".to_string(), ByteString(vec![0xff]));
+        let secret = corev1::Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+
+        let missing = validate_rpc_secret_value(&secret, "rpc-auth", "missing").unwrap_err();
+        assert!(matches!(missing, Error::RpcSecretMissingKey { key, .. } if key == "missing"));
+
+        let invalid = validate_rpc_secret_value(&secret, "rpc-auth", "invalid").unwrap_err();
+        assert!(matches!(invalid, Error::RpcSecretInvalidEncoding { key, .. } if key == "invalid"));
+    }
+
+    #[test]
+    fn rpc_secret_value_rejects_values_rustfs_cannot_use() {
+        for value in [b"   \n".as_slice(), b" rustfsadmin ".as_slice()] {
+            let mut data = BTreeMap::new();
+            data.insert("rpc-secret".to_string(), ByteString(value.to_vec()));
+            let secret = corev1::Secret {
+                data: Some(data),
+                ..Default::default()
+            };
+
+            let err = validate_rpc_secret_value(&secret, "rpc-auth", "rpc-secret").unwrap_err();
+            assert!(matches!(err, Error::RpcSecretInvalidValue { .. }));
+        }
+    }
+
+    #[test]
+    fn rpc_secret_value_accepts_non_default_non_blank_utf8() {
+        let mut data = BTreeMap::new();
+        data.insert(
+            "rpc-secret".to_string(),
+            ByteString(b"dedicated-rpc-secret".to_vec()),
+        );
+        let secret = corev1::Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+
+        validate_rpc_secret_value(&secret, "rpc-auth", "rpc-secret").unwrap();
     }
 
     #[test]

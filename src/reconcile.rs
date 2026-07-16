@@ -888,6 +888,11 @@ pub fn error_policy(object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> A
             | context::Error::CredentialSecretMissingKey { .. }
             | context::Error::CredentialSecretInvalidEncoding { .. }
             | context::Error::CredentialSecretTooShort { .. }
+            | context::Error::RpcSecretNotFound { .. }
+            | context::Error::RpcSecretInvalidReference { .. }
+            | context::Error::RpcSecretMissingKey { .. }
+            | context::Error::RpcSecretInvalidEncoding { .. }
+            | context::Error::RpcSecretInvalidValue { .. }
             | context::Error::KmsSecretNotFound { .. }
             | context::Error::KmsSecretMissingKey { .. }
             | context::Error::KmsConfigInvalid { .. } => Duration::from_secs(60),
@@ -938,6 +943,11 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
                 "CredentialSecretInvalidEncoding"
             }
             context::Error::CredentialSecretTooShort { .. } => "CredentialSecretTooShort",
+            context::Error::RpcSecretNotFound { .. } => "RpcSecretNotFound",
+            context::Error::RpcSecretInvalidReference { .. } => "RpcSecretInvalidReference",
+            context::Error::RpcSecretMissingKey { .. } => "RpcSecretMissingKey",
+            context::Error::RpcSecretInvalidEncoding { .. } => "RpcSecretInvalidEncoding",
+            context::Error::RpcSecretInvalidValue { .. } => "RpcSecretInvalidValue",
             context::Error::KmsSecretNotFound { .. } => "KmsSecretNotFound",
             context::Error::KmsSecretMissingKey { .. } => "KmsSecretMissingKey",
             context::Error::KmsConfigInvalid { .. } => "KmsConfigInvalid",
