@@ -82,7 +82,7 @@ pub enum Error {
     RpcSecretInvalidEncoding { secret_name: String, key: String },
 
     #[snafu(display(
-        "RPC Secret '{}' key '{}' must be non-blank and must not use the RustFS default credential value",
+        "RPC Secret '{}' key '{}' must be non-blank, contain no NUL bytes, and must not use the RustFS default credential value",
         secret_name,
         key
     ))]
@@ -324,7 +324,7 @@ fn validate_rpc_secret_value(secret: &Secret, secret_name: &str, key: &str) -> R
         key: key.to_string(),
     })?;
     let value = value.trim();
-    if value.is_empty() || value == RUSTFS_DEFAULT_CREDENTIAL_VALUE {
+    if value.is_empty() || value.contains('\0') || value == RUSTFS_DEFAULT_CREDENTIAL_VALUE {
         return RpcSecretInvalidValueSnafu {
             secret_name: secret_name.to_string(),
             key: key.to_string(),
@@ -679,8 +679,9 @@ impl Context {
     /// Validates the dedicated internode RPC authentication Secret when configured.
     ///
     /// RustFS trims `RUSTFS_RPC_SECRET` and rejects blank values and its public default
-    /// credential value. Validate those rules before rendering StatefulSets so an invalid
-    /// Secret cannot start a rollout that leaves Pods unable to authenticate to each other.
+    /// credential value; process environments also cannot represent NUL bytes. Validate
+    /// those rules before rendering StatefulSets so an invalid Secret cannot start a
+    /// rollout that leaves Pods unable to authenticate to each other.
     pub async fn validate_rpc_secret(&self, tenant: &Tenant) -> Result<(), Error> {
         let Some(secret_ref) = tenant.spec.rpc_secret.as_ref() else {
             return Ok(());
@@ -1010,7 +1011,11 @@ mod validate_local_kms_tests {
 
     #[test]
     fn rpc_secret_value_rejects_values_rustfs_cannot_use() {
-        for value in [b"   \n".as_slice(), b" rustfsadmin ".as_slice()] {
+        for value in [
+            b"   \n".as_slice(),
+            b" rustfsadmin ".as_slice(),
+            b"valid\0secret".as_slice(),
+        ] {
             let mut data = BTreeMap::new();
             data.insert("rpc-secret".to_string(), ByteString(value.to_vec()));
             let secret = corev1::Secret {

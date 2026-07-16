@@ -735,18 +735,15 @@ mod controller_watch_tests {
     }
 
     #[test]
-    fn secret_mapper_uses_rustfs_tenant_label_for_cert_manager_output_secret() {
+    fn secret_mapper_uses_rustfs_tenant_label_for_external_tenant_secret() {
         let secret = corev1::Secret {
             metadata: metav1::ObjectMeta {
-                name: Some("server-tls".to_string()),
+                name: Some("rustfs-rpc-auth".to_string()),
                 namespace: Some("storage".to_string()),
-                labels: Some(BTreeMap::from([
-                    (
-                        "app.kubernetes.io/managed-by".to_string(),
-                        "rustfs-operator".to_string(),
-                    ),
-                    ("rustfs.tenant".to_string(), "tenant-b".to_string()),
-                ])),
+                labels: Some(BTreeMap::from([(
+                    "rustfs.tenant".to_string(),
+                    "tenant-b".to_string(),
+                )])),
                 ..Default::default()
             },
             ..Default::default()

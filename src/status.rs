@@ -104,7 +104,7 @@ impl StatusError {
                 Reason::RpcSecretInvalidValue,
                 ConditionType::RpcAuthReady,
                 format!(
-                    "RPC Secret '{}' key '{}' must be non-blank and must not use the RustFS default credential value",
+                    "RPC Secret '{}' key '{}' must be non-blank, contain no NUL bytes, and must not use the RustFS default credential value",
                     secret_name, key
                 ),
             ),
@@ -261,6 +261,7 @@ impl StatusError {
 pub struct StatusBuilder {
     generation: Option<i64>,
     now: String,
+    rpc_secret_configured: bool,
     next: Status,
 }
 
@@ -269,6 +270,7 @@ impl StatusBuilder {
         Self {
             generation: tenant.metadata.generation,
             now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            rpc_secret_configured: tenant.spec.rpc_secret.is_some(),
             next: tenant.status.clone().unwrap_or_default(),
         }
     }
@@ -564,7 +566,6 @@ impl StatusBuilder {
         for condition_type in [
             ConditionType::SpecValid,
             ConditionType::CredentialsReady,
-            ConditionType::RpcAuthReady,
             ConditionType::KmsReady,
             ConditionType::PoolsReady,
             ConditionType::WorkloadsReady,
@@ -576,6 +577,18 @@ impl StatusBuilder {
                 Reason::ReconcileSucceeded,
                 format!("{} is ready", condition_type.as_str()),
             );
+        }
+
+        if self.rpc_secret_configured {
+            self.set_condition(
+                ConditionType::RpcAuthReady,
+                ConditionStatus::True,
+                Reason::ReconcileSucceeded,
+                "Configured RPC Secret is valid".to_string(),
+            );
+        } else {
+            self.next
+                .remove_condition_by_type(ConditionType::RpcAuthReady.as_str());
         }
     }
 
@@ -657,7 +670,11 @@ mod tests {
 
     #[test]
     fn status_builder_maps_rpc_secret_invalid_value() {
-        let tenant = crate::tests::create_test_tenant(None, None);
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.rpc_secret = Some(crate::types::v1alpha1::tenant::RpcSecretRef {
+            name: "rpc-auth".to_string(),
+            key: "rpc-secret".to_string(),
+        });
         let err = context::Error::RpcSecretInvalidValue {
             secret_name: "rpc-auth".to_string(),
             key: "rpc-secret".to_string(),
@@ -674,6 +691,60 @@ mod tests {
         assert_eq!(status.current_state, "Blocked");
         assert!(status.condition(ConditionType::CredentialsReady).is_none());
         assert!(status.condition(ConditionType::WorkloadsReady).is_none());
+    }
+
+    #[test]
+    fn successful_status_reports_rpc_auth_ready_only_for_managed_secret() {
+        let mut unmanaged = crate::tests::create_test_tenant(None, None);
+        unmanaged.spec.env.push(k8s_openapi::api::core::v1::EnvVar {
+            name: "RUSTFS_RPC_SECRET".to_string(),
+            value: Some("legacy-user-value".to_string()),
+            ..Default::default()
+        });
+        let mut builder = StatusBuilder::from_tenant(&unmanaged);
+        builder.finish_success();
+        let status = builder.build();
+
+        assert!(status.condition(ConditionType::RpcAuthReady).is_none());
+
+        let mut managed = crate::tests::create_test_tenant(None, None);
+        managed.spec.rpc_secret = Some(crate::types::v1alpha1::tenant::RpcSecretRef {
+            name: "rpc-auth".to_string(),
+            key: "rpc-secret".to_string(),
+        });
+        let mut builder = StatusBuilder::from_tenant(&managed);
+        builder.finish_success();
+        let status = builder.build();
+
+        let condition = status.condition(ConditionType::RpcAuthReady).unwrap();
+        assert_eq!(condition.status, "True");
+        assert_eq!(condition.message, "Configured RPC Secret is valid");
+    }
+
+    #[test]
+    fn successful_status_prunes_rpc_auth_ready_after_secret_is_unconfigured() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.generation = Some(2);
+        tenant.status = Some(Status {
+            observed_generation: Some(1),
+            conditions: vec![condition(
+                ConditionType::RpcAuthReady.as_str(),
+                "True",
+                "ReconcileSucceeded",
+            )],
+            ..Default::default()
+        });
+
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.finish_success();
+        let status = builder.build();
+
+        assert!(
+            status
+                .conditions
+                .iter()
+                .all(|condition| condition.type_ != ConditionType::RpcAuthReady.as_str())
+        );
     }
 
     #[test]

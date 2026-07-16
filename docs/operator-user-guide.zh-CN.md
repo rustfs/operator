@@ -325,6 +325,42 @@ spec:
 2. `spec.env` 中显式配置 `RUSTFS_ACCESS_KEY` 和 `RUSTFS_SECRET_KEY`。
 3. RustFS 内置默认值。默认值仅适合开发测试。
 
+#### 独立的节点间 RPC Secret
+
+生产环境建议配置 `spec.rpcSecret`，避免节点间 RPC 认证依赖管理员凭据。
+Secret 必须与 Tenant 位于同一 namespace；若 Secret 由外部系统管理，请添加
+Tenant 标签：
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-rpc-auth
+  namespace: storage
+  labels:
+    rustfs.tenant: rustfs-a
+type: Opaque
+stringData:
+  rpc-secret: "replace-with-a-dedicated-rpc-secret"
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
+spec:
+  rpcSecret:
+    name: rustfs-rpc-auth
+    key: rpc-secret
+  # pools: ...
+```
+
+所选值必须是有效 UTF-8、不能为空、不能包含 NUL 字节，并且不能是
+`rustfsadmin`。`rustfs.tenant` 标签仅用于在 Secret 变化时及时触发 Tenant
+重新校验，不是授权机制。配置的 Secret 校验通过后，Operator 会报告
+`RpcAuthReady=True`。更新 Secret 不会改变已运行 Pod 的进程环境；协调重启和
+热加载不在此功能范围内。
+
 ### 7.4 工作负载配置
 
 常用 Tenant 级字段：

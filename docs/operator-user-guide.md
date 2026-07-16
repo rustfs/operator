@@ -323,6 +323,44 @@ Credential priority:
 2. Explicit `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY` in `spec.env`.
 3. RustFS built-in defaults. Use defaults only for development.
 
+#### Dedicated internode RPC Secret
+
+For production, configure `spec.rpcSecret` so internode RPC authentication does
+not depend on the administrator credentials. Keep the Secret in the Tenant
+namespace and label externally managed Secrets with the Tenant name:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-rpc-auth
+  namespace: storage
+  labels:
+    rustfs.tenant: rustfs-a
+type: Opaque
+stringData:
+  rpc-secret: "replace-with-a-dedicated-rpc-secret"
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
+spec:
+  rpcSecret:
+    name: rustfs-rpc-auth
+    key: rpc-secret
+  # pools: ...
+```
+
+The selected value must be valid UTF-8, non-blank, contain no NUL bytes, and
+must not be `rustfsadmin`. The `rustfs.tenant` label lets Secret updates enqueue
+the Tenant for prompt revalidation; it is not an authorization mechanism. When
+the configured Secret passes validation, the Operator reports
+`RpcAuthReady=True`. Updating the Secret does not change the environment of
+already-running Pods; coordinated restart and hot reload are outside this
+feature.
+
 ### 7.4 Workload Settings
 
 Useful Tenant-level fields:
