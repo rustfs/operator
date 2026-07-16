@@ -23,14 +23,21 @@ use crate::framework::{
     tenant_factory::TenantTemplate,
 };
 use operator::types::v1alpha1::k8s::PodManagementPolicy;
+use operator::types::v1alpha1::tenant::RpcSecretRef;
 
 const TEST_ACCESS_KEY: &str = "testaccess";
 const TEST_SECRET_KEY: &str = "testsecret";
+const TEST_RPC_SECRET: &str = "test-dedicated-rpc-secret";
+const RPC_SECRET_KEY: &str = "rpc-secret";
 const RESOURCE_RESET_TIMEOUT: Duration = Duration::from_secs(120);
 const RESOURCE_RESET_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub fn credential_secret_name(config: &ClusterTestConfig) -> String {
     format!("{}-credentials", config.tenant_name)
+}
+
+pub fn rpc_secret_name(config: &ClusterTestConfig) -> String {
+    format!("{}-rpc-auth", config.tenant_name)
 }
 
 pub fn test_credentials() -> (&'static str, &'static str) {
@@ -66,6 +73,27 @@ stringData:
     )
 }
 
+pub fn rpc_secret_manifest(config: &ClusterTestConfig) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Secret
+metadata:
+  name: {secret_name}
+  namespace: {namespace}
+  labels:
+    rustfs.tenant: {tenant_name}
+type: Opaque
+stringData:
+  {key}: {rpc_secret}
+"#,
+        secret_name = rpc_secret_name(config),
+        namespace = config.test_namespace,
+        tenant_name = config.tenant_name,
+        key = RPC_SECRET_KEY,
+        rpc_secret = TEST_RPC_SECRET,
+    )
+}
+
 pub fn smoke_tenant_template(config: &ClusterTestConfig) -> TenantTemplate {
     let mut template = TenantTemplate::kind_local(
         &config.test_namespace,
@@ -81,6 +109,10 @@ pub fn smoke_tenant_template(config: &ClusterTestConfig) -> TenantTemplate {
             .clone()
             .unwrap_or(PodManagementPolicy::Parallel),
     );
+    template.rpc_secret = Some(RpcSecretRef {
+        name: rpc_secret_name(config),
+        key: RPC_SECRET_KEY.to_string(),
+    });
 
     template
 }
@@ -98,6 +130,9 @@ pub fn apply_smoke_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
         .run_checked()?;
     kubectl
         .apply_yaml_command(credential_secret_manifest(config))
+        .run_checked()?;
+    kubectl
+        .apply_yaml_command(rpc_secret_manifest(config))
         .run_checked()?;
     kubectl
         .apply_yaml_command(smoke_tenant_manifest(config)?)
@@ -304,7 +339,10 @@ fn is_not_found(output: &CommandOutput) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{credential_secret_manifest, credential_secret_name, smoke_tenant_manifest};
+    use super::{
+        credential_secret_manifest, credential_secret_name, rpc_secret_manifest, rpc_secret_name,
+        smoke_tenant_manifest,
+    };
     use crate::framework::config::E2eConfig;
 
     #[test]
@@ -317,6 +355,9 @@ mod tests {
         assert!(manifest.contains("image: rustfs/rustfs:latest"));
         assert!(manifest.contains("storageClassName: local-storage"));
         assert!(manifest.contains("name: e2e-tenant-credentials"));
+        assert!(manifest.contains("rpcSecret:"));
+        assert!(manifest.contains("name: e2e-tenant-rpc-auth"));
+        assert!(manifest.contains("key: rpc-secret"));
     }
 
     #[test]
@@ -328,5 +369,16 @@ mod tests {
         assert!(manifest.contains("namespace: rustfs-e2e-smoke"));
         assert!(manifest.contains("accesskey:"));
         assert!(manifest.contains("secretkey:"));
+    }
+
+    #[test]
+    fn rpc_secret_uses_tenant_watch_label() {
+        let config = E2eConfig::defaults();
+        let manifest = rpc_secret_manifest(&config);
+
+        assert_eq!(rpc_secret_name(&config), "e2e-tenant-rpc-auth");
+        assert!(manifest.contains("namespace: rustfs-e2e-smoke"));
+        assert!(manifest.contains("rustfs.tenant: e2e-tenant"));
+        assert!(manifest.contains("rpc-secret: test-dedicated-rpc-secret"));
     }
 }

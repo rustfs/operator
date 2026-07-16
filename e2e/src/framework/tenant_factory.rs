@@ -22,7 +22,7 @@ use operator::types::v1alpha1::k8s::ImagePullPolicy;
 use operator::types::v1alpha1::k8s::PodManagementPolicy;
 use operator::types::v1alpha1::persistence::PersistenceConfig;
 use operator::types::v1alpha1::pool::{Pool, SchedulingConfig};
-use operator::types::v1alpha1::tenant::{Tenant, TenantSpec};
+use operator::types::v1alpha1::tenant::{RpcSecretRef, Tenant, TenantSpec};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -32,6 +32,7 @@ pub struct TenantTemplate {
     pub image: String,
     pub storage_class: String,
     pub credential_secret_name: String,
+    pub rpc_secret: Option<RpcSecretRef>,
     pub servers: i32,
     pub volumes_per_server: i32,
     pub storage_request: String,
@@ -55,6 +56,7 @@ impl TenantTemplate {
             image: image.into(),
             storage_class: storage_class.into(),
             credential_secret_name: credential_secret_name.into(),
+            rpc_secret: None,
             servers: 4,
             volumes_per_server: 2,
             storage_request: "10Gi".to_string(),
@@ -83,6 +85,7 @@ impl TenantTemplate {
             image: image.into(),
             storage_class: storage_class.into(),
             credential_secret_name: credential_secret_name.into(),
+            rpc_secret: None,
             servers: 4,
             volumes_per_server: 1,
             storage_request: "100Gi".to_string(),
@@ -146,6 +149,7 @@ impl TenantTemplate {
             creds_secret: Some(LocalObjectReference {
                 name: self.credential_secret_name.clone(),
             }),
+            rpc_secret: self.rpc_secret.clone(),
             env,
             ..TenantSpec::default()
         };

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use rustfs_operator_e2e::framework::{
-    artifacts::ArtifactCollector, config::E2eConfig, deploy, kube_client, live, resources, storage,
-    tools::required_tool_checks, wait,
+    artifacts::ArtifactCollector, assertions, config::E2eConfig, deploy, kube_client, live,
+    resources, storage, tools::required_tool_checks, wait,
 };
 
 #[test]
@@ -57,7 +57,12 @@ async fn smoke_apply_tenant_and_wait_ready() -> Result<()> {
 
         let client = kube_client::default_client().await?;
         let tenants = kube_client::tenant_api(client, &config.test_namespace);
-        wait::wait_for_tenant_ready(tenants, &config.tenant_name, config.timeout).await?;
+        let tenant =
+            wait::wait_for_tenant_ready(tenants, &config.tenant_name, config.timeout).await?;
+        ensure!(
+            assertions::condition_status(&tenant, "RpcAuthReady") == Some("True"),
+            "Tenant became Ready without RpcAuthReady=True"
+        );
         Ok(())
     }
     .await;

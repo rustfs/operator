@@ -95,6 +95,23 @@ Use `spec.rpcSecret` to keep RustFS internode RPC authentication independent fro
 the administrator credentials in `spec.credsSecret`:
 
 ```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-rpc-auth
+  namespace: storage
+  labels:
+    # Lets Secret updates enqueue this Tenant for prompt revalidation.
+    rustfs.tenant: rustfs-a
+type: Opaque
+stringData:
+  rpc-secret: "replace-with-a-dedicated-rpc-secret"
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
 spec:
   credsSecret:
     name: rustfs-admin-creds
@@ -105,11 +122,15 @@ spec:
 
 The operator maps the selected Secret key to `RUSTFS_RPC_SECRET` in every RustFS
 Pod. Before applying workloads, it verifies that the Secret and selected key
-exist and that the value is valid UTF-8, non-blank, and not the RustFS default
-credential value (`rustfsadmin`). Keep this value stable while rotating
-administrator credentials. If `spec.rpcSecret` is omitted, the operator does not
-set `RUSTFS_RPC_SECRET` and RustFS resolves the RPC secret from its own credential
-configuration.
+exist and that the value is valid UTF-8, non-blank, contains no NUL bytes, and is
+not the RustFS default credential value (`rustfsadmin`). Keep this value stable
+while rotating administrator credentials. The `rustfs.tenant` label is not used
+for authorization; it lets updates to an externally managed Secret enqueue the
+Tenant for revalidation. A Secret update does not change the environment of
+already-running Pods. Coordinated restart and hot reload are outside this
+feature. If `spec.rpcSecret` is omitted, the operator does not set
+`RUSTFS_RPC_SECRET`, RustFS resolves it from its own credential configuration,
+and the operator does not report `RpcAuthReady` for that unmanaged value.
 
 ### Tenant Provisioning
 
