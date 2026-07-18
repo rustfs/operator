@@ -21,21 +21,14 @@ use crate::types::v1alpha1::{
     encryption::PodSecurityContextOverride,
     persistence::PersistenceConfig,
     pool::{Pool, validate_pool_shape_immutable},
-    tenant::{Tenant, TenantSpec},
+    tenant::Tenant,
 };
 use axum::{
     Extension, Json,
     extract::{Path, Query},
 };
 use k8s_openapi::api::core::v1 as corev1;
-use kube::{
-    Api, Client, ResourceExt,
-    api::{ListParams, Patch, PatchParams},
-};
-use serde_json::json;
-use std::collections::BTreeSet;
-
-const RUSTFS_TENANT_LABEL: &str = "rustfs.tenant";
+use kube::{Api, Client, ResourceExt, api::ListParams};
 
 // curl -s -X POST http://localhost:9090/api/v1/login \
 //   -H "Content-Type: application/json" \
@@ -313,14 +306,11 @@ pub async fn create_tenant(
         });
     }
 
-    let api: Api<Tenant> = Api::namespaced(client.clone(), &req.namespace);
+    let api: Api<Tenant> = Api::namespaced(client, &req.namespace);
     let created = api
         .create(&Default::default(), &tenant)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", req.name)))?;
-
-    sync_provisioning_reference_labels(&client, &req.namespace, &req.name, None, &created.spec)
-        .await;
 
     let item = tenant_to_list_item(created);
 
@@ -352,15 +342,13 @@ pub async fn update_tenant(
     Json(req): Json<UpdateTenantRequest>,
 ) -> Result<Json<UpdateTenantResponse>> {
     let client = create_client(&claims).await?;
-    let api: Api<Tenant> = Api::namespaced(client.clone(), &namespace);
+    let api: Api<Tenant> = Api::namespaced(client, &namespace);
 
     // Load current object
     let mut tenant = api
         .get(&name)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
-    let previous_spec = tenant.spec.clone();
-
     // Merge only provided fields
     let mut updated_fields = Vec::new();
 
@@ -491,15 +479,6 @@ pub async fn update_tenant(
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
-    sync_provisioning_reference_labels(
-        &client,
-        &namespace,
-        &name,
-        Some(&previous_spec),
-        &updated_tenant.spec,
-    )
-    .await;
-
     Ok(Json(UpdateTenantResponse {
         success: true,
         message: format!("Tenant updated: {}", updated_fields.join(", ")),
@@ -568,15 +547,13 @@ pub async fn put_tenant_yaml(
     }
 
     let client = create_client(&claims).await?;
-    let api: Api<Tenant> = Api::namespaced(client.clone(), &namespace);
+    let api: Api<Tenant> = Api::namespaced(client, &namespace);
 
     // Get the current Tenant (to preserve resourceVersion and safe metadata)
     let mut current = api
         .get(&name)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
-    let previous_spec = current.spec.clone();
-
     if let Err(message) = validate_pool_shape_immutable(&current.spec.pools, &in_tenant.spec.pools)
     {
         return Err(Error::BadRequest { message });
@@ -603,15 +580,6 @@ pub async fn put_tenant_yaml(
         .replace(&name, &Default::default(), &current)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
-
-    sync_provisioning_reference_labels(
-        &client,
-        &namespace,
-        &name,
-        Some(&previous_spec),
-        &updated.spec,
-    )
-    .await;
 
     // Return the updated Tenant YAML (clean, without managedFields)
     let mut clean = updated;
@@ -682,163 +650,9 @@ fn summarize_tenant_states(tenants: &[Tenant]) -> TenantStateCountsResponse {
     }
 }
 
-async fn sync_provisioning_reference_labels(
-    client: &Client,
-    namespace: &str,
-    tenant_name: &str,
-    previous_spec: Option<&TenantSpec>,
-    current_spec: &TenantSpec,
-) {
-    let patch = json!({
-        "metadata": {
-            "labels": {
-                "rustfs.tenant": tenant_name,
-            },
-        },
-    });
-    let params = PatchParams::default();
-
-    let config_maps: BTreeSet<_> = current_spec
-        .policies
-        .iter()
-        .map(|policy| policy.document.config_map_key_ref.name.as_str())
-        .collect();
-    let config_map_api: Api<corev1::ConfigMap> = Api::namespaced(client.clone(), namespace);
-    for name in config_maps {
-        if let Err(error) = config_map_api
-            .patch(name, &params, &Patch::Merge(&patch))
-            .await
-        {
-            tracing::debug!(
-                namespace,
-                tenant = tenant_name,
-                config_map = name,
-                %error,
-                "Failed to label provisioning policy ConfigMap"
-            );
-        }
-    }
-
-    let secrets = provisioning_user_secret_names(current_spec);
-    let secret_api: Api<corev1::Secret> = Api::namespaced(client.clone(), namespace);
-    for name in &secrets {
-        if let Err(error) = secret_api.patch(name, &params, &Patch::Merge(&patch)).await {
-            tracing::debug!(
-                namespace,
-                tenant = tenant_name,
-                secret = name,
-                %error,
-                "Failed to label provisioning user Secret"
-            );
-        }
-    }
-
-    let Some(previous_spec) = previous_spec else {
-        return;
-    };
-    for name in stale_provisioning_user_secret_names(previous_spec, current_spec) {
-        remove_stale_user_secret_label(&secret_api, namespace, tenant_name, &name).await;
-    }
-}
-
-fn provisioning_user_secret_names(spec: &TenantSpec) -> BTreeSet<String> {
-    spec.users
-        .iter()
-        .map(|user| user.credentials_secret_name().to_string())
-        .collect()
-}
-
-fn stale_provisioning_user_secret_names(
-    previous_spec: &TenantSpec,
-    current_spec: &TenantSpec,
-) -> BTreeSet<String> {
-    let previous = provisioning_user_secret_names(previous_spec);
-    let current = current_spec.referenced_secret_names();
-    previous.difference(&current).cloned().collect()
-}
-
-async fn remove_stale_user_secret_label(
-    secret_api: &Api<corev1::Secret>,
-    namespace: &str,
-    tenant_name: &str,
-    secret_name: &str,
-) {
-    let secret = match secret_api.get(secret_name).await {
-        Ok(secret) => secret,
-        Err(error) => {
-            tracing::debug!(
-                namespace,
-                tenant = tenant_name,
-                secret = secret_name,
-                %error,
-                "Failed to inspect stale provisioning user Secret label"
-            );
-            return;
-        }
-    };
-    if !secret_label_belongs_to_tenant(&secret, tenant_name) {
-        return;
-    }
-    let Some(resource_version) = secret.metadata.resource_version else {
-        tracing::debug!(
-            namespace,
-            tenant = tenant_name,
-            secret = secret_name,
-            "Skipped stale provisioning user Secret label cleanup without resourceVersion"
-        );
-        return;
-    };
-
-    let patch = json!({
-        "metadata": {
-            "resourceVersion": resource_version,
-            "labels": {
-                "rustfs.tenant": null,
-            },
-        },
-    });
-    if let Err(error) = secret_api
-        .patch(secret_name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-    {
-        tracing::debug!(
-            namespace,
-            tenant = tenant_name,
-            secret = secret_name,
-            %error,
-            "Failed to remove stale provisioning user Secret label"
-        );
-    }
-}
-
-fn secret_label_belongs_to_tenant(secret: &corev1::Secret, tenant_name: &str) -> bool {
-    secret
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|labels| labels.get(RUSTFS_TENANT_LABEL))
-        .is_some_and(|owner| owner == tenant_name)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        RUSTFS_TENANT_LABEL, provisioning_user_secret_names, secret_label_belongs_to_tenant,
-        stale_provisioning_user_secret_names, state_matches_filter,
-    };
-    use crate::types::v1alpha1::provisioning::{ProvisioningUser, UserCredentialsSecretRef};
-    use crate::types::v1alpha1::tenant::{RpcSecretRef, TenantSpec};
-    use http::{Method, Request, Response};
-    use k8s_openapi::api::core::v1::Secret;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use kube::{Api, Client, client::Body};
-    use serde_json::Value;
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        convert::Infallible,
-        sync::{Arc, Mutex},
-    };
-    use tower::service_fn;
+    use super::state_matches_filter;
 
     #[test]
     fn state_filter_is_case_insensitive_for_known_states() {
@@ -850,221 +664,5 @@ mod tests {
     #[test]
     fn unknown_filter_value_does_not_match_unknown_state() {
         assert!(!state_matches_filter("Unknown", Some("foo")));
-    }
-
-    #[test]
-    fn provisioning_user_secret_names_resolve_overrides_and_legacy_fallbacks() {
-        let spec = TenantSpec {
-            users: vec![
-                ProvisioningUser {
-                    name: "legacy-user".to_string(),
-                    ..Default::default()
-                },
-                ProvisioningUser {
-                    name: "app-user".to_string(),
-                    creds_secret: Some(UserCredentialsSecretRef {
-                        name: "rustfs-user-app-user".to_string(),
-                    }),
-                    ..Default::default()
-                },
-                ProvisioningUser {
-                    name: "other-user".to_string(),
-                    creds_secret: Some(UserCredentialsSecretRef {
-                        name: "rustfs-user-app-user".to_string(),
-                    }),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            provisioning_user_secret_names(&spec),
-            BTreeSet::from([
-                "legacy-user".to_string(),
-                "rustfs-user-app-user".to_string(),
-            ])
-        );
-    }
-
-    #[test]
-    fn stale_user_secret_names_keep_secrets_still_referenced_by_another_user() {
-        let previous = TenantSpec {
-            users: vec![
-                provisioning_user("app-user", Some("rustfs-user-old")),
-                provisioning_user("shared-user-a", Some("rustfs-user-shared")),
-            ],
-            ..Default::default()
-        };
-        let current = TenantSpec {
-            users: vec![
-                provisioning_user("app-user", Some("rustfs-user-new")),
-                provisioning_user("shared-user-b", Some("rustfs-user-shared")),
-            ],
-            ..Default::default()
-        };
-
-        assert_eq!(
-            stale_provisioning_user_secret_names(&previous, &current),
-            BTreeSet::from(["rustfs-user-old".to_string()])
-        );
-    }
-
-    #[test]
-    fn stale_user_secret_names_keep_secrets_referenced_by_other_tenant_fields() {
-        let previous = TenantSpec {
-            users: vec![provisioning_user("app-user", Some("shared-secret"))],
-            ..Default::default()
-        };
-        let current = TenantSpec {
-            users: vec![provisioning_user("app-user", Some("new-user-secret"))],
-            rpc_secret: Some(RpcSecretRef {
-                name: "shared-secret".to_string(),
-                key: "rpc-secret".to_string(),
-            }),
-            ..Default::default()
-        };
-
-        assert!(stale_provisioning_user_secret_names(&previous, &current).is_empty());
-    }
-
-    #[tokio::test]
-    async fn stale_secret_cleanup_sends_resource_version_guarded_merge_patch() {
-        #[derive(Debug)]
-        struct CapturedRequest {
-            method: Method,
-            uri: String,
-            content_type: Option<String>,
-            body: Option<Value>,
-        }
-
-        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
-        let service_capture = captured.clone();
-        let service = service_fn(move |request: Request<Body>| {
-            let service_capture = service_capture.clone();
-            async move {
-                let method = request.method().clone();
-                let uri = request.uri().to_string();
-                let content_type = request
-                    .headers()
-                    .get(http::header::CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_string);
-                let body = request
-                    .into_body()
-                    .collect_bytes()
-                    .await
-                    .expect("request body should be readable");
-                let body = (!body.is_empty()).then(|| {
-                    serde_json::from_slice(&body).expect("request body should be valid JSON")
-                });
-                service_capture
-                    .lock()
-                    .expect("request capture lock should be available")
-                    .push(CapturedRequest {
-                        method,
-                        uri,
-                        content_type,
-                        body,
-                    });
-
-                let secret = serde_json::json!({
-                    "apiVersion": "v1",
-                    "kind": "Secret",
-                    "metadata": {
-                        "name": "old-user-secret",
-                        "namespace": "storage",
-                        "resourceVersion": "42",
-                        "labels": { "rustfs.tenant": "tenant-a" }
-                    }
-                });
-                Ok::<_, Infallible>(
-                    Response::builder()
-                        .body(Body::from(
-                            serde_json::to_vec(&secret).expect("Secret response should serialize"),
-                        ))
-                        .expect("response should build"),
-                )
-            }
-        });
-        let client = Client::new(service, "default");
-        let secret_api = Api::<Secret>::namespaced(client, "storage");
-
-        super::remove_stale_user_secret_label(
-            &secret_api,
-            "storage",
-            "tenant-a",
-            "old-user-secret",
-        )
-        .await;
-
-        let captured = captured
-            .lock()
-            .expect("request capture lock should be available");
-        assert_eq!(captured.len(), 2);
-        assert_eq!(captured[0].method, Method::GET);
-        assert_eq!(
-            captured[0].uri,
-            "/api/v1/namespaces/storage/secrets/old-user-secret"
-        );
-        assert_eq!(captured[1].method, Method::PATCH);
-        assert_eq!(
-            captured[1].uri,
-            "/api/v1/namespaces/storage/secrets/old-user-secret?"
-        );
-        assert_eq!(
-            captured[1].content_type.as_deref(),
-            Some("application/merge-patch+json")
-        );
-        assert_eq!(
-            captured[1].body,
-            Some(serde_json::json!({
-                "metadata": {
-                    "resourceVersion": "42",
-                    "labels": { "rustfs.tenant": null }
-                }
-            }))
-        );
-    }
-
-    #[test]
-    fn stale_secret_label_cleanup_only_owns_the_current_tenant_label() {
-        let current_tenant = Secret {
-            metadata: ObjectMeta {
-                labels: Some(BTreeMap::from([(
-                    RUSTFS_TENANT_LABEL.to_string(),
-                    "tenant-a".to_string(),
-                )])),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let other_tenant = Secret {
-            metadata: ObjectMeta {
-                labels: Some(BTreeMap::from([(
-                    RUSTFS_TENANT_LABEL.to_string(),
-                    "tenant-b".to_string(),
-                )])),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        assert!(secret_label_belongs_to_tenant(&current_tenant, "tenant-a"));
-        assert!(!secret_label_belongs_to_tenant(&other_tenant, "tenant-a"));
-        assert!(!secret_label_belongs_to_tenant(
-            &Secret::default(),
-            "tenant-a"
-        ));
-    }
-
-    fn provisioning_user(name: &str, secret_name: Option<&str>) -> ProvisioningUser {
-        ProvisioningUser {
-            name: name.to_string(),
-            creds_secret: secret_name.map(|name| UserCredentialsSecretRef {
-                name: name.to_string(),
-            }),
-            ..Default::default()
-        }
     }
 }

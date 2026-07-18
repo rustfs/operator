@@ -32,6 +32,7 @@ use tracing::{debug, info, warn};
 mod phases;
 mod pool_lifecycle;
 mod provisioning;
+mod reference_labels;
 mod tls;
 
 const OUT_OF_SERVICE_TAINT_KEY: &str = "node.kubernetes.io/out-of-service";
@@ -42,6 +43,9 @@ use phases::{
     reconcile_services, validate_no_pool_rename, validate_tenant_prerequisites,
 };
 use pool_lifecycle::reconcile_pool_lifecycle;
+use reference_labels::{
+    MISSING_REFERENCE_REQUEUE_INTERVAL, reconcile_provisioning_reference_labels,
+};
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -107,7 +111,13 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         &removed_pool_cleanup,
     )
     .await?;
-    finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan).await
+    let action = finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan).await?;
+    let reference_labels =
+        reconcile_provisioning_reference_labels(&ctx, &latest_tenant, &ns).await?;
+    if reference_labels.has_missing_resources && action == Action::await_change() {
+        return Ok(Action::requeue(MISSING_REFERENCE_REQUEUE_INTERVAL));
+    }
+    Ok(action)
 }
 
 #[cfg(test)]
@@ -342,7 +352,7 @@ fn condition_marker(
         .map(|condition| (condition.status.clone(), condition.reason.clone()))
 }
 
-fn object_owned_by_tenant(metadata: &metav1::ObjectMeta, tenant: &Tenant) -> bool {
+pub(super) fn object_owned_by_tenant(metadata: &metav1::ObjectMeta, tenant: &Tenant) -> bool {
     let Some(tenant_uid) = tenant.metadata.uid.as_deref().filter(|uid| !uid.is_empty()) else {
         return false;
     };

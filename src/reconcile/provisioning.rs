@@ -58,6 +58,19 @@ struct UserCredentials {
     resource_version: Option<String>,
 }
 
+enum UserCredentialsCheck {
+    DuplicateSecret,
+    Checked {
+        policy_error: Option<String>,
+        credentials: Result<UserCredentials, String>,
+    },
+}
+
+struct UserCredentialsPreflight {
+    checks: Vec<UserCredentialsCheck>,
+    duplicate_access_key_hashes: BTreeSet<String>,
+}
+
 struct PolicyDocument {
     raw: String,
     normalized: String,
@@ -379,6 +392,7 @@ pub(super) async fn reconcile_provisioning(
             };
         }
     };
+    let user_credentials = preflight_user_credentials(&run).await;
 
     let mut live_policies = match load_live_policies(&client, tenant).await {
         Ok(policies) => policies,
@@ -403,7 +417,7 @@ pub(super) async fn reconcile_provisioning(
     };
 
     reconcile_policies(&mut run, &client, &mut live_policies).await;
-    reconcile_users(&mut run, &client, &live_policies).await;
+    reconcile_users(&mut run, &client, &live_policies, &user_credentials).await;
     reconcile_buckets(&mut run, &client).await;
     run.finish()
 }
@@ -696,8 +710,8 @@ async fn reconcile_users(
     run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     live_policies: &BTreeMap<String, String>,
+    credentials_preflight: &UserCredentialsPreflight,
 ) {
-    let duplicate_secret_names = duplicate_user_credentials_secret_names(&run.tenant.spec.users);
     let failed_spec_policies = run
         .status
         .policies
@@ -706,8 +720,40 @@ async fn reconcile_users(
         .map(|item| item.name.clone())
         .collect::<BTreeSet<_>>();
 
-    for user in &run.tenant.spec.users {
-        if duplicate_secret_names.contains(user.credentials_secret_name()) {
+    for (user, preflight) in run
+        .tenant
+        .spec
+        .users
+        .iter()
+        .zip(credentials_preflight.checks.iter())
+    {
+        let (policy_error, credentials) = match preflight {
+            UserCredentialsCheck::DuplicateSecret => {
+                let previous = run.previous_user(&user.name);
+                let item = run.item(
+                    previous,
+                    &user.name,
+                    ProvisioningItemState::Failed,
+                    Reason::UserSecretInvalid,
+                    format!(
+                        "credentials Secret '{}' is referenced by multiple provisioning users",
+                        user.credentials_secret_name()
+                    ),
+                );
+                let item = annotate_user_item(item, user, previous, None);
+                run.push_user(item);
+                continue;
+            }
+            UserCredentialsCheck::Checked {
+                policy_error,
+                credentials,
+            } => (policy_error, credentials),
+        };
+        if let Ok(credentials) = credentials
+            && credentials_preflight
+                .duplicate_access_key_hashes
+                .contains(&access_key_hash(&credentials.access_key))
+        {
             let previous = run.previous_user(&user.name);
             let item = run.item(
                 previous,
@@ -715,17 +761,99 @@ async fn reconcile_users(
                 ProvisioningItemState::Failed,
                 Reason::UserSecretInvalid,
                 format!(
-                    "credentials Secret '{}' is referenced by multiple provisioning users",
-                    user.credentials_secret_name()
+                    "credentials Secret '{}' resolves to an access key used by multiple provisioning users",
+                    credentials.secret_name
                 ),
             );
             let item = annotate_user_item(item, user, previous, None);
             run.push_user(item);
             continue;
         }
-        let item = reconcile_user(run, client, live_policies, &failed_spec_policies, user).await;
+        if let Some(message) = policy_error {
+            let previous = run.previous_user(&user.name);
+            let item = run.item(
+                previous,
+                &user.name,
+                ProvisioningItemState::Failed,
+                Reason::UserPolicyInvalid,
+                message,
+            );
+            let item = annotate_user_item(item, user, previous, None);
+            run.push_user(item);
+            continue;
+        }
+        let credentials = match credentials {
+            Ok(credentials) => credentials,
+            Err(message) => {
+                let previous = run.previous_user(&user.name);
+                let item = run.item(
+                    previous,
+                    &user.name,
+                    ProvisioningItemState::Failed,
+                    Reason::UserSecretInvalid,
+                    message,
+                );
+                let item = annotate_user_item(item, user, previous, None);
+                run.push_user(item);
+                continue;
+            }
+        };
+
+        let item = reconcile_user(
+            run,
+            client,
+            live_policies,
+            &failed_spec_policies,
+            user,
+            credentials,
+        )
+        .await;
         run.push_user(item);
     }
+}
+
+async fn preflight_user_credentials(run: &ProvisioningRun<'_>) -> UserCredentialsPreflight {
+    let duplicate_secret_names = duplicate_user_credentials_secret_names(&run.tenant.spec.users);
+    let mut checks = Vec::with_capacity(run.tenant.spec.users.len());
+    for user in &run.tenant.spec.users {
+        if duplicate_secret_names.contains(user.credentials_secret_name()) {
+            checks.push(UserCredentialsCheck::DuplicateSecret);
+            continue;
+        }
+        checks.push(UserCredentialsCheck::Checked {
+            policy_error: validate_user_policies(user).err(),
+            credentials: load_user_secret(run, user).await,
+        });
+    }
+    let duplicate_access_key_hashes = duplicate_user_access_key_hashes(&checks);
+    UserCredentialsPreflight {
+        checks,
+        duplicate_access_key_hashes,
+    }
+}
+
+fn duplicate_user_access_key_hashes(
+    credentials_preflight: &[UserCredentialsCheck],
+) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    credentials_preflight
+        .iter()
+        .filter_map(|preflight| match preflight {
+            UserCredentialsCheck::Checked {
+                credentials: Ok(credentials),
+                ..
+            } => Some(credentials),
+            UserCredentialsCheck::DuplicateSecret
+            | UserCredentialsCheck::Checked {
+                credentials: Err(_),
+                ..
+            } => None,
+        })
+        .filter_map(|credentials| {
+            let hash = access_key_hash(&credentials.access_key);
+            (!seen.insert(hash.clone())).then_some(hash)
+        })
+        .collect()
 }
 
 async fn reconcile_user(
@@ -734,34 +862,10 @@ async fn reconcile_user(
     live_policies: &BTreeMap<String, String>,
     failed_spec_policies: &BTreeSet<String>,
     user: &ProvisioningUser,
+    credentials: &UserCredentials,
 ) -> ProvisioningItemStatus {
     let previous = run.previous_user(&user.name);
-    if let Err(message) = validate_user_policies(user) {
-        let item = run.item(
-            previous,
-            &user.name,
-            ProvisioningItemState::Failed,
-            Reason::UserPolicyInvalid,
-            message,
-        );
-        return annotate_user_item(item, user, previous, None);
-    }
-
-    let credentials = match load_user_secret(run, user).await {
-        Ok(credentials) => credentials,
-        Err(message) => {
-            let item = run.item(
-                previous,
-                &user.name,
-                ProvisioningItemState::Failed,
-                Reason::UserSecretInvalid,
-                message,
-            );
-            return annotate_user_item(item, user, previous, None);
-        }
-    };
-
-    if user_access_key_changed(previous, &credentials) {
+    if user_access_key_changed(previous, credentials) {
         let item = run.item(
             previous,
             &user.name,
@@ -817,7 +921,7 @@ async fn reconcile_user(
     };
 
     let credentials_applied =
-        match sync_user_credentials(client, previous, &credentials, exists).await {
+        match sync_user_credentials(client, previous, credentials, exists).await {
             Ok(applied) => applied,
             Err(error) => {
                 let item = run.item(
@@ -842,7 +946,7 @@ async fn reconcile_user(
             Reason::UserPolicySetFailed,
             format!("failed to set RustFS user policy mapping: {error}"),
         );
-        return annotate_user_item(item, user, previous, Some(&credentials));
+        return annotate_user_item(item, user, previous, Some(credentials));
     }
 
     let message = if !exists {
@@ -868,7 +972,7 @@ async fn reconcile_user(
         }
         _ => Some(run.now.clone()),
     };
-    annotate_user_item(item, user, previous, Some(&credentials))
+    annotate_user_item(item, user, previous, Some(credentials))
 }
 
 fn annotate_user_item(
@@ -1381,11 +1485,18 @@ mod tests {
         body::Body,
         extract::State,
         http::{Request, StatusCode},
-        routing::{get, put},
+        routing::{any, get, put},
     };
     use k8s_openapi::ByteString;
-    use std::sync::Arc;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::{Client, client::Body as KubeBody};
+    use std::convert::Infallible;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::sync::Mutex;
+    use tower::service_fn;
 
     #[derive(Clone, Default)]
     struct PolicyApplyCapture {
@@ -1430,6 +1541,182 @@ mod tests {
         assert!(error.contains("at least 8 characters"));
     }
 
+    #[tokio::test]
+    async fn duplicate_access_keys_fail_before_any_rustfs_user_request() {
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| async move {
+            let secret_name = request
+                .uri()
+                .path()
+                .rsplit('/')
+                .next()
+                .expect("Secret request should include a name");
+            let secret_key = match secret_name {
+                "user-secret-a" => b"secret-value-a".to_vec(),
+                "user-secret-b" => b"secret-value-b".to_vec(),
+                _ => panic!("unexpected Secret request: {secret_name}"),
+            };
+            let secret = Secret {
+                metadata: ObjectMeta {
+                    name: Some(secret_name.to_string()),
+                    namespace: Some("storage".to_string()),
+                    resource_version: Some("1".to_string()),
+                    ..Default::default()
+                },
+                data: Some(BTreeMap::from([
+                    (
+                        "accesskey".to_string(),
+                        ByteString(b"shareduser01".to_vec()),
+                    ),
+                    ("secretkey".to_string(), ByteString(secret_key)),
+                ])),
+                ..Default::default()
+            };
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .body(KubeBody::from(
+                        serde_json::to_vec(&secret).expect("Secret should serialize"),
+                    ))
+                    .expect("response should build"),
+            )
+        });
+        let ctx = Context::new(Client::new(kube_service, "default"));
+        let mut colliding_with_invalid_policy =
+            provisioning_user("logical-b", "user-secret-b", "readonly");
+        colliding_with_invalid_policy.policies.clear();
+        let tenant = Tenant {
+            metadata: ObjectMeta {
+                name: Some("tenant-a".to_string()),
+                namespace: Some("storage".to_string()),
+                ..Default::default()
+            },
+            spec: crate::types::v1alpha1::tenant::TenantSpec {
+                users: vec![
+                    provisioning_user("logical-a", "user-secret-a", "readwrite"),
+                    colliding_with_invalid_policy,
+                ],
+                ..Default::default()
+            },
+            status: None,
+        };
+        let mut run = ProvisioningRun {
+            ctx: &ctx,
+            tenant: &tenant,
+            namespace: "storage",
+            previous: ProvisioningStatus::default(),
+            now: "2026-07-18T00:00:00Z".to_string(),
+            status: ProvisioningStatus::default(),
+            failures: Vec::new(),
+        };
+
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let route_count = request_count.clone();
+        let router = Router::new().fallback(any(move || {
+            let route_count = route_count.clone();
+            async move {
+                route_count.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let live_policies = BTreeMap::from([("readwrite".to_string(), "{}".to_string())]);
+
+        let credentials_preflight = preflight_user_credentials(&run).await;
+        reconcile_users(&mut run, &client, &live_policies, &credentials_preflight).await;
+
+        assert_eq!(request_count.load(Ordering::SeqCst), 0);
+        assert_eq!(run.status.users.len(), 2);
+        assert!(run.status.users.iter().all(|item| {
+            item.state == ProvisioningItemState::Failed.as_str()
+                && item.reason == Reason::UserSecretInvalid.as_str()
+                && item
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| !message.contains("shareduser01"))
+        }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn user_preflight_loads_credentials_without_changing_policy_error_priority() {
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let service_count = request_count.clone();
+        let kube_service = service_fn(move |_request: http::Request<KubeBody>| {
+            let service_count = service_count.clone();
+            async move {
+                service_count.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(KubeBody::empty())
+                        .expect("response should build"),
+                )
+            }
+        });
+        let ctx = Context::new(Client::new(kube_service, "default"));
+        let tenant = Tenant {
+            metadata: ObjectMeta {
+                name: Some("tenant-a".to_string()),
+                namespace: Some("storage".to_string()),
+                ..Default::default()
+            },
+            spec: crate::types::v1alpha1::tenant::TenantSpec {
+                users: vec![ProvisioningUser {
+                    name: "invalid-user".to_string(),
+                    creds_secret: Some(
+                        crate::types::v1alpha1::provisioning::UserCredentialsSecretRef {
+                            name: "missing-secret".to_string(),
+                        },
+                    ),
+                    policies: Vec::new(),
+                    deletion_policy: Default::default(),
+                }],
+                ..Default::default()
+            },
+            status: None,
+        };
+        let mut run = ProvisioningRun {
+            ctx: &ctx,
+            tenant: &tenant,
+            namespace: "storage",
+            previous: ProvisioningStatus::default(),
+            now: "2026-07-18T00:00:00Z".to_string(),
+            status: ProvisioningStatus::default(),
+            failures: Vec::new(),
+        };
+
+        let client = RustfsAdminClient::new_with_base_url(
+            "http://127.0.0.1:1".to_string(),
+            "access",
+            "secret",
+        );
+
+        let credentials_preflight = preflight_user_credentials(&run).await;
+        reconcile_users(&mut run, &client, &BTreeMap::new(), &credentials_preflight).await;
+
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert_eq!(run.status.users.len(), 1);
+        assert_eq!(
+            run.status.users[0].reason,
+            Reason::UserPolicyInvalid.as_str()
+        );
+        assert!(
+            run.status.users[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("at least one policy"))
+        );
+    }
+
     #[test]
     fn user_policy_list_must_not_be_empty() {
         let user = ProvisioningUser {
@@ -1443,6 +1730,19 @@ mod tests {
             validate_user_policies(&user).expect_err("empty policy list should be rejected");
 
         assert!(error.contains("at least one policy"));
+    }
+
+    fn provisioning_user(name: &str, secret_name: &str, policy: &str) -> ProvisioningUser {
+        ProvisioningUser {
+            name: name.to_string(),
+            creds_secret: Some(
+                crate::types::v1alpha1::provisioning::UserCredentialsSecretRef {
+                    name: secret_name.to_string(),
+                },
+            ),
+            policies: vec![policy.to_string()],
+            deletion_policy: Default::default(),
+        }
     }
 
     #[test]

@@ -598,11 +598,11 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
 - `spec.buckets`：bucket，可选择开启 object lock。
 
-ConfigMap 和 user Secret 必须位于 Tenant namespace。若这些资源不是通过 Operator Console 创建，建议添加 label：`rustfs.tenant=<tenant-name>`，这样资源变化可以触发 owning Tenant reconcile。
+ConfigMap 和 user Secret 必须位于 Tenant namespace。operator 会在被引用的 policy ConfigMap 和 user Secret 上维护 `rustfs.tenant=<tenant-name>` label，使资源变化能够触发 owning Tenant reconcile；尚未创建的引用资源会在创建后重试加 label。
 
 Policy document 由 RustFS 解析。请使用 `arn:aws:s3:::bucket` 和 `arn:aws:s3:::bucket/*` 这类 S3 ARN resource 写法；如需匹配所有 bucket，请使用 `arn:aws:s3:::*`。RustFS policy parser 不接受裸 `Resource: "*"`。
 
-每个 `spec.users[]` 条目都可以通过 `credsSecret.name` 指定 Tenant namespace 中的 user credentials Secret。省略 `credsSecret` 时，Operator 继续读取与 `user.name` 同名的 Secret，以兼容旧版 manifest。显式引用是唯一来源；配置错误或 Secret 不存在时，不会再回退到同名 Secret。同一 Tenant 内解析后的 Secret 名称必须唯一；API 会拒绝重复引用，而在集群仍安装旧版 CRD、尚未启用该校验时，reconcile 也会阻止这些重复配置生效。
+每个 `spec.users[]` 条目都可以通过 `credsSecret.name` 指定 Tenant namespace 中的 user credentials Secret。省略 `credsSecret` 时，Operator 继续读取与 `user.name` 同名的 Secret，以兼容旧版 manifest。显式引用是唯一来源；配置错误或 Secret 不存在时，不会再回退到同名 Secret。同一 Tenant 内解析后的 Secret 名称必须唯一；API 会拒绝重复引用，而在集群仍安装旧版 CRD、尚未启用该校验时，reconcile 也会阻止这些重复配置生效。不同 Secret 中的 `accesskey` 也必须唯一；reconcile 会先校验全部 user credentials，再修改任何 RustFS user，并拒绝所有冲突条目。
 
 Secret 必须包含 `accesskey` 和 `secretkey`，或者 MinIO 兼容 key：`CONSOLE_ACCESS_KEY` 和 `CONSOLE_SECRET_KEY`。如果两种 key 同时存在，值必须一致。`user.name` 仍是声明和 status 中的逻辑标识，Secret 内的 `accesskey` 才是实际 RustFS user。user access key 至少 8 个字符，且不能包含空白、`=` 或 `,`；user secret key 至少 8 个字符。`rustfs.tenant` label 只负责在 Secret 更新时触发 Tenant reconcile，不参与选择要读取的 Secret。
 

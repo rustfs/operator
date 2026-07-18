@@ -143,7 +143,7 @@ kubectl apply -f examples/provisioning-tenant.yaml
 kubectl wait --for=condition=Ready tenant/provisioning-demo --timeout=10m
 ```
 
-ConfigMaps and user Secrets should carry `rustfs.tenant=<tenant-name>` when they are managed outside the Console so updates enqueue the owning Tenant.
+The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps and user Secrets so updates enqueue the owning Tenant.
 
 ---
 
