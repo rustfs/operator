@@ -70,6 +70,10 @@ export async function createTenant(body: CreateTenantRequest): Promise<TenantLis
   return apiClient.post<TenantListItem>("/tenants", body)
 }
 
+export async function createTenantYaml(body: TenantYamlPayload): Promise<TenantListItem> {
+  return apiClient.post<TenantListItem>("/tenants/yaml", body)
+}
+
 export async function updateTenant(
   namespace: string,
   name: string,

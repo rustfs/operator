@@ -154,6 +154,8 @@ pub enum Reason {
     PoolDecommissionFailed,
     StatefulSetApplyFailed,
     StatefulSetUpdateValidationFailed,
+    InvalidWorkloadSecurityProfile,
+    WorkloadSecurityIncompatible,
     RolloutInProgress,
     PodsNotReady,
     PoolDegraded,
@@ -221,6 +223,8 @@ impl Reason {
             Self::PoolDecommissionFailed => "PoolDecommissionFailed",
             Self::StatefulSetApplyFailed => "StatefulSetApplyFailed",
             Self::StatefulSetUpdateValidationFailed => "StatefulSetUpdateValidationFailed",
+            Self::InvalidWorkloadSecurityProfile => "InvalidWorkloadSecurityProfile",
+            Self::WorkloadSecurityIncompatible => "WorkloadSecurityIncompatible",
             Self::RolloutInProgress => "RolloutInProgress",
             Self::PodsNotReady => "PodsNotReady",
             Self::PoolDegraded => "PoolDegraded",
@@ -497,6 +501,8 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "PoolDecommissionCanceled"
             | "PoolDecommissionFailed"
             | "StatefulSetUpdateValidationFailed"
+            | "InvalidWorkloadSecurityProfile"
+            | "WorkloadSecurityIncompatible"
             | "ProvisioningUnsupported"
             | "PolicyDocumentConfigMapNotFound"
             | "PolicyDocumentKeyNotFound"
@@ -562,6 +568,10 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "CaBundleMissing" => vec!["configureCaSecretRef", "enableSystemCaIfAppropriate"],
         "CaBundleInvalid" => vec!["replaceCaBundle"],
         "TlsHotReloadUnsupported" => vec!["useRolloutRotation", "enableCleanTlsDirectory"],
+        "InvalidWorkloadSecurityProfile" => vec!["fixWorkloadSecurityProfile"],
+        "WorkloadSecurityIncompatible" => {
+            vec!["upgradeRustfsImage", "configureCompatibleSeccompProfile"]
+        }
         "InvalidTenantName" => vec!["renameTenant"],
         "ImmutableFieldModified" => vec!["restoreImmutableField"],
         "PoolDeleteBlocked" => vec!["restorePoolSpec", "startDecommissionAfterRestore"],
@@ -656,6 +666,14 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("CertManagerCertificateApplyFailed"),
             vec!["fixCertificateSpec", "inspectOperatorLogs"]
+        );
+        assert_eq!(
+            next_actions_for_reason("InvalidWorkloadSecurityProfile"),
+            vec!["fixWorkloadSecurityProfile"]
+        );
+        assert_eq!(
+            next_actions_for_reason("WorkloadSecurityIncompatible"),
+            vec!["upgradeRustfsImage", "configureCompatibleSeccompProfile"]
         );
     }
 

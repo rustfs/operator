@@ -13,7 +13,7 @@
 //  limitations under the License.
 
 /// Default RustFS container image when neither spec.image nor TENANT_RUSTFS_IMAGE is set.
-pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:latest";
+pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:1.0.0-beta.10";
 
 pub(crate) fn get_rustfs_image() -> Option<String> {
     std::env::var("TENANT_RUSTFS_IMAGE").ok()

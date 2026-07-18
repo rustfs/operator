@@ -134,7 +134,9 @@ pub struct ServicePort {
     pub target_port: String,
 }
 
-/// SecurityContext for create/update (Pod runAsUser, runAsGroup, fsGroup, runAsNonRoot).
+/// Legacy Console form subset of the Tenant Pod security context.
+///
+/// The raw YAML editor is authoritative for seccomp, container, and Pool-level settings.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSecurityContextRequest {
@@ -156,7 +158,7 @@ pub struct CreateTenantRequest {
     pub policies: Option<Vec<ProvisioningPolicy>>,
     pub users: Option<Vec<ProvisioningUser>>,
     pub buckets: Option<Vec<ProvisioningBucket>>,
-    /// Optional Pod SecurityContext override (runAsUser, runAsGroup, fsGroup, runAsNonRoot).
+    /// Optional legacy Pod security context form fields.
     pub security_context: Option<CreateSecurityContextRequest>,
 }
 

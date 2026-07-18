@@ -92,13 +92,45 @@ kubectl logs -n rustfs-system \
 升级已有安装：
 
 ```bash
-kubectl apply -f deploy/rustfs-operator/crds/tenant-crd.yaml
+# Helm 不会升级 Chart crds/ 目录中已经存在的 CRD。
+kubectl apply --server-side --force-conflicts \
+  --field-manager=rustfs-operator-crd-upgrade \
+  -f deploy/rustfs-operator/crds/tenant.yaml
+kubectl apply --server-side --force-conflicts \
+  --field-manager=rustfs-operator-crd-upgrade \
+  -f deploy/rustfs-operator/crds/policybinding-crd.yaml
 helm upgrade rustfs-operator deploy/rustfs-operator/ \
   --namespace rustfs-system
 ```
 
-Helm 不会升级 Chart `crds/` 目录中的已有 CRD。使用新版本 Operator 引入的字段前，请先应用更新后的 Tenant CRD，并等待 Operator rollout 完成。
-未配置新版可选字段的已有 Tenant manifest 无需迁移。如果仍有旧版 Operator binary 在 reconcile Tenant，请勿依赖 `users[].credsSecret`，因为旧版本仍会按 user 同名规则读取 Secret。
+请先更新 CRD，再升级 Operator，确保 API Server 能接受新版本 Controller
+引入的字段。CRD 是集群级资源，并由所有 Tenant namespace 共享，升级前应审查变更。
+专用 field manager 会显式接管 Chart 管理的 CRD 字段，因此也适用于最初由 Helm
+创建的 CRD。
+
+未配置 `users[].credsSecret` 的已有 manifest 保持兼容。只有在新 Operator rollout
+全部完成后，才能依赖显式的 user Secret 引用；旧 binary 仍会按 user 同名规则读取
+Secret。
+
+此版本会为生成的 RustFS Pod 和容器补充安全默认值。已有兼容 Tenant 的
+StatefulSet template 如果尚未包含这些值，会在下一次 reconcile 时发生滚动更新。
+请在维护窗口内升级：单副本 Tenant 在重启期间可能不可用，多副本 Tenant 会暂时以
+较低容量运行。应先核对每个 Tenant 的镜像。已知不兼容镜像会在 rollout 前被阻断；
+只要最终生效的 profile 为 `RuntimeDefault`，可变 tag、digest 引用或自定义仓库都需要
+与镜像绑定的确认注解。
+升级前应固定到已验证的 RustFS beta.9 或更高 release tag；也可先验证实际生效的镜像，
+再将 `operator.rustfs.com/runtime-default-image-ack` 设置为完全相同的镜像引用。
+
+内置 RustFS 镜像 fallback 也会从可变的 `latest` 改为
+`rustfs/rustfs:1.0.0-beta.10`。未设置 `spec.image`，且 Operator 没有配置
+`TENANT_RUSTFS_IMAGE` 环境变量覆盖的 Tenant，会在 reconcile 时滚动到该固定版本。
+若希望 RustFS 升级节奏独立于 Operator 默认值，应显式设置 `spec.image`。
+
+应将此次变更视为单向 workload security migration。新版本 Operator 完成 Tenant
+reconcile 后，不要直接降级到尚未提供这些 restricted 默认值的旧版本。旧 Controller
+会省略新增的 seccomp 和容器安全字段：restricted 准入会拒绝该更新；未启用
+restricted 准入的集群则可能把 workload 滚动回较弱配置。故障恢复应向前升级到当前
+版本或更新的修复版本。
 
 卸载：
 
@@ -188,7 +220,7 @@ metadata:
   name: dev-minimal
   namespace: default
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
   pools:
     - name: dev-pool
       servers: 1
@@ -371,7 +403,7 @@ spec:
 
 | 字段 | 用途 |
 |------|------|
-| `image` | RustFS server 镜像。未配置时使用 Operator fallback。 |
+| `image` | RustFS server 镜像。未配置时依次使用 `TENANT_RUSTFS_IMAGE` 和固定 fallback `rustfs/rustfs:1.0.0-beta.10`。 |
 | `imagePullSecret` | 镜像拉取 Secret。 |
 | `imagePullPolicy` | RustFS 镜像拉取策略。 |
 | `scheduler` | 自定义 scheduler 名称。 |
@@ -382,7 +414,67 @@ spec:
 | `lifecycle` | Kubernetes 容器 lifecycle hook。 |
 | `podManagementPolicy` | StatefulSet pod management policy。 |
 | `podDeletionPolicyWhenNodeIsDown` | 节点 NotReady/Unknown 时的 Pod 删除策略。 |
-| `securityContext` | RustFS Pod 的 Pod SecurityContext 覆盖。 |
+| `securityContext` | 所有 RustFS Pool 的 Pod SecurityContext 覆盖。 |
+| `containerSecurityContext` | 所有 Pool 的 RustFS 容器 SecurityContext 覆盖。 |
+
+这两个字段也可配置在每个 `spec.pools[]` 条目上。Pool 级字段会按字段覆盖
+Tenant 级字段，Tenant 级字段再覆盖 Operator 默认值。Operator 默认设置
+`runAsNonRoot: true`、`RuntimeDefault` seccomp、禁止权限提升并丢弃全部 Linux
+capabilities，满足 Kubernetes Pod Security `restricted` 对应要求。显式覆盖可以
+放宽这些默认值，因此可能被集群准入策略拒绝。为兼容存量配置，如果显式配置
+`runAsUser: 0`、但没有显式配置 `runAsNonRoot`，Operator 会推导
+`runAsNonRoot: false`；该配置不能用于 `restricted` namespace。
+
+`RuntimeDefault` 还要求 RustFS 镜像能够在容器运行时默认 seccomp 下启动。
+`rustfs/rustfs:1.0.0-beta.8` 的 Tokio runtime 启用了 io_uring，因此不兼容；
+请使用包含 [rustfs/rustfs#4364](https://github.com/rustfs/rustfs/pull/4364)
+或更高版本的构建。当有效 seccomp profile 为 `RuntimeDefault` 时，Operator 会在
+创建或滚动 StatefulSet 前保守阻止官方 RustFS `1.0.0-alpha.*` 以及 beta.1 至
+beta.8 镜像（包括对应的 `-glibc` 变体）。兼容的 `Localhost` profile 仍可作为高级
+显式覆盖。该门禁覆盖官方 Docker Hub、GHCR 和 Quay 仓库。官方 `latest` 等可变 tag、
+无 tag 镜像、自定义仓库以及所有 digest 引用（包括 `tag@digest`）都无法进行版本验证。
+在 `RuntimeDefault` 下，Operator 会阻止这些引用，除非 Tenant 注解
+`operator.rustfs.com/runtime-default-image-ack` 与实际生效的镜像引用完全一致。该专用
+确认与镜像引用绑定，引用变化时必须同步更新；已有 seccomp 配置不会被当作镜像确认。
+例如：
+
+```yaml
+metadata:
+  annotations:
+    operator.rustfs.com/runtime-default-image-ack: "registry.example.com/rustfs/rustfs@sha256:<digest>"
+spec:
+  image: "registry.example.com/rustfs/rustfs@sha256:<digest>"
+```
+
+验证镜像后，可通过原始 YAML 编辑器或 `kubectl` 设置该注解。可变 tag 也可以使用匹配
+注解，但 tag 后续可能在注解不变的情况下指向不同内容，这表示用户明确接受该剩余风险；
+生产环境应优先使用不可变 digest。该注解不能覆盖没有 digest 的已知不兼容官方
+alpha 或 beta.1 至 beta.8 引用。对于 `tag@digest`，Kubernetes 实际按 digest
+拉取镜像，因此 digest 具有决定性；验证该精确 digest 后，可以确认完整镜像引用。
+
+请先在 RustFS 可能调度到的每个节点上安装 profile，再配置相对于容器运行时的路径，
+例如：
+
+```yaml
+spec:
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/rustfs-io-uring.json
+```
+
+seccomp 与 AppArmor profile 的合法类型为 `RuntimeDefault`、`Localhost` 和
+`Unconfined`。`Localhost` 必须设置非空 `localhostProfile`，其他类型不得设置该字段。
+seccomp Localhost profile 必须是相对向下路径，且不能包含 `..` 路径段；AppArmor
+Localhost profile 不能包含首尾空白，长度不能超过 4095 字节。Operator 会在创建或
+滚动 StatefulSet 前拒绝无效值。
+
+`readOnlyRootFilesystem` 可配置但默认不启用；启用时需要根据镜像配置为 `/logs`、
+`/tmp` 等运行路径提供可写卷。
+
+Console 的专用安全配置表单仅管理存量 Pod 级 UID/GID 字段。请通过 Console 原始
+YAML 编辑器或 `kubectl` 配置 `seccompProfile`、`containerSecurityContext` 和
+Pool 级覆盖。
 
 Operator 会自动管理以下环境变量：
 
@@ -900,6 +992,8 @@ kubectl logs -n rustfs-system \
 | `CredentialSecretTooShort` | 两个凭据值是否都至少 8 个字符。 |
 | `KmsSecretNotFound` / `KmsSecretMissingKey` | KMS Secret 是否存在，并包含必要 key，例如 Vault 的 `vault-token` 或 Local KMS 的 `masterKeySecretRef.key`。 |
 | `CertManagerCrdMissing` / `CertManagerIssuerNotFound` | cert-manager 是否安装，issuer 是否存在。 |
+| `InvalidWorkloadSecurityProfile` | 修正 seccomp 或 AppArmor profile 类型及其与 `localhostProfile` 的组合。 |
+| `WorkloadSecurityIncompatible` | 对已知旧镜像进行升级，或使用兼容的 `Localhost` profile。对于无法验证的引用，应固定到已验证的 release tag；也可在验证后将 `operator.rustfs.com/runtime-default-image-ack` 设置为完全相同的实际镜像引用，并优先使用 digest。 |
 | `StatefulSetUpdateValidationFailed` | 是否修改了不可变 StatefulSet 字段或 pool 形态字段。 |
 | `ProvisioningFailed` | 检查 `status.provisioning`、policy ConfigMap、user Secret 和 RustFS 管理员凭据。 |
 

@@ -1191,6 +1191,8 @@ mod tests {
                 volumes_per_server: 2,
                 ..Default::default()
             },
+            security_context: None,
+            container_security_context: None,
             scheduling: SchedulingConfig::default(),
         }
     }

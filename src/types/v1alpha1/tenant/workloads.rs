@@ -21,7 +21,11 @@ use crate::types::v1alpha1::persistence::{
     default_local_kms_key_directory,
 };
 use crate::types::v1alpha1::pool::Pool;
+use crate::types::v1alpha1::security_context::{
+    MAX_KUBERNETES_ID, PodSecurityContextOverride, effective_run_as_non_root,
+};
 use crate::types::v1alpha1::tls::{TlsPlan, http_probe};
+use k8s_openapi::DeepMerge;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
@@ -35,6 +39,404 @@ const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 const DEFAULT_RUN_AS_USER: i64 = 10001;
 const DEFAULT_RUN_AS_GROUP: i64 = 10001;
 const DEFAULT_FS_GROUP: i64 = 10001;
+const LAST_TOKIO_IO_URING_BETA: u32 = 8;
+pub const RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION: &str =
+    "operator.rustfs.com/runtime-default-image-ack";
+// Kubernetes caps Localhost AppArmor names at PATH_MAX - 1 bytes.
+const MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH: usize = 4095;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageUnverifiableReason {
+    CustomRepository,
+    DigestQualified,
+    MissingTag,
+    MutableTag,
+    UnknownTag,
+}
+
+impl ImageUnverifiableReason {
+    fn description(self) -> &'static str {
+        match self {
+            Self::CustomRepository => "reference from a custom repository",
+            Self::DigestQualified => {
+                "digest-qualified reference (Kubernetes pulls by digest, not tag)"
+            }
+            Self::MissingTag => "reference without an explicit version tag",
+            Self::MutableTag => "mutable 'latest' tag",
+            Self::UnknownTag => "unrecognized version tag",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RustfsImageSeccompCompatibility<'a> {
+    KnownCompatible,
+    KnownIncompatible { tag: &'a str },
+    Unverifiable { reason: ImageUnverifiableReason },
+}
+
+fn split_image_repository_and_tag(reference: &str) -> (&str, Option<&str>) {
+    let last_path_separator = reference.rfind('/').map_or(0, |index| index + 1);
+    let tag_separator = reference
+        .rfind(':')
+        .filter(|index| *index >= last_path_separator);
+
+    match tag_separator {
+        Some(index) => (&reference[..index], Some(&reference[index + 1..])),
+        None => (reference, None),
+    }
+}
+
+fn is_official_rustfs_repository(repository: &str) -> bool {
+    matches!(
+        repository,
+        "rustfs/rustfs"
+            | "docker.io/rustfs/rustfs"
+            | "index.docker.io/rustfs/rustfs"
+            | "registry-1.docker.io/rustfs/rustfs"
+            | "ghcr.io/rustfs/rustfs"
+            | "quay.io/rustfs/rustfs"
+    )
+}
+
+fn parse_canonical_u32(part: &str) -> Option<u32> {
+    let value = part.parse::<u32>().ok()?;
+    (part == value.to_string()).then_some(value)
+}
+
+fn is_known_compatible_release_tag(tag: &str) -> bool {
+    let (release, suffix) = tag
+        .split_once('-')
+        .map_or((tag, None), |(release, suffix)| (release, Some(suffix)));
+    let mut components = release.split('.');
+    let version = match (
+        components.next().and_then(parse_canonical_u32),
+        components.next().and_then(parse_canonical_u32),
+        components.next().and_then(parse_canonical_u32),
+        components.next(),
+    ) {
+        (Some(major), Some(minor), Some(patch), None) => (major, minor, patch),
+        _ => return false,
+    };
+
+    if suffix.is_some_and(|suffix| suffix != "glibc") {
+        return false;
+    }
+
+    version >= (1, 0, 0)
+}
+
+fn classify_rustfs_image_for_seccomp(image: &str) -> RustfsImageSeccompCompatibility<'_> {
+    let image = image.trim();
+    let (tagged_reference, digest) = image
+        .split_once('@')
+        .map_or((image, None), |(reference, digest)| {
+            (reference, Some(digest))
+        });
+    let (repository, tag) = split_image_repository_and_tag(tagged_reference);
+    if !is_official_rustfs_repository(repository) {
+        return RustfsImageSeccompCompatibility::Unverifiable {
+            reason: ImageUnverifiableReason::CustomRepository,
+        };
+    }
+
+    if digest.is_some() {
+        return RustfsImageSeccompCompatibility::Unverifiable {
+            reason: ImageUnverifiableReason::DigestQualified,
+        };
+    }
+
+    let Some(tag) = tag else {
+        return RustfsImageSeccompCompatibility::Unverifiable {
+            reason: ImageUnverifiableReason::MissingTag,
+        };
+    };
+    if tag == "latest" {
+        return RustfsImageSeccompCompatibility::Unverifiable {
+            reason: ImageUnverifiableReason::MutableTag,
+        };
+    }
+
+    let tag = tag.strip_prefix('v').unwrap_or(tag);
+    if tag.starts_with("1.0.0-alpha.") {
+        return RustfsImageSeccompCompatibility::KnownIncompatible { tag };
+    }
+
+    if let Some(beta) = tag.strip_prefix("1.0.0-beta.") {
+        let (number, suffix) = beta
+            .split_once('-')
+            .map_or((beta, None), |(number, suffix)| (number, Some(suffix)));
+        if let Some(beta) = parse_canonical_u32(number)
+            && (beta <= LAST_TOKIO_IO_URING_BETA || suffix.is_none_or(|suffix| suffix == "glibc"))
+        {
+            return if beta <= LAST_TOKIO_IO_URING_BETA {
+                RustfsImageSeccompCompatibility::KnownIncompatible { tag }
+            } else {
+                RustfsImageSeccompCompatibility::KnownCompatible
+            };
+        }
+    }
+
+    if is_known_compatible_release_tag(tag) {
+        RustfsImageSeccompCompatibility::KnownCompatible
+    } else {
+        RustfsImageSeccompCompatibility::Unverifiable {
+            reason: ImageUnverifiableReason::UnknownTag,
+        }
+    }
+}
+
+fn validate_declared_security_profile_shape<'a>(
+    field_path: &str,
+    type_: &str,
+    localhost_profile: Option<&'a str>,
+) -> Result<Option<&'a str>, String> {
+    if !matches!(type_, "RuntimeDefault" | "Localhost" | "Unconfined") {
+        return Err(format!(
+            "{field_path}.type must be RuntimeDefault, Localhost, or Unconfined; got '{type_}'"
+        ));
+    }
+
+    match (type_, localhost_profile) {
+        ("Localhost", Some(profile)) => Ok(Some(profile)),
+        ("Localhost", None) => Err(format!(
+            "{field_path}.localhostProfile must be nonblank when type is Localhost"
+        )),
+        (_, Some(_)) => Err(format!(
+            "{field_path}.localhostProfile must be omitted when type is {type_}"
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn validate_declared_seccomp_profile(
+    field_path: &str,
+    type_: &str,
+    localhost_profile: Option<&str>,
+) -> Result<(), String> {
+    let Some(profile) =
+        validate_declared_security_profile_shape(field_path, type_, localhost_profile)?
+    else {
+        return Ok(());
+    };
+
+    if profile.trim().is_empty() {
+        return Err(format!(
+            "{field_path}.localhostProfile must be nonblank when type is Localhost"
+        ));
+    }
+    // Match kube-apiserver's validateLocalDescendingPath checks.
+    if profile.starts_with('/') {
+        return Err(format!(
+            "{field_path}.localhostProfile must be a relative path"
+        ));
+    }
+    if profile.split('/').any(|component| component == "..") {
+        return Err(format!(
+            "{field_path}.localhostProfile must not contain '..'"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_declared_app_armor_profile(
+    field_path: &str,
+    type_: &str,
+    localhost_profile: Option<&str>,
+) -> Result<(), String> {
+    let Some(profile) =
+        validate_declared_security_profile_shape(field_path, type_, localhost_profile)?
+    else {
+        return Ok(());
+    };
+
+    if profile.trim() != profile {
+        return Err(format!(
+            "{field_path}.localhostProfile must not be padded with whitespace"
+        ));
+    }
+    if profile.is_empty() {
+        return Err(format!(
+            "{field_path}.localhostProfile must be nonblank when type is Localhost"
+        ));
+    }
+    if profile.len() > MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH {
+        return Err(format!(
+            "{field_path}.localhostProfile must be at most {MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH} bytes"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_kubernetes_id(field_path: &str, value: Option<i64>) -> Result<(), String> {
+    if value.is_some_and(|value| !(0..=MAX_KUBERNETES_ID).contains(&value)) {
+        return Err(format!(
+            "{field_path} must be between 0 and {MAX_KUBERNETES_ID}, inclusive"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_declared_security_context_ids(
+    pod_field_path: &str,
+    pod: Option<&PodSecurityContextOverride>,
+    container_field_path: &str,
+    container: Option<&corev1::SecurityContext>,
+) -> Result<(), String> {
+    validate_kubernetes_id(
+        &format!("{pod_field_path}.runAsUser"),
+        pod.and_then(|context| context.run_as_user),
+    )?;
+    validate_kubernetes_id(
+        &format!("{pod_field_path}.runAsGroup"),
+        pod.and_then(|context| context.run_as_group),
+    )?;
+    validate_kubernetes_id(
+        &format!("{pod_field_path}.fsGroup"),
+        pod.and_then(|context| context.fs_group),
+    )?;
+    validate_kubernetes_id(
+        &format!("{container_field_path}.runAsUser"),
+        container.and_then(|context| context.run_as_user),
+    )?;
+    validate_kubernetes_id(
+        &format!("{container_field_path}.runAsGroup"),
+        container.and_then(|context| context.run_as_group),
+    )?;
+
+    Ok(())
+}
+
+fn apply_pod_security_context_override(
+    context: &mut corev1::PodSecurityContext,
+    overrides: &PodSecurityContextOverride,
+) {
+    context.run_as_user = overrides.run_as_user.or(context.run_as_user);
+    context.run_as_group = overrides.run_as_group.or(context.run_as_group);
+    context.fs_group = overrides.fs_group.or(context.fs_group);
+    context.run_as_non_root = overrides.run_as_non_root.or(context.run_as_non_root);
+    context.seccomp_profile = overrides
+        .seccomp_profile
+        .clone()
+        .or_else(|| context.seccomp_profile.clone());
+}
+
+fn explicit_pod_run_as_non_root(
+    tenant: Option<&PodSecurityContextOverride>,
+    pool: Option<&PodSecurityContextOverride>,
+) -> Option<bool> {
+    pool.and_then(|overrides| overrides.run_as_non_root)
+        .or_else(|| tenant.and_then(|overrides| overrides.run_as_non_root))
+}
+
+fn effective_pod_security_context(
+    tenant: Option<&PodSecurityContextOverride>,
+    pool: Option<&PodSecurityContextOverride>,
+) -> corev1::PodSecurityContext {
+    let explicit_run_as_non_root = explicit_pod_run_as_non_root(tenant, pool);
+    let mut context = corev1::PodSecurityContext {
+        run_as_user: Some(DEFAULT_RUN_AS_USER),
+        run_as_group: Some(DEFAULT_RUN_AS_GROUP),
+        fs_group: Some(DEFAULT_FS_GROUP),
+        fs_group_change_policy: Some("OnRootMismatch".to_string()),
+        run_as_non_root: Some(true),
+        seccomp_profile: Some(corev1::SeccompProfile {
+            type_: "RuntimeDefault".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    for overrides in [tenant, pool].into_iter().flatten() {
+        apply_pod_security_context_override(&mut context, overrides);
+    }
+
+    context.run_as_non_root = Some(effective_run_as_non_root(
+        context.run_as_user,
+        explicit_run_as_non_root,
+    ));
+
+    context
+}
+
+fn merge_container_security_context(
+    context: &mut corev1::SecurityContext,
+    overrides: &corev1::SecurityContext,
+) {
+    context.merge_from(overrides.clone());
+
+    // These tagged profile objects are atomic Kubernetes values. Deep-merging them can retain
+    // localhostProfile after changing type from Localhost to RuntimeDefault, which is invalid.
+    if overrides.seccomp_profile.is_some() {
+        context
+            .seccomp_profile
+            .clone_from(&overrides.seccomp_profile);
+    }
+    if overrides.app_armor_profile.is_some() {
+        context
+            .app_armor_profile
+            .clone_from(&overrides.app_armor_profile);
+    }
+}
+
+fn effective_container_security_context(
+    tenant: Option<&corev1::SecurityContext>,
+    pool: Option<&corev1::SecurityContext>,
+    explicit_pod_run_as_non_root: Option<bool>,
+) -> corev1::SecurityContext {
+    let explicit_container_run_as_non_root = pool
+        .and_then(|overrides| overrides.run_as_non_root)
+        .or_else(|| tenant.and_then(|overrides| overrides.run_as_non_root));
+    let mut context = corev1::SecurityContext {
+        allow_privilege_escalation: Some(false),
+        capabilities: Some(corev1::Capabilities {
+            drop: Some(vec!["ALL".to_string()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    for overrides in [tenant, pool].into_iter().flatten() {
+        merge_container_security_context(&mut context, overrides);
+    }
+
+    // A container UID overrides the Pod UID. When neither the container nor Pod explicitly
+    // chooses runAsNonRoot, materialize the matching container value so the Pod default does not
+    // turn an intentional UID 0 override into the contradictory UID 0 + runAsNonRoot=true pair.
+    if context.run_as_user.is_some()
+        && explicit_container_run_as_non_root.is_none()
+        && explicit_pod_run_as_non_root.is_none()
+    {
+        context.run_as_non_root = Some(effective_run_as_non_root(context.run_as_user, None));
+    }
+
+    context
+}
+
+struct EffectiveWorkloadSecurityContext {
+    pod: corev1::PodSecurityContext,
+    container: corev1::SecurityContext,
+}
+
+fn effective_workload_security_context(
+    tenant_pod: Option<&PodSecurityContextOverride>,
+    pool_pod: Option<&PodSecurityContextOverride>,
+    tenant_container: Option<&corev1::SecurityContext>,
+    pool_container: Option<&corev1::SecurityContext>,
+) -> EffectiveWorkloadSecurityContext {
+    let explicit_pod_run_as_non_root = explicit_pod_run_as_non_root(tenant_pod, pool_pod);
+    EffectiveWorkloadSecurityContext {
+        pod: effective_pod_security_context(tenant_pod, pool_pod),
+        container: effective_container_security_context(
+            tenant_container,
+            pool_container,
+            explicit_pod_run_as_non_root,
+        ),
+    }
+}
 
 const TLS_OPERATOR_MANAGED_ENV_VARS: &[&str] = &[
     "RUSTFS_VOLUMES",
@@ -84,6 +486,201 @@ fn stateful_name(tenant: &Tenant, pool: &Pool) -> String {
 }
 
 impl Tenant {
+    fn validate_declared_workload_security_contexts(&self) -> Result<(), types::error::Error> {
+        let invalid_profile = |message| types::error::Error::InvalidWorkloadSecurityProfile {
+            name: self.name(),
+            message,
+        };
+        let validate_seccomp = |field_path: &str, type_: &str, localhost_profile: Option<&str>| {
+            validate_declared_seccomp_profile(field_path, type_, localhost_profile)
+                .map_err(&invalid_profile)
+        };
+        let validate_app_armor =
+            |field_path: &str, type_: &str, localhost_profile: Option<&str>| {
+                validate_declared_app_armor_profile(field_path, type_, localhost_profile).map_err(
+                    |message| types::error::Error::InvalidWorkloadSecurityProfile {
+                        name: self.name(),
+                        message,
+                    },
+                )
+            };
+
+        validate_declared_security_context_ids(
+            "spec.securityContext",
+            self.spec.security_context.as_ref(),
+            "spec.containerSecurityContext",
+            self.spec.container_security_context.as_ref(),
+        )
+        .map_err(&invalid_profile)?;
+
+        if let Some(profile) = self
+            .spec
+            .security_context
+            .as_ref()
+            .and_then(|context| context.seccomp_profile.as_ref())
+        {
+            validate_seccomp(
+                "spec.securityContext.seccompProfile",
+                &profile.type_,
+                profile.localhost_profile.as_deref(),
+            )?;
+        }
+
+        if let Some(context) = self.spec.container_security_context.as_ref() {
+            if let Some(profile) = context.seccomp_profile.as_ref() {
+                validate_seccomp(
+                    "spec.containerSecurityContext.seccompProfile",
+                    &profile.type_,
+                    profile.localhost_profile.as_deref(),
+                )?;
+            }
+            if let Some(profile) = context.app_armor_profile.as_ref() {
+                validate_app_armor(
+                    "spec.containerSecurityContext.appArmorProfile",
+                    &profile.type_,
+                    profile.localhost_profile.as_deref(),
+                )?;
+            }
+        }
+
+        for pool in &self.spec.pools {
+            validate_declared_security_context_ids(
+                &format!("spec.pools[name={}].securityContext", pool.name),
+                pool.security_context.as_ref(),
+                &format!("spec.pools[name={}].containerSecurityContext", pool.name),
+                pool.container_security_context.as_ref(),
+            )
+            .map_err(&invalid_profile)?;
+
+            if let Some(profile) = pool
+                .security_context
+                .as_ref()
+                .and_then(|context| context.seccomp_profile.as_ref())
+            {
+                validate_seccomp(
+                    &format!(
+                        "spec.pools[name={}].securityContext.seccompProfile",
+                        pool.name
+                    ),
+                    &profile.type_,
+                    profile.localhost_profile.as_deref(),
+                )?;
+            }
+
+            if let Some(context) = pool.container_security_context.as_ref() {
+                if let Some(profile) = context.seccomp_profile.as_ref() {
+                    validate_seccomp(
+                        &format!(
+                            "spec.pools[name={}].containerSecurityContext.seccompProfile",
+                            pool.name
+                        ),
+                        &profile.type_,
+                        profile.localhost_profile.as_deref(),
+                    )?;
+                }
+                if let Some(profile) = context.app_armor_profile.as_ref() {
+                    validate_app_armor(
+                        &format!(
+                            "spec.pools[name={}].containerSecurityContext.appArmorProfile",
+                            pool.name
+                        ),
+                        &profile.type_,
+                        profile.localhost_profile.as_deref(),
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_effective_workload_identity(
+        &self,
+        pool: &Pool,
+        security: &EffectiveWorkloadSecurityContext,
+    ) -> Result<(), types::error::Error> {
+        let effective_run_as_user = security.container.run_as_user.or(security.pod.run_as_user);
+        let effective_run_as_non_root = security
+            .container
+            .run_as_non_root
+            .or(security.pod.run_as_non_root);
+
+        if effective_run_as_user == Some(0) && effective_run_as_non_root == Some(true) {
+            return Err(types::error::Error::InvalidWorkloadSecurityProfile {
+                name: self.name(),
+                message: format!(
+                    "pool '{}' resolves runAsUser to UID 0 while runAsNonRoot is explicitly true; use a non-zero UID or explicitly set the effective runAsNonRoot value to false",
+                    pool.name
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_workload_security_compatibility(&self) -> Result<(), types::error::Error> {
+        self.validate_declared_workload_security_contexts()?;
+
+        let image = super::helper::get_rustfs_image_or_default(self.spec.image.as_ref());
+        let image_compatibility = classify_rustfs_image_for_seccomp(&image);
+
+        for pool in &self.spec.pools {
+            let security = effective_workload_security_context(
+                self.spec.security_context.as_ref(),
+                pool.security_context.as_ref(),
+                self.spec.container_security_context.as_ref(),
+                pool.container_security_context.as_ref(),
+            );
+            self.validate_effective_workload_identity(pool, &security)?;
+
+            let seccomp_type = security
+                .container
+                .seccomp_profile
+                .as_ref()
+                .or(security.pod.seccomp_profile.as_ref())
+                .map(|profile| profile.type_.as_str());
+
+            if seccomp_type != Some("RuntimeDefault") {
+                continue;
+            }
+
+            match image_compatibility {
+                RustfsImageSeccompCompatibility::KnownCompatible => {}
+                RustfsImageSeccompCompatibility::KnownIncompatible { tag } => {
+                    return Err(types::error::Error::WorkloadSecurityIncompatible {
+                        name: self.name(),
+                        message: format!(
+                            "image '{image}' ({tag}) enables Tokio io_uring and cannot run with RuntimeDefault seccomp; upgrade to a RustFS build containing rustfs/rustfs#4364 before reconciling pool '{}', or configure a compatible Localhost seccomp profile",
+                            pool.name
+                        ),
+                    });
+                }
+                RustfsImageSeccompCompatibility::Unverifiable { reason } => {
+                    let image_acknowledged = self
+                        .metadata
+                        .annotations
+                        .as_ref()
+                        .and_then(|annotations| {
+                            annotations.get(RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION)
+                        })
+                        .is_some_and(|acknowledged_image| acknowledged_image == &image);
+                    if !image_acknowledged {
+                        return Err(types::error::Error::WorkloadSecurityIncompatible {
+                            name: self.name(),
+                            message: format!(
+                                "image '{image}' uses a {} and its seccomp compatibility cannot be verified for RuntimeDefault in pool '{}'; pin a verified RustFS 1.0.0-beta.9 or later release tag (for example 1.0.0-beta.10), or verify the image and set metadata.annotations['{RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION}'] to the exact current resolved image reference; mutable references can change without changing the annotation, so a digest-qualified reference is strongly recommended",
+                                reason.description(),
+                                pool.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn rustfs_pool_volume_spec(
         &self,
         pool: &Pool,
@@ -442,6 +1039,8 @@ impl Tenant {
         tls_plan: &TlsPlan,
         cluster_domain: &str,
     ) -> Result<v1::StatefulSet, types::error::Error> {
+        self.validate_declared_workload_security_contexts()?;
+
         let labels = self.pool_labels(pool);
         let selector_labels = self.pool_selector_labels(pool);
 
@@ -574,24 +1173,17 @@ impl Tenant {
         pod_volumes.extend(tls_plan.volumes.clone());
         volume_mounts.extend(tls_plan.volume_mounts.clone());
 
-        // Enforce non-root execution and make mounted volumes writable by RustFS user.
-        // If spec.securityContext overrides are set, use those values instead.
-        let sc = self.spec.security_context.as_ref();
-
-        let pod_security_context = Some(corev1::PodSecurityContext {
-            run_as_user: Some(
-                sc.and_then(|s| s.run_as_user)
-                    .unwrap_or(DEFAULT_RUN_AS_USER),
-            ),
-            run_as_group: Some(
-                sc.and_then(|s| s.run_as_group)
-                    .unwrap_or(DEFAULT_RUN_AS_GROUP),
-            ),
-            fs_group: Some(sc.and_then(|s| s.fs_group).unwrap_or(DEFAULT_FS_GROUP)),
-            fs_group_change_policy: Some("OnRootMismatch".to_string()),
-            run_as_non_root: sc.and_then(|s| s.run_as_non_root),
-            ..Default::default()
-        });
+        let security = effective_workload_security_context(
+            self.spec.security_context.as_ref(),
+            pool.security_context.as_ref(),
+            self.spec.container_security_context.as_ref(),
+            pool.container_security_context.as_ref(),
+        );
+        self.validate_effective_workload_identity(pool, &security)?;
+        let EffectiveWorkloadSecurityContext {
+            pod: pod_security_context,
+            container: container_security_context,
+        } = security;
 
         let container = corev1::Container {
             name: "rustfs".to_owned(),
@@ -630,6 +1222,7 @@ impl Tenant {
             readiness_probe: Some(http_probe("/health/ready", tls_plan.probe_scheme)),
             startup_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
             termination_message_policy: Some("FallbackToLogsOnError".to_string()),
+            security_context: Some(container_security_context),
             ..Default::default()
         };
 
@@ -666,7 +1259,7 @@ impl Tenant {
                     spec: Some(corev1::PodSpec {
                         service_account_name: Some(self.service_account_name()),
                         containers: vec![container],
-                        security_context: pod_security_context,
+                        security_context: Some(pod_security_context),
                         volumes: Some(pod_volumes),
                         scheduler_name: self.spec.scheduler.clone(),
                         // Pool-level priority class overrides tenant-level
@@ -884,6 +1477,13 @@ impl Tenant {
 
         // Check image pull policy
         if existing_container.image_pull_policy != desired_container.image_pull_policy {
+            return Ok(true);
+        }
+
+        // Check RustFS container security context.
+        if serde_json::to_value(&existing_container.security_context)?
+            != serde_json::to_value(&desired_container.security_context)?
+        {
             return Ok(true);
         }
 
@@ -1138,12 +1738,17 @@ impl Tenant {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER};
+    use super::{
+        DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER,
+        MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH, RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION,
+        validate_declared_app_armor_profile, validate_declared_seccomp_profile,
+    };
     use crate::types::v1alpha1::encryption::{
         EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef,
     };
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
-    use crate::types::v1alpha1::tenant::RpcSecretRef;
+    use crate::types::v1alpha1::security_context::{MAX_KUBERNETES_ID, PodSecurityContextOverride};
+    use crate::types::v1alpha1::tenant::{RpcSecretRef, Tenant};
     use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
     use k8s_openapi::api::core::v1 as corev1;
 
@@ -1155,6 +1760,248 @@ mod tests {
 
     fn tls_plan(hash: &str) -> TlsPlan {
         TlsPlan::for_test("server-tls", hash)
+    }
+
+    fn runtime_default_seccomp_profile() -> corev1::SeccompProfile {
+        corev1::SeccompProfile {
+            type_: "RuntimeDefault".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn acknowledge_runtime_default_image(tenant: &mut Tenant, image: &str) {
+        tenant.metadata.annotations.get_or_insert_default().insert(
+            RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION.to_string(),
+            image.to_string(),
+        );
+    }
+
+    fn invalid_security_profile_error_message(tenant: &Tenant) -> String {
+        match tenant.validate_workload_security_compatibility() {
+            Err(crate::types::error::Error::InvalidWorkloadSecurityProfile { message, .. }) => {
+                message
+            }
+            Ok(()) => panic!("workload security validation should fail"),
+            Err(error) => panic!("unexpected workload security error: {error}"),
+        }
+    }
+
+    type SetDeclaredId = fn(&mut Tenant, i64);
+
+    fn declared_security_context_id_fields() -> Vec<(&'static str, SetDeclaredId)> {
+        vec![
+            ("spec.securityContext.runAsUser", |tenant, value| {
+                tenant
+                    .spec
+                    .security_context
+                    .get_or_insert_default()
+                    .run_as_user = Some(value);
+            }),
+            ("spec.securityContext.runAsGroup", |tenant, value| {
+                tenant
+                    .spec
+                    .security_context
+                    .get_or_insert_default()
+                    .run_as_group = Some(value);
+            }),
+            ("spec.securityContext.fsGroup", |tenant, value| {
+                tenant
+                    .spec
+                    .security_context
+                    .get_or_insert_default()
+                    .fs_group = Some(value);
+            }),
+            (
+                "spec.containerSecurityContext.runAsUser",
+                |tenant, value| {
+                    tenant
+                        .spec
+                        .container_security_context
+                        .get_or_insert_default()
+                        .run_as_user = Some(value);
+                },
+            ),
+            (
+                "spec.containerSecurityContext.runAsGroup",
+                |tenant, value| {
+                    tenant
+                        .spec
+                        .container_security_context
+                        .get_or_insert_default()
+                        .run_as_group = Some(value);
+                },
+            ),
+            (
+                "spec.pools[name=pool-0].securityContext.runAsUser",
+                |tenant, value| {
+                    tenant.spec.pools[0]
+                        .security_context
+                        .get_or_insert_default()
+                        .run_as_user = Some(value);
+                },
+            ),
+            (
+                "spec.pools[name=pool-0].securityContext.runAsGroup",
+                |tenant, value| {
+                    tenant.spec.pools[0]
+                        .security_context
+                        .get_or_insert_default()
+                        .run_as_group = Some(value);
+                },
+            ),
+            (
+                "spec.pools[name=pool-0].securityContext.fsGroup",
+                |tenant, value| {
+                    tenant.spec.pools[0]
+                        .security_context
+                        .get_or_insert_default()
+                        .fs_group = Some(value);
+                },
+            ),
+            (
+                "spec.pools[name=pool-0].containerSecurityContext.runAsUser",
+                |tenant, value| {
+                    tenant.spec.pools[0]
+                        .container_security_context
+                        .get_or_insert_default()
+                        .run_as_user = Some(value);
+                },
+            ),
+            (
+                "spec.pools[name=pool-0].containerSecurityContext.runAsGroup",
+                |tenant, value| {
+                    tenant.spec.pools[0]
+                        .container_security_context
+                        .get_or_insert_default()
+                        .run_as_group = Some(value);
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn declared_security_context_ids_reject_out_of_range_values_at_every_scope() {
+        for (field_path, set_value) in declared_security_context_id_fields() {
+            for value in [-1, MAX_KUBERNETES_ID + 1] {
+                let mut tenant = crate::tests::create_test_tenant(None, None);
+                set_value(&mut tenant, value);
+
+                let message = invalid_security_profile_error_message(&tenant);
+                assert!(
+                    message.contains(field_path),
+                    "missing field path for value {value}: {message}"
+                );
+                assert!(
+                    message.contains("between 0 and 2147483647, inclusive"),
+                    "missing valid range for value {value}: {message}"
+                );
+
+                let render_error = tenant
+                    .new_statefulset(&tenant.spec.pools[0])
+                    .expect_err("an out-of-range workload ID must fail before rendering");
+                assert!(matches!(
+                    render_error,
+                    crate::types::error::Error::InvalidWorkloadSecurityProfile { message, .. }
+                        if message.contains(field_path)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn declared_security_context_ids_accept_kubernetes_boundaries_at_every_scope() {
+        for (field_path, set_value) in declared_security_context_id_fields() {
+            for value in [0, MAX_KUBERNETES_ID] {
+                let mut tenant = crate::tests::create_test_tenant(None, None);
+                set_value(&mut tenant, value);
+
+                tenant
+                    .validate_workload_security_compatibility()
+                    .unwrap_or_else(|error| {
+                        panic!("{field_path} should accept boundary value {value}: {error}")
+                    });
+                tenant
+                    .new_statefulset(&tenant.spec.pools[0])
+                    .unwrap_or_else(|error| {
+                        panic!("{field_path} should render boundary value {value}: {error}")
+                    });
+            }
+        }
+    }
+
+    #[test]
+    fn seccomp_localhost_profile_uses_kubernetes_descending_path_rules() {
+        validate_declared_seccomp_profile(
+            "spec.securityContext.seccompProfile",
+            "Localhost",
+            Some("profiles/rustfs.json"),
+        )
+        .expect("relative descending path should be valid");
+
+        for (profile, detail) in [
+            ("", "must be nonblank"),
+            ("/profiles/rustfs.json", "must be a relative path"),
+            ("profiles/../rustfs.json", "must not contain '..'"),
+            ("../profiles/rustfs.json", "must not contain '..'"),
+        ] {
+            let error = validate_declared_seccomp_profile(
+                "spec.securityContext.seccompProfile",
+                "Localhost",
+                Some(profile),
+            )
+            .expect_err("invalid seccomp Localhost path should be rejected");
+            assert!(
+                error.contains(detail),
+                "unexpected validation error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_armor_localhost_profile_uses_kubernetes_name_rules() {
+        validate_declared_app_armor_profile(
+            "spec.containerSecurityContext.appArmorProfile",
+            "Localhost",
+            Some("profiles/rustfs"),
+        )
+        .expect("unpadded AppArmor profile name should be valid");
+
+        let maximum_length = "a".repeat(MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH);
+        validate_declared_app_armor_profile(
+            "spec.containerSecurityContext.appArmorProfile",
+            "Localhost",
+            Some(&maximum_length),
+        )
+        .expect("a 4095-byte AppArmor Localhost name should be valid");
+
+        for (profile, detail) in [
+            ("", "must be nonblank"),
+            (" profiles/rustfs", "must not be padded with whitespace"),
+            ("profiles/rustfs ", "must not be padded with whitespace"),
+        ] {
+            let error = validate_declared_app_armor_profile(
+                "spec.containerSecurityContext.appArmorProfile",
+                "Localhost",
+                Some(profile),
+            )
+            .expect_err("invalid AppArmor Localhost name should be rejected");
+            assert!(
+                error.contains(detail),
+                "unexpected validation error: {error}"
+            );
+        }
+
+        let oversized = "a".repeat(MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH + 1);
+        let error = validate_declared_app_armor_profile(
+            "spec.containerSecurityContext.appArmorProfile",
+            "Localhost",
+            Some(&oversized),
+        )
+        .expect_err("oversized AppArmor Localhost name should be rejected");
+        assert!(
+            error.contains("must be at most 4095 bytes"),
+            "unexpected validation error: {error}"
+        );
     }
 
     fn env_value<'a>(container: &'a corev1::Container, name: &str) -> Option<&'a str> {
@@ -1993,6 +2840,10 @@ mod tests {
             .template
             .spec
             .expect("Pod template should have spec");
+        assert_eq!(
+            pod_spec.containers[0].image.as_deref(),
+            Some("rustfs/rustfs:1.0.0-beta.10")
+        );
 
         let security_context = pod_spec
             .security_context
@@ -2019,6 +2870,731 @@ mod tests {
             Some("OnRootMismatch".to_string()),
             "fsGroup change policy should be set for PVC mounts"
         );
+        assert_eq!(security_context.run_as_non_root, Some(true));
+        assert_eq!(
+            security_context
+                .seccomp_profile
+                .as_ref()
+                .map(|profile| profile.type_.as_str()),
+            Some("RuntimeDefault")
+        );
+
+        let container_security_context = pod_spec.containers[0]
+            .security_context
+            .as_ref()
+            .expect("RustFS container should have securityContext");
+        assert_eq!(
+            container_security_context.allow_privilege_escalation,
+            Some(false)
+        );
+        assert_eq!(
+            container_security_context
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.drop.as_ref()),
+            Some(&vec!["ALL".to_string()])
+        );
+        assert_eq!(
+            container_security_context.read_only_root_filesystem, None,
+            "readOnlyRootFilesystem is configurable but not required by restricted"
+        );
+    }
+
+    #[test]
+    fn known_tokio_io_uring_images_are_blocked_with_runtime_default_seccomp() {
+        for image in [
+            "rustfs/rustfs:1.0.0-alpha.99",
+            "rustfs/rustfs:1.0.0-beta.8",
+            "docker.io/rustfs/rustfs:1.0.0-beta.8-glibc",
+            "ghcr.io/rustfs/rustfs:1.0.0-beta.8-glibc",
+            "quay.io/rustfs/rustfs:1.0.0-beta.8-glibc",
+            "registry-1.docker.io/rustfs/rustfs:v1.0.0-beta.7-glibc",
+        ] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.image = Some(image.to_string());
+
+            let error = match tenant.validate_workload_security_compatibility() {
+                Ok(()) => panic!("image {image} should be blocked"),
+                Err(error) => error,
+            };
+
+            assert!(matches!(
+                error,
+                crate::types::error::Error::WorkloadSecurityIncompatible { message, .. }
+                    if message.contains("rustfs/rustfs#4364")
+                        && message.contains("pool-0")
+                        && message.contains(image)
+            ));
+        }
+
+        let image = "rustfs/rustfs:1.0.0-beta.8";
+        let mut acknowledged_incompatible = crate::tests::create_test_tenant(None, None);
+        acknowledged_incompatible.spec.image = Some(image.to_string());
+        acknowledge_runtime_default_image(&mut acknowledged_incompatible, image);
+        let error = acknowledged_incompatible
+            .validate_workload_security_compatibility()
+            .expect_err("an image acknowledgement must not override a known incompatibility");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::WorkloadSecurityIncompatible { message, .. }
+                if message.contains("rustfs/rustfs#4364")
+        ));
+    }
+
+    #[test]
+    fn compatible_localhost_profile_allows_legacy_rustfs_image() {
+        for image in [
+            "docker.io/rustfs/rustfs:1.0.0-alpha.99",
+            "docker.io/rustfs/rustfs:1.0.0-beta.8",
+        ] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.image = Some(image.to_string());
+            tenant.spec.security_context = Some(PodSecurityContextOverride {
+                seccomp_profile: Some(corev1::SeccompProfile {
+                    localhost_profile: Some("profiles/rustfs-io-uring.json".to_string()),
+                    type_: "Localhost".to_string(),
+                }),
+                ..Default::default()
+            });
+
+            tenant
+                .validate_workload_security_compatibility()
+                .unwrap_or_else(|error| {
+                    panic!("image {image} should allow an explicit Localhost profile: {error}")
+                });
+        }
+    }
+
+    #[test]
+    fn verified_compatible_rustfs_release_tags_are_accepted() {
+        for image in [
+            "rustfs/rustfs:1.0.0-beta.9",
+            "docker.io/rustfs/rustfs:1.0.0-beta.9-glibc",
+            "ghcr.io/rustfs/rustfs:1.0.0-beta.9-glibc",
+            "quay.io/rustfs/rustfs:1.0.0-beta.9-glibc",
+            "index.docker.io/rustfs/rustfs:v1.0.0-beta.10-glibc",
+            "rustfs/rustfs:1.0.0",
+            "rustfs/rustfs:1.0.1-glibc",
+        ] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.image = Some(image.to_string());
+
+            tenant
+                .validate_workload_security_compatibility()
+                .unwrap_or_else(|error| panic!("image {image} should not be blocked: {error}"));
+        }
+    }
+
+    #[test]
+    fn unverifiable_images_are_blocked_with_implicit_runtime_default_seccomp() {
+        for image in [
+            "rustfs/rustfs:latest",
+            "rustfs/rustfs",
+            "rustfs/rustfs@sha256:0123456789abcdef",
+            "rustfs/rustfs:1.0.0-beta.10@sha256:0123456789abcdef",
+            "rustfs/rustfs:1.0.0-beta.10-preview.5",
+            "rustfs/rustfs:nightly",
+            "rustfs/rustfs:01.0.0",
+            "rustfs/rustfs:1.00.0",
+            "rustfs/rustfs:1.0.00",
+            "rustfs/rustfs:1.0.0-beta.09",
+            "rustfs/rustfs:1.0.0-beta.09-glibc",
+            "registry.example.com/rustfs/rustfs:1.0.0-beta.10",
+        ] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.image = Some(image.to_string());
+
+            let error = tenant
+                .validate_workload_security_compatibility()
+                .expect_err("unverifiable image should be blocked with implicit RuntimeDefault");
+            assert!(matches!(
+                error,
+                crate::types::error::Error::WorkloadSecurityIncompatible { message, .. }
+                    if message.contains(image)
+                        && message.contains("cannot be verified")
+                        && message.contains(RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION)
+                        && message.contains("pool-0")
+            ));
+        }
+    }
+
+    #[test]
+    fn runtime_default_image_ack_must_exactly_match_the_resolved_image() {
+        let image = "rustfs/rustfs:latest";
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(image.to_string());
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            seccomp_profile: Some(runtime_default_seccomp_profile()),
+            ..Default::default()
+        });
+
+        tenant
+            .validate_workload_security_compatibility()
+            .expect_err("an explicit RuntimeDefault profile must not acknowledge the image");
+
+        acknowledge_runtime_default_image(&mut tenant, "rustfs/rustfs:nightly");
+        tenant
+            .validate_workload_security_compatibility()
+            .expect_err("a mismatched image acknowledgement must not be accepted");
+
+        acknowledge_runtime_default_image(&mut tenant, image);
+        tenant
+            .validate_workload_security_compatibility()
+            .expect("a matching acknowledgement should permit an unverifiable mutable image");
+
+        tenant.spec.image = Some("rustfs/rustfs:nightly".to_string());
+        tenant
+            .validate_workload_security_compatibility()
+            .expect_err("changing the image must invalidate its previous acknowledgement");
+    }
+
+    #[test]
+    fn digest_is_authoritative_over_a_legacy_looking_tag() {
+        // Kubernetes pulls tag@digest references by digest, so the tag cannot prove which build
+        // runs. A matching acknowledgement may therefore permit even a beta.8-looking digest.
+        let image = "rustfs/rustfs:1.0.0-beta.8@sha256:0123456789abcdef";
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(image.to_string());
+        acknowledge_runtime_default_image(&mut tenant, image);
+
+        tenant
+            .validate_workload_security_compatibility()
+            .expect("a matching acknowledgement should permit a digest-qualified image");
+    }
+
+    #[test]
+    fn invalid_declared_security_profiles_are_rejected_before_image_compatibility() {
+        let legacy_image = "rustfs/rustfs:1.0.0-beta.8".to_string();
+        let mut cases = Vec::new();
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                type_: "Localhost".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.securityContext.seccompProfile.localhostProfile",
+            "must be nonblank",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                localhost_profile: Some("profiles/invalid.json".to_string()),
+                type_: "RuntimeDefault".to_string(),
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.containerSecurityContext.seccompProfile.localhostProfile",
+            "must be omitted",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                type_: "Invalid".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.containerSecurityContext.appArmorProfile.type",
+            "must be RuntimeDefault, Localhost, or Unconfined",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                localhost_profile: Some("   ".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.pools[name=pool-0].securityContext.seccompProfile.localhostProfile",
+            "must be nonblank",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                type_: "Unknown".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.pools[name=pool-0].containerSecurityContext.seccompProfile.type",
+            "must be RuntimeDefault, Localhost, or Unconfined",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                localhost_profile: Some("/profiles/rustfs.json".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.securityContext.seccompProfile.localhostProfile",
+            "must be a relative path",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                localhost_profile: Some("profiles/../rustfs.json".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.pools[name=pool-0].containerSecurityContext.seccompProfile.localhostProfile",
+            "must not contain '..'",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                localhost_profile: Some(" profiles/rustfs".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.containerSecurityContext.appArmorProfile.localhostProfile",
+            "must not be padded with whitespace",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image.clone());
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                localhost_profile: Some("a".repeat(MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH + 1)),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.pools[name=pool-0].containerSecurityContext.appArmorProfile.localhostProfile",
+            "must be at most 4095 bytes",
+        ));
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some(legacy_image);
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                localhost_profile: Some("profiles/invalid".to_string()),
+                type_: "Unconfined".to_string(),
+            }),
+            ..Default::default()
+        });
+        cases.push((
+            tenant,
+            "spec.pools[name=pool-0].containerSecurityContext.appArmorProfile.localhostProfile",
+            "must be omitted",
+        ));
+
+        for (tenant, field, detail) in cases {
+            let message = invalid_security_profile_error_message(&tenant);
+            assert!(message.contains(field), "missing field path in: {message}");
+            assert!(
+                message.contains(detail),
+                "missing validation detail in: {message}"
+            );
+            assert!(
+                !message.contains("io_uring"),
+                "profile validation must run before image compatibility: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_declared_security_profiles_are_accepted_at_every_scope() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some("rustfs/rustfs:1.0.0-beta.8-glibc".to_string());
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                type_: "RuntimeDefault".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                type_: "RuntimeDefault".to_string(),
+                ..Default::default()
+            }),
+            seccomp_profile: Some(corev1::SeccompProfile {
+                type_: "Unconfined".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                type_: "Unconfined".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                localhost_profile: Some("profiles/rustfs-apparmor".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            seccomp_profile: Some(corev1::SeccompProfile {
+                localhost_profile: Some("profiles/rustfs-seccomp.json".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+
+        tenant
+            .validate_workload_security_compatibility()
+            .expect("valid Localhost container override should allow the legacy image");
+    }
+
+    #[test]
+    fn security_context_overrides_merge_from_tenant_and_pool() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            run_as_user: Some(20_001),
+            run_as_non_root: Some(false),
+            seccomp_profile: Some(corev1::SeccompProfile {
+                localhost_profile: Some("profiles/rustfs.json".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            capabilities: Some(corev1::Capabilities {
+                add: Some(vec!["NET_BIND_SERVICE".to_string()]),
+                ..Default::default()
+            }),
+            read_only_root_filesystem: Some(true),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride {
+            run_as_group: Some(30_001),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            allow_privilege_escalation: Some(true),
+            capabilities: Some(corev1::Capabilities {
+                drop: Some(vec![]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create StatefulSet");
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+        let pod_context = pod_spec
+            .security_context
+            .expect("Pod should have securityContext");
+
+        assert_eq!(pod_context.run_as_user, Some(20_001));
+        assert_eq!(pod_context.run_as_group, Some(30_001));
+        assert_eq!(pod_context.fs_group, Some(DEFAULT_FS_GROUP));
+        assert_eq!(pod_context.run_as_non_root, Some(false));
+        assert_eq!(
+            pod_context
+                .seccomp_profile
+                .as_ref()
+                .map(|profile| profile.type_.as_str()),
+            Some("Localhost")
+        );
+
+        let container_context = pod_spec.containers[0]
+            .security_context
+            .as_ref()
+            .expect("RustFS container should have securityContext");
+        assert_eq!(container_context.allow_privilege_escalation, Some(true));
+        assert_eq!(container_context.read_only_root_filesystem, Some(true));
+        assert_eq!(container_context.run_as_non_root, None);
+        assert_eq!(container_context.seccomp_profile, None);
+        assert_eq!(
+            container_context
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.add.as_ref()),
+            Some(&vec!["NET_BIND_SERVICE".to_string()])
+        );
+        assert_eq!(
+            container_context
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.drop.as_ref()),
+            Some(&vec![])
+        );
+    }
+
+    #[test]
+    fn partial_container_override_preserves_safe_defaults() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            read_only_root_filesystem: Some(true),
+            ..Default::default()
+        });
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create StatefulSet");
+        let context = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec")
+            .containers[0]
+            .security_context
+            .clone()
+            .expect("RustFS container should have securityContext");
+
+        assert_eq!(context.allow_privilege_escalation, Some(false));
+        assert_eq!(context.read_only_root_filesystem, Some(true));
+        assert_eq!(
+            context
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.drop.as_ref()),
+            Some(&vec!["ALL".to_string()])
+        );
+    }
+
+    #[test]
+    fn legacy_root_override_disables_implicit_run_as_non_root() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            run_as_user: Some(0),
+            ..Default::default()
+        });
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create StatefulSet");
+        let context = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec")
+            .security_context
+            .expect("Pod should have securityContext");
+
+        assert_eq!(context.run_as_user, Some(0));
+        assert_eq!(context.run_as_non_root, Some(false));
+    }
+
+    #[test]
+    fn container_root_override_derives_non_root_false_at_tenant_and_pool_scopes() {
+        for pool_scope in [false, true] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            let root_context = corev1::SecurityContext {
+                run_as_user: Some(0),
+                ..Default::default()
+            };
+            if pool_scope {
+                tenant.spec.pools[0].container_security_context = Some(root_context);
+            } else {
+                tenant.spec.container_security_context = Some(root_context);
+            }
+
+            tenant
+                .validate_workload_security_compatibility()
+                .expect("implicit container runAsNonRoot should follow the container UID");
+            let statefulset = tenant
+                .new_statefulset(&tenant.spec.pools[0])
+                .expect("root container override should render consistently");
+            let pod_spec = statefulset
+                .spec
+                .expect("StatefulSet should have spec")
+                .template
+                .spec
+                .expect("Pod template should have spec");
+            let container_context = pod_spec.containers[0]
+                .security_context
+                .as_ref()
+                .expect("RustFS container should have securityContext");
+
+            assert_eq!(
+                pod_spec.security_context.unwrap().run_as_non_root,
+                Some(true)
+            );
+            assert_eq!(container_context.run_as_user, Some(0));
+            assert_eq!(container_context.run_as_non_root, Some(false));
+        }
+    }
+
+    #[test]
+    fn explicit_root_and_non_root_true_is_rejected_before_rendering() {
+        let mut cases = Vec::new();
+
+        let mut tenant_container = crate::tests::create_test_tenant(None, None);
+        tenant_container.spec.container_security_context = Some(corev1::SecurityContext {
+            run_as_user: Some(0),
+            run_as_non_root: Some(true),
+            ..Default::default()
+        });
+        cases.push(tenant_container);
+
+        let mut pool_container = crate::tests::create_test_tenant(None, None);
+        pool_container.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            run_as_user: Some(0),
+            run_as_non_root: Some(true),
+            ..Default::default()
+        });
+        cases.push(pool_container);
+
+        let mut inherited_pod_true = crate::tests::create_test_tenant(None, None);
+        inherited_pod_true.spec.security_context = Some(PodSecurityContextOverride {
+            run_as_non_root: Some(true),
+            ..Default::default()
+        });
+        inherited_pod_true.spec.pools[0].container_security_context =
+            Some(corev1::SecurityContext {
+                run_as_user: Some(0),
+                ..Default::default()
+            });
+        cases.push(inherited_pod_true);
+
+        for tenant in cases {
+            let error = tenant
+                .validate_workload_security_compatibility()
+                .expect_err("UID 0 with explicit runAsNonRoot=true should be rejected");
+            assert!(matches!(
+                error,
+                crate::types::error::Error::InvalidWorkloadSecurityProfile { message, .. }
+                    if message.contains("pool-0")
+                        && message.contains("UID 0")
+                        && message.contains("explicitly true")
+            ));
+
+            let render_error = tenant
+                .new_statefulset(&tenant.spec.pools[0])
+                .expect_err("contradictory identity must fail before StatefulSet rendering");
+            assert!(matches!(
+                render_error,
+                crate::types::error::Error::InvalidWorkloadSecurityProfile { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn container_non_root_uid_overrides_implicit_pod_root_identity() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            run_as_user: Some(0),
+            ..Default::default()
+        });
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            run_as_user: Some(20_001),
+            ..Default::default()
+        });
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("container non-root UID should override the Pod root identity");
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+        let container_context = pod_spec.containers[0]
+            .security_context
+            .as_ref()
+            .expect("RustFS container should have securityContext");
+
+        assert_eq!(
+            pod_spec.security_context.unwrap().run_as_non_root,
+            Some(false)
+        );
+        assert_eq!(container_context.run_as_user, Some(20_001));
+        assert_eq!(container_context.run_as_non_root, Some(true));
+    }
+
+    #[test]
+    fn pool_replaces_tagged_container_security_profiles_atomically() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                localhost_profile: Some("profiles/tenant-apparmor".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            seccomp_profile: Some(corev1::SeccompProfile {
+                localhost_profile: Some("profiles/tenant-seccomp.json".to_string()),
+                type_: "Localhost".to_string(),
+            }),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            app_armor_profile: Some(corev1::AppArmorProfile {
+                type_: "RuntimeDefault".to_string(),
+                ..Default::default()
+            }),
+            seccomp_profile: Some(corev1::SeccompProfile {
+                type_: "RuntimeDefault".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create StatefulSet");
+        let context = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec")
+            .containers[0]
+            .security_context
+            .clone()
+            .expect("RustFS container should have securityContext");
+
+        let app_armor = context
+            .app_armor_profile
+            .expect("AppArmor profile should be set");
+        assert_eq!(app_armor.type_, "RuntimeDefault");
+        assert_eq!(app_armor.localhost_profile, None);
+
+        let seccomp = context
+            .seccomp_profile
+            .expect("Seccomp profile should be set");
+        assert_eq!(seccomp.type_, "RuntimeDefault");
+        assert_eq!(seccomp.localhost_profile, None);
     }
 
     // Test: Default logging mode is stdout (no volumes)
@@ -2393,6 +3969,50 @@ mod tests {
         assert!(
             !needs_update,
             "StatefulSet should not need update when comparing to itself"
+        );
+    }
+
+    #[test]
+    fn test_statefulset_container_security_context_change_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create StatefulSet");
+
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            read_only_root_filesystem: Some(true),
+            ..Default::default()
+        });
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, &tenant.spec.pools[0])
+            .expect("Should check update need");
+
+        assert!(needs_update, "Container security changes should roll Pods");
+    }
+
+    #[test]
+    fn test_statefulset_without_container_security_defaults_needs_update() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+        statefulset
+            .spec
+            .as_mut()
+            .and_then(|spec| spec.template.spec.as_mut())
+            .expect("Pod template should have spec")
+            .containers[0]
+            .security_context = None;
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "Legacy StatefulSets should receive safe defaults"
         );
     }
 

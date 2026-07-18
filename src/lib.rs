@@ -848,6 +848,23 @@ mod controller_watch_tests {
         assert!(documents[1].contains("scope: Namespaced"));
     }
 
+    #[test]
+    fn tracked_tenant_crds_match_generated_schema() {
+        let yaml = render_crds_yaml().expect("CRDs render to YAML");
+        let (tenant, _) = yaml
+            .split_once("---\n")
+            .expect("Tenant and PolicyBinding CRDs should be separated");
+
+        assert_eq!(
+            tenant,
+            include_str!("../deploy/rustfs-operator/crds/tenant.yaml")
+        );
+        assert_eq!(
+            tenant,
+            include_str!("../deploy/rustfs-operator/crds/tenant-crd.yaml")
+        );
+    }
+
     fn tenant_owner_ref(name: &str) -> metav1::OwnerReference {
         metav1::OwnerReference {
             api_version: "rustfs.com/v1alpha1".to_string(),

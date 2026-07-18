@@ -335,12 +335,62 @@ kubectl apply -f examples/simple-tenant.yaml
 To upgrade the operator:
 
 ```bash
-kubectl apply -f deploy/rustfs-operator/crds/tenant-crd.yaml
-helm upgrade rustfs-operator deploy/rustfs-operator/
+kubectl apply --server-side --force-conflicts \
+  --field-manager=rustfs-operator-crd-upgrade \
+  -f deploy/rustfs-operator/crds/tenant.yaml
+kubectl apply --server-side --force-conflicts \
+  --field-manager=rustfs-operator-crd-upgrade \
+  -f deploy/rustfs-operator/crds/policybinding-crd.yaml
+helm upgrade rustfs-operator deploy/rustfs-operator/ \
+  --namespace rustfs-system
 ```
 
-Helm does not upgrade CRDs from the chart's `crds/` directory. Apply the updated Tenant CRD and wait for the operator rollout before using newly introduced Tenant fields such as `users[].credsSecret`.
-Existing manifests that omit the field remain compatible. Older operator binaries ignore the reference and continue using the same-name Secret convention, so complete the rollout before relying on it.
+Helm does not upgrade existing CRDs from a chart's `crds/` directory. Apply the
+cluster-scoped CRDs first so the API server accepts fields introduced by the
+new Operator version. The dedicated field manager deliberately takes ownership
+of the chart-managed CRD fields, including CRDs originally created by Helm.
+
+This release adds secure defaults to generated RustFS Pods and containers.
+Existing compatible Tenants whose StatefulSet templates do not already contain
+those values will roll on their next reconciliation. Schedule the upgrade in a
+maintenance window: a single-replica Tenant can be unavailable during restart,
+and a multi-replica Tenant temporarily runs with reduced capacity. Verify every
+Tenant image first. Known incompatible images are blocked before rollout, and
+mutable tags, digest references, or custom repositories are blocked under an
+effective `RuntimeDefault` profile unless the Tenant carries an image-bound
+acknowledgement. Before upgrade, either pin a verified RustFS beta.9-or-later
+release tag, or verify the effective image and set
+`operator.rustfs.com/runtime-default-image-ack` to that exact image reference:
+
+```yaml
+metadata:
+  annotations:
+    operator.rustfs.com/runtime-default-image-ack: "registry.example.com/rustfs/rustfs@sha256:<digest>"
+spec:
+  image: "registry.example.com/rustfs/rustfs@sha256:<digest>"
+```
+
+The annotation must change when the image reference changes and cannot override
+a known-incompatible official alpha or beta.1 through beta.8 reference that is
+not digest-qualified. For `tag@digest`, Kubernetes pulls by digest; after
+verifying that exact digest, acknowledge the complete reference. Mutable tags can
+change content without changing the annotation, so prefer an immutable digest
+in production.
+
+The built-in RustFS image fallback also changes from the mutable `latest` tag to
+`rustfs/rustfs:1.0.0-beta.10`. Tenants without `spec.image` and without a
+`TENANT_RUSTFS_IMAGE` Operator environment override roll to that pinned release
+on reconciliation. Set `spec.image` explicitly to control future server upgrades.
+
+Treat this as a one-way workload security migration. Once this Operator has
+reconciled a Tenant, do not downgrade directly to a version that predates the
+restricted defaults: restricted admission rejects the older workload template,
+while clusters without that admission can roll back to weaker settings. Recover
+by rolling forward to this version or a newer fixed version.
+
+Existing manifests that omit `users[].credsSecret` remain compatible. Wait for
+the new Operator rollout to complete before relying on an explicit user Secret
+reference; older binaries continue using the same-name Secret convention.
 
 ## Console UI
 

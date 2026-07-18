@@ -20,7 +20,7 @@ metadata:
   labels:
     phase: expansion
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   pools:
     # ORIGINAL POOL (v1): Existing deployment

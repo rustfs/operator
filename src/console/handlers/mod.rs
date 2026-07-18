@@ -21,3 +21,20 @@ pub mod pools;
 pub mod security_context;
 pub mod tenants;
 pub mod topology;
+
+use crate::console::error::{Error, Result};
+use crate::types::v1alpha1::tenant::Tenant;
+
+/// Apply the complete domain validation contract before any Console Tenant write.
+pub(super) fn validate_tenant_for_write(tenant: &Tenant) -> Result<()> {
+    tenant.validate_pools().map_err(|error| Error::BadRequest {
+        message: error.to_string(),
+    })?;
+    tenant
+        .validate_workload_security_compatibility()
+        .map_err(|error| Error::BadRequest {
+            message: error.to_string(),
+        })?;
+
+    Ok(())
+}

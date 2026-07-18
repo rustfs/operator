@@ -5,11 +5,24 @@ metadata:
   namespace: rustfs-system
 spec:
   # Container image for RustFS (optional, defaults to a specific version)
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   # Pod management policy for StatefulSet (defaults to Parallel)
   # Parallel is recommended for multi-node RustFS deployments
   podManagementPolicy: Parallel
+
+  # The operator applies Pod Security "restricted" compatible defaults.
+  # Optional Tenant-level overrides apply to every pool; pool-level values win.
+  # securityContext:
+  #   runAsNonRoot: true
+  #   seccompProfile:
+  #     type: RuntimeDefault
+  # containerSecurityContext:
+  #   allowPrivilegeEscalation: false
+  #   capabilities:
+  #     drop: ["ALL"]
+  #   # Not enabled by default because RustFS may need writable runtime paths.
+  #   readOnlyRootFilesystem: false
 
   # Pool configuration - at least one pool is required
   # RustFS validates whether the requested storage layout is supported at startup.

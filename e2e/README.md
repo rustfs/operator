@@ -86,11 +86,19 @@ operator ns:      rustfs-system
 test namespace:   rustfs-e2e-smoke
 tenant name:      e2e-tenant
 console URL:      http://127.0.0.1:19090
-rustfs image:      rustfs/rustfs:latest
+rustfs image:      rustfs/rustfs:1.0.0-beta.10
 storage class:    local-storage
 PV count:         12
 kind config:      e2e/manifests/kind-rustfs-e2e.yaml
 ```
+
+Set `RUSTFS_E2E_SERVER_IMAGE` to exercise a branch or custom RustFS image. The
+harness writes `operator.rustfs.com/runtime-default-image-ack` with that exact
+reference so the Tenant can use the Operator's `RuntimeDefault` seccomp default.
+A mutable override can drift while the annotation stays unchanged; use a digest
+when reproducibility matters. The built-in default does not receive the
+annotation, so the smoke suite continues to test the normal implicit-default
+path.
 
 Live tests are `#[ignore]` and run through the reduced Make workflow. The Makefile injects `RUSTFS_E2E_LIVE=1` internally, so the common flow does not need the environment prefix:
 

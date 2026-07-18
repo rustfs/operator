@@ -3,7 +3,6 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import Link from "next/link"
-import { parse } from "yaml"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 import { RiArrowLeftLine } from "@remixicon/react"
@@ -16,18 +15,12 @@ import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { routes } from "@/lib/routes"
 import * as api from "@/lib/api"
-import type {
-  CreatePoolRequest,
-  CreateTenantRequest,
-  ProvisioningBucket,
-  ProvisioningPolicy,
-  ProvisioningUser,
-} from "@/types/api"
+import type { CreatePoolRequest, CreateTenantRequest, TenantListItem } from "@/types/api"
 import { ApiError } from "@/lib/api-client"
 
 type CreateMode = "form" | "yaml"
 
-const DEFAULT_RUSTFS_IMAGE = "rustfs/rustfs:latest"
+const DEFAULT_RUSTFS_IMAGE = "rustfs/rustfs:1.0.0-beta.10"
 
 const defaultPool: CreatePoolRequest = {
   name: "pool-0",
@@ -58,37 +51,6 @@ spec:
             requests:
               storage: 10Gi
 `
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value == null || Array.isArray(value)) return null
-  return value as Record<string, unknown>
-}
-
-function asString(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined
-  const trimmed = value.trim()
-  return trimmed ? trimmed : undefined
-}
-
-function asPositiveInt(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value
-  if (typeof value === "string") {
-    const parsed = Number.parseInt(value, 10)
-    if (Number.isInteger(parsed) && parsed > 0) return parsed
-  }
-  return undefined
-}
-
-function asBoolean(value: unknown): boolean | undefined {
-  if (typeof value === "boolean") return value
-  return undefined
-}
-
-function asStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined
-  const values = value.map(asString)
-  return values.every((item): item is string => !!item) ? values : undefined
-}
 
 export default function TenantCreatePage() {
   const { t } = useTranslation()
@@ -130,179 +92,15 @@ export default function TenantCreatePage() {
     setPools((prev) => prev.filter((_, i) => i !== index))
   }
 
-  const parseYamlToCreateRequest = (rawYaml: string): CreateTenantRequest => {
-    let doc: unknown
-    try {
-      doc = parse(rawYaml)
-    } catch {
-      throw new Error(t("YAML format is invalid"))
-    }
-
-    const root = asRecord(doc)
-    if (!root) {
-      throw new Error(t("YAML format is invalid"))
-    }
-
-    const metadata = asRecord(root.metadata)
-    const spec = asRecord(root.spec)
-    const apiVersion = asString(root.apiVersion)
-    const kind = asString(root.kind)
-    const parsedName = asString(metadata?.name)
-    const parsedNamespace = asString(metadata?.namespace)
-
-    if (apiVersion !== "rustfs.com/v1alpha1" || kind !== "Tenant") {
-      throw new Error(t("YAML must be a rustfs.com/v1alpha1 Tenant"))
-    }
-
-    if (!parsedName || !parsedNamespace) {
-      throw new Error(t("YAML must include metadata.name and metadata.namespace"))
-    }
-
-    const poolsRaw = spec?.pools
-    if (!Array.isArray(poolsRaw) || poolsRaw.length === 0) {
-      throw new Error(t("YAML must include spec.pools with at least one item"))
-    }
-
-    const parsedPools: CreatePoolRequest[] = poolsRaw.map((poolItem, index) => {
-      const pool = asRecord(poolItem)
-      const persistence = asRecord(pool?.persistence)
-      const volumeClaimTemplate = asRecord(persistence?.volumeClaimTemplate ?? persistence?.volume_claim_template)
-      const resources = asRecord(volumeClaimTemplate?.resources)
-      const requests = asRecord(resources?.requests)
-      const servers = asPositiveInt(pool?.servers)
-      const volumesPerServer = asPositiveInt(
-        pool?.volumesPerServer ??
-          pool?.volumes_per_server ??
-          persistence?.volumesPerServer ??
-          persistence?.volumes_per_server,
-      )
-      const storageSize = asString(pool?.storageSize ?? pool?.storage_size ?? pool?.size ?? requests?.storage)
-
-      if (!pool || !servers || !volumesPerServer || !storageSize) {
-        throw new Error(t("YAML pool fields are invalid"))
-      }
-
-      return {
-        name: asString(pool.name) ?? `pool-${index}`,
-        servers,
-        volumes_per_server: volumesPerServer,
-        storage_size: storageSize,
-        storage_class:
-          asString(
-            pool.storageClass ??
-              pool.storage_class ??
-              volumeClaimTemplate?.storageClassName ??
-              volumeClaimTemplate?.storage_class_name,
-          ) || undefined,
-      }
-    })
-
-    const specSc = asRecord(spec?.securityContext ?? spec?.security_context)
-    const credsSecretRef = asRecord(spec?.credsSecret ?? spec?.creds_secret)
-    const security_context = specSc
-      ? {
-          runAsUser: asPositiveInt(specSc.runAsUser ?? specSc.run_as_user),
-          runAsGroup: asPositiveInt(specSc.runAsGroup ?? specSc.run_as_group),
-          fsGroup: asPositiveInt(specSc.fsGroup ?? specSc.fs_group),
-          runAsNonRoot:
-            typeof specSc.runAsNonRoot === "boolean"
-              ? specSc.runAsNonRoot
-              : typeof specSc.run_as_non_root === "boolean"
-                ? specSc.run_as_non_root
-                : true,
-        }
-      : undefined
-
-    const policiesRaw = spec?.policies
-    const policies = Array.isArray(policiesRaw)
-      ? policiesRaw.map((item): ProvisioningPolicy => {
-          const policy = asRecord(item)
-          const document = asRecord(policy?.document)
-          const configMapKeyRef = asRecord(document?.configMapKeyRef ?? document?.config_map_key_ref)
-          const policyName = asString(policy?.name)
-          const configMapName = asString(configMapKeyRef?.name)
-          const key = asString(configMapKeyRef?.key)
-          if (!policy || !policyName || !configMapName || !key) {
-            throw new Error(t("YAML policy provisioning fields are invalid"))
-          }
-          return {
-            name: policyName,
-            document: {
-              configMapKeyRef: {
-                name: configMapName,
-                key,
-              },
-            },
-          }
-        })
-      : undefined
-
-    const usersRaw = spec?.users
-    const users = Array.isArray(usersRaw)
-      ? usersRaw.map((item): ProvisioningUser => {
-          const user = asRecord(item)
-          const userName = asString(user?.name)
-          const userPolicies = asStringArray(user?.policies)
-          const rawCredsSecret = user?.credsSecret ?? user?.creds_secret
-          const credsSecret = asRecord(rawCredsSecret)
-          const credsSecretName = asString(credsSecret?.name)
-          if (
-            !user ||
-            !userName ||
-            !userPolicies ||
-            userPolicies.length === 0 ||
-            (rawCredsSecret != null && !credsSecretName)
-          ) {
-            throw new Error(t("YAML user provisioning fields are invalid"))
-          }
-          return {
-            name: userName,
-            credsSecret: credsSecretName ? { name: credsSecretName } : undefined,
-            policies: userPolicies,
-          }
-        })
-      : undefined
-
-    const bucketsRaw = spec?.buckets
-    const buckets = Array.isArray(bucketsRaw)
-      ? bucketsRaw.map((item): ProvisioningBucket => {
-          const bucket = asRecord(item)
-          const bucketName = asString(bucket?.name)
-          if (!bucket || !bucketName) {
-            throw new Error(t("YAML bucket provisioning fields are invalid"))
-          }
-          return {
-            name: bucketName,
-            region: asString(bucket.region),
-            objectLock: asBoolean(bucket.objectLock ?? bucket.object_lock),
-          }
-        })
-      : undefined
-
-    return {
-      name: parsedName,
-      namespace: parsedNamespace,
-      pools: parsedPools,
-      image: asString(spec?.image),
-      mount_path: asString(spec?.mountPath ?? spec?.mount_path),
-      creds_secret: asString(spec?.credsSecret ?? spec?.creds_secret) ?? asString(credsSecretRef?.name),
-      policies,
-      users,
-      buckets,
-      security_context,
-    }
-  }
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
 
     try {
-      let requestBody: CreateTenantRequest
+      let createdTenant: TenantListItem
 
       if (mode === "yaml") {
-        // Create-by-YAML endpoint is pending; convert YAML to current JSON create payload.
-        requestBody = parseYamlToCreateRequest(yamlContent)
+        createdTenant = await api.createTenantYaml({ yaml: yamlContent })
       } else {
         if (!name.trim()) {
           toast.warning(t("Tenant name is required"))
@@ -317,7 +115,7 @@ export default function TenantCreatePage() {
           toast.warning(t("Image is required"))
           return
         }
-        requestBody = {
+        const requestBody: CreateTenantRequest = {
           name: name.trim(),
           namespace: namespace.trim(),
           pools: pools.map((p) => ({
@@ -333,11 +131,11 @@ export default function TenantCreatePage() {
             runAsNonRoot: securityContext.runAsNonRoot,
           },
         }
+        createdTenant = await api.createTenant(requestBody)
       }
 
-      await api.createTenant(requestBody)
       toast.success(t("Tenant created"))
-      router.push(routes.tenantDetail(requestBody.namespace, requestBody.name))
+      router.push(routes.tenantDetail(createdTenant.namespace, createdTenant.name))
     } catch (e) {
       const err = e as ApiError
       const fallback = e instanceof Error ? e.message : t("Create failed")
@@ -411,8 +209,13 @@ export default function TenantCreatePage() {
                     required
                     value={image}
                     onChange={(e) => setImage(e.target.value)}
-                    placeholder="rustfs/rustfs:latest"
+                    placeholder="rustfs/rustfs:1.0.0-beta.10"
                   />
+                  <p className="text-xs text-muted-foreground">
+                    {t(
+                      "Use YAML mode for custom repositories, mutable tags, or digest-qualified images and set runtime-default-image-ack to the exact image reference.",
+                    )}
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="creds">
@@ -432,7 +235,9 @@ export default function TenantCreatePage() {
               <CardHeader>
                 <CardTitle className="text-base">{t("SecurityContext")}</CardTitle>
                 <CardDescription>
-                  {t("Override Pod SecurityContext for RustFS pods (default: 10001/10001/10001). Optional.")}
+                  {t(
+                    "Override Pod SecurityContext UID/GID fields (default: 10001/10001/10001). Use YAML mode for seccomp, container, and Pool-level settings. Optional.",
+                  )}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">

@@ -70,7 +70,10 @@ export RUSTFS_FAULT_TEST_SERVER_IMAGE='docker.io/rustfs/rustfs@sha256:<digest>'
 ```
 
 `RUSTFS_FAULT_TEST_SERVER_IMAGE` must be explicit. Prefer a pinned digest so a
-failed run can be reproduced.
+failed run can be reproduced. For a non-default or otherwise unverifiable
+image, the harness binds the required
+`operator.rustfs.com/runtime-default-image-ack` Tenant annotation to this exact
+reference; changing the image therefore requires a new acknowledgement.
 
 `RUSTFS_FAULT_TEST_EXPECTED_CONTEXT` is optional. When set, both the shell
 runner and Rust test entrypoint require the current context to match it exactly.

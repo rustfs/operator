@@ -82,6 +82,13 @@ pub(super) async fn validate_tenant_prerequisites(
         return Err(e.into());
     }
 
+    // Block known incompatible RustFS images before creating or rolling any StatefulSet.
+    if let Err(e) = tenant.validate_workload_security_compatibility() {
+        let status_error = StatusError::from_types_error(&e);
+        patch_status_error(ctx, tenant, &status_error).await;
+        return Err(e.into());
+    }
+
     // Validate credential Secret if configured.
     // This only validates the Secret exists and has required keys.
     // Actual credential injection happens via secretKeyRef in the StatefulSet.

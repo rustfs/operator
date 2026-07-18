@@ -147,6 +147,7 @@
   "Tenant name is required": "Tenant name is required",
   "Namespace is required": "Namespace is required",
   "Image is required": "Image is required",
+  "Use YAML mode for custom repositories, mutable tags, or digest-qualified images and set runtime-default-image-ack to the exact image reference.": "Use YAML mode for custom repositories, mutable tags, or digest-qualified images and set runtime-default-image-ack to the exact image reference.",
   "Delete tenant \"{{name}}\"? This cannot be undone.": "Delete tenant \"{{name}}\"? This cannot be undone.",
   "Overview": "Overview",
   "Events": "Events",
@@ -249,9 +250,11 @@
   "Vault endpoint is required": "Vault endpoint is required",
   "Security": "Security",
   "SecurityContext": "SecurityContext",
-  "Override Pod SecurityContext for RustFS pods (runAsUser, runAsGroup, fsGroup). Changes apply after Pods are recreated.": "Override Pod SecurityContext for RustFS pods (runAsUser, runAsGroup, fsGroup). Changes apply after Pods are recreated.",
+  "Override Pod SecurityContext UID/GID fields (default: 10001/10001/10001). Use YAML mode for seccomp, container, and Pool-level settings. Optional.": "Override Pod SecurityContext UID/GID fields (default: 10001/10001/10001). Use YAML mode for seccomp, container, and Pool-level settings. Optional.",
+  "Override Pod SecurityContext UID/GID fields. Use Raw YAML for seccomp, container, and Pool-level settings. Changes apply after Pods are recreated.": "Override Pod SecurityContext UID/GID fields. Use Raw YAML for seccomp, container, and Pool-level settings. Changes apply after Pods are recreated.",
   "SecurityContext updated": "SecurityContext updated",
   "Failed to load security context": "Failed to load security context",
   "Do not run as Root": "Do not run as Root",
+  "Default": "Default",
   "Loading...": "Loading..."
 }

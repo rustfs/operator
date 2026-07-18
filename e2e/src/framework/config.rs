@@ -20,7 +20,7 @@ use std::time::Duration;
 
 pub const DEFAULT_CLUSTER_NAME: &str = "rustfs-e2e";
 pub const DEFAULT_STORAGE_HOST_DIR_PREFIX: &str = "/tmp/rustfs-e2e-storage";
-pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:latest";
+pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:1.0.0-beta.10";
 pub const DEFAULT_CERT_MANAGER_VERSION: &str = "v1.16.2";
 pub const KIND_WORKER_COUNT: usize = 3;
 

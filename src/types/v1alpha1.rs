@@ -20,6 +20,7 @@ pub mod policy_binding;
 pub mod pool;
 pub mod pool_lifecycle;
 pub mod provisioning;
+pub mod security_context;
 pub mod status;
 pub mod tenant;
 pub mod tls;
@@ -317,5 +318,95 @@ mod tenant_provisioning_crd_tests {
                 [0]["message"],
             json!("bucket name must be a valid RustFS/S3 bucket name")
         );
+    }
+}
+
+#[cfg(test)]
+mod tenant_security_context_tests {
+    use super::tenant::Tenant;
+    use kube::CustomResourceExt;
+    use serde_json::json;
+
+    #[test]
+    fn tenant_crd_exposes_pod_and_container_security_contexts() {
+        let crd = serde_json::to_value(Tenant::crd()).expect("Tenant CRD serializes");
+        let spec = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"];
+        let tenant_pod = &spec["securityContext"]["properties"];
+        let tenant_container = &spec["containerSecurityContext"]["properties"];
+        let pool = &spec["pools"]["items"]["properties"];
+
+        assert_eq!(
+            tenant_pod["seccompProfile"]["properties"]["type"]["type"],
+            json!("string")
+        );
+        assert_eq!(pool["securityContext"]["type"], json!("object"));
+        assert_eq!(pool["containerSecurityContext"]["type"], json!("object"));
+
+        for pod in [tenant_pod, &pool["securityContext"]["properties"]] {
+            for field in ["runAsUser", "runAsGroup", "fsGroup"] {
+                assert_eq!(pod[field]["minimum"].as_f64(), Some(0.0));
+                assert_eq!(pod[field]["maximum"].as_f64(), Some(i32::MAX as f64));
+            }
+        }
+
+        for container in [
+            tenant_container,
+            &pool["containerSecurityContext"]["properties"],
+        ] {
+            assert_eq!(
+                container["allowPrivilegeEscalation"]["type"],
+                json!("boolean")
+            );
+            assert_eq!(
+                container["capabilities"]["properties"]["drop"]["items"]["type"],
+                json!("string")
+            );
+            assert_eq!(
+                container["readOnlyRootFilesystem"]["type"],
+                json!("boolean")
+            );
+            assert_eq!(
+                container["seccompProfile"]["properties"]["type"]["type"],
+                json!("string")
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_tenant_security_context_still_deserializes() {
+        let tenant: Tenant = serde_yaml_ng::from_str(
+            r#"
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: legacy
+  namespace: storage
+spec:
+  pools:
+    - name: pool-0
+      servers: 1
+      persistence:
+        volumesPerServer: 1
+  securityContext:
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    runAsNonRoot: true
+"#,
+        )
+        .expect("Legacy Tenant YAML should deserialize");
+
+        let context = tenant
+            .spec
+            .security_context
+            .expect("Legacy securityContext should be preserved");
+        assert_eq!(context.run_as_user, Some(10001));
+        assert_eq!(context.run_as_group, Some(10001));
+        assert_eq!(context.fs_group, Some(10001));
+        assert_eq!(context.run_as_non_root, Some(true));
+        assert!(context.seccomp_profile.is_none());
+        assert!(tenant.spec.container_security_context.is_none());
+        assert!(tenant.spec.pools[0].security_context.is_none());
+        assert!(tenant.spec.pools[0].container_security_context.is_none());
     }
 }

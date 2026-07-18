@@ -39,7 +39,7 @@ metadata:
     cost-profile: optimized
     environment: production
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   pools:
     # CRITICAL POOL: On-demand instances

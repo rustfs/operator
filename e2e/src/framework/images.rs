@@ -74,7 +74,7 @@ mod tests {
             [
                 "rustfs/operator:e2e",
                 "rustfs/console-web:e2e",
-                "rustfs/rustfs:latest",
+                "rustfs/rustfs:1.0.0-beta.10",
                 "quay.io/jetstack/cert-manager-controller:v1.16.2",
                 "quay.io/jetstack/cert-manager-webhook:v1.16.2",
                 "quay.io/jetstack/cert-manager-cainjector:v1.16.2",

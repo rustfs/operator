@@ -24,7 +24,7 @@ use crate::console::{
 };
 use crate::types::v1alpha1::{
     persistence::PersistenceConfig,
-    pool::{Pool, SchedulingConfig, validate_pool_collection, validate_pool_name},
+    pool::{Pool, SchedulingConfig, validate_pool_name},
     pool_lifecycle::{
         DecommissionAction, DecommissionRequest, PoolLifecycleSpec, PvcRetentionPolicy,
     },
@@ -32,6 +32,11 @@ use crate::types::v1alpha1::{
     status::pool::PoolLifecycleState,
     tenant::Tenant,
 };
+
+fn push_pool_and_validate_tenant(tenant: &mut Tenant, pool: Pool) -> Result<()> {
+    tenant.spec.pools.push(pool);
+    super::validate_tenant_for_write(tenant)
+}
 
 /// Loose validation for a Kubernetes resource quantity (e.g. `10Gi`, `100M`, `1`).
 fn is_valid_k8s_quantity(s: &str) -> bool {
@@ -599,6 +604,8 @@ pub async fn add_pool(
             labels: None,
             annotations: None,
         },
+        security_context: None,
+        container_security_context: None,
         scheduling: SchedulingConfig {
             node_selector: req.node_selector,
             resources: req.resources.map(|r| corev1::ResourceRequirements {
@@ -659,10 +666,7 @@ pub async fn add_pool(
         }
 
         remove_decommission_request(&mut tenant, pool_name);
-        tenant.spec.pools.push(new_pool.clone());
-        if let Err(message) = validate_pool_collection(&tenant.name_any(), &tenant.spec.pools) {
-            return Err(Error::BadRequest { message });
-        }
+        push_pool_and_validate_tenant(&mut tenant, new_pool.clone())?;
 
         match tenant_api
             .replace(&tenant_name, &Default::default(), &tenant)
@@ -974,13 +978,15 @@ mod tests {
         decommission_request_can_replace, has_recorded_pool_status_requiring_decommission,
         is_managed_pool_statefulset, is_pool_observation_current,
         pool_delete_observation_pending_error, pool_delete_requires_decommission_error,
-        remove_decommission_request, upsert_decommission_request, validate_lifecycle_request_id,
+        push_pool_and_validate_tenant, remove_decommission_request, upsert_decommission_request,
+        validate_lifecycle_request_id,
     };
     use crate::console::error::Error;
     use crate::types::v1alpha1::{
         pool_lifecycle::{
             DecommissionAction, DecommissionRequest, PoolLifecycleSpec, PvcRetentionPolicy,
         },
+        security_context::PodSecurityContextOverride,
         status::{
             Status,
             pool::{
@@ -990,7 +996,8 @@ mod tests {
         },
         tenant::TenantSpec,
     };
-    use axum::http::StatusCode;
+    use axum::{http::StatusCode, response::IntoResponse};
+    use k8s_openapi::api::core::v1 as corev1;
     use std::collections::BTreeMap;
 
     fn tenant_with_generations(
@@ -1009,6 +1016,40 @@ mod tests {
                 observed_generation,
                 ..Default::default()
             }),
+        }
+    }
+
+    #[test]
+    fn pool_addition_rejects_legacy_images_that_would_inherit_runtime_default_seccomp() {
+        for image in ["rustfs/rustfs:1.0.0-alpha.99", "rustfs/rustfs:1.0.0-beta.8"] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.image = Some(image.to_string());
+            tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride {
+                seccomp_profile: Some(corev1::SeccompProfile {
+                    localhost_profile: Some("profiles/rustfs-io-uring.json".to_string()),
+                    type_: "Localhost".to_string(),
+                }),
+                ..Default::default()
+            });
+            tenant
+                .validate_workload_security_compatibility()
+                .expect("existing Localhost pool should remain compatible");
+
+            let mut new_pool = tenant.spec.pools[0].clone();
+            new_pool.name = "pool-1".to_string();
+            new_pool.security_context = None;
+            new_pool.container_security_context = None;
+
+            let error = push_pool_and_validate_tenant(&mut tenant, new_pool)
+                .expect_err("new RuntimeDefault pool must be rejected before replace");
+            assert!(
+                matches!(&error, Error::BadRequest { message }
+                    if message.contains(image)
+                        && message.contains("pool-1")
+                        && message.contains("Tokio io_uring")),
+                "unexpected error: {error}"
+            );
+            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
         }
     }
 

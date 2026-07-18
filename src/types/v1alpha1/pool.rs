@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::types::v1alpha1::persistence::PersistenceConfig;
+use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
 
 /// Kubernetes scheduling and placement configuration for pools.
 /// Groups related scheduling fields for better code organization.
@@ -64,6 +65,16 @@ pub struct Pool {
     pub servers: i32,
 
     pub persistence: PersistenceConfig,
+
+    /// Pod SecurityContext overrides for this Pool.
+    /// Values override Tenant-level Pod SecurityContext settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<PodSecurityContextOverride>,
+
+    /// RustFS container SecurityContext overrides for this Pool.
+    /// Values are merged over Tenant-level container settings and operator defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_security_context: Option<corev1::SecurityContext>,
 
     /// Kubernetes scheduling and placement configuration.
     /// Flattened to maintain backward compatibility with YAML structure.
@@ -236,6 +247,8 @@ mod tests {
                 volumes_per_server,
                 ..Default::default()
             },
+            security_context: None,
+            container_security_context: None,
             scheduling: Default::default(),
         }
     }

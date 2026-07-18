@@ -908,6 +908,8 @@ mod validate_local_kms_tests {
                 path: path.map(ToOwned::to_owned),
                 ..Default::default()
             },
+            security_context: None,
+            container_security_context: None,
             scheduling: Default::default(),
         }
     }

@@ -83,7 +83,7 @@ metadata:
   name: custom-rbac-tenant-1
   namespace: default
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   # Use custom ServiceAccount
   serviceAccountName: my-custom-sa
@@ -125,7 +125,7 @@ metadata:
   name: custom-rbac-tenant-2
   namespace: default
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   # Use custom ServiceAccount (with cloud identity annotations)
   serviceAccountName: cloud-identity-sa
@@ -184,7 +184,7 @@ spec:
 #     name: custom-rbac-tenant-2
 #     namespace: default
 #   spec:
-#     image: rustfs/rustfs:latest
+#     image: rustfs/rustfs:1.0.0-beta.10
 #     serviceAccountName: cloud-identity-sa
 #     createServiceAccountRbac: true
 #     pools:

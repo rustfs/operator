@@ -185,6 +185,16 @@ impl StatusError {
                 ConditionType::KmsReady,
                 sanitize_message(message),
             ),
+            types::error::Error::InvalidWorkloadSecurityProfile { message, .. } => Self::blocked(
+                Reason::InvalidWorkloadSecurityProfile,
+                ConditionType::SpecValid,
+                sanitize_message(message),
+            ),
+            types::error::Error::WorkloadSecurityIncompatible { message, .. } => Self::blocked(
+                Reason::WorkloadSecurityIncompatible,
+                ConditionType::WorkloadsReady,
+                sanitize_message(message),
+            ),
             types::error::Error::NoNamespace => Self::transient(
                 Reason::KubernetesApiError,
                 ConditionType::Ready,
@@ -691,6 +701,52 @@ mod tests {
         assert_eq!(status.current_state, "Blocked");
         assert!(status.condition(ConditionType::CredentialsReady).is_none());
         assert!(status.condition(ConditionType::WorkloadsReady).is_none());
+    }
+
+    #[test]
+    fn status_builder_blocks_incompatible_workload_security() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let err = types::error::Error::WorkloadSecurityIncompatible {
+            name: tenant.name(),
+            message: "upgrade the RustFS image".to_string(),
+        };
+
+        let status_error = StatusError::from_types_error(&err);
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let status = builder.build();
+
+        let condition = status.condition(ConditionType::WorkloadsReady).unwrap();
+        assert_eq!(condition.status, "False");
+        assert_eq!(condition.reason, "WorkloadSecurityIncompatible");
+        assert_eq!(status.current_state, "Blocked");
+        assert_eq!(
+            crate::types::v1alpha1::status::next_actions_for_reason(&condition.reason),
+            vec!["upgradeRustfsImage", "configureCompatibleSeccompProfile"]
+        );
+    }
+
+    #[test]
+    fn status_builder_marks_invalid_workload_security_profile_as_invalid_spec() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let err = types::error::Error::InvalidWorkloadSecurityProfile {
+            name: tenant.name(),
+            message: "spec.containerSecurityContext.appArmorProfile is invalid".to_string(),
+        };
+
+        let status_error = StatusError::from_types_error(&err);
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let status = builder.build();
+
+        let condition = status.condition(ConditionType::SpecValid).unwrap();
+        assert_eq!(condition.status, "False");
+        assert_eq!(condition.reason, "InvalidWorkloadSecurityProfile");
+        assert_eq!(status.current_state, "Blocked");
+        assert_eq!(
+            crate::types::v1alpha1::status::next_actions_for_reason(&condition.reason),
+            vec!["fixWorkloadSecurityProfile"]
+        );
     }
 
     #[test]

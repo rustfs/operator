@@ -37,6 +37,10 @@ pub fn tenant_routes() -> Router<AppState> {
         )
         .route("/tenants", post(handlers::tenants::create_tenant))
         .route(
+            "/tenants/yaml",
+            post(handlers::tenants::create_tenant_from_yaml),
+        )
+        .route(
             "/namespaces/:namespace/tenants",
             get(handlers::tenants::list_tenants_by_namespace),
         )

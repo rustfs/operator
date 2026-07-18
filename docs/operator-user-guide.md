@@ -90,13 +90,51 @@ kubectl logs -n rustfs-system \
 Upgrade an existing installation:
 
 ```bash
-kubectl apply -f deploy/rustfs-operator/crds/tenant-crd.yaml
+# Helm does not upgrade CRDs stored in a chart's crds/ directory.
+kubectl apply --server-side --force-conflicts \
+  --field-manager=rustfs-operator-crd-upgrade \
+  -f deploy/rustfs-operator/crds/tenant.yaml
+kubectl apply --server-side --force-conflicts \
+  --field-manager=rustfs-operator-crd-upgrade \
+  -f deploy/rustfs-operator/crds/policybinding-crd.yaml
 helm upgrade rustfs-operator deploy/rustfs-operator/ \
   --namespace rustfs-system
 ```
 
-Helm does not upgrade CRDs from a chart's `crds/` directory. Apply the updated Tenant CRD before using fields introduced by a newer operator version, then wait for the operator rollout to complete.
-Existing Tenant manifests that omit newer optional fields require no migration. Do not rely on `users[].credsSecret` while any older operator binary is still reconciling the Tenant, because older versions use the same-name Secret convention.
+Apply the CRDs before upgrading the Operator so the API server accepts fields
+introduced by the new controller version. Review CRD changes carefully; CRDs
+are cluster-scoped and shared by all Tenant namespaces. The dedicated field
+manager deliberately takes ownership of the chart-managed CRD fields so this
+upgrade also works for CRDs originally created by Helm.
+
+Existing manifests that omit `users[].credsSecret` remain compatible. Wait for
+the new Operator rollout to complete before relying on an explicit user Secret
+reference; older binaries continue using the same-name Secret convention.
+
+This release adds secure defaults to generated RustFS Pods and containers.
+Existing compatible Tenants whose StatefulSet templates do not already contain
+those values will roll on their next reconciliation. Schedule the upgrade in a
+maintenance window: a single-replica Tenant can be unavailable during restart,
+and a multi-replica Tenant temporarily runs with reduced capacity. Verify every
+Tenant image first. Known incompatible images are blocked before rollout, and
+mutable tags, digest references, or custom repositories are blocked whenever
+the effective profile is `RuntimeDefault` unless the Tenant carries an
+image-bound acknowledgement. Before upgrade, either pin a verified RustFS
+beta.9-or-later release tag, or verify the effective image and set
+`operator.rustfs.com/runtime-default-image-ack` to that exact image reference.
+
+The built-in RustFS image fallback also changes from the mutable `latest` tag to
+`rustfs/rustfs:1.0.0-beta.10`. A Tenant that omits `spec.image` and has no
+`TENANT_RUSTFS_IMAGE` Operator environment override will therefore roll to that
+pinned release on reconciliation. Set `spec.image` explicitly when you want to
+control future RustFS upgrades independently of the Operator default.
+
+Treat this as a one-way workload security migration. After the new Operator has
+reconciled a Tenant, do not downgrade directly to an Operator version that
+predates these restricted defaults. An older controller omits the new seccomp
+and container security fields: restricted admission rejects that update, while
+a cluster without restricted admission can roll the workload back to weaker
+settings. Recover by rolling forward to this version or a newer fixed version.
 
 Uninstall:
 
@@ -186,7 +224,7 @@ metadata:
   name: dev-minimal
   namespace: default
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
   pools:
     - name: dev-pool
       servers: 1
@@ -371,7 +409,7 @@ Useful Tenant-level fields:
 
 | Field | Purpose |
 |-------|---------|
-| `image` | RustFS server image. Defaults to the operator's configured fallback. |
+| `image` | RustFS server image. Defaults to `TENANT_RUSTFS_IMAGE`, then the pinned fallback `rustfs/rustfs:1.0.0-beta.10`. |
 | `imagePullSecret` | Image pull Secret reference. |
 | `imagePullPolicy` | RustFS image pull policy. |
 | `scheduler` | Custom scheduler name. |
@@ -382,7 +420,78 @@ Useful Tenant-level fields:
 | `lifecycle` | Kubernetes container lifecycle hooks. |
 | `podManagementPolicy` | StatefulSet pod management policy. |
 | `podDeletionPolicyWhenNodeIsDown` | Node-down pod deletion behavior. |
-| `securityContext` | Pod SecurityContext override for RustFS pods. |
+| `securityContext` | Pod SecurityContext overrides for all RustFS Pools. |
+| `containerSecurityContext` | RustFS container SecurityContext overrides for all Pools. |
+
+Both fields are also available on each `spec.pools[]` entry. Pool values are
+merged over Tenant values, which are merged over the Operator's defaults. By
+default, generated workloads set `runAsNonRoot: true`, use the
+`RuntimeDefault` seccomp profile, disable privilege escalation, and drop all
+Linux capabilities. These defaults satisfy the corresponding Kubernetes Pod
+Security `restricted` controls. Explicit overrides can relax them and may then
+be rejected by cluster admission policy. For legacy compatibility, an explicit
+`runAsUser: 0` without an explicit `runAsNonRoot` derives `runAsNonRoot: false`;
+that configuration cannot run in a `restricted` namespace.
+
+`RuntimeDefault` also requires a RustFS image that can run under the runtime's
+default seccomp profile. `rustfs/rustfs:1.0.0-beta.8` is not compatible because
+its Tokio runtime enables io_uring; use a build containing
+[rustfs/rustfs#4364](https://github.com/rustfs/rustfs/pull/4364) or later.
+The Operator conservatively blocks official RustFS `1.0.0-alpha.*` images and
+beta.1 through beta.8, including their `-glibc` variants, when the effective
+seccomp profile is `RuntimeDefault`, before it creates or rolls a StatefulSet.
+This gate covers the official Docker Hub, GHCR, and Quay repositories. A
+compatible `Localhost` profile remains an explicit advanced override. Mutable
+official tags such as `latest`, untagged images, custom repositories, and every
+digest reference (including `tag@digest`) cannot be version-verified. The
+Operator blocks those references under `RuntimeDefault` unless the Tenant
+annotation `operator.rustfs.com/runtime-default-image-ack` exactly matches the
+effective image reference. This dedicated acknowledgement is bound to the
+reference and must be updated whenever the reference changes; an existing
+seccomp setting is not treated as image approval. For example:
+
+```yaml
+metadata:
+  annotations:
+    operator.rustfs.com/runtime-default-image-ack: "registry.example.com/rustfs/rustfs@sha256:<digest>"
+spec:
+  image: "registry.example.com/rustfs/rustfs@sha256:<digest>"
+```
+
+Use the raw YAML editor or `kubectl` to set the annotation after verifying the
+image. A matching acknowledgement may also be used with a mutable tag, but the
+tag can later resolve to different content without changing the annotation;
+that is an explicit acceptance of the residual risk. Prefer an immutable digest
+in production. The acknowledgement never overrides a known-incompatible
+official alpha or beta.1 through beta.8 reference without a digest. For
+`tag@digest`, Kubernetes pulls by digest, so the digest is authoritative and the
+complete reference may be acknowledged after that exact digest is verified.
+
+Install the profile on every node where RustFS can be scheduled, then configure
+the runtime-relative profile path. For example:
+
+```yaml
+spec:
+  securityContext:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/rustfs-io-uring.json
+```
+
+Valid seccomp and AppArmor profile types are `RuntimeDefault`, `Localhost`, and
+`Unconfined`. `Localhost` requires a non-empty `localhostProfile`; the other
+types must not set it. A seccomp Localhost profile must be a relative descending
+path with no `..` component. An AppArmor Localhost profile must have no leading
+or trailing whitespace and must not exceed 4095 bytes. The Operator rejects an
+invalid value before creating or rolling a StatefulSet.
+
+`readOnlyRootFilesystem` is supported as an override but is not enabled by
+default; users enabling it must provide writable runtime paths such as `/logs`
+and `/tmp` as required by their image configuration.
+
+The dedicated Console security form manages the legacy Pod-level UID/GID fields
+only. Configure `seccompProfile`, `containerSecurityContext`, and Pool-level
+overrides through the Console raw YAML editor or `kubectl`.
 
 The operator reserves these environment variables and manages them automatically:
 
@@ -901,6 +1010,8 @@ Common blocked reasons:
 | `CredentialSecretTooShort` | Both credential values are at least 8 characters. |
 | `KmsSecretNotFound` / `KmsSecretMissingKey` | KMS Secret exists and contains required keys, such as Vault `vault-token` or the Local KMS `masterKeySecretRef.key`. |
 | `CertManagerCrdMissing` / `CertManagerIssuerNotFound` | cert-manager is installed and the issuer exists. |
+| `InvalidWorkloadSecurityProfile` | Fix the seccomp or AppArmor profile type and its `localhostProfile` pairing. |
+| `WorkloadSecurityIncompatible` | Upgrade a known legacy image or use a compatible `Localhost` profile. For an unverifiable reference, pin a verified release tag or set `operator.rustfs.com/runtime-default-image-ack` to the exact effective image reference after verification; prefer a digest. |
 | `StatefulSetUpdateValidationFailed` | An immutable StatefulSet or pool-shape field was changed. |
 | `ProvisioningFailed` | Check `status.provisioning`, policy ConfigMaps, user Secrets, and RustFS admin credentials. |
 
