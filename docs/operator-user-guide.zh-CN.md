@@ -602,7 +602,7 @@ ConfigMap 和 user Secret 必须位于 Tenant namespace。若这些资源不是�
 
 Policy document 由 RustFS 解析。请使用 `arn:aws:s3:::bucket` 和 `arn:aws:s3:::bucket/*` 这类 S3 ARN resource 写法；如需匹配所有 bucket，请使用 `arn:aws:s3:::*`。RustFS policy parser 不接受裸 `Resource: "*"`。
 
-每个 `spec.users[]` 条目都可以通过 `credsSecret.name` 指定 Tenant namespace 中的 user credentials Secret。省略 `credsSecret` 时，Operator 继续读取与 `user.name` 同名的 Secret，以兼容旧版 manifest。显式引用是唯一来源；配置错误或 Secret 不存在时，不会再回退到同名 Secret。
+每个 `spec.users[]` 条目都可以通过 `credsSecret.name` 指定 Tenant namespace 中的 user credentials Secret。省略 `credsSecret` 时，Operator 继续读取与 `user.name` 同名的 Secret，以兼容旧版 manifest。显式引用是唯一来源；配置错误或 Secret 不存在时，不会再回退到同名 Secret。同一 Tenant 内解析后的 Secret 名称必须唯一；API 会拒绝重复引用，而在集群仍安装旧版 CRD、尚未启用该校验时，reconcile 也会阻止这些重复配置生效。
 
 Secret 必须包含 `accesskey` 和 `secretkey`，或者 MinIO 兼容 key：`CONSOLE_ACCESS_KEY` 和 `CONSOLE_SECRET_KEY`。如果两种 key 同时存在，值必须一致。`user.name` 仍是声明和 status 中的逻辑标识，Secret 内的 `accesskey` 才是实际 RustFS user。user access key 至少 8 个字符，且不能包含空白、`=` 或 `,`；user secret key 至少 8 个字符。`rustfs.tenant` label 只负责在 Secret 更新时触发 Tenant reconcile，不参与选择要读取的 Secret。
 

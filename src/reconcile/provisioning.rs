@@ -16,6 +16,7 @@ use crate::context::{self, Context};
 use crate::sts::rustfs_client::{CreateBucketResult, RustfsAdminClient, RustfsClientError};
 use crate::types::v1alpha1::provisioning::{
     ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
+    duplicate_user_credentials_secret_names,
 };
 use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::provisioning::{
@@ -696,6 +697,7 @@ async fn reconcile_users(
     client: &RustfsAdminClient,
     live_policies: &BTreeMap<String, String>,
 ) {
+    let duplicate_secret_names = duplicate_user_credentials_secret_names(&run.tenant.spec.users);
     let failed_spec_policies = run
         .status
         .policies
@@ -705,6 +707,22 @@ async fn reconcile_users(
         .collect::<BTreeSet<_>>();
 
     for user in &run.tenant.spec.users {
+        if duplicate_secret_names.contains(user.credentials_secret_name()) {
+            let previous = run.previous_user(&user.name);
+            let item = run.item(
+                previous,
+                &user.name,
+                ProvisioningItemState::Failed,
+                Reason::UserSecretInvalid,
+                format!(
+                    "credentials Secret '{}' is referenced by multiple provisioning users",
+                    user.credentials_secret_name()
+                ),
+            );
+            let item = annotate_user_item(item, user, previous, None);
+            run.push_user(item);
+            continue;
+        }
         let item = reconcile_user(run, client, live_policies, &failed_spec_policies, user).await;
         run.push_user(item);
     }

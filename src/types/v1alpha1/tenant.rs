@@ -206,6 +206,7 @@ pub struct TenantSpec {
         extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
     )]
     #[x_kube(validation = Rule::new("self.all(x, has(x.policies) && x.policies.size() > 0)").message("user policies must contain at least one policy"))]
+    #[x_kube(validation = Rule::new("self.all(x, self.exists_one(y, (has(x.credsSecret) ? x.credsSecret.name : x.name) == (has(y.credsSecret) ? y.credsSecret.name : y.name)))").message("user credential Secret references must be unique"))]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub users: Vec<ProvisioningUser>,
 
