@@ -1803,6 +1803,8 @@ spec:
                 x-kubernetes-validations:
                 - message: user policies must contain at least one policy
                   rule: self.all(x, has(x.policies) && x.policies.size() > 0)
+                - message: user credential Secret references must be unique
+                  rule: 'self.all(x, self.exists_one(y, (has(x.credsSecret) ? x.credsSecret.name : x.name) == (has(y.credsSecret) ? y.credsSecret.name : y.name)))'
             required:
             - pools
             type: object

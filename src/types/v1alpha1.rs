@@ -292,6 +292,20 @@ mod tenant_provisioning_crd_tests {
                 .any(|rule| rule["message"]
                     == json!("user policies must contain at least one policy"))
         );
+        assert!(
+            user_validations
+                .as_array()
+                .expect("user validations are present")
+                .iter()
+                .any(|rule| {
+                    rule["message"]
+                        == json!("user credential Secret references must be unique")
+                        && rule["rule"]
+                            == json!(
+                                "self.all(x, self.exists_one(y, (has(x.credsSecret) ? x.credsSecret.name : x.name) == (has(y.credsSecret) ? y.credsSecret.name : y.name)))"
+                            )
+                })
+        );
         let user_policy_validations = &spec["properties"]["users"]["items"]["properties"]["policies"]
             ["x-kubernetes-validations"];
         assert!(

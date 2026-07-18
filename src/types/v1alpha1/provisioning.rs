@@ -15,6 +15,7 @@
 use kube::KubeSchema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use utoipa::ToSchema;
 
 pub(crate) const MAX_CONFIG_MAP_REF_NAME_LENGTH: u32 = 253;
@@ -106,6 +107,20 @@ impl ProvisioningUser {
     }
 }
 
+/// Returns credentials Secret names selected by more than one provisioning user.
+pub(crate) fn duplicate_user_credentials_secret_names(
+    users: &[ProvisioningUser],
+) -> BTreeSet<&str> {
+    let mut seen = BTreeSet::new();
+    users
+        .iter()
+        .filter_map(|user| {
+            let secret_name = user.credentials_secret_name();
+            (!seen.insert(secret_name)).then_some(secret_name)
+        })
+        .collect()
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningBucket {
@@ -134,7 +149,10 @@ impl ProvisioningBucket {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProvisioningUser, UserCredentialsSecretRef};
+    use super::{
+        ProvisioningUser, UserCredentialsSecretRef, duplicate_user_credentials_secret_names,
+    };
+    use std::collections::BTreeSet;
 
     #[test]
     fn user_credentials_secret_defaults_to_user_name() {
@@ -160,5 +178,34 @@ mod tests {
         };
 
         assert_eq!(user.credentials_secret_name(), "rustfs-user-app-user");
+    }
+
+    #[test]
+    fn duplicate_credentials_secret_names_include_legacy_resolution() {
+        let users = [
+            ProvisioningUser {
+                name: "shared-secret".to_string(),
+                ..Default::default()
+            },
+            ProvisioningUser {
+                name: "app-user".to_string(),
+                creds_secret: Some(UserCredentialsSecretRef {
+                    name: "shared-secret".to_string(),
+                }),
+                ..Default::default()
+            },
+            ProvisioningUser {
+                name: "report-user".to_string(),
+                creds_secret: Some(UserCredentialsSecretRef {
+                    name: "report-user-secret".to_string(),
+                }),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            duplicate_user_credentials_secret_names(&users),
+            BTreeSet::from(["shared-secret"])
+        );
     }
 }
