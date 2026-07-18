@@ -27,6 +27,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::{CustomResource, KubeSchema, Resource, ResourceExt};
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
+use std::collections::BTreeSet;
 
 // Submodules for resource factory methods
 mod helper;
@@ -227,6 +228,50 @@ pub struct TenantSpec {
     /// Applies to all RustFS pods in this Tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<PodSecurityContextOverride>,
+}
+
+impl TenantSpec {
+    /// Returns every Kubernetes Secret name referenced by the Tenant specification.
+    pub(crate) fn referenced_secret_names(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        {
+            let mut insert = |name: &str| {
+                if !name.is_empty() {
+                    names.insert(name.to_string());
+                }
+            };
+
+            if let Some(secret) = &self.image_pull_secret {
+                insert(&secret.name);
+            }
+            for env in &self.env {
+                if let Some(secret) = env
+                    .value_from
+                    .as_ref()
+                    .and_then(|source| source.secret_key_ref.as_ref())
+                {
+                    insert(&secret.name);
+                }
+            }
+            if let Some(secret) = &self.creds_secret {
+                insert(&secret.name);
+            }
+            if let Some(secret) = &self.rpc_secret {
+                insert(&secret.name);
+            }
+            for user in &self.users {
+                insert(user.credentials_secret_name());
+            }
+        }
+
+        if let Some(tls) = &self.tls {
+            names.extend(tls.referenced_secret_names());
+        }
+        if let Some(encryption) = &self.encryption {
+            names.extend(encryption.referenced_secret_names());
+        }
+        names
+    }
 }
 
 impl Tenant {
@@ -467,9 +512,84 @@ pub fn validate_dns1035_label(name: &str) -> Result<(), types::error::Error> {
 
 #[cfg(test)]
 mod tests {
+    use super::TenantSpec;
     use crate::types::v1alpha1::status::pool::PoolState;
     use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn referenced_secret_names_cover_all_tenant_secret_sources() {
+        let spec: TenantSpec = serde_json::from_value(serde_json::json!({
+            "pools": [],
+            "imagePullSecret": { "name": "image-pull" },
+            "env": [{
+                "name": "OIDC_CLIENT_SECRET",
+                "valueFrom": {
+                    "secretKeyRef": { "name": "env-secret", "key": "client-secret" }
+                }
+            }],
+            "credsSecret": { "name": "admin-creds" },
+            "rpcSecret": { "name": "rpc-auth", "key": "rpc-secret" },
+            "users": [
+                { "name": "legacy-user", "policies": ["readwrite"] },
+                {
+                    "name": "explicit-user",
+                    "credsSecret": { "name": "explicit-user-creds" },
+                    "policies": ["readwrite"]
+                }
+            ],
+            "tls": {
+                "certManager": {
+                    "secretName": "default-tls",
+                    "caTrust": {
+                        "caSecretRef": { "name": "default-ca", "key": "ca.crt" }
+                    }
+                },
+                "certificates": [{
+                    "name": "public",
+                    "certManager": {
+                        "secretName": "public-tls",
+                        "caTrust": {
+                            "clientCaSecretRef": {
+                                "name": "public-client-ca",
+                                "key": "ca.crt"
+                            }
+                        }
+                    }
+                }],
+                "caTrust": {
+                    "caSecretRef": { "name": "tenant-ca", "key": "ca.crt" }
+                }
+            },
+            "encryption": {
+                "kmsSecret": { "name": "vault-token" },
+                "local": {
+                    "masterKeySecretRef": { "name": "local-master-key", "key": "key" }
+                }
+            }
+        }))
+        .expect("TenantSpec should deserialize");
+
+        assert_eq!(
+            spec.referenced_secret_names(),
+            BTreeSet::from([
+                "admin-creds".to_string(),
+                "default-ca".to_string(),
+                "default-tls".to_string(),
+                "env-secret".to_string(),
+                "explicit-user-creds".to_string(),
+                "image-pull".to_string(),
+                "legacy-user".to_string(),
+                "local-master-key".to_string(),
+                "public-client-ca".to_string(),
+                "public-tls".to_string(),
+                "rpc-auth".to_string(),
+                "tenant-ca".to_string(),
+                "vault-token".to_string(),
+            ])
+        );
+    }
 
     fn statefulset_with_status(
         generation: i64,

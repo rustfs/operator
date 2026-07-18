@@ -753,7 +753,7 @@ fn stale_provisioning_user_secret_names(
     current_spec: &TenantSpec,
 ) -> BTreeSet<String> {
     let previous = provisioning_user_secret_names(previous_spec);
-    let current = provisioning_user_secret_names(current_spec);
+    let current = current_spec.referenced_secret_names();
     previous.difference(&current).cloned().collect()
 }
 
@@ -827,10 +827,18 @@ mod tests {
         stale_provisioning_user_secret_names, state_matches_filter,
     };
     use crate::types::v1alpha1::provisioning::{ProvisioningUser, UserCredentialsSecretRef};
-    use crate::types::v1alpha1::tenant::TenantSpec;
+    use crate::types::v1alpha1::tenant::{RpcSecretRef, TenantSpec};
+    use http::{Method, Request, Response};
     use k8s_openapi::api::core::v1::Secret;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use std::collections::{BTreeMap, BTreeSet};
+    use kube::{Api, Client, client::Body};
+    use serde_json::Value;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        convert::Infallible,
+        sync::{Arc, Mutex},
+    };
+    use tower::service_fn;
 
     #[test]
     fn state_filter_is_case_insensitive_for_known_states() {
@@ -899,6 +907,123 @@ mod tests {
         assert_eq!(
             stale_provisioning_user_secret_names(&previous, &current),
             BTreeSet::from(["rustfs-user-old".to_string()])
+        );
+    }
+
+    #[test]
+    fn stale_user_secret_names_keep_secrets_referenced_by_other_tenant_fields() {
+        let previous = TenantSpec {
+            users: vec![provisioning_user("app-user", Some("shared-secret"))],
+            ..Default::default()
+        };
+        let current = TenantSpec {
+            users: vec![provisioning_user("app-user", Some("new-user-secret"))],
+            rpc_secret: Some(RpcSecretRef {
+                name: "shared-secret".to_string(),
+                key: "rpc-secret".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        assert!(stale_provisioning_user_secret_names(&previous, &current).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_secret_cleanup_sends_resource_version_guarded_merge_patch() {
+        #[derive(Debug)]
+        struct CapturedRequest {
+            method: Method,
+            uri: String,
+            content_type: Option<String>,
+            body: Option<Value>,
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let service_capture = captured.clone();
+        let service = service_fn(move |request: Request<Body>| {
+            let service_capture = service_capture.clone();
+            async move {
+                let method = request.method().clone();
+                let uri = request.uri().to_string();
+                let content_type = request
+                    .headers()
+                    .get(http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                let body = request
+                    .into_body()
+                    .collect_bytes()
+                    .await
+                    .expect("request body should be readable");
+                let body = (!body.is_empty()).then(|| {
+                    serde_json::from_slice(&body).expect("request body should be valid JSON")
+                });
+                service_capture
+                    .lock()
+                    .expect("request capture lock should be available")
+                    .push(CapturedRequest {
+                        method,
+                        uri,
+                        content_type,
+                        body,
+                    });
+
+                let secret = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {
+                        "name": "old-user-secret",
+                        "namespace": "storage",
+                        "resourceVersion": "42",
+                        "labels": { "rustfs.tenant": "tenant-a" }
+                    }
+                });
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .body(Body::from(
+                            serde_json::to_vec(&secret).expect("Secret response should serialize"),
+                        ))
+                        .expect("response should build"),
+                )
+            }
+        });
+        let client = Client::new(service, "default");
+        let secret_api = Api::<Secret>::namespaced(client, "storage");
+
+        super::remove_stale_user_secret_label(
+            &secret_api,
+            "storage",
+            "tenant-a",
+            "old-user-secret",
+        )
+        .await;
+
+        let captured = captured
+            .lock()
+            .expect("request capture lock should be available");
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].method, Method::GET);
+        assert_eq!(
+            captured[0].uri,
+            "/api/v1/namespaces/storage/secrets/old-user-secret"
+        );
+        assert_eq!(captured[1].method, Method::PATCH);
+        assert_eq!(
+            captured[1].uri,
+            "/api/v1/namespaces/storage/secrets/old-user-secret?"
+        );
+        assert_eq!(
+            captured[1].content_type.as_deref(),
+            Some("application/merge-patch+json")
+        );
+        assert_eq!(
+            captured[1].body,
+            Some(serde_json::json!({
+                "metadata": {
+                    "resourceVersion": "42",
+                    "labels": { "rustfs.tenant": null }
+                }
+            }))
         );
     }
 
