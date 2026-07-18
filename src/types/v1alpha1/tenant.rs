@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::types::v1alpha1::encryption::{EncryptionConfig, PodSecurityContextOverride};
+use crate::types::v1alpha1::encryption::EncryptionConfig;
 use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::logging::LoggingConfig;
 use crate::types::v1alpha1::pool::{Pool, validate_pool_collection};
@@ -20,6 +20,7 @@ use crate::types::v1alpha1::pool_lifecycle::PoolLifecycleSpec;
 use crate::types::v1alpha1::provisioning::{
     ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
 };
+use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
 use crate::types::v1alpha1::tls::TlsConfig;
 use crate::types::{self, error::NoNamespaceSnafu};
 use k8s_openapi::api::core::v1 as corev1;
@@ -34,6 +35,8 @@ mod helper;
 mod rbac;
 mod services;
 mod workloads;
+
+pub use workloads::RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION;
 
 pub(crate) const MAX_TENANT_POOLS: u32 = 32;
 pub(crate) const MAX_TENANT_POLICIES: u32 = 256;
@@ -225,10 +228,15 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<EncryptionConfig>,
 
-    /// Override the default Pod SecurityContext (runAsUser/runAsGroup/fsGroup = 10001).
-    /// Applies to all RustFS pods in this Tenant.
+    /// Override the default Pod SecurityContext for every Pool in this Tenant.
+    /// Pool-level values take precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<PodSecurityContextOverride>,
+
+    /// Override the default RustFS container SecurityContext for every Pool in this Tenant.
+    /// Pool-level values take precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_security_context: Option<corev1::SecurityContext>,
 }
 
 impl TenantSpec {

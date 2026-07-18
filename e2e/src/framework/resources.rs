@@ -54,6 +54,23 @@ metadata:
     )
 }
 
+pub fn restricted_namespace_manifest(namespace: &str) -> String {
+    format!(
+        r#"apiVersion: v1
+kind: Namespace
+metadata:
+  name: {namespace}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+"#
+    )
+}
+
 pub fn credential_secret_manifest(config: &ClusterTestConfig) -> String {
     format!(
         r#"apiVersion: v1
@@ -123,7 +140,7 @@ pub fn smoke_tenant_manifest(config: &ClusterTestConfig) -> Result<String> {
 pub fn apply_smoke_tenant_resources(config: &ClusterTestConfig) -> Result<()> {
     let kubectl = Kubectl::new(config);
     kubectl
-        .apply_yaml_command(namespace_manifest(&config.test_namespace))
+        .apply_yaml_command(restricted_namespace_manifest(&config.test_namespace))
         .run_checked()?;
     kubectl
         .apply_yaml_command(credential_secret_manifest(config))
@@ -337,8 +354,8 @@ fn is_not_found(output: &CommandOutput) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        credential_secret_manifest, credential_secret_name, rpc_secret_manifest, rpc_secret_name,
-        smoke_tenant_manifest,
+        credential_secret_manifest, credential_secret_name, namespace_manifest,
+        restricted_namespace_manifest, rpc_secret_manifest, rpc_secret_name, smoke_tenant_manifest,
     };
     use crate::framework::config::E2eConfig;
 
@@ -349,12 +366,46 @@ mod tests {
 
         assert!(manifest.contains("kind: Tenant"));
         assert!(manifest.contains("namespace: rustfs-e2e-smoke"));
-        assert!(manifest.contains("image: rustfs/rustfs:latest"));
+        assert!(manifest.contains("image: rustfs/rustfs:1.0.0-beta.10"));
+        assert!(!manifest.contains("seccompProfile:"));
+        assert!(!manifest.contains("operator.rustfs.com/runtime-default-image-ack"));
         assert!(manifest.contains("storageClassName: local-storage"));
         assert!(manifest.contains("name: e2e-tenant-credentials"));
         assert!(manifest.contains("rpcSecret:"));
         assert!(manifest.contains("name: e2e-tenant-rpc-auth"));
         assert!(manifest.contains("key: rpc-secret"));
+    }
+
+    #[test]
+    fn smoke_tenant_manifest_acknowledges_a_custom_branch_image() {
+        let mut config = E2eConfig::defaults();
+        config.rustfs_image = "registry.example.com/rustfs/rustfs:e2e".to_string();
+        let tenant = super::smoke_tenant_template(&config).build();
+        tenant
+            .validate_workload_security_compatibility()
+            .expect("the E2E template should acknowledge its custom branch image");
+
+        let manifest = serde_yaml_ng::to_string(&tenant).expect("tenant manifest");
+        assert!(!manifest.contains("seccompProfile:"));
+        assert!(manifest.contains("operator.rustfs.com/runtime-default-image-ack:"));
+        assert!(manifest.contains("registry.example.com/rustfs/rustfs:e2e"));
+    }
+
+    #[test]
+    fn smoke_namespace_enforces_latest_restricted_pod_security() {
+        let manifest = restricted_namespace_manifest("rustfs-e2e-smoke");
+
+        assert!(manifest.contains("pod-security.kubernetes.io/enforce: restricted"));
+        assert!(manifest.contains("pod-security.kubernetes.io/enforce-version: latest"));
+        assert!(manifest.contains("pod-security.kubernetes.io/audit: restricted"));
+        assert!(manifest.contains("pod-security.kubernetes.io/warn: restricted"));
+    }
+
+    #[test]
+    fn operator_namespace_does_not_enable_restricted_admission() {
+        let manifest = namespace_manifest("rustfs-operator-system");
+
+        assert!(!manifest.contains("pod-security.kubernetes.io/"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ metadata:
     environment: development
 spec:
   # Container image (optional - uses operator default if not specified)
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   # Minimal pool configuration.
   # A single-node single-disk Tenant is expressed as 1 server × 1 volume.

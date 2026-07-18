@@ -42,6 +42,12 @@ pub enum Error {
     #[snafu(display("KMS migration is blocked for tenant '{}': {}", name, message))]
     KmsMigrationBlocked { name: String, message: String },
 
+    #[snafu(display("invalid workload security profile for tenant '{}': {}", name, message))]
+    InvalidWorkloadSecurityProfile { name: String, message: String },
+
+    #[snafu(display("workload security is incompatible for tenant '{}': {}", name, message))]
+    WorkloadSecurityIncompatible { name: String, message: String },
+
     #[snafu(display("serde_json error: {}", source))]
     SerdeJson { source: serde_json::Error },
 }

@@ -37,7 +37,7 @@ metadata:
     architecture: heterogeneous-disks
     environment: production
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   pools:
     # LARGE DISK POOL: Nodes with large SSD disks

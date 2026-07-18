@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::framework::config::DEFAULT_RUSTFS_IMAGE;
 use k8s_openapi::api::core::v1::{
     Affinity, EnvVar, LocalObjectReference, PersistentVolumeClaimSpec, PodAffinityTerm,
     PodAntiAffinity, VolumeResourceRequirements,
@@ -22,7 +23,9 @@ use operator::types::v1alpha1::k8s::ImagePullPolicy;
 use operator::types::v1alpha1::k8s::PodManagementPolicy;
 use operator::types::v1alpha1::persistence::PersistenceConfig;
 use operator::types::v1alpha1::pool::{Pool, SchedulingConfig};
-use operator::types::v1alpha1::tenant::{RpcSecretRef, Tenant, TenantSpec};
+use operator::types::v1alpha1::tenant::{
+    RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION, RpcSecretRef, Tenant, TenantSpec,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -120,6 +123,8 @@ impl TenantTemplate {
                 }),
                 ..PersistenceConfig::default()
             },
+            security_context: None,
+            container_security_context: None,
             scheduling: SchedulingConfig {
                 node_selector: self.node_selector.clone(),
                 affinity: self.affinity.clone(),
@@ -156,6 +161,15 @@ impl TenantTemplate {
 
         let mut tenant = Tenant::new(&self.name, spec);
         tenant.metadata.namespace = Some(self.namespace.clone());
+        // Live E2E frequently injects a branch image from a custom registry. Bind that
+        // acknowledgement to the exact reference while the pinned default smoke case keeps
+        // exercising the Operator's implicit image and security defaults.
+        if self.image != DEFAULT_RUSTFS_IMAGE {
+            tenant.metadata.annotations.get_or_insert_default().insert(
+                RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION.to_string(),
+                self.image.clone(),
+            );
+        }
         tenant
     }
 }
@@ -183,7 +197,7 @@ fn fault_tenant_pod_anti_affinity(tenant_name: &str) -> Affinity {
 
 #[cfg(test)]
 mod tests {
-    use super::TenantTemplate;
+    use super::{RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION, TenantTemplate};
 
     #[test]
     fn kind_local_tenant_uses_local_image_policy_and_disk_bypass() {
@@ -215,6 +229,19 @@ mod tests {
             Some("local-storage")
         );
         assert!(tenant.spec.image_pull_policy.is_some());
+        assert!(tenant.spec.security_context.is_none());
+        assert_eq!(
+            tenant
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION))
+                .map(String::as_str),
+            Some("rustfs/rustfs:e2e")
+        );
+        tenant
+            .validate_workload_security_compatibility()
+            .expect("the image-bound E2E acknowledgement should allow a branch image");
         assert!(
             tenant
                 .spec
@@ -239,7 +266,7 @@ mod tests {
         let tenant = TenantTemplate::real_cluster(
             "rustfs-fault-test",
             "fault-test-tenant",
-            "rustfs/rustfs:latest",
+            "rustfs/rustfs:1.0.0-beta.10",
             "fast-csi",
             "fault-test-tenant-credentials",
         )

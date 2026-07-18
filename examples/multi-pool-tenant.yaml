@@ -4,7 +4,7 @@ metadata:
   name: multi-pool-tenant
   namespace: rustfs-system
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   # Multiple pools for distributed storage
   pools:

@@ -38,6 +38,8 @@ pub fn create_test_tenant(
                     volumes_per_server: 4,
                     ..Default::default()
                 },
+                security_context: None,
+                container_security_context: None,
                 scheduling: Default::default(),
             }],
             service_account_name,

@@ -25,7 +25,7 @@ use crate::framework::{
 
 const RUSTFS_FORMAT_MARKER_PATHS: [&str; 2] = [".rustfs.sys/format.json", ".minio.sys/format.json"];
 const DOCKER_ROOT_UID: u32 = 0;
-const CLEANUP_HELPER_FALLBACK_IMAGES: [&str; 2] = ["rustfs/rustfs:latest", "busybox:latest"];
+const CLEANUP_HELPER_FALLBACK_IMAGES: [&str; 2] = ["rustfs/rustfs:1.0.0-beta.10", "busybox:latest"];
 
 #[derive(Debug, Clone)]
 pub struct KindCluster {
@@ -151,7 +151,7 @@ impl KindCluster {
 
         Err(last_error.unwrap_or_else(|| {
             anyhow::anyhow!(
-                "no local Docker cleanup helper image is available; build rustfs/operator:e2e or ensure rustfs/rustfs:latest is present"
+                "no local Docker cleanup helper image is available; build rustfs/operator:e2e or ensure the configured RustFS image is present"
             )
         }))
     }
@@ -395,11 +395,12 @@ mod tests {
     #[test]
     fn ctr_import_image_command_streams_docker_archive_to_node_containerd() {
         let kind = KindCluster::new(E2eConfig::defaults());
-        let command = kind.ctr_import_image_command("rustfs/rustfs:latest", "rustfs-e2e-worker");
+        let command =
+            kind.ctr_import_image_command("rustfs/rustfs:1.0.0-beta.10", "rustfs-e2e-worker");
 
         assert_eq!(
             command.display(),
-            "sh -c docker save \"$1\" | docker exec --privileged -i \"$2\" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs - sh rustfs/rustfs:latest rustfs-e2e-worker"
+            "sh -c docker save \"$1\" | docker exec --privileged -i \"$2\" ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs - sh rustfs/rustfs:1.0.0-beta.10 rustfs-e2e-worker"
         );
     }
 
@@ -474,7 +475,7 @@ mod tests {
         let command = kind
             .docker_clean_host_storage_command(
                 std::path::Path::new("/tmp/rustfs-e2e-storage-1"),
-                "rustfs/rustfs:latest",
+                "rustfs/rustfs:1.0.0-beta.10",
                 1000,
                 1000,
             )
@@ -482,12 +483,12 @@ mod tests {
 
         assert_eq!(
             command.display(),
-            "docker run --rm --pull never --user 0:0 --entrypoint /bin/sh -v /tmp/rustfs-e2e-storage-1:/e2e-storage rustfs/rustfs:latest -c find /e2e-storage -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && chown 1000:1000 /e2e-storage"
+            "docker run --rm --pull never --user 0:0 --entrypoint /bin/sh -v /tmp/rustfs-e2e-storage-1:/e2e-storage rustfs/rustfs:1.0.0-beta.10 -c find /e2e-storage -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && chown 1000:1000 /e2e-storage"
         );
         assert!(
             kind.docker_clean_host_storage_command(
                 std::path::Path::new("/tmp/other"),
-                "rustfs/rustfs:latest",
+                "rustfs/rustfs:1.0.0-beta.10",
                 1000,
                 1000,
             )
@@ -527,7 +528,7 @@ mod tests {
             kind.cleanup_helper_images(),
             vec![
                 "rustfs/operator:e2e".to_string(),
-                "rustfs/rustfs:latest".to_string(),
+                "rustfs/rustfs:1.0.0-beta.10".to_string(),
                 "busybox:latest".to_string(),
             ]
         );

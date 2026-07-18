@@ -413,6 +413,7 @@ export interface SecurityContextInfo {
   runAsGroup: number | null
   fsGroup: number | null
   runAsNonRoot: boolean | null
+  effectiveRunAsNonRoot: boolean
 }
 
 export interface EncryptionInfoResponse {
@@ -449,10 +450,14 @@ export interface EncryptionUpdateResponse {
 }
 
 export interface UpdateSecurityContextRequest {
-  runAsUser?: number
-  runAsGroup?: number
-  fsGroup?: number
-  runAsNonRoot?: boolean
+  /** Omit to preserve, null to clear, or provide a value to set. */
+  runAsUser?: number | null
+  /** Omit to preserve, null to clear, or provide a value to set. */
+  runAsGroup?: number | null
+  /** Omit to preserve, null to clear, or provide a value to set. */
+  fsGroup?: number | null
+  /** Omit to preserve, null to restore the Operator default, or provide a value to set. */
+  runAsNonRoot?: boolean | null
 }
 
 export interface SecurityContextUpdateResponse {

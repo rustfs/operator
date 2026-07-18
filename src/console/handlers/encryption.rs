@@ -20,6 +20,7 @@ use crate::console::{
 use crate::types::v1alpha1::encryption::{
     EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef, VaultKmsConfig,
 };
+use crate::types::v1alpha1::security_context::effective_run_as_non_root;
 use crate::types::v1alpha1::tenant::Tenant;
 use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
@@ -73,6 +74,10 @@ pub async fn get_encryption(
                         run_as_group: sc.run_as_group,
                         fs_group: sc.fs_group,
                         run_as_non_root: sc.run_as_non_root,
+                        effective_run_as_non_root: effective_run_as_non_root(
+                            sc.run_as_user,
+                            sc.run_as_non_root,
+                        ),
                     }
                 }),
             },
@@ -89,6 +94,10 @@ pub async fn get_encryption(
                         run_as_group: sc.run_as_group,
                         fs_group: sc.fs_group,
                         run_as_non_root: sc.run_as_non_root,
+                        effective_run_as_non_root: effective_run_as_non_root(
+                            sc.run_as_user,
+                            sc.run_as_non_root,
+                        ),
                     }
                 }),
             },

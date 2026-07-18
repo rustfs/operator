@@ -33,6 +33,7 @@ import type {
   AddPoolRequest,
   EncryptionInfoResponse,
   UpdateEncryptionRequest,
+  UpdateSecurityContextRequest,
   ProvisioningItemStatus,
 } from "@/types/api"
 import { ApiError } from "@/lib/api-client"
@@ -115,6 +116,42 @@ function provisioningItemDetails(item: ProvisioningItemStatus): string {
   return details.length > 0 ? details.join(" ") : "-"
 }
 
+type RunAsNonRootMode = "default" | "true" | "false"
+
+interface SecurityContextFormState {
+  runAsUser: string
+  runAsGroup: string
+  fsGroup: string
+  runAsNonRoot: RunAsNonRootMode
+}
+
+type SecurityContextDirtyFields = Record<keyof SecurityContextFormState, boolean>
+
+const cleanSecurityContextDirtyFields = (): SecurityContextDirtyFields => ({
+  runAsUser: false,
+  runAsGroup: false,
+  fsGroup: false,
+  runAsNonRoot: false,
+})
+
+function nullableInteger(value: string): number | null {
+  return value.trim() === "" ? null : Number.parseInt(value, 10)
+}
+
+function buildSecurityContextUpdate(
+  form: SecurityContextFormState,
+  dirty: SecurityContextDirtyFields,
+): UpdateSecurityContextRequest {
+  const update: UpdateSecurityContextRequest = {}
+  if (dirty.runAsUser) update.runAsUser = nullableInteger(form.runAsUser)
+  if (dirty.runAsGroup) update.runAsGroup = nullableInteger(form.runAsGroup)
+  if (dirty.fsGroup) update.fsGroup = nullableInteger(form.fsGroup)
+  if (dirty.runAsNonRoot) {
+    update.runAsNonRoot = form.runAsNonRoot === "default" ? null : form.runAsNonRoot === "true"
+  }
+  return update
+}
+
 export function TenantDetailClient({ namespace, name, initialTab, initialYamlEditable }: TenantDetailClientProps) {
   const router = useRouter()
   const { t } = useTranslation()
@@ -173,12 +210,13 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   const [secCtxLoaded, setSecCtxLoaded] = useState(false)
   const [secCtxLoading, setSecCtxLoading] = useState(false)
   const [secCtxSaving, setSecCtxSaving] = useState(false)
-  const [secCtx, setSecCtx] = useState({
+  const [secCtx, setSecCtx] = useState<SecurityContextFormState>({
     runAsUser: "",
     runAsGroup: "",
     fsGroup: "",
-    runAsNonRoot: true,
+    runAsNonRoot: "default",
   })
+  const [secCtxDirty, setSecCtxDirty] = useState<SecurityContextDirtyFields>(cleanSecurityContextDirtyFields)
 
   const loadTenant = async () => {
     const [detailResult, poolResult, podResult] = await Promise.allSettled([
@@ -297,6 +335,11 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     loadSecurityContext()
   }, [tab, secCtxLoaded, secCtxLoading]) // eslint-disable-line react-hooks/exhaustive-deps -- only lazy-load once per tenant
 
+  useEffect(() => {
+    setSecCtxLoaded(false)
+    setSecCtxDirty(cleanSecurityContextDirtyFields())
+  }, [namespace, name])
+
   const loadSecurityContext = async () => {
     setSecCtxLoading(true)
     try {
@@ -305,8 +348,9 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
         runAsUser: data.runAsUser?.toString() ?? "",
         runAsGroup: data.runAsGroup?.toString() ?? "",
         fsGroup: data.fsGroup?.toString() ?? "",
-        runAsNonRoot: data.runAsNonRoot ?? true,
+        runAsNonRoot: data.runAsNonRoot === null ? "default" : data.runAsNonRoot ? "true" : "false",
       })
+      setSecCtxDirty(cleanSecurityContextDirtyFields())
     } catch (e) {
       const err = e as ApiError
       toast.error(err.message || t("Failed to load security context"))
@@ -320,12 +364,8 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
     e.preventDefault()
     setSecCtxSaving(true)
     try {
-      await api.updateSecurityContext(namespace, name, {
-        runAsUser: secCtx.runAsUser ? parseInt(secCtx.runAsUser, 10) : undefined,
-        runAsGroup: secCtx.runAsGroup ? parseInt(secCtx.runAsGroup, 10) : undefined,
-        fsGroup: secCtx.fsGroup ? parseInt(secCtx.fsGroup, 10) : undefined,
-        runAsNonRoot: secCtx.runAsNonRoot,
-      })
+      await api.updateSecurityContext(namespace, name, buildSecurityContextUpdate(secCtx, secCtxDirty))
+      await loadSecurityContext()
       toast.success(t("SecurityContext updated"))
     } catch (e) {
       const err = e as ApiError
@@ -1248,7 +1288,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
             <CardTitle className="text-base">{t("SecurityContext")}</CardTitle>
             <CardDescription>
               {t(
-                "Override Pod SecurityContext for RustFS pods (runAsUser, runAsGroup, fsGroup). Changes apply after Pods are recreated.",
+                "Override Pod SecurityContext UID/GID fields. Use Raw YAML for seccomp, container, and Pool-level settings. Changes apply after Pods are recreated.",
               )}
             </CardDescription>
           </CardHeader>
@@ -1267,7 +1307,10 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       type="number"
                       placeholder="10001"
                       value={secCtx.runAsUser}
-                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsUser: e.target.value }))}
+                      onChange={(e) => {
+                        setSecCtx((s) => ({ ...s, runAsUser: e.target.value }))
+                        setSecCtxDirty((dirty) => ({ ...dirty, runAsUser: true }))
+                      }}
                     />
                   </div>
                   <div className="space-y-2">
@@ -1276,7 +1319,10 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       type="number"
                       placeholder="10001"
                       value={secCtx.runAsGroup}
-                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsGroup: e.target.value }))}
+                      onChange={(e) => {
+                        setSecCtx((s) => ({ ...s, runAsGroup: e.target.value }))
+                        setSecCtxDirty((dirty) => ({ ...dirty, runAsGroup: true }))
+                      }}
                     />
                   </div>
                   <div className="space-y-2">
@@ -1285,20 +1331,29 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       type="number"
                       placeholder="10001"
                       value={secCtx.fsGroup}
-                      onChange={(e) => setSecCtx((s) => ({ ...s, fsGroup: e.target.value }))}
+                      onChange={(e) => {
+                        setSecCtx((s) => ({ ...s, fsGroup: e.target.value }))
+                        setSecCtxDirty((dirty) => ({ ...dirty, fsGroup: true }))
+                      }}
                     />
                   </div>
-                  <div className="flex items-end gap-3 pb-2">
-                    <label htmlFor="sec-nonroot" className="text-sm whitespace-nowrap">
+                  <div className="space-y-2">
+                    <label htmlFor="sec-nonroot" className="text-sm font-medium whitespace-nowrap">
                       {t("Do not run as Root")}
                     </label>
-                    <input
+                    <select
                       id="sec-nonroot"
-                      type="checkbox"
-                      checked={secCtx.runAsNonRoot}
-                      onChange={(e) => setSecCtx((s) => ({ ...s, runAsNonRoot: e.target.checked }))}
-                      className="h-4 w-4 rounded border-border"
-                    />
+                      value={secCtx.runAsNonRoot}
+                      onChange={(e) => {
+                        setSecCtx((s) => ({ ...s, runAsNonRoot: e.target.value as RunAsNonRootMode }))
+                        setSecCtxDirty((dirty) => ({ ...dirty, runAsNonRoot: true }))
+                      }}
+                      className="dark:bg-input/30 border-input h-8 w-full rounded-none border bg-transparent px-2.5 text-xs outline-none"
+                    >
+                      <option value="default">{t("Default")}</option>
+                      <option value="true">true</option>
+                      <option value="false">false</option>
+                    </select>
                   </div>
                 </div>
                 <div className="flex gap-2">

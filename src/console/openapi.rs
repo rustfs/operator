@@ -65,6 +65,7 @@ use crate::types::v1alpha1::status::provisioning::{
         api_list_tenants,
         api_get_tenant_state_counts,
         api_create_tenant,
+        api_create_tenant_from_yaml,
         api_list_tenants_by_ns,
         api_get_tenant_state_counts_by_ns,
         api_get_tenant,
@@ -213,6 +214,24 @@ fn api_get_tenant_state_counts() -> Json<TenantStateCountsResponse> {
 
 #[utoipa::path(post, path = "/api/v1/tenants", request_body = CreateTenantRequest, responses((status = 200, body = TenantListItem)), tag = "tenants")]
 fn api_create_tenant(_body: Json<CreateTenantRequest>) -> Json<TenantListItem> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/tenants/yaml",
+    request_body = TenantYAML,
+    responses(
+        (status = 200, body = TenantListItem),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "tenants"
+)]
+fn api_create_tenant_from_yaml(_body: Json<TenantYAML>) -> Json<TenantListItem> {
     unimplemented!("Documentation only")
 }
 
@@ -457,6 +476,33 @@ mod tests {
             )
             .and_then(Value::as_str),
             Some("#/components/schemas/UserCredentialsSecretRef")
+        );
+    }
+
+    #[test]
+    fn tenant_yaml_create_route_is_documented() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
+        let operation = spec
+            .pointer("/paths/~1api~1v1~1tenants~1yaml/post")
+            .expect("Tenant YAML create path should exist");
+
+        assert_eq!(
+            operation
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/TenantYAML")
+        );
+        assert_eq!(
+            operation
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/TenantListItem")
+        );
+        assert_eq!(
+            operation
+                .pointer("/responses/400/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/ConsoleErrorResponse")
         );
     }
 }

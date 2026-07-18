@@ -681,7 +681,7 @@ fn apply_positive_case_base_resources(
 fn apply_shared_namespace_resources(config: &E2eConfig) -> Result<()> {
     apply_yaml(
         config,
-        resources::namespace_manifest(&config.test_namespace),
+        resources::restricted_namespace_manifest(&config.test_namespace),
     )?;
     apply_yaml(config, resources::credential_secret_manifest(config))?;
     Ok(())

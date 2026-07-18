@@ -9,7 +9,7 @@ metadata:
   name: multi-cert-tls
   namespace: rustfs-system
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
 
   tls:
     mode: certManager

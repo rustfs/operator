@@ -9,9 +9,9 @@ metadata:
   labels:
     app: rustfs
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
   # Kind demos load the server image into node-local containerd. Avoid forcing
-  # Docker Hub access for the `latest` tag when the image is already present.
+  # Docker Hub access when the pinned image is already present.
   imagePullPolicy: IfNotPresent
   podManagementPolicy: Parallel
 

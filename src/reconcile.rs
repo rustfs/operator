@@ -920,6 +920,8 @@ pub fn error_policy(object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> A
             types::error::Error::ImmutableFieldModified { .. }
             | types::error::Error::InvalidTenantName { .. }
             | types::error::Error::KmsMigrationBlocked { .. }
+            | types::error::Error::InvalidWorkloadSecurityProfile { .. }
+            | types::error::Error::WorkloadSecurityIncompatible { .. }
             | types::error::Error::PoolDeleteBlocked { .. } => Duration::from_secs(60),
 
             // Other type errors - use moderate requeue
@@ -970,6 +972,12 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
             types::error::Error::ImmutableFieldModified { .. } => "ImmutableFieldModified",
             types::error::Error::PoolDeleteBlocked { .. } => "PoolDeleteBlocked",
             types::error::Error::KmsMigrationBlocked { .. } => "KmsMigrationBlocked",
+            types::error::Error::InvalidWorkloadSecurityProfile { .. } => {
+                "InvalidWorkloadSecurityProfile"
+            }
+            types::error::Error::WorkloadSecurityIncompatible { .. } => {
+                "WorkloadSecurityIncompatible"
+            }
             types::error::Error::NoNamespace => "NoNamespace",
             types::error::Error::InternalError { .. } => "InternalError",
             types::error::Error::SerdeJson { .. } => "SerdeJsonError",

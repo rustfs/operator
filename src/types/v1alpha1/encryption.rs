@@ -18,6 +18,9 @@ use kube::KubeSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+// Keep the former public path available for downstream Rust users.
+pub use super::security_context::PodSecurityContextOverride;
+
 /// KMS backend type for server-side encryption.
 ///
 /// RustFS `init_kms_system` reads `RUSTFS_KMS_BACKEND` (`local` or `vault`).
@@ -148,27 +151,4 @@ impl EncryptionConfig {
         }
         names
     }
-}
-
-/// Pod SecurityContext overrides for all RustFS pods in this Tenant.
-///
-/// Overrides the default Pod SecurityContext (`runAsUser` / `runAsGroup` / `fsGroup` = 10001).
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct PodSecurityContextOverride {
-    /// UID to run the container process as.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_user: Option<i64>,
-
-    /// GID to run the container process as.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_group: Option<i64>,
-
-    /// GID applied to all volumes mounted in the Pod (`fsGroup`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fs_group: Option<i64>,
-
-    /// Enforce non-root execution (default in the operator: `true` when set).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as_non_root: Option<bool>,
 }

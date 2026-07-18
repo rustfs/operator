@@ -61,7 +61,7 @@ metadata:
   name: provisioning-demo
   namespace: default
 spec:
-  image: rustfs/rustfs:latest
+  image: rustfs/rustfs:1.0.0-beta.10
   credsSecret:
     name: provisioning-admin-creds
   pools:
