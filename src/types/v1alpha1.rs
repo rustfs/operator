@@ -216,6 +216,27 @@ mod tenant_provisioning_crd_tests {
             json!(MAX_POLICIES_PER_USER)
         );
         assert_eq!(
+            spec["properties"]["users"]["items"]["properties"]["credsSecret"]["type"],
+            json!("object")
+        );
+        assert_eq!(
+            spec["properties"]["users"]["items"]["properties"]["credsSecret"]["properties"]["name"]
+                ["minLength"],
+            json!(1)
+        );
+        assert_eq!(
+            spec["properties"]["users"]["items"]["properties"]["credsSecret"]["required"],
+            json!(["name"])
+        );
+        assert!(
+            spec["properties"]["users"]["items"]["required"]
+                .as_array()
+                .expect("user required fields are present")
+                .iter()
+                .all(|field| field != "credsSecret"),
+            "user credsSecret must remain optional"
+        );
+        assert_eq!(
             spec["properties"]["buckets"]["x-kubernetes-list-type"],
             json!("map")
         );
@@ -246,6 +267,16 @@ mod tenant_provisioning_crd_tests {
         assert_eq!(
             status["properties"]["provisioning"]["properties"]["phase"]["enum"],
             json!(["Pending", "Ready", "Failed", null])
+        );
+        assert_eq!(
+            status["properties"]["provisioning"]["properties"]["users"]["items"]["properties"]["observedSecretName"]
+                ["type"],
+            json!("string")
+        );
+        assert_eq!(
+            status["properties"]["provisioning"]["properties"]["users"]["items"]["properties"]["observedSecretName"]
+                ["nullable"],
+            json!(true)
         );
 
         assert!(

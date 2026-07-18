@@ -130,9 +130,12 @@ Demonstrates operator-managed RustFS canned policies, regular users, and buckets
 **Features demonstrated:**
 - Tenant admin credentials through `spec.credsSecret`
 - Policy document stored in a labeled ConfigMap
-- User credentials stored in a labeled Secret
+- User credentials stored in a labeled Secret selected by `users[].credsSecret.name`
 - Required non-empty direct policy mapping for each user
 - Bucket creation with object lock verification
+
+For backward compatibility, omitting `users[].credsSecret` still selects a Secret
+with the same name as the logical user.
 
 **Deployment:**
 ```bash

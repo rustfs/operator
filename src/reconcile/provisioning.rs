@@ -53,6 +53,7 @@ struct ProvisioningRun<'a> {
 struct UserCredentials {
     access_key: String,
     secret_key: String,
+    secret_name: String,
     resource_version: Option<String>,
 }
 
@@ -201,6 +202,7 @@ impl ProvisioningRun<'_> {
         item.last_applied_hash = previous.last_applied_hash.clone();
         item.last_applied_generation = previous.last_applied_generation;
         item.observed_secret_resource_version = previous.observed_secret_resource_version.clone();
+        item.observed_secret_name = previous.observed_secret_name.clone();
         item.last_applied_access_key_hash = previous.last_applied_access_key_hash.clone();
         item.policies = previous.policies.clone();
         item.region = previous.region.clone();
@@ -235,6 +237,7 @@ impl ProvisioningRun<'_> {
             if let Some(previous) = self.previous_user(&user.name) {
                 item.observed_secret_resource_version =
                     previous.observed_secret_resource_version.clone();
+                item.observed_secret_name = previous.observed_secret_name.clone();
                 item.last_applied_access_key_hash = previous.last_applied_access_key_hash.clone();
                 item.policies = previous.policies.clone();
             }
@@ -859,11 +862,13 @@ fn annotate_user_item(
     match applied_credentials {
         Some(credentials) => {
             item.observed_secret_resource_version = credentials.resource_version.clone();
+            item.observed_secret_name = Some(credentials.secret_name.clone());
             item.last_applied_access_key_hash = Some(access_key_hash(&credentials.access_key));
         }
         None => {
             item.observed_secret_resource_version =
                 previous.and_then(|item| item.observed_secret_resource_version.clone());
+            item.observed_secret_name = previous.and_then(|item| item.observed_secret_name.clone());
             item.last_applied_access_key_hash =
                 previous.and_then(|item| item.last_applied_access_key_hash.clone());
         }
@@ -916,6 +921,7 @@ fn user_credentials_need_apply(
     let current_hash = access_key_hash(&credentials.access_key);
 
     previous.observed_secret_resource_version.as_deref() != Some(resource_version)
+        || previous.observed_secret_name.as_deref() != Some(credentials.secret_name.as_str())
         || previous.last_applied_access_key_hash.as_deref() != Some(current_hash.as_str())
 }
 
@@ -927,34 +933,35 @@ async fn load_user_secret(
     run: &ProvisioningRun<'_>,
     user: &ProvisioningUser,
 ) -> Result<UserCredentials, String> {
+    let secret_name = user.credentials_secret_name();
     let secret: Secret = run
         .ctx
-        .get(&user.name, run.namespace)
+        .get(secret_name, run.namespace)
         .await
         .map_err(|error| {
             if context::is_kube_not_found(&error) {
-                format!("user Secret '{}' was not found", user.name)
+                format!("user Secret '{secret_name}' was not found")
             } else {
-                format!("failed to read user Secret '{}': {error}", user.name)
+                format!("failed to read user Secret '{secret_name}': {error}")
             }
         })?;
     let data = secret
         .data
         .as_ref()
-        .ok_or_else(|| format!("user Secret '{}' has no data", user.name))?;
+        .ok_or_else(|| format!("user Secret '{secret_name}' has no data"))?;
 
     let access_key = read_compatible_secret_value(
         data,
         "accesskey",
         "CONSOLE_ACCESS_KEY",
-        &user.name,
+        secret_name,
         "access key",
     )?;
     let secret_key = read_compatible_secret_value(
         data,
         "secretkey",
         "CONSOLE_SECRET_KEY",
-        &user.name,
+        secret_name,
         "secret key",
     )?;
 
@@ -964,6 +971,7 @@ async fn load_user_secret(
     Ok(UserCredentials {
         access_key,
         secret_key,
+        secret_name: secret_name.to_string(),
         resource_version: secret.metadata.resource_version,
     })
 }
@@ -1408,6 +1416,7 @@ mod tests {
     fn user_policy_list_must_not_be_empty() {
         let user = ProvisioningUser {
             name: "app-user".to_string(),
+            creds_secret: None,
             policies: Vec::new(),
             deletion_policy: Default::default(),
         };
@@ -1599,10 +1608,12 @@ mod tests {
             Reason::ProvisioningConfigured.as_str(),
         );
         previous.observed_secret_resource_version = Some("1".to_string());
+        previous.observed_secret_name = Some("app-user".to_string());
         previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
         let credentials = UserCredentials {
             access_key: "appuser01".to_string(),
             secret_key: "rotated-secret".to_string(),
+            secret_name: "app-user".to_string(),
             resource_version: Some("2".to_string()),
         };
 
@@ -1627,14 +1638,63 @@ mod tests {
             Reason::ProvisioningConfigured.as_str(),
         );
         previous.observed_secret_resource_version = Some("1".to_string());
+        previous.observed_secret_name = Some("app-user".to_string());
         previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
         let credentials = UserCredentials {
             access_key: "appuser01".to_string(),
             secret_key: "unchanged-secret".to_string(),
+            secret_name: "app-user".to_string(),
             resource_version: Some("1".to_string()),
         };
 
         assert!(!user_credentials_need_apply(
+            Some(&previous),
+            &credentials,
+            true
+        ));
+    }
+
+    #[test]
+    fn changed_user_secret_reference_requires_credentials_write() {
+        let mut previous = ProvisioningItemStatus::new(
+            "app-user",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        );
+        previous.observed_secret_resource_version = Some("1".to_string());
+        previous.observed_secret_name = Some("app-user".to_string());
+        previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let credentials = UserCredentials {
+            access_key: "appuser01".to_string(),
+            secret_key: "rotated-secret".to_string(),
+            secret_name: "rustfs-user-app-user".to_string(),
+            resource_version: Some("1".to_string()),
+        };
+
+        assert!(user_credentials_need_apply(
+            Some(&previous),
+            &credentials,
+            true
+        ));
+    }
+
+    #[test]
+    fn legacy_user_status_records_secret_identity_with_one_credentials_write() {
+        let mut previous = ProvisioningItemStatus::new(
+            "app-user",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        );
+        previous.observed_secret_resource_version = Some("1".to_string());
+        previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let credentials = UserCredentials {
+            access_key: "appuser01".to_string(),
+            secret_key: "unchanged-secret".to_string(),
+            secret_name: "app-user".to_string(),
+            resource_version: Some("1".to_string()),
+        };
+
+        assert!(user_credentials_need_apply(
             Some(&previous),
             &credentials,
             true
@@ -1652,6 +1712,7 @@ mod tests {
         let credentials = UserCredentials {
             access_key: "otheruser".to_string(),
             secret_key: "rotated-secret".to_string(),
+            secret_name: "app-user".to_string(),
             resource_version: Some("2".to_string()),
         };
 

@@ -1761,6 +1761,17 @@ spec:
                 description: Regular users that should exist in the RustFS tenant.
                 items:
                   properties:
+                    credsSecret:
+                      description: Optional credentials Secret reference. Defaults to a Secret named after the user.
+                      nullable: true
+                      properties:
+                        name:
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
                     deletionPolicy:
                       enum:
                       - Retain
@@ -2207,6 +2218,9 @@ spec:
                         objectLock:
                           nullable: true
                           type: boolean
+                        observedSecretName:
+                          nullable: true
+                          type: string
                         observedSecretResourceVersion:
                           nullable: true
                           type: string
@@ -2266,6 +2280,9 @@ spec:
                         objectLock:
                           nullable: true
                           type: boolean
+                        observedSecretName:
+                          nullable: true
+                          type: string
                         observedSecretResourceVersion:
                           nullable: true
                           type: string
@@ -2313,6 +2330,9 @@ spec:
                         objectLock:
                           nullable: true
                           type: boolean
+                        observedSecretName:
+                          nullable: true
+                          type: string
                         observedSecretResourceVersion:
                           nullable: true
                           type: string

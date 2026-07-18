@@ -115,6 +115,9 @@ export interface ProvisioningPolicy {
 
 export interface ProvisioningUser {
   name: string
+  credsSecret?: {
+    name: string
+  }
   policies: string[]
   deletionPolicy?: ProvisioningDeletionPolicy
 }
@@ -136,6 +139,8 @@ export interface ProvisioningItemStatus {
   lastAppliedHash?: string | null
   lastAppliedGeneration?: number | null
   observedSecretResourceVersion?: string | null
+  observedSecretName?: string | null
+  lastAppliedAccessKeyHash?: string | null
   policies?: string[]
   region?: string | null
   objectLock?: boolean | null

@@ -47,7 +47,7 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: provisioning-app-user
+  name: rustfs-user-app-user
   namespace: default
   labels:
     rustfs.tenant: provisioning-demo
@@ -80,7 +80,9 @@ spec:
           key: policy.json
 
   users:
-    - name: provisioning-app-user
+    - name: app-user
+      credsSecret:
+        name: rustfs-user-app-user
       policies:
         - app-readwrite
 

@@ -90,9 +90,13 @@ kubectl logs -n rustfs-system \
 Upgrade an existing installation:
 
 ```bash
+kubectl apply -f deploy/rustfs-operator/crds/tenant-crd.yaml
 helm upgrade rustfs-operator deploy/rustfs-operator/ \
   --namespace rustfs-system
 ```
+
+Helm does not upgrade CRDs from a chart's `crds/` directory. Apply the updated Tenant CRD before using fields introduced by a newer operator version, then wait for the operator rollout to complete.
+Existing Tenant manifests that omit newer optional fields require no migration. Do not rely on `users[].credsSecret` while any older operator binary is still reconciling the Tenant, because older versions use the same-name Secret convention.
 
 Uninstall:
 
@@ -598,9 +602,11 @@ ConfigMaps and user Secrets must live in the Tenant namespace. If managed outsid
 
 Policy documents are parsed by RustFS. Use S3 ARN resource patterns such as `arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/*`; for all buckets, use `arn:aws:s3:::*`. A bare `Resource: "*"` is not accepted by RustFS policy parsing.
 
-For each `spec.users[]` entry, the operator reads a Secret with the same name as the user. The Secret must contain `accesskey` and `secretkey`, or the MinIO-compatible keys `CONSOLE_ACCESS_KEY` and `CONSOLE_SECRET_KEY`. If both key formats are present, their values must match. User access keys must be at least 8 characters and must not contain whitespace, `=`, or `,`; user secret keys must be at least 8 characters.
+For each `spec.users[]` entry, set `credsSecret.name` to select a user credentials Secret in the Tenant namespace. If `credsSecret` is omitted, the operator reads a Secret with the same name as `user.name`, preserving the behavior of older manifests. An explicit reference is authoritative and does not fall back to the same-name Secret when it is invalid or missing.
 
-Updating a user Secret's `secretkey` rotates that RustFS user's credential. The `accesskey` is immutable after the first successful reconciliation; use a new user entry and Secret when it must change, then migrate clients before removing the old entry.
+The Secret must contain `accesskey` and `secretkey`, or the MinIO-compatible keys `CONSOLE_ACCESS_KEY` and `CONSOLE_SECRET_KEY`. If both key formats are present, their values must match. `user.name` remains the declarative and status identity; the Secret's `accesskey` is the actual RustFS user. User access keys must be at least 8 characters and must not contain whitespace, `=`, or `,`; user secret keys must be at least 8 characters. The `rustfs.tenant` label only causes Secret updates to enqueue the Tenant; it does not select which Secret is read.
+
+Updating a user Secret's `secretkey`, or changing `credsSecret.name` to another Secret with the same `accesskey`, rotates that RustFS user's credential. The `accesskey` is immutable after the first successful reconciliation; use a new user entry and Secret when it must change, then migrate clients before removing the old entry.
 
 ```yaml
 apiVersion: v1
@@ -626,7 +632,7 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: app-user
+  name: rustfs-user-app-user
   namespace: storage
   labels:
     rustfs.tenant: rustfs-a
@@ -656,6 +662,8 @@ spec:
           key: policy.json
   users:
     - name: app-user
+      credsSecret:
+        name: rustfs-user-app-user
       policies:
         - app-readwrite
   buckets:
