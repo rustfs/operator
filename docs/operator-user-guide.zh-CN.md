@@ -595,7 +595,7 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
 - `spec.buckets`：bucket，可选择开启 object lock。
 
-ConfigMap 和 user Secret 必须位于 Tenant namespace。operator 仍会在被引用的 policy ConfigMap 上维护 `rustfs.tenant=<tenant-name>` label。Secret 更新会按所有 Tenant spec 做反向匹配，因此同一个 Secret 可以被多个 Tenant 共享，不需要路由 label。operator 启动时会清理外部 Secret 上遗留的路由 label。
+ConfigMap 和 user Secret 必须位于 Tenant namespace。Operator 会从 Tenant spec 建立反向引用索引，因此被引用资源的创建或更新会触发所有引用它的 Tenant reconcile；无需要求或修改资源标签，也不需要对这些资源拥有写权限。
 
 Policy document 由 RustFS 解析。请使用 `arn:aws:s3:::bucket` 和 `arn:aws:s3:::bucket/*` 这类 S3 ARN resource 写法；如需匹配所有 bucket，请使用 `arn:aws:s3:::*`。RustFS policy parser 不接受裸 `Resource: "*"`。
 
@@ -611,8 +611,6 @@ kind: ConfigMap
 metadata:
   name: app-policy
   namespace: storage
-  labels:
-    rustfs.tenant: rustfs-a
 data:
   policy.json: |
     {

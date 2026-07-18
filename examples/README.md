@@ -129,8 +129,8 @@ Demonstrates operator-managed RustFS canned policies, regular users, and buckets
 
 **Features demonstrated:**
 - Tenant admin credentials through `spec.credsSecret`
-- Policy document stored in a labeled ConfigMap
-- User credentials stored in a labeled Secret selected by `users[].credsSecret.name`
+- Policy document stored in a referenced ConfigMap
+- User credentials stored in a referenced Secret selected by `users[].credsSecret.name`
 - Required non-empty direct policy mapping for each user
 - Bucket creation with object lock verification
 
@@ -143,7 +143,7 @@ kubectl apply -f examples/provisioning-tenant.yaml
 kubectl wait --for=condition=Ready tenant/provisioning-demo --timeout=10m
 ```
 
-The operator labels referenced policy ConfigMaps. Secret updates are matched against every Tenant spec, so one Secret can be shared without a routing label.
+The operator indexes policy ConfigMap and user Secret references, so creating or updating either resource enqueues every Tenant that references it without requiring resource labels.
 
 ---
 
