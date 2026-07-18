@@ -14,6 +14,7 @@
 
 use axum::{
     Json,
+    extract::rejection::JsonRejection,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -36,6 +37,18 @@ pub enum Error {
 
     #[snafu(display("Bad request: {}", message))]
     BadRequest { message: String },
+
+    #[snafu(display("Invalid JSON syntax: {}", message))]
+    JsonSyntax { message: String },
+
+    #[snafu(display("Invalid JSON data: {}", message))]
+    JsonData { message: String },
+
+    #[snafu(display("Unsupported JSON media type: {}", message))]
+    UnsupportedMediaType { message: String },
+
+    #[snafu(display("Request body rejected with status {}: {}", status, message))]
+    RequestBody { status: StatusCode, message: String },
 
     #[snafu(display("Conflict: {}", message))]
     Conflict { message: String },
@@ -65,9 +78,23 @@ pub enum Error {
     Json { source: serde_json::Error },
 }
 
-/// Map `kube::Error` to a console error (403 -> Forbidden, 404 -> NotFound, 409 -> Conflict).
+/// Map Kubernetes API status errors to the corresponding Console error contract.
 pub fn map_kube_error(e: kube::Error, not_found_resource: impl Into<String>) -> Error {
     match &e {
+        kube::Error::Api(ae) if ae.code == 401 => Error::Unauthorized {
+            message: if ae.message.trim().is_empty() {
+                "Kubernetes API authentication required".to_string()
+            } else {
+                ae.message.clone()
+            },
+        },
+        kube::Error::Api(ae) if matches!(ae.code, 400 | 422) => Error::BadRequest {
+            message: if ae.message.trim().is_empty() {
+                "Kubernetes API rejected the request".to_string()
+            } else {
+                ae.message.clone()
+            },
+        },
         kube::Error::Api(ae) if ae.code == 403 => Error::Forbidden {
             message: if ae.message.is_empty() {
                 "Kubernetes API access denied".to_string()
@@ -79,13 +106,36 @@ pub fn map_kube_error(e: kube::Error, not_found_resource: impl Into<String>) -> 
             resource: not_found_resource.into(),
         },
         kube::Error::Api(ae) if ae.code == 409 => Error::Conflict {
-            message: "Resource was modified by another request, please retry".to_string(),
+            message: if ae.message.trim().is_empty() {
+                "Kubernetes API reported a resource conflict".to_string()
+            } else {
+                ae.message.clone()
+            },
         },
         _ => Error::KubeApi { source: e },
     }
 }
 
 impl Error {
+    /// Convert Axum's JSON extraction failures into the Console error contract.
+    pub(crate) fn from_json_rejection(rejection: JsonRejection) -> Self {
+        match rejection {
+            JsonRejection::JsonSyntaxError(error) => Self::JsonSyntax {
+                message: error.body_text(),
+            },
+            JsonRejection::JsonDataError(error) => Self::JsonData {
+                message: error.body_text(),
+            },
+            JsonRejection::MissingJsonContentType(error) => Self::UnsupportedMediaType {
+                message: error.body_text(),
+            },
+            rejection => Self::RequestBody {
+                status: rejection.status(),
+                message: rejection.body_text(),
+            },
+        }
+    }
+
     fn log_if_server_error(&self) {
         match self {
             Error::InternalServer { message } => {
@@ -169,6 +219,38 @@ impl Error {
                 StatusCode::BAD_REQUEST,
                 "BadRequest".to_string(),
                 "InvalidRequest".to_string(),
+                message,
+                Vec::new(),
+                None,
+            ),
+            Error::JsonSyntax { message } => (
+                StatusCode::BAD_REQUEST,
+                "BadRequest".to_string(),
+                "InvalidJsonSyntax".to_string(),
+                message,
+                Vec::new(),
+                None,
+            ),
+            Error::JsonData { message } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "UnprocessableEntity".to_string(),
+                "InvalidJsonData".to_string(),
+                message,
+                Vec::new(),
+                None,
+            ),
+            Error::UnsupportedMediaType { message } => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "UnsupportedMediaType".to_string(),
+                "UnsupportedJsonContentType".to_string(),
+                message,
+                Vec::new(),
+                None,
+            ),
+            Error::RequestBody { status, message } => (
+                status,
+                "RequestBodyError".to_string(),
+                "InvalidRequestBody".to_string(),
                 message,
                 Vec::new(),
                 None,
@@ -261,6 +343,15 @@ mod tests {
     use crate::console::models::common::ConsoleErrorDetails;
     use serde_json::json;
 
+    fn kube_api_error(code: u16, message: &str) -> kube::Error {
+        kube::Error::Api(kube::error::ErrorResponse {
+            status: "Failure".to_string(),
+            message: message.to_string(),
+            reason: String::new(),
+            code,
+        })
+    }
+
     #[test]
     fn bad_request_maps_to_stable_error_contract() -> std::result::Result<(), serde_json::Error> {
         let (status, response) = Error::BadRequest {
@@ -330,5 +421,58 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    #[test]
+    fn kubernetes_unprocessable_entity_maps_to_bad_request() {
+        let error = map_kube_error(
+            kube_api_error(422, "metadata.labels: Invalid value"),
+            "Tenant",
+        );
+
+        assert!(matches!(
+            error,
+            Error::BadRequest { message } if message == "metadata.labels: Invalid value"
+        ));
+    }
+
+    #[test]
+    fn kubernetes_unauthorized_maps_to_unauthorized() {
+        let server_message = map_kube_error(
+            kube_api_error(401, "Unauthorized: bearer token has expired"),
+            "Tenant",
+        );
+        assert!(matches!(
+            server_message,
+            Error::Unauthorized { message }
+                if message == "Unauthorized: bearer token has expired"
+        ));
+
+        let fallback = map_kube_error(kube_api_error(401, ""), "Tenant");
+        assert!(matches!(
+            fallback,
+            Error::Unauthorized { message }
+                if message == "Kubernetes API authentication required"
+        ));
+    }
+
+    #[test]
+    fn kubernetes_conflict_preserves_server_message_or_uses_fallback() {
+        let server_message = map_kube_error(
+            kube_api_error(409, "tenants.rustfs.com \"logs\" already exists"),
+            "Tenant",
+        );
+        assert!(matches!(
+            server_message,
+            Error::Conflict { message }
+                if message == "tenants.rustfs.com \"logs\" already exists"
+        ));
+
+        let fallback = map_kube_error(kube_api_error(409, ""), "Tenant");
+        assert!(matches!(
+            fallback,
+            Error::Conflict { message }
+                if message == "Kubernetes API reported a resource conflict"
+        ));
     }
 }

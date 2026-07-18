@@ -19,6 +19,7 @@ use kube::{Api, Client, ResourceExt, api::ListParams};
 
 use crate::console::{
     error::{self, Error, Result},
+    json::ConsoleJson,
     models::{common::ConsoleErrorDetails, pool::*},
     state::Claims,
 };
@@ -554,7 +555,7 @@ pub async fn list_pools(
 pub async fn add_pool(
     Path((namespace, tenant_name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<AddPoolRequest>,
+    ConsoleJson(req): ConsoleJson<AddPoolRequest>,
 ) -> Result<Json<AddPoolResponse>> {
     let client = create_client(&claims).await?;
     let tenant_api: Api<Tenant> = Api::namespaced(client, &namespace);
@@ -825,7 +826,7 @@ async fn write_pool_decommission_request(
 pub async fn start_pool_decommission(
     Path((namespace, tenant_name, pool_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<StartPoolDecommissionRequest>,
+    ConsoleJson(req): ConsoleJson<StartPoolDecommissionRequest>,
 ) -> Result<Json<PoolDecommissionRequestResponse>> {
     write_pool_decommission_request(
         namespace,
@@ -843,7 +844,7 @@ pub async fn start_pool_decommission(
 pub async fn cancel_pool_decommission(
     Path((namespace, tenant_name, pool_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<CancelPoolDecommissionRequest>,
+    ConsoleJson(req): ConsoleJson<CancelPoolDecommissionRequest>,
 ) -> Result<Json<PoolDecommissionRequestResponse>> {
     write_pool_decommission_request(
         namespace,

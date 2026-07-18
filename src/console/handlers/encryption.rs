@@ -14,6 +14,7 @@
 
 use crate::console::{
     error::{self, Error, Result},
+    json::ConsoleJson,
     models::encryption::*,
     state::Claims,
 };
@@ -110,7 +111,7 @@ pub async fn get_encryption(
 pub async fn update_encryption(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(body): Json<UpdateEncryptionRequest>,
+    ConsoleJson(body): ConsoleJson<UpdateEncryptionRequest>,
 ) -> Result<Json<EncryptionUpdateResponse>> {
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::namespaced(client, &namespace);
@@ -121,9 +122,9 @@ pub async fn update_encryption(
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
 
     let encryption = if body.enabled {
-        let backend = match body.backend.as_deref() {
-            Some("vault") => KmsBackendType::Vault,
-            _ => KmsBackendType::Local,
+        let backend = match body.backend {
+            Some(UpdateEncryptionBackend::Vault) => KmsBackendType::Vault,
+            Some(UpdateEncryptionBackend::Local) | None => KmsBackendType::Local,
         };
         let vault_endpoint = body
             .vault

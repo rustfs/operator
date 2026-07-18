@@ -28,6 +28,12 @@ use crate::console::models::cluster::{
 use crate::console::models::common::{
     ConsoleActionResponse, ConsoleErrorDetails, ConsoleErrorResponse,
 };
+use crate::console::models::encryption::{
+    EncryptionInfoResponse, EncryptionUpdateResponse, LocalInfo, LocalMasterKeySecretRefInfo,
+    SecurityContextInfo, SecurityContextUpdateResponse, UpdateEncryptionBackend,
+    UpdateEncryptionRequest, UpdateLocalRequest, UpdateSecurityContextRequest, UpdateVaultRequest,
+    VaultInfo,
+};
 use crate::console::models::event::{EventItem, EventListResponse};
 use crate::console::models::pod::{
     ContainerInfo, ContainerState, DeletePodResponse, LogsQuery, PodCondition, PodDetails,
@@ -73,6 +79,10 @@ use crate::types::v1alpha1::status::provisioning::{
         api_delete_tenant,
         api_get_tenant_yaml,
         api_put_tenant_yaml,
+        api_get_encryption,
+        api_update_encryption,
+        api_get_security_context,
+        api_update_security_context,
         api_list_pools,
         api_add_pool,
         api_delete_pool,
@@ -126,6 +136,18 @@ use crate::types::v1alpha1::status::provisioning::{
         UpdateTenantResponse,
         DeleteTenantResponse,
         TenantYAML,
+        EncryptionInfoResponse,
+        EncryptionUpdateResponse,
+        VaultInfo,
+        LocalInfo,
+        LocalMasterKeySecretRefInfo,
+        UpdateEncryptionRequest,
+        UpdateEncryptionBackend,
+        UpdateVaultRequest,
+        UpdateLocalRequest,
+        SecurityContextInfo,
+        UpdateSecurityContextRequest,
+        SecurityContextUpdateResponse,
         PoolDetails,
         PoolListResponse,
         AddPoolRequest,
@@ -167,6 +189,8 @@ use crate::types::v1alpha1::status::provisioning::{
     tags(
         (name = "auth", description = "Authentication"),
         (name = "tenants", description = "Tenant management"),
+        (name = "encryption", description = "Tenant encryption configuration"),
+        (name = "security-context", description = "Tenant pod security context"),
         (name = "pools", description = "Pool management"),
         (name = "pods", description = "Pod management"),
         (name = "events", description = "Event management"),
@@ -182,7 +206,21 @@ use crate::types::v1alpha1::status::provisioning::{
 pub struct ApiDoc;
 
 // --- Auth ---
-#[utoipa::path(post, path = "/api/v1/login", request_body = LoginRequest, responses((status = 200, body = LoginResponse)), tag = "auth")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, body = LoginResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "auth"
+)]
 fn api_login(_body: Json<LoginRequest>) -> Json<LoginResponse> {
     unimplemented!("Documentation only")
 }
@@ -212,7 +250,23 @@ fn api_get_tenant_state_counts() -> Json<TenantStateCountsResponse> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(post, path = "/api/v1/tenants", request_body = CreateTenantRequest, responses((status = 200, body = TenantListItem)), tag = "tenants")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/tenants",
+    request_body = CreateTenantRequest,
+    responses(
+        (status = 200, body = TenantListItem),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "tenants"
+)]
 fn api_create_tenant(_body: Json<CreateTenantRequest>) -> Json<TenantListItem> {
     unimplemented!("Documentation only")
 }
@@ -224,6 +278,9 @@ fn api_create_tenant(_body: Json<CreateTenantRequest>) -> Json<TenantListItem> {
     responses(
         (status = 200, body = TenantListItem),
         (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
         (status = 401, body = ConsoleErrorResponse),
         (status = 403, body = ConsoleErrorResponse),
         (status = 409, body = ConsoleErrorResponse),
@@ -259,7 +316,25 @@ fn api_get_tenant() -> Json<TenantDetailsResponse> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(put, path = "/api/v1/namespaces/{namespace}/tenants/{name}", params(("namespace" = String, Path), ("name" = String, Path)), request_body = UpdateTenantRequest, responses((status = 200, body = UpdateTenantResponse)), tag = "tenants")]
+#[utoipa::path(
+    put,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}",
+    params(("namespace" = String, Path), ("name" = String, Path)),
+    request_body = UpdateTenantRequest,
+    responses(
+        (status = 200, body = UpdateTenantResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "tenants"
+)]
 fn api_update_tenant(_body: Json<UpdateTenantRequest>) -> Json<UpdateTenantResponse> {
     unimplemented!("Documentation only")
 }
@@ -274,8 +349,125 @@ fn api_get_tenant_yaml() -> Json<TenantYAML> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(put, path = "/api/v1/namespaces/{namespace}/tenants/{name}/yaml", params(("namespace" = String, Path), ("name" = String, Path)), request_body = TenantYAML, responses((status = 200, body = TenantYAML)), tag = "tenants")]
+#[utoipa::path(
+    put,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/yaml",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path)
+    ),
+    request_body = TenantYAML,
+    responses(
+        (status = 200, body = TenantYAML),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "tenants"
+)]
 fn api_put_tenant_yaml(_body: Json<TenantYAML>) -> Json<TenantYAML> {
+    unimplemented!("Documentation only")
+}
+
+// --- Encryption ---
+#[utoipa::path(
+    get,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/encryption",
+    params(
+        ("namespace" = String, Path, description = "Tenant namespace"),
+        ("name" = String, Path, description = "Tenant name")
+    ),
+    responses(
+        (status = 200, body = EncryptionInfoResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "encryption"
+)]
+fn api_get_encryption() -> Json<EncryptionInfoResponse> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/encryption",
+    params(
+        ("namespace" = String, Path, description = "Tenant namespace"),
+        ("name" = String, Path, description = "Tenant name")
+    ),
+    request_body = UpdateEncryptionRequest,
+    responses(
+        (status = 200, body = EncryptionUpdateResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "encryption"
+)]
+fn api_update_encryption(_body: Json<UpdateEncryptionRequest>) -> Json<EncryptionUpdateResponse> {
+    unimplemented!("Documentation only")
+}
+
+// --- Security Context ---
+#[utoipa::path(
+    get,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/security-context",
+    params(
+        ("namespace" = String, Path, description = "Tenant namespace"),
+        ("name" = String, Path, description = "Tenant name")
+    ),
+    responses(
+        (status = 200, body = SecurityContextInfo),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "security-context"
+)]
+fn api_get_security_context() -> Json<SecurityContextInfo> {
+    unimplemented!("Documentation only")
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/security-context",
+    params(
+        ("namespace" = String, Path, description = "Tenant namespace"),
+        ("name" = String, Path, description = "Tenant name")
+    ),
+    request_body = UpdateSecurityContextRequest,
+    responses(
+        (status = 200, body = SecurityContextUpdateResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "security-context"
+)]
+fn api_update_security_context(
+    _body: Json<UpdateSecurityContextRequest>,
+) -> Json<SecurityContextUpdateResponse> {
     unimplemented!("Documentation only")
 }
 
@@ -285,7 +477,25 @@ fn api_list_pools() -> Json<PoolListResponse> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(post, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools", params(("namespace" = String, Path), ("name" = String, Path)), request_body = AddPoolRequest, responses((status = 200, body = AddPoolResponse)), tag = "pools")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/pools",
+    params(("namespace" = String, Path), ("name" = String, Path)),
+    request_body = AddPoolRequest,
+    responses(
+        (status = 200, body = AddPoolResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "pools"
+)]
 fn api_add_pool(_body: Json<AddPoolRequest>) -> Json<AddPoolResponse> {
     unimplemented!("Documentation only")
 }
@@ -325,6 +535,9 @@ fn api_delete_pool() -> Json<DeletePoolResponse> {
     responses(
         (status = 200, body = PoolDecommissionRequestResponse),
         (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
         (status = 401, body = ConsoleErrorResponse),
         (status = 403, body = ConsoleErrorResponse),
         (status = 404, body = ConsoleErrorResponse),
@@ -351,6 +564,9 @@ fn api_start_pool_decommission(
     responses(
         (status = 200, body = PoolDecommissionRequestResponse),
         (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
         (status = 401, body = ConsoleErrorResponse),
         (status = 403, body = ConsoleErrorResponse),
         (status = 404, body = ConsoleErrorResponse),
@@ -381,7 +597,28 @@ fn api_delete_pod() -> Json<DeletePodResponse> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(post, path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods/{pod}/restart", params(("namespace" = String, Path), ("name" = String, Path), ("pod" = String, Path)), request_body = RestartPodRequest, responses((status = 200, body = DeletePodResponse)), tag = "pods")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/namespaces/{namespace}/tenants/{name}/pods/{pod}/restart",
+    params(
+        ("namespace" = String, Path),
+        ("name" = String, Path),
+        ("pod" = String, Path)
+    ),
+    request_body = RestartPodRequest,
+    responses(
+        (status = 200, body = DeletePodResponse),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 404, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "pods"
+)]
 fn api_restart_pod(_body: Json<RestartPodRequest>) -> Json<DeletePodResponse> {
     unimplemented!("Documentation only")
 }
@@ -411,7 +648,23 @@ fn api_list_namespaces() -> Json<NamespaceListResponse> {
     unimplemented!("Documentation only")
 }
 
-#[utoipa::path(post, path = "/api/v1/namespaces", request_body = CreateNamespaceRequest, responses((status = 200, body = NamespaceItem)), tag = "cluster")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/namespaces",
+    request_body = CreateNamespaceRequest,
+    responses(
+        (status = 200, body = NamespaceItem),
+        (status = 400, body = ConsoleErrorResponse),
+        (status = 413, body = ConsoleErrorResponse),
+        (status = 415, body = ConsoleErrorResponse),
+        (status = 422, body = ConsoleErrorResponse),
+        (status = 401, body = ConsoleErrorResponse),
+        (status = 403, body = ConsoleErrorResponse),
+        (status = 409, body = ConsoleErrorResponse),
+        (status = 500, body = ConsoleErrorResponse)
+    ),
+    tag = "cluster"
+)]
 fn api_create_namespace(_body: Json<CreateNamespaceRequest>) -> Json<NamespaceItem> {
     unimplemented!("Documentation only")
 }
@@ -427,6 +680,42 @@ mod tests {
     use super::ApiDoc;
     use serde_json::Value;
     use utoipa::OpenApi;
+
+    #[test]
+    fn every_json_request_documents_the_console_rejection_envelope() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
+        let paths = spec
+            .pointer("/paths")
+            .and_then(Value::as_object)
+            .expect("OpenAPI paths exist");
+        let mut request_operations = 0;
+
+        for (path, path_item) in paths {
+            for method in ["post", "put", "patch"] {
+                let Some(operation) = path_item.get(method) else {
+                    continue;
+                };
+                if operation.get("requestBody").is_none() {
+                    continue;
+                }
+                request_operations += 1;
+
+                for status in ["400", "413", "415", "422"] {
+                    assert_eq!(
+                        operation
+                            .pointer(&format!(
+                                "/responses/{status}/content/application~1json/schema/$ref"
+                            ))
+                            .and_then(Value::as_str),
+                        Some("#/components/schemas/ConsoleErrorResponse"),
+                        "{method} {path} status {status} should use ConsoleErrorResponse"
+                    );
+                }
+            }
+        }
+
+        assert_eq!(request_operations, 12);
+    }
 
     #[test]
     fn delete_pool_documents_standard_error_responses() {
@@ -498,11 +787,137 @@ mod tests {
                 .and_then(Value::as_str),
             Some("#/components/schemas/TenantListItem")
         );
+        for status in ["400", "413", "415", "422"] {
+            assert_eq!(
+                operation
+                    .pointer(&format!(
+                        "/responses/{status}/content/application~1json/schema/$ref"
+                    ))
+                    .and_then(Value::as_str),
+                Some("#/components/schemas/ConsoleErrorResponse"),
+                "status {status} should use ConsoleErrorResponse"
+            );
+        }
+    }
+
+    #[test]
+    fn encryption_routes_and_strict_request_schema_are_documented() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
+        let operation = spec
+            .pointer("/paths/~1api~1v1~1namespaces~1{namespace}~1tenants~1{name}~1encryption")
+            .expect("encryption path should exist");
+
         assert_eq!(
             operation
-                .pointer("/responses/400/content/application~1json/schema/$ref")
+                .pointer("/get/responses/200/content/application~1json/schema/$ref")
                 .and_then(Value::as_str),
-            Some("#/components/schemas/ConsoleErrorResponse")
+            Some("#/components/schemas/EncryptionInfoResponse")
         );
+        assert!(
+            spec.pointer("/components/schemas/SecurityContextInfo")
+                .is_some(),
+            "nested encryption response schemas should be registered"
+        );
+        assert_eq!(
+            operation
+                .pointer("/put/requestBody/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/UpdateEncryptionRequest")
+        );
+        assert_eq!(
+            operation
+                .pointer("/put/responses/200/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/EncryptionUpdateResponse")
+        );
+        assert_eq!(
+            operation.pointer("/put/tags/0").and_then(Value::as_str),
+            Some("encryption")
+        );
+        for status in ["400", "413", "415", "422"] {
+            assert_eq!(
+                operation
+                    .pointer(&format!(
+                        "/put/responses/{status}/content/application~1json/schema/$ref"
+                    ))
+                    .and_then(Value::as_str),
+                Some("#/components/schemas/ConsoleErrorResponse"),
+                "status {status} should use ConsoleErrorResponse"
+            );
+        }
+
+        assert_eq!(
+            spec.pointer("/components/schemas/UpdateEncryptionBackend/enum")
+                .and_then(Value::as_array),
+            Some(&vec![
+                Value::String("local".to_string()),
+                Value::String("vault".to_string()),
+            ])
+        );
+        for schema in [
+            "UpdateEncryptionRequest",
+            "UpdateVaultRequest",
+            "UpdateLocalRequest",
+            "LocalMasterKeySecretRefInfo",
+        ] {
+            assert_eq!(
+                spec.pointer(&format!(
+                    "/components/schemas/{schema}/additionalProperties"
+                ))
+                .and_then(Value::as_bool),
+                Some(false),
+                "{schema} should reject unknown fields"
+            );
+        }
+    }
+
+    #[test]
+    fn security_context_routes_are_documented() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
+        let operation = spec
+            .pointer("/paths/~1api~1v1~1namespaces~1{namespace}~1tenants~1{name}~1security-context")
+            .expect("security-context path should exist");
+
+        assert_eq!(
+            operation
+                .pointer("/get/responses/200/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/SecurityContextInfo")
+        );
+        assert_eq!(
+            operation
+                .pointer("/put/requestBody/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/UpdateSecurityContextRequest")
+        );
+        assert_eq!(
+            operation
+                .pointer("/put/responses/200/content/application~1json/schema/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/SecurityContextUpdateResponse")
+        );
+        assert_eq!(
+            operation.pointer("/put/tags/0").and_then(Value::as_str),
+            Some("security-context")
+        );
+        assert!(
+            spec.pointer("/tags")
+                .and_then(Value::as_array)
+                .is_some_and(|tags| tags.iter().any(|tag| {
+                    tag.get("name").and_then(Value::as_str) == Some("security-context")
+                })),
+            "security-context tag metadata should be registered"
+        );
+        for status in ["400", "413", "415", "422"] {
+            assert_eq!(
+                operation
+                    .pointer(&format!(
+                        "/put/responses/{status}/content/application~1json/schema/$ref"
+                    ))
+                    .and_then(Value::as_str),
+                Some("#/components/schemas/ConsoleErrorResponse"),
+                "status {status} should use ConsoleErrorResponse"
+            );
+        }
     }
 }

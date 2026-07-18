@@ -163,3 +163,163 @@ pub fn topology_routes() -> Router<AppState> {
         get(handlers::topology::get_topology_overview),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{auth_routes, cluster_routes, pod_routes, pool_routes, tenant_routes};
+    use crate::console::state::{AppState, Claims};
+    use axum::{
+        Extension, Router,
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode, header},
+    };
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn test_app() -> Router {
+        tenant_routes()
+            .merge(pool_routes())
+            .merge(pod_routes())
+            .merge(cluster_routes())
+            .merge(auth_routes())
+            .layer(Extension(Claims {
+                k8s_token: "test-token".to_string(),
+                exp: usize::MAX,
+                iat: 0,
+            }))
+            .with_state(AppState::new("test-secret".to_string()))
+    }
+
+    async fn send_json_request(
+        method: Method,
+        path: &str,
+        content_type: Option<&str>,
+        body: &str,
+    ) -> TestResult<(StatusCode, Value)> {
+        let mut request = Request::builder().method(method).uri(path);
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        let response = test_app()
+            .oneshot(request.body(Body::from(body.to_string()))?)
+            .await?;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        Ok((status, serde_json::from_slice(&body)?))
+    }
+
+    fn assert_error_envelope(body: &Value, code: &str, reason: &str) {
+        assert_eq!(body.get("code").and_then(Value::as_str), Some(code));
+        assert_eq!(body.get("reason").and_then(Value::as_str), Some(reason));
+        assert!(body.get("message").and_then(Value::as_str).is_some());
+    }
+
+    #[tokio::test]
+    async fn every_json_write_route_maps_syntax_errors_to_console_envelope() -> TestResult {
+        let cases = [
+            (Method::POST, "/login"),
+            (Method::POST, "/tenants"),
+            (Method::POST, "/tenants/yaml"),
+            (Method::PUT, "/namespaces/storage/tenants/tenant-a"),
+            (Method::PUT, "/namespaces/storage/tenants/tenant-a/yaml"),
+            (
+                Method::PUT,
+                "/namespaces/storage/tenants/tenant-a/encryption",
+            ),
+            (
+                Method::PUT,
+                "/namespaces/storage/tenants/tenant-a/security-context",
+            ),
+            (Method::POST, "/namespaces/storage/tenants/tenant-a/pools"),
+            (
+                Method::POST,
+                "/namespaces/storage/tenants/tenant-a/pools/primary/decommission",
+            ),
+            (
+                Method::POST,
+                "/namespaces/storage/tenants/tenant-a/pools/primary/decommission/cancel",
+            ),
+            (
+                Method::POST,
+                "/namespaces/storage/tenants/tenant-a/pods/tenant-a-0/restart",
+            ),
+            (Method::POST, "/namespaces"),
+        ];
+
+        for (method, path) in cases {
+            let (status, body) =
+                send_json_request(method, path, Some("application/json"), "{").await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            assert_error_envelope(&body, "BadRequest", "InvalidJsonSyntax");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_write_route_maps_unsupported_content_type_to_console_envelope() -> TestResult {
+        for content_type in [None, Some("text/plain")] {
+            let (status, body) =
+                send_json_request(Method::POST, "/login", content_type, r#"{"token":"test"}"#)
+                    .await?;
+
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+            assert_error_envelope(&body, "UnsupportedMediaType", "UnsupportedJsonContentType");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_write_route_maps_invalid_data_to_console_envelope() -> TestResult {
+        let (status, body) = send_json_request(
+            Method::POST,
+            "/login",
+            Some("application/json"),
+            r#"{"token":42}"#,
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error_envelope(&body, "UnprocessableEntity", "InvalidJsonData");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oversized_json_body_maps_to_console_envelope() -> TestResult {
+        const DEFAULT_JSON_BODY_LIMIT: usize = 2 * 1024 * 1024;
+        let body = serde_json::json!({
+            "token": "x".repeat(DEFAULT_JSON_BODY_LIMIT),
+        })
+        .to_string();
+        assert!(body.len() > DEFAULT_JSON_BODY_LIMIT);
+
+        let (status, body) =
+            send_json_request(Method::POST, "/login", Some("application/json"), &body).await?;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_error_envelope(&body, "RequestBodyError", "InvalidRequestBody");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn encryption_route_maps_invalid_data_to_console_envelope() -> TestResult {
+        for body in [
+            r#"{"enabled":"true"}"#,
+            r#"{"enabled":true,"backend":"valut"}"#,
+            r#"{"enabled":true,"enabeld":true}"#,
+        ] {
+            let (status, body) = send_json_request(
+                Method::PUT,
+                "/namespaces/storage/tenants/tenant-a/encryption",
+                Some("application/json"),
+                body,
+            )
+            .await?;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_error_envelope(&body, "UnprocessableEntity", "InvalidJsonData");
+        }
+        Ok(())
+    }
+}
