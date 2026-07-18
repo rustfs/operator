@@ -22,7 +22,7 @@ use axum::{
     Router, body::Body, extract::State, http::StatusCode, middleware, response::IntoResponse,
     routing::get,
 };
-use futures::StreamExt;
+use futures::{Stream, StreamExt, TryStreamExt};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as HyperBuilder;
@@ -31,13 +31,13 @@ use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
-use kube::runtime::reflector::ObjectRef;
-use kube::runtime::{Controller, reflector::Store, watcher};
+use kube::runtime::reflector::{self, ObjectRef};
+use kube::runtime::{Controller, WatchStreamExt, watcher};
 use kube::{Api, Client, CustomResourceExt, Resource, api::ListParams};
 use kube_leader_election::{
     LeaderCallbacks, LeaderElector, LeaderElectorConfig, LeaseLock, SystemClock,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -84,11 +84,11 @@ pub fn init_tracing() {
 
 mod cluster_dns;
 mod context;
-mod legacy_secret_labels;
 pub mod metrics;
 pub mod reconcile;
 mod status;
 mod tenant_monitor;
+mod tenant_reference_index;
 pub mod types;
 pub mod utils;
 
@@ -198,23 +198,47 @@ async fn run_controller(
     cancel: CancellationToken,
     cluster_domain: cluster_dns::ClusterDomain,
 ) {
-    legacy_secret_labels::cleanup_external_secret_labels(&client).await;
-
     let tenant_client = Api::<Tenant>::all(client.clone());
+    let reference_index = Arc::new(tenant_reference_index::TenantReferenceIndex::default());
+    let indexing_reference_index = reference_index.clone();
+    let (tenant_reader, tenant_writer) = reflector::store();
+    // Drive the Controller store, reverse-reference index, and root trigger from one ordered
+    // Tenant stream. The reflector and index synchronously apply each event before it reaches the
+    // trigger. Relisted Tenants are buffered until InitDone has atomically swapped both caches.
+    let tenant_trigger = tenant_trigger_stream(reflector::reflector(
+        tenant_writer,
+        watcher::watcher(tenant_client, watcher::Config::default())
+            .default_backoff()
+            .inspect_ok(move |event| indexing_reference_index.apply_event(event)),
+    ));
+
     let context = Context::new_with_cluster_domain(client.clone(), cluster_domain);
-    let controller = Controller::new(tenant_client, watcher::Config::default());
-    let secret_tenant_store = controller.store();
-    let controller = controller
-        .watches(
+    let controller = Controller::for_stream(tenant_trigger, tenant_reader);
+    // User-owned Secrets and ConfigMaps remain immutable. A dedicated, event-driven reverse index
+    // supports shared resources without scanning every Tenant.
+    let config_map_reference_index = reference_index.clone();
+    let secret_reference_index = reference_index.clone();
+    let config_maps = relist_aware_touched_objects(
+        watcher::metadata_watcher(
             Api::<corev1::ConfigMap>::all(client.clone()),
             watcher::Config::default(),
-            tenant_refs_for_config_map,
         )
-        .watches(
+        .default_backoff(),
+    );
+    let secrets = relist_aware_touched_objects(
+        watcher::metadata_watcher(
             Api::<corev1::Secret>::all(client.clone()),
             watcher::Config::default(),
-            move |secret| tenant_refs_for_secret(secret, &secret_tenant_store),
         )
+        .default_backoff(),
+    );
+    let controller = controller
+        .watches_stream(config_maps, move |config_map| {
+            tenant_refs_for_config_map(config_map, &config_map_reference_index)
+        })
+        .watches_stream(secrets, move |secret| {
+            tenant_refs_for_secret(secret, &secret_reference_index)
+        })
         .owns(
             Api::<corev1::ServiceAccount>::all(client.clone()),
             watcher::Config::default(),
@@ -276,6 +300,155 @@ async fn run_controller(
             }
         } => {}
     }
+}
+
+/// Convert reflected Tenant events into triggers without publishing a partial relist.
+///
+/// The Controller resolves each emitted Tenant through the reflector store, so an object deleted
+/// before the Controller processes its trigger can be skipped as stale. Delete events themselves
+/// are ignored here, while subsequent Apply events and complete relists continue through the
+/// stream.
+fn tenant_trigger_stream<S>(events: S) -> impl Stream<Item = Result<Tenant, watcher::Error>> + Send
+where
+    S: Stream<Item = Result<watcher::Event<Tenant>, watcher::Error>> + Send + 'static,
+{
+    futures::stream::unfold(
+        (
+            Box::pin(events),
+            None::<VecDeque<Tenant>>,
+            VecDeque::<Tenant>::new(),
+        ),
+        |(mut events, mut initializing, mut pending)| async move {
+            loop {
+                if let Some(tenant) = pending.pop_front() {
+                    return Some((Ok(tenant), (events, initializing, pending)));
+                }
+
+                let event = events.next().await?;
+                match event {
+                    Ok(watcher::Event::Apply(tenant)) => {
+                        return Some((Ok(tenant), (events, initializing, pending)));
+                    }
+                    Ok(watcher::Event::Delete(_)) => {}
+                    Ok(watcher::Event::Init) => initializing = Some(VecDeque::new()),
+                    Ok(watcher::Event::InitApply(tenant)) => {
+                        initializing
+                            .get_or_insert_with(VecDeque::new)
+                            .push_back(tenant);
+                    }
+                    Ok(watcher::Event::InitDone) => {
+                        pending = initializing.take().unwrap_or_default();
+                    }
+                    Err(error) => {
+                        return Some((Err(error), (events, initializing, pending)));
+                    }
+                }
+            }
+        },
+    )
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RelatedResourceKey {
+    namespace: Option<String>,
+    name: String,
+}
+
+impl RelatedResourceKey {
+    fn from_resource<K: Resource>(resource: &K) -> Option<Self> {
+        let metadata = resource.meta();
+        Some(Self {
+            namespace: metadata.namespace.clone(),
+            name: metadata.name.clone()?,
+        })
+    }
+}
+
+fn related_resource_metadata_refs<K: Resource>(resource: &K) -> Vec<ObjectRef<Tenant>> {
+    let metadata = resource.meta();
+    tenant_refs_from_metadata(
+        metadata.namespace.as_deref(),
+        metadata.owner_references.as_deref(),
+        metadata.labels.as_ref(),
+    )
+}
+
+/// Decode related-resource watch events while recovering deletes lost across an RV relist.
+///
+/// Kubernetes represents a relist as Init/InitApply/InitDone, without explicit Delete events for
+/// objects absent from the new snapshot. Keep the last complete metadata snapshot and replay
+/// objects that disappeared or changed Tenant-routing metadata after InitDone, so both the old and
+/// new Tenant mappings are reconciled.
+fn relist_aware_touched_objects<K, S>(
+    events: S,
+) -> impl Stream<Item = Result<K, watcher::Error>> + Send
+where
+    K: Clone + Resource + Send + 'static,
+    S: Stream<Item = Result<watcher::Event<K>, watcher::Error>> + Send + 'static,
+{
+    futures::stream::unfold(
+        (
+            Box::pin(events),
+            BTreeMap::<RelatedResourceKey, K>::new(),
+            None::<BTreeMap<RelatedResourceKey, K>>,
+            VecDeque::<K>::new(),
+        ),
+        |(mut events, mut active, mut initializing, mut pending)| async move {
+            loop {
+                if let Some(resource) = pending.pop_front() {
+                    return Some((Ok(resource), (events, active, initializing, pending)));
+                }
+
+                let event = events.next().await?;
+                match event {
+                    Ok(watcher::Event::Apply(resource)) => {
+                        if let Some(key) = RelatedResourceKey::from_resource(&resource)
+                            && let Some(previous) = active.insert(key, resource.clone())
+                            && related_resource_metadata_refs(&previous)
+                                != related_resource_metadata_refs(&resource)
+                        {
+                            pending.push_back(previous);
+                        }
+                        return Some((Ok(resource), (events, active, initializing, pending)));
+                    }
+                    Ok(watcher::Event::Delete(resource)) => {
+                        if let Some(key) = RelatedResourceKey::from_resource(&resource) {
+                            active.remove(&key);
+                        }
+                        return Some((Ok(resource), (events, active, initializing, pending)));
+                    }
+                    Ok(watcher::Event::Init) => initializing = Some(BTreeMap::new()),
+                    Ok(watcher::Event::InitApply(resource)) => {
+                        if let Some(key) = RelatedResourceKey::from_resource(&resource) {
+                            initializing
+                                .get_or_insert_with(BTreeMap::new)
+                                .insert(key, resource);
+                        }
+                    }
+                    Ok(watcher::Event::InitDone) => {
+                        if let Some(next) = initializing.take() {
+                            pending.extend(next.values().cloned());
+                            pending.extend(
+                                active
+                                    .iter()
+                                    .filter(|(key, previous)| {
+                                        next.get(*key).is_none_or(|current| {
+                                            related_resource_metadata_refs(*previous)
+                                                != related_resource_metadata_refs(current)
+                                        })
+                                    })
+                                    .map(|(_, resource)| resource.clone()),
+                            );
+                            active = next;
+                        }
+                    }
+                    Err(error) => {
+                        return Some((Err(error), (events, active, initializing, pending)));
+                    }
+                }
+            }
+        },
+    )
 }
 
 async fn instrumented_reconcile_rustfs(
@@ -589,49 +762,32 @@ fn cert_manager_certificate_api_resource() -> ApiResource {
     )
 }
 
-fn tenant_refs_for_secret(
-    secret: corev1::Secret,
-    tenant_store: &Store<Tenant>,
+fn tenant_refs_for_secret<K: Resource>(
+    secret: K,
+    index: &tenant_reference_index::TenantReferenceIndex,
 ) -> Vec<ObjectRef<Tenant>> {
-    tenant_refs_for_secret_from_tenants(&secret, &tenant_store.state())
-}
-
-fn tenant_refs_for_secret_from_tenants(
-    secret: &corev1::Secret,
-    tenants: &[Arc<Tenant>],
-) -> Vec<ObjectRef<Tenant>> {
+    let metadata = secret.meta();
     let mut refs = tenant_refs_from_metadata(
-        secret.metadata.namespace.as_deref(),
-        secret.metadata.owner_references.as_deref(),
-        None,
+        metadata.namespace.as_deref(),
+        metadata.owner_references.as_deref(),
+        metadata.labels.as_ref(),
     );
-    let Some(namespace) = secret.metadata.namespace.as_deref() else {
-        return refs;
-    };
-    let Some(secret_name) = secret.metadata.name.as_deref() else {
-        return refs;
-    };
-
-    for tenant in tenants {
-        if tenant.metadata.deletion_timestamp.is_some()
-            || tenant.metadata.namespace.as_deref() != Some(namespace)
-            || !tenant.spec.referenced_secret_names().contains(secret_name)
-        {
-            continue;
-        }
-
-        push_unique_tenant_ref(&mut refs, ObjectRef::new(&tenant.name()).within(namespace));
-    }
-
-    refs
+    refs.extend(index.refs_for_secret(metadata.namespace.as_deref(), metadata.name.as_deref()));
+    deduplicate_tenant_refs(refs)
 }
 
-fn tenant_refs_for_config_map(config_map: corev1::ConfigMap) -> Vec<ObjectRef<Tenant>> {
-    tenant_refs_from_metadata(
-        config_map.metadata.namespace.as_deref(),
-        config_map.metadata.owner_references.as_deref(),
-        config_map.metadata.labels.as_ref(),
-    )
+fn tenant_refs_for_config_map<K: Resource>(
+    config_map: K,
+    index: &tenant_reference_index::TenantReferenceIndex,
+) -> Vec<ObjectRef<Tenant>> {
+    let metadata = config_map.meta();
+    let mut refs = tenant_refs_from_metadata(
+        metadata.namespace.as_deref(),
+        metadata.owner_references.as_deref(),
+        metadata.labels.as_ref(),
+    );
+    refs.extend(index.refs_for_config_map(metadata.namespace.as_deref(), metadata.name.as_deref()));
+    deduplicate_tenant_refs(refs)
 }
 
 fn tenant_refs_for_pod(pod: corev1::Pod) -> Vec<ObjectRef<Tenant>> {
@@ -660,7 +816,7 @@ fn tenant_refs_from_metadata(
     if let Some(owner_references) = owner_references {
         for owner in owner_references {
             if let Some(tenant_ref) = tenant_ref_from_owner_reference(namespace, owner) {
-                push_unique_tenant_ref(&mut refs, tenant_ref);
+                refs.push(tenant_ref);
             }
         }
     }
@@ -668,10 +824,10 @@ fn tenant_refs_from_metadata(
     if let Some(labels) = labels
         && let Some(tenant_ref) = tenant_ref_from_labels(namespace, labels)
     {
-        push_unique_tenant_ref(&mut refs, tenant_ref);
+        refs.push(tenant_ref);
     }
 
-    refs
+    deduplicate_tenant_refs(refs)
 }
 
 fn tenant_ref_from_owner_reference(
@@ -701,10 +857,17 @@ fn tenant_ref_from_labels(
     Some(ObjectRef::new(name).within(namespace?))
 }
 
-fn push_unique_tenant_ref(refs: &mut Vec<ObjectRef<Tenant>>, tenant_ref: ObjectRef<Tenant>) {
-    if !refs.iter().any(|existing| existing == &tenant_ref) {
-        refs.push(tenant_ref);
-    }
+fn deduplicate_tenant_refs(refs: Vec<ObjectRef<Tenant>>) -> Vec<ObjectRef<Tenant>> {
+    refs.into_iter()
+        .map(|tenant_ref| {
+            (
+                (tenant_ref.namespace.clone(), tenant_ref.name.clone()),
+                tenant_ref,
+            )
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect()
 }
 
 pub fn render_crds_yaml() -> Result<String, serde_yaml_ng::Error> {
@@ -736,9 +899,10 @@ pub async fn crd(file: Option<String>) -> Result<(), Box<dyn std::error::Error>>
 #[cfg(test)]
 mod controller_watch_tests {
     use super::*;
-    use crate::types::v1alpha1::tenant::{RpcSecretRef, TenantSpec};
+    use crate::types::v1alpha1::tenant::RpcSecretRef;
+    use futures::{TryStreamExt, stream};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn cert_manager_certificate_api_resource_is_stable() {
@@ -749,6 +913,231 @@ mod controller_watch_tests {
         assert_eq!(resource.api_version, "cert-manager.io/v1");
         assert_eq!(resource.kind, "Certificate");
         assert_eq!(resource.plural, "certificates");
+    }
+
+    #[tokio::test]
+    async fn tenant_trigger_continues_after_an_applied_tenant_is_deleted() {
+        let index = Arc::new(tenant_reference_index::TenantReferenceIndex::default());
+        let tenant_a = tenant_fixture("tenant-a", "storage");
+        let tenant_b = tenant_fixture("tenant-b", "storage");
+        let indexing = index.clone();
+        let events = stream::iter([
+            Ok::<_, watcher::Error>(watcher::Event::Apply(tenant_a.clone())),
+            Ok(watcher::Event::Delete(tenant_a)),
+            Ok(watcher::Event::Apply(tenant_b)),
+        ])
+        .inspect_ok(move |event| indexing.apply_event(event));
+        let (reader, writer) = reflector::store();
+        let trigger = tenant_trigger_stream(reflector::reflector(writer, events));
+
+        let emitted = tokio::time::timeout(Duration::from_secs(1), trigger.try_collect::<Vec<_>>())
+            .await
+            .expect("Tenant trigger must not stall")
+            .expect("fixture events must be valid");
+
+        assert_eq!(
+            emitted
+                .iter()
+                .filter_map(|tenant| tenant.metadata.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["tenant-a", "tenant-b"]
+        );
+        assert!(
+            reader
+                .get(&ObjectRef::new("tenant-a").within("storage"))
+                .is_none()
+        );
+        assert!(
+            reader
+                .get(&ObjectRef::new("tenant-b").within("storage"))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn related_resource_apply_replays_previous_metadata_mapping() {
+        let previous = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner-changed".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-a")]),
+                resource_version: Some("1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let replacement = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner-changed".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-b")]),
+                resource_version: Some("2".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let events = stream::iter([
+            Ok::<_, watcher::Error>(watcher::Event::Apply(previous)),
+            Ok(watcher::Event::Apply(replacement)),
+        ]);
+
+        let emitted = relist_aware_touched_objects(events)
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("fixture events must be valid");
+        let updated_tenants = emitted
+            .iter()
+            .skip(1)
+            .flat_map(related_resource_metadata_refs)
+            .map(|tenant| tenant.name)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            updated_tenants,
+            BTreeSet::from(["tenant-a".to_string(), "tenant-b".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn related_resource_relist_replays_objects_missing_from_new_snapshot() {
+        let deleted = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("deleted".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-a")]),
+                resource_version: Some("1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut retained = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("retained".to_string()),
+                namespace: Some("storage".to_string()),
+                resource_version: Some("1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let first_retained = retained.clone();
+        retained.metadata.resource_version = Some("2".to_string());
+        let events = stream::iter([
+            Ok::<_, watcher::Error>(watcher::Event::Init),
+            Ok(watcher::Event::InitApply(deleted)),
+            Ok(watcher::Event::InitApply(first_retained)),
+            Ok(watcher::Event::InitDone),
+            // An expired resource version restarts the watch. Kubernetes does not emit an
+            // explicit Delete for objects that are absent from the replacement snapshot.
+            Ok(watcher::Event::Init),
+            Ok(watcher::Event::InitApply(retained)),
+            Ok(watcher::Event::InitDone),
+        ]);
+
+        let emitted = relist_aware_touched_objects(events)
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("fixture events must be valid");
+        let names = emitted
+            .iter()
+            .filter_map(|secret| secret.metadata.name.as_deref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["deleted", "retained", "retained", "deleted"]);
+        let replayed_delete = emitted.last().expect("missing object must be replayed");
+        assert_eq!(
+            replayed_delete.metadata.resource_version.as_deref(),
+            Some("1")
+        );
+        assert_single_ref(
+            &tenant_refs_for_secret(
+                replayed_delete.clone(),
+                &tenant_reference_index::TenantReferenceIndex::default(),
+            ),
+            "tenant-a",
+            "storage",
+        );
+    }
+
+    #[tokio::test]
+    async fn related_resource_relist_replays_previous_metadata_mappings() {
+        let previous_owner = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner-changed".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-a")]),
+                resource_version: Some("1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let replacement_owner = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("owner-changed".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-b")]),
+                resource_version: Some("2".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let previous_label = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("label-changed".to_string()),
+                namespace: Some("storage".to_string()),
+                labels: Some(BTreeMap::from([(
+                    RUSTFS_TENANT_LABEL.to_string(),
+                    "tenant-c".to_string(),
+                )])),
+                resource_version: Some("1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let replacement_label = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("label-changed".to_string()),
+                namespace: Some("storage".to_string()),
+                labels: Some(BTreeMap::from([(
+                    RUSTFS_TENANT_LABEL.to_string(),
+                    "tenant-d".to_string(),
+                )])),
+                resource_version: Some("2".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let events = stream::iter([
+            Ok::<_, watcher::Error>(watcher::Event::Init),
+            Ok(watcher::Event::InitApply(previous_owner)),
+            Ok(watcher::Event::InitApply(previous_label)),
+            Ok(watcher::Event::InitDone),
+            Ok(watcher::Event::Init),
+            Ok(watcher::Event::InitApply(replacement_owner)),
+            Ok(watcher::Event::InitApply(replacement_label)),
+            Ok(watcher::Event::InitDone),
+        ]);
+
+        let emitted = relist_aware_touched_objects(events)
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("fixture events must be valid");
+        assert_eq!(emitted.len(), 6);
+
+        let second_relist_tenants = emitted
+            .iter()
+            .skip(2)
+            .flat_map(related_resource_metadata_refs)
+            .map(|tenant| tenant.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            second_relist_tenants,
+            BTreeSet::from([
+                "tenant-a".to_string(),
+                "tenant-b".to_string(),
+                "tenant-c".to_string(),
+                "tenant-d".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -763,7 +1152,10 @@ mod controller_watch_tests {
             ..Default::default()
         };
 
-        let refs = tenant_refs_for_secret_from_tenants(&secret, &[]);
+        let refs = tenant_refs_for_secret(
+            secret,
+            &tenant_reference_index::TenantReferenceIndex::default(),
+        );
 
         assert_single_ref(&refs, "tenant-a", "storage");
     }
@@ -774,26 +1166,48 @@ mod controller_watch_tests {
             metadata: metav1::ObjectMeta {
                 name: Some("shared-rpc-auth".to_string()),
                 namespace: Some("storage".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let index = tenant_reference_index::TenantReferenceIndex::default();
+        for tenant in [
+            tenant_referencing_secret("tenant-a", "storage", "shared-rpc-auth"),
+            tenant_referencing_secret("tenant-b", "storage", "shared-rpc-auth"),
+            tenant_referencing_secret("tenant-other-namespace", "other", "shared-rpc-auth"),
+            tenant_referencing_secret("tenant-other-secret", "storage", "different-secret"),
+        ] {
+            index.apply_event(&watcher::Event::Apply(tenant));
+        }
+
+        let refs = tenant_refs_for_secret(secret, &index);
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], ObjectRef::new("tenant-a").within("storage"));
+        assert_eq!(refs[1], ObjectRef::new("tenant-b").within("storage"));
+    }
+
+    #[test]
+    fn secret_mapper_uses_rustfs_tenant_label_as_legacy_fallback() {
+        let secret = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("legacy-secret".to_string()),
+                namespace: Some("storage".to_string()),
                 labels: Some(BTreeMap::from([(
-                    "rustfs.tenant".to_string(),
-                    "tenant-a".to_string(),
+                    RUSTFS_TENANT_LABEL.to_string(),
+                    "tenant-legacy".to_string(),
                 )])),
                 ..Default::default()
             },
             ..Default::default()
         };
-        let tenants = vec![
-            tenant_referencing_secret("tenant-a", "storage", "shared-rpc-auth"),
-            tenant_referencing_secret("tenant-b", "storage", "shared-rpc-auth"),
-            tenant_referencing_secret("tenant-other-namespace", "other", "shared-rpc-auth"),
-            tenant_referencing_secret("tenant-other-secret", "storage", "different-secret"),
-        ];
 
-        let refs = tenant_refs_for_secret_from_tenants(&secret, &tenants);
+        let refs = tenant_refs_for_secret(
+            secret,
+            &tenant_reference_index::TenantReferenceIndex::default(),
+        );
 
-        assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0], ObjectRef::new("tenant-a").within("storage"));
-        assert_eq!(refs[1], ObjectRef::new("tenant-b").within("storage"));
+        assert_single_ref(&refs, "tenant-legacy", "storage");
     }
 
     #[test]
@@ -808,7 +1222,10 @@ mod controller_watch_tests {
             ..Default::default()
         };
 
-        let refs = tenant_refs_for_config_map(owned);
+        let refs = tenant_refs_for_config_map(
+            owned,
+            &tenant_reference_index::TenantReferenceIndex::default(),
+        );
         assert_single_ref(&refs, "tenant-policy", "storage");
 
         let labeled = corev1::ConfigMap {
@@ -824,8 +1241,101 @@ mod controller_watch_tests {
             ..Default::default()
         };
 
-        let refs = tenant_refs_for_config_map(labeled);
+        let refs = tenant_refs_for_config_map(
+            labeled,
+            &tenant_reference_index::TenantReferenceIndex::default(),
+        );
         assert_single_ref(&refs, "tenant-policy-label", "storage");
+    }
+
+    #[test]
+    fn config_map_mapper_uses_cached_tenant_references_without_resource_labels() {
+        let config_map = corev1::ConfigMap {
+            metadata: metav1::ObjectMeta {
+                name: Some("shared-policy".to_string()),
+                namespace: Some("storage".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let index = tenant_reference_index::TenantReferenceIndex::default();
+        for name in ["tenant-a", "tenant-b"] {
+            let mut tenant = tenant_fixture(name, "storage");
+            tenant
+                .spec
+                .policies
+                .push(crate::types::v1alpha1::provisioning::ProvisioningPolicy {
+                    name: "readwrite".to_string(),
+                    document: crate::types::v1alpha1::provisioning::PolicyDocumentSource {
+                        config_map_key_ref:
+                            crate::types::v1alpha1::provisioning::ConfigMapKeyReference {
+                                name: "shared-policy".to_string(),
+                                key: "policy.json".to_string(),
+                            },
+                    },
+                    ..Default::default()
+                });
+            index.apply_event(&watcher::Event::Apply(tenant));
+        }
+
+        let refs = tenant_refs_for_config_map(config_map, &index);
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|reference| reference.name == "tenant-a"));
+        assert!(refs.iter().any(|reference| reference.name == "tenant-b"));
+    }
+
+    #[test]
+    fn secret_mapper_uses_cached_tenant_references_in_the_same_namespace() {
+        let secret = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("credentials".to_string()),
+                namespace: Some("storage".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut matching = tenant_fixture("tenant-a", "storage");
+        matching.spec.creds_secret = Some(corev1::LocalObjectReference {
+            name: "credentials".to_string(),
+        });
+        let mut other_namespace = tenant_fixture("tenant-b", "other");
+        other_namespace.spec.creds_secret = Some(corev1::LocalObjectReference {
+            name: "credentials".to_string(),
+        });
+        let index = tenant_reference_index::TenantReferenceIndex::default();
+        index.apply_event(&watcher::Event::Apply(matching));
+        index.apply_event(&watcher::Event::Apply(other_namespace));
+
+        let refs = tenant_refs_for_secret(secret, &index);
+
+        assert_single_ref(&refs, "tenant-a", "storage");
+    }
+
+    #[test]
+    fn secret_mapper_deduplicates_legacy_metadata_and_index_references() {
+        let secret = corev1::Secret {
+            metadata: metav1::ObjectMeta {
+                name: Some("credentials".to_string()),
+                namespace: Some("storage".to_string()),
+                labels: Some(BTreeMap::from([(
+                    "rustfs.tenant".to_string(),
+                    "tenant-a".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut tenant = tenant_fixture("tenant-a", "storage");
+        tenant.spec.creds_secret = Some(corev1::LocalObjectReference {
+            name: "credentials".to_string(),
+        });
+        let index = tenant_reference_index::TenantReferenceIndex::default();
+        index.apply_event(&watcher::Event::Apply(tenant));
+
+        let refs = tenant_refs_for_secret(secret, &index);
+
+        assert_single_ref(&refs, "tenant-a", "storage");
     }
 
     #[test]
@@ -919,22 +1429,19 @@ mod controller_watch_tests {
         }
     }
 
-    fn tenant_referencing_secret(name: &str, namespace: &str, secret_name: &str) -> Arc<Tenant> {
-        Arc::new(Tenant {
-            metadata: metav1::ObjectMeta {
-                name: Some(name.to_string()),
-                namespace: Some(namespace.to_string()),
-                ..Default::default()
-            },
-            spec: TenantSpec {
-                rpc_secret: Some(RpcSecretRef {
-                    name: secret_name.to_string(),
-                    key: "rpc-secret".to_string(),
-                }),
-                ..Default::default()
-            },
-            status: None,
-        })
+    fn tenant_fixture(name: &str, namespace: &str) -> Tenant {
+        let mut tenant = Tenant::new(name, Default::default());
+        tenant.metadata.namespace = Some(namespace.to_string());
+        tenant
+    }
+
+    fn tenant_referencing_secret(name: &str, namespace: &str, secret_name: &str) -> Tenant {
+        let mut tenant = tenant_fixture(name, namespace);
+        tenant.spec.rpc_secret = Some(RpcSecretRef {
+            name: secret_name.to_string(),
+            key: "rpc-secret".to_string(),
+        });
+        tenant
     }
 
     fn assert_single_ref(refs: &[ObjectRef<Tenant>], name: &str, namespace: &str) {

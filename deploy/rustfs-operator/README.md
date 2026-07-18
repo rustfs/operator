@@ -156,7 +156,7 @@ spec:
       objectLock: true
 ```
 
-Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].credsSecret.name` selects the credentials Secret; when omitted, the operator falls back to a Secret named after `users[].name` for compatibility with existing manifests. The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps. Secret updates are matched against every Tenant spec, so a Secret can be shared by multiple Tenants without a routing label. Legacy routing labels are removed from external Secrets when the operator starts. Provisioned resources are retained when removed from the Tenant spec.
+Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].credsSecret.name` selects the credentials Secret; when omitted, the operator falls back to a Secret named after `users[].name` for compatibility with existing manifests. The operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object. Provisioned resources are retained when removed from the Tenant spec.
 
 ### RBAC Configuration
 

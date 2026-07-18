@@ -705,7 +705,7 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 - `spec.users` for regular users. Each user must have at least one direct policy mapping.
 - `spec.buckets` for buckets and optional object lock.
 
-ConfigMaps and user Secrets must live in the Tenant namespace. The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps. Secret updates are matched against every Tenant spec, so a Secret can be shared by multiple Tenants without a routing label. Legacy routing labels are removed from external Secrets when the operator starts.
+ConfigMaps and user Secrets must live in the Tenant namespace. The Operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object.
 
 Policy documents are parsed by RustFS. Use S3 ARN resource patterns such as `arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/*`; for all buckets, use `arn:aws:s3:::*`. A bare `Resource: "*"` is not accepted by RustFS policy parsing.
 
@@ -721,8 +721,6 @@ kind: ConfigMap
 metadata:
   name: app-policy
   namespace: storage
-  labels:
-    rustfs.tenant: rustfs-a
 data:
   policy.json: |
     {

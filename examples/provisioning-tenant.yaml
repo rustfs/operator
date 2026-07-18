@@ -20,8 +20,6 @@ kind: ConfigMap
 metadata:
   name: provisioning-app-policy
   namespace: default
-  labels:
-    rustfs.tenant: provisioning-demo
 data:
   policy.json: |
     {
