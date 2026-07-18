@@ -43,9 +43,7 @@ use phases::{
     reconcile_services, validate_no_pool_rename, validate_tenant_prerequisites,
 };
 use pool_lifecycle::reconcile_pool_lifecycle;
-use reference_labels::{
-    MISSING_REFERENCE_REQUEUE_INTERVAL, reconcile_provisioning_reference_labels,
-};
+use reference_labels::{MISSING_REFERENCE_REQUEUE_INTERVAL, reconcile_policy_config_map_labels};
 
 #[derive(Snafu, Debug)]
 pub enum Error {
@@ -112,9 +110,9 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     )
     .await?;
     let action = finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan).await?;
-    let reference_labels =
-        reconcile_provisioning_reference_labels(&ctx, &latest_tenant, &ns).await?;
-    if reference_labels.has_missing_resources && action == Action::await_change() {
+    let missing_policy_config_maps =
+        reconcile_policy_config_map_labels(&ctx, &latest_tenant, &ns).await?;
+    if missing_policy_config_maps && action == Action::await_change() {
         return Ok(Action::requeue(MISSING_REFERENCE_REQUEUE_INTERVAL));
     }
     Ok(action)

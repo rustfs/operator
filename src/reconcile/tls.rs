@@ -20,7 +20,7 @@ use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::certificate::{
     CertificateObjectRef, SecretStatusRef, TlsCertificateStatus, TlsServerCertificateStatus,
 };
-use crate::types::v1alpha1::tenant::Tenant;
+use crate::types::v1alpha1::tenant::{RUSTFS_TENANT_LABEL, Tenant};
 use crate::types::v1alpha1::tls::{
     CaTrustSource, CertManagerIssuerRef, CertManagerTlsConfig, SecretKeyReference,
     TlsCertificateConfig, TlsConfig, TlsMode, TlsPlan, TlsRotationStrategy,
@@ -954,9 +954,11 @@ fn build_cert_manager_certificate(
     if let Some(private_key) = cert_manager.private_key.as_ref() {
         spec.insert("privateKey".to_string(), json!(private_key));
     }
+    let mut secret_labels = tenant.common_labels();
+    secret_labels.remove(RUSTFS_TENANT_LABEL);
     spec.insert(
         "secretTemplate".to_string(),
-        json!({ "labels": tenant.common_labels() }),
+        json!({ "labels": secret_labels }),
     );
 
     let resource = certificate_api_resource();
@@ -2471,7 +2473,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             certificate
                 .data
                 .pointer("/spec/secretTemplate/labels/rustfs.tenant"),
-            Some(&serde_json::json!("tenant-a"))
+            None
         );
         assert_eq!(
             certificate

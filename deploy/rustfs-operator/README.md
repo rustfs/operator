@@ -100,9 +100,6 @@ kind: Secret
 metadata:
   name: rustfs-rpc-auth
   namespace: storage
-  labels:
-    # Lets Secret updates enqueue this Tenant for prompt revalidation.
-    rustfs.tenant: rustfs-a
 type: Opaque
 stringData:
   rpc-secret: "replace-with-a-dedicated-rpc-secret"
@@ -124,11 +121,11 @@ The operator maps the selected Secret key to `RUSTFS_RPC_SECRET` in every RustFS
 Pod. Before applying workloads, it verifies that the Secret and selected key
 exist and that the value is valid UTF-8, non-blank, contains no NUL bytes, and is
 not the RustFS default credential value (`rustfsadmin`). Keep this value stable
-while rotating administrator credentials. The `rustfs.tenant` label is not used
-for authorization; it lets updates to an externally managed Secret enqueue the
-Tenant for revalidation. A Secret update does not change the environment of
-already-running Pods. Coordinated restart and hot reload are outside this
-feature. If `spec.rpcSecret` is omitted, the operator does not set
+while rotating administrator credentials. Secret updates enqueue every Tenant
+whose spec references the Secret, including when multiple Tenants share it. A
+Secret update does not change the environment of already-running Pods.
+Coordinated restart and hot reload are outside this feature. If `spec.rpcSecret`
+is omitted, the operator does not set
 `RUSTFS_RPC_SECRET`, RustFS resolves it from its own credential configuration,
 and the operator does not report `RpcAuthReady` for that unmanaged value.
 
@@ -159,7 +156,7 @@ spec:
       objectLock: true
 ```
 
-Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].credsSecret.name` selects the credentials Secret; when omitted, the operator falls back to a Secret named after `users[].name` for compatibility with existing manifests. The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps and user Secrets so changes enqueue the owning Tenant; references that do not exist yet are retried. The label triggers reconciliation but does not select the Secret. Provisioned resources are retained when removed from the Tenant spec.
+Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].credsSecret.name` selects the credentials Secret; when omitted, the operator falls back to a Secret named after `users[].name` for compatibility with existing manifests. The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps. Secret updates are matched against every Tenant spec, so a Secret can be shared by multiple Tenants without a routing label. Legacy routing labels are removed from external Secrets when the operator starts. Provisioned resources are retained when removed from the Tenant spec.
 
 ### RBAC Configuration
 

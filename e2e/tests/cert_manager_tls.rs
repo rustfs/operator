@@ -91,32 +91,27 @@ fn external_secret_tenant_manifest_uses_shared_secret_and_rollout_strategy() -> 
 }
 
 #[test]
-fn external_secret_manifests_carry_tenant_watch_label_for_initial_create_and_rotation() -> Result<()>
-{
+fn external_secret_manifests_need_no_tenant_watch_label_for_create_or_rotation() -> Result<()> {
     let config = tls_e2e::external_secret_case_config(&E2eConfig::defaults());
 
     let initial = tls_e2e::external_tls_secret_manifests(&config)?;
-    assert_secret_manifest_tenant_watch_label(
+    assert_secret_manifest_has_no_tenant_watch_label(
         "initial external TLS Secret",
         &initial.tls_secret_manifest,
-        &config.tenant_name,
     )?;
-    assert_secret_manifest_tenant_watch_label(
+    assert_secret_manifest_has_no_tenant_watch_label(
         "initial external CA Secret",
         &initial.ca_secret_manifest,
-        &config.tenant_name,
     )?;
 
     let rotated = tls_e2e::external_tls_secret_manifests(&config)?;
-    assert_secret_manifest_tenant_watch_label(
+    assert_secret_manifest_has_no_tenant_watch_label(
         "rotated external TLS Secret",
         &rotated.tls_secret_manifest,
-        &config.tenant_name,
     )?;
-    assert_secret_manifest_tenant_watch_label(
+    assert_secret_manifest_has_no_tenant_watch_label(
         "rotated external CA Secret",
         &rotated.ca_secret_manifest,
-        &config.tenant_name,
     )?;
 
     Ok(())
@@ -1062,21 +1057,17 @@ fn collect_tls_artifacts_on_error(config: &E2eConfig, case_name: &str, result: &
     }
 }
 
-fn assert_secret_manifest_tenant_watch_label(
-    context: &str,
-    manifest: &str,
-    expected_tenant: &str,
-) -> Result<()> {
+fn assert_secret_manifest_has_no_tenant_watch_label(context: &str, manifest: &str) -> Result<()> {
     let secret: corev1::Secret = serde_yaml_ng::from_str(manifest)
         .with_context(|| format!("parse {context} Secret manifest"))?;
-    let labels = secret
+    let has_tenant_label = secret
         .metadata
         .labels
         .as_ref()
-        .with_context(|| format!("{context} missing labels"))?;
+        .is_some_and(|labels| labels.contains_key("rustfs.tenant"));
     ensure!(
-        labels.get("rustfs.tenant").map(String::as_str) == Some(expected_tenant),
-        "{context} should carry rustfs.tenant label for Tenant {expected_tenant}"
+        !has_tenant_label,
+        "{context} should not carry a rustfs.tenant routing label"
     );
     Ok(())
 }

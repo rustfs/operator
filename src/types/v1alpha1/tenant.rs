@@ -187,9 +187,8 @@ pub struct TenantSpec {
     /// When configured, the operator maps this key to `RUSTFS_RPC_SECRET` for every
     /// RustFS Pod. Keep it stable while rotating `credsSecret`. When omitted, the
     /// operator does not set `RUSTFS_RPC_SECRET`; RustFS resolves it from its own
-    /// credential configuration. Label an externally managed Secret with
-    /// `rustfs.tenant=<Tenant name>` so Secret updates enqueue the Tenant for
-    /// prompt revalidation.
+    /// credential configuration. Secret updates enqueue every Tenant that references
+    /// the Secret, so one externally managed Secret can be shared by multiple Tenants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpc_secret: Option<RpcSecretRef>,
 
