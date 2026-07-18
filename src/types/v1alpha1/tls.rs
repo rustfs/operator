@@ -17,7 +17,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::schemars::JsonSchema;
 use kube::KubeSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const DEFAULT_TLS_MOUNT_PATH: &str = "/var/run/rustfs/tls";
 pub const TLS_HASH_ANNOTATION: &str = "operator.rustfs.com/tls-hash";
@@ -254,6 +254,45 @@ impl TlsConfig {
             .find(|certificate| certificate.default)
             .and_then(|certificate| certificate.cert_manager.ca_trust.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn referenced_secret_names(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        if let Some(cert_manager) = &self.cert_manager {
+            extend_cert_manager_secret_names(&mut names, cert_manager);
+        }
+        for certificate in &self.certificates {
+            extend_cert_manager_secret_names(&mut names, &certificate.cert_manager);
+        }
+        if let Some(ca_trust) = &self.ca_trust {
+            extend_ca_trust_secret_names(&mut names, ca_trust);
+        }
+        names
+    }
+}
+
+fn extend_cert_manager_secret_names(names: &mut BTreeSet<String>, config: &CertManagerTlsConfig) {
+    if let Some(name) = &config.secret_name
+        && !name.is_empty()
+    {
+        names.insert(name.clone());
+    }
+    if let Some(ca_trust) = &config.ca_trust {
+        extend_ca_trust_secret_names(names, ca_trust);
+    }
+}
+
+fn extend_ca_trust_secret_names(names: &mut BTreeSet<String>, config: &CaTrustConfig) {
+    for secret in [
+        config.ca_secret_ref.as_ref(),
+        config.client_ca_secret_ref.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !secret.name.is_empty() {
+            names.insert(secret.name.clone());
+        }
     }
 }
 

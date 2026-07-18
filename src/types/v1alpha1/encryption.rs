@@ -16,6 +16,7 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::schemars::JsonSchema;
 use kube::KubeSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// KMS backend type for server-side encryption.
 ///
@@ -127,6 +128,26 @@ pub struct EncryptionConfig {
     /// Optional default SSE key id (`RUSTFS_KMS_DEFAULT_KEY_ID`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_key_id: Option<String>,
+}
+
+impl EncryptionConfig {
+    pub(crate) fn referenced_secret_names(&self) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        if let Some(secret) = &self.kms_secret
+            && !secret.name.is_empty()
+        {
+            names.insert(secret.name.clone());
+        }
+        if let Some(secret) = self
+            .local
+            .as_ref()
+            .and_then(|local| local.master_key_secret_ref.as_ref())
+            && !secret.name.is_empty()
+        {
+            names.insert(secret.name.clone());
+        }
+        names
+    }
 }
 
 /// Pod SecurityContext overrides for all RustFS pods in this Tenant.
