@@ -21,6 +21,7 @@ pub(crate) const MAX_CONFIG_MAP_REF_NAME_LENGTH: u32 = 253;
 pub(crate) const MAX_CONFIG_MAP_REF_KEY_LENGTH: u32 = 253;
 pub(crate) const MAX_PROVISIONING_POLICY_NAME_LENGTH: u32 = 253;
 pub(crate) const MAX_PROVISIONING_USER_NAME_LENGTH: u32 = 253;
+pub(crate) const MAX_USER_CREDENTIALS_SECRET_NAME_LENGTH: u32 = 253;
 pub(crate) const MAX_POLICIES_PER_USER: u32 = 64;
 pub(crate) const MAX_USER_POLICY_NAME_LENGTH: u32 = 253;
 pub(crate) const MIN_BUCKET_NAME_LENGTH: u32 = 3;
@@ -65,11 +66,23 @@ pub struct ProvisioningPolicy {
     pub deletion_policy: ProvisioningDeletionPolicy,
 }
 
+/// Reference to a user credentials Secret in the Tenant namespace.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UserCredentialsSecretRef {
+    #[schemars(length(min = 1, max = MAX_USER_CREDENTIALS_SECRET_NAME_LENGTH))]
+    pub name: String,
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningUser {
     #[schemars(length(min = 1, max = MAX_PROVISIONING_USER_NAME_LENGTH), regex(pattern = r"^\S+$"))]
     pub name: String,
+
+    /// Optional credentials Secret reference. Defaults to a Secret named after the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creds_secret: Option<UserCredentialsSecretRef>,
 
     /// Canned policies to map directly to this user.
     #[schemars(
@@ -82,6 +95,15 @@ pub struct ProvisioningUser {
 
     #[serde(default, skip_serializing_if = "is_retain")]
     pub deletion_policy: ProvisioningDeletionPolicy,
+}
+
+impl ProvisioningUser {
+    /// Resolves the credentials Secret name while preserving the legacy same-name convention.
+    pub fn credentials_secret_name(&self) -> &str {
+        self.creds_secret
+            .as_ref()
+            .map_or(self.name.as_str(), |reference| reference.name.as_str())
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
@@ -107,5 +129,36 @@ pub struct ProvisioningBucket {
 impl ProvisioningBucket {
     pub fn object_lock_enabled(&self) -> bool {
         self.object_lock.unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProvisioningUser, UserCredentialsSecretRef};
+
+    #[test]
+    fn user_credentials_secret_defaults_to_user_name() {
+        let user: ProvisioningUser = serde_json::from_value(serde_json::json!({
+            "name": "app-user",
+            "policies": ["app-readwrite"]
+        }))
+        .expect("legacy ProvisioningUser should deserialize");
+
+        assert_eq!(user.credentials_secret_name(), "app-user");
+        let value = serde_json::to_value(user).expect("ProvisioningUser should serialize");
+        assert!(value.get("credsSecret").is_none());
+    }
+
+    #[test]
+    fn user_credentials_secret_uses_explicit_reference() {
+        let user = ProvisioningUser {
+            name: "app-user".to_string(),
+            creds_secret: Some(UserCredentialsSecretRef {
+                name: "rustfs-user-app-user".to_string(),
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(user.credentials_secret_name(), "rustfs-user-app-user");
     }
 }

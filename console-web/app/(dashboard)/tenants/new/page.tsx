@@ -243,11 +243,21 @@ export default function TenantCreatePage() {
           const user = asRecord(item)
           const userName = asString(user?.name)
           const userPolicies = asStringArray(user?.policies)
-          if (!user || !userName || !userPolicies || userPolicies.length === 0) {
+          const rawCredsSecret = user?.credsSecret ?? user?.creds_secret
+          const credsSecret = asRecord(rawCredsSecret)
+          const credsSecretName = asString(credsSecret?.name)
+          if (
+            !user ||
+            !userName ||
+            !userPolicies ||
+            userPolicies.length === 0 ||
+            (rawCredsSecret != null && !credsSecretName)
+          ) {
             throw new Error(t("YAML user provisioning fields are invalid"))
           }
           return {
             name: userName,
+            credsSecret: credsSecretName ? { name: credsSecretName } : undefined,
             policies: userPolicies,
           }
         })

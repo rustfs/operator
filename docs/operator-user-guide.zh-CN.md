@@ -92,9 +92,13 @@ kubectl logs -n rustfs-system \
 升级已有安装：
 
 ```bash
+kubectl apply -f deploy/rustfs-operator/crds/tenant-crd.yaml
 helm upgrade rustfs-operator deploy/rustfs-operator/ \
   --namespace rustfs-system
 ```
+
+Helm 不会升级 Chart `crds/` 目录中的已有 CRD。使用新版本 Operator 引入的字段前，请先应用更新后的 Tenant CRD，并等待 Operator rollout 完成。
+未配置新版可选字段的已有 Tenant manifest 无需迁移。如果仍有旧版 Operator binary 在 reconcile Tenant，请勿依赖 `users[].credsSecret`，因为旧版本仍会按 user 同名规则读取 Secret。
 
 卸载：
 
@@ -598,9 +602,11 @@ ConfigMap 和 user Secret 必须位于 Tenant namespace。若这些资源不是�
 
 Policy document 由 RustFS 解析。请使用 `arn:aws:s3:::bucket` 和 `arn:aws:s3:::bucket/*` 这类 S3 ARN resource 写法；如需匹配所有 bucket，请使用 `arn:aws:s3:::*`。RustFS policy parser 不接受裸 `Resource: "*"`。
 
-每个 `spec.users[]` 条目都会读取一个与 user 名同名的 Secret。Secret 必须包含 `accesskey` 和 `secretkey`，或者 MinIO 兼容 key：`CONSOLE_ACCESS_KEY` 和 `CONSOLE_SECRET_KEY`。如果两种 key 同时存在，值必须一致。user access key 至少 8 个字符，且不能包含空白、`=` 或 `,`；user secret key 至少 8 个字符。
+每个 `spec.users[]` 条目都可以通过 `credsSecret.name` 指定 Tenant namespace 中的 user credentials Secret。省略 `credsSecret` 时，Operator 继续读取与 `user.name` 同名的 Secret，以兼容旧版 manifest。显式引用是唯一来源；配置错误或 Secret 不存在时，不会再回退到同名 Secret。
 
-更新 user Secret 的 `secretkey` 会轮换对应 RustFS user 的凭据。首次成功 provisioning 后，`accesskey` 不可变；如需变更，请新建 user 条目和 Secret，迁移客户端后再移除旧条目。
+Secret 必须包含 `accesskey` 和 `secretkey`，或者 MinIO 兼容 key：`CONSOLE_ACCESS_KEY` 和 `CONSOLE_SECRET_KEY`。如果两种 key 同时存在，值必须一致。`user.name` 仍是声明和 status 中的逻辑标识，Secret 内的 `accesskey` 才是实际 RustFS user。user access key 至少 8 个字符，且不能包含空白、`=` 或 `,`；user secret key 至少 8 个字符。`rustfs.tenant` label 只负责在 Secret 更新时触发 Tenant reconcile，不参与选择要读取的 Secret。
+
+更新 user Secret 的 `secretkey`，或者把 `credsSecret.name` 切换到具有相同 `accesskey` 的另一个 Secret，都会轮换对应 RustFS user 的凭据。首次成功 provisioning 后，`accesskey` 不可变；如需变更，请新建 user 条目和 Secret，迁移客户端后再移除旧条目。
 
 ```yaml
 apiVersion: v1
@@ -626,7 +632,7 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: app-user
+  name: rustfs-user-app-user
   namespace: storage
   labels:
     rustfs.tenant: rustfs-a
@@ -656,6 +662,8 @@ spec:
           key: policy.json
   users:
     - name: app-user
+      credsSecret:
+        name: rustfs-user-app-user
       policies:
         - app-readwrite
   buckets:

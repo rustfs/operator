@@ -97,6 +97,9 @@ pub struct ProvisioningItemStatus {
     pub observed_secret_resource_version: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_secret_name: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_applied_access_key_hash: Option<String>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

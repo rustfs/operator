@@ -150,6 +150,8 @@ spec:
           key: policy.json
   users:
     - name: app-user
+      credsSecret:
+        name: rustfs-user-app-user
       policies:
         - app-readwrite
   buckets:
@@ -157,7 +159,7 @@ spec:
       objectLock: true
 ```
 
-Policy ConfigMaps and user Secrets must live in the Tenant namespace. If they are created outside the Operator Console, add `rustfs.tenant=<tenant-name>` so changes to those resources enqueue the owning Tenant. Provisioned resources are retained when removed from the Tenant spec.
+Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].credsSecret.name` selects the credentials Secret; when omitted, the operator falls back to a Secret named after `users[].name` for compatibility with existing manifests. If references are created outside the Operator Console, add `rustfs.tenant=<tenant-name>` so changes enqueue the owning Tenant. The label triggers reconciliation but does not select the Secret. Provisioned resources are retained when removed from the Tenant spec.
 
 ### RBAC Configuration
 
@@ -333,8 +335,12 @@ kubectl apply -f examples/simple-tenant.yaml
 To upgrade the operator:
 
 ```bash
+kubectl apply -f deploy/rustfs-operator/crds/tenant-crd.yaml
 helm upgrade rustfs-operator deploy/rustfs-operator/
 ```
+
+Helm does not upgrade CRDs from the chart's `crds/` directory. Apply the updated Tenant CRD and wait for the operator rollout before using newly introduced Tenant fields such as `users[].credsSecret`.
+Existing manifests that omit the field remain compatible. Older operator binaries ignore the reference and continue using the same-name Secret convention, so complete the rollout before relying on it.
 
 ## Console UI
 

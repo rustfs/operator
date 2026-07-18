@@ -50,7 +50,7 @@ use crate::console::models::topology::{
 };
 use crate::types::v1alpha1::provisioning::{
     ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy,
-    ProvisioningPolicy, ProvisioningUser,
+    ProvisioningPolicy, ProvisioningUser, UserCredentialsSecretRef,
 };
 use crate::types::v1alpha1::status::provisioning::{
     ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus,
@@ -109,6 +109,7 @@ use crate::types::v1alpha1::status::provisioning::{
         ProvisioningItemState,
         ProvisioningPolicy,
         ProvisioningUser,
+        UserCredentialsSecretRef,
         ProvisioningBucket,
         ProvisioningDeletionPolicy,
         PolicyDocumentSource,
@@ -434,6 +435,7 @@ mod tests {
             .expect("schemas exist");
 
         assert!(schemas.contains_key("ProvisioningStatus"));
+        assert!(schemas.contains_key("UserCredentialsSecretRef"));
         assert_eq!(
             spec.pointer("/components/schemas/TenantDetailsResponse/properties/provisioning/$ref")
                 .and_then(Value::as_str),
@@ -448,6 +450,13 @@ mod tests {
             spec.pointer("/components/schemas/UpdateTenantRequest/properties/buckets/items/$ref")
                 .and_then(Value::as_str),
             Some("#/components/schemas/ProvisioningBucket")
+        );
+        assert_eq!(
+            spec.pointer(
+                "/components/schemas/ProvisioningUser/properties/credsSecret/oneOf/1/$ref",
+            )
+            .and_then(Value::as_str),
+            Some("#/components/schemas/UserCredentialsSecretRef")
         );
     }
 }
