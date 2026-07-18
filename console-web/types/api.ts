@@ -428,7 +428,7 @@ export interface EncryptionInfoResponse {
 
 export interface UpdateEncryptionRequest {
   enabled: boolean
-  backend?: string
+  backend?: "local" | "vault"
   vault?: {
     endpoint: string
   }

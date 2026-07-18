@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod handlers;
+pub mod json;
 pub mod middleware;
 pub mod models;
 #[allow(dead_code)]

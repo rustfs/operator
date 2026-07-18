@@ -15,7 +15,11 @@
 use super::validate_tenant_for_write;
 use crate::console::{
     error::{self, Error, Result},
-    models::encryption::{PatchField, SecurityContextInfo, UpdateSecurityContextRequest},
+    json::ConsoleJson,
+    models::encryption::{
+        PatchField, SecurityContextInfo, SecurityContextUpdateResponse,
+        UpdateSecurityContextRequest,
+    },
     state::Claims,
 };
 use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
@@ -85,7 +89,7 @@ fn apply_validated_security_context_update(
 pub async fn update_security_context(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(body): Json<UpdateSecurityContextRequest>,
+    ConsoleJson(body): ConsoleJson<UpdateSecurityContextRequest>,
 ) -> Result<Json<SecurityContextUpdateResponse>> {
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::namespaced(client, &namespace);
@@ -128,12 +132,6 @@ pub async fn update_security_context(
     Err(last_conflict.unwrap_or_else(|| Error::Conflict {
         message: "Resource was modified by another request, please retry".to_string(),
     }))
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct SecurityContextUpdateResponse {
-    pub success: bool,
-    pub message: String,
 }
 
 async fn create_client(claims: &Claims) -> Result<Client> {

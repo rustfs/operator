@@ -14,6 +14,7 @@
 
 use crate::console::{
     error::{self, Error, Result},
+    json::ConsoleJson,
     models::pod::*,
     state::Claims,
 };
@@ -234,7 +235,7 @@ pub async fn delete_pod(
 pub async fn restart_pod(
     Path((namespace, tenant_name, pod_name)): Path<(String, String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<RestartPodRequest>,
+    ConsoleJson(req): ConsoleJson<RestartPodRequest>,
 ) -> Result<Json<DeletePodResponse>> {
     let client = create_client(&claims).await?;
     let api: Api<corev1::Pod> = Api::namespaced(client, &namespace);

@@ -18,6 +18,7 @@ use snafu::ResultExt;
 
 use crate::console::{
     error::{self, Error, Result},
+    json::ConsoleJson,
     models::auth::{LoginRequest, LoginResponse, SessionResponse},
     state::{AppState, Claims, SESSION_TTL_SECONDS},
 };
@@ -30,7 +31,7 @@ use crate::types::v1alpha1::tenant::Tenant;
 //   -d "{\"token\": \"$TOKEN\"}"
 pub async fn login(
     State(state): State<AppState>,
-    Json(req): Json<LoginRequest>,
+    ConsoleJson(req): ConsoleJson<LoginRequest>,
 ) -> Result<impl IntoResponse> {
     tracing::info!("Console login attempt");
 

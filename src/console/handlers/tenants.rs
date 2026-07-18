@@ -15,6 +15,7 @@
 use super::validate_tenant_for_write;
 use crate::console::{
     error::{self, Error, Result},
+    json::ConsoleJson,
     models::tenant::*,
     state::Claims,
 };
@@ -232,7 +233,7 @@ pub async fn get_tenant_details(
 /// Create a Tenant CR (and namespace if missing).
 pub async fn create_tenant(
     Extension(claims): Extension<Claims>,
-    Json(req): Json<CreateTenantRequest>,
+    ConsoleJson(req): ConsoleJson<CreateTenantRequest>,
 ) -> Result<Json<TenantListItem>> {
     let tenant = tenant_from_create_request(req)?;
     let (name, namespace) = tenant_identity(&tenant)?;
@@ -338,7 +339,7 @@ fn tenant_from_create_request(req: CreateTenantRequest) -> Result<Tenant> {
 /// Create a Tenant from its complete YAML representation.
 pub async fn create_tenant_from_yaml(
     Extension(claims): Extension<Claims>,
-    Json(req): Json<TenantYAML>,
+    ConsoleJson(req): ConsoleJson<TenantYAML>,
 ) -> Result<Json<TenantListItem>> {
     let tenant = parse_tenant_yaml_for_create(&req.yaml)?;
     let (name, namespace) = tenant_identity(&tenant)?;
@@ -379,7 +380,7 @@ pub async fn delete_tenant(
 pub async fn update_tenant(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<UpdateTenantRequest>,
+    ConsoleJson(req): ConsoleJson<UpdateTenantRequest>,
 ) -> Result<Json<UpdateTenantResponse>> {
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::namespaced(client, &namespace);
@@ -549,7 +550,7 @@ pub async fn get_tenant_yaml(
 pub async fn put_tenant_yaml(
     Path((namespace, name)): Path<(String, String)>,
     Extension(claims): Extension<Claims>,
-    Json(req): Json<TenantYAML>,
+    ConsoleJson(req): ConsoleJson<TenantYAML>,
 ) -> Result<Json<TenantYAML>> {
     let in_tenant = parse_tenant_yaml(&req.yaml)?;
 

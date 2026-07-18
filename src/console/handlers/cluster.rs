@@ -14,6 +14,7 @@
 
 use crate::console::{
     error::{self, Error, Result},
+    json::ConsoleJson,
     models::cluster::*,
     state::Claims,
 };
@@ -146,7 +147,7 @@ pub async fn list_namespaces(
 /// Create a namespace by name.
 pub async fn create_namespace(
     Extension(claims): Extension<Claims>,
-    Json(req): Json<CreateNamespaceRequest>,
+    ConsoleJson(req): ConsoleJson<CreateNamespaceRequest>,
 ) -> Result<Json<NamespaceItem>> {
     let client = create_client(&claims).await?;
     let api: Api<corev1::Namespace> = Api::all(client);

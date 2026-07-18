@@ -48,7 +48,7 @@ pub struct LocalInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalMasterKeySecretRefInfo {
     pub name: String,
     pub key: String,
@@ -85,24 +85,31 @@ impl SecurityContextInfo {
 
 /// PUT request – update encryption configuration.
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateEncryptionRequest {
     pub enabled: bool,
-    pub backend: Option<String>,
+    pub backend: Option<UpdateEncryptionBackend>,
     pub vault: Option<UpdateVaultRequest>,
     pub local: Option<UpdateLocalRequest>,
     pub kms_secret_name: Option<String>,
     pub default_key_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateEncryptionBackend {
+    Local,
+    Vault,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateVaultRequest {
     pub endpoint: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateLocalRequest {
     pub key_directory: Option<String>,
     pub master_key_secret_ref: Option<LocalMasterKeySecretRefInfo>,
@@ -156,6 +163,13 @@ where
     }
 }
 
+/// SecurityContext update result.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SecurityContextUpdateResponse {
+    pub success: bool,
+    pub message: String,
+}
+
 /// Generic success response.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EncryptionUpdateResponse {
@@ -165,7 +179,9 @@ pub struct EncryptionUpdateResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{PatchField, SecurityContextInfo, UpdateSecurityContextRequest};
+    use super::{
+        PatchField, SecurityContextInfo, UpdateEncryptionRequest, UpdateSecurityContextRequest,
+    };
     use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
 
     #[test]
@@ -221,5 +237,52 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("unknown field `runAsUsr`"));
+    }
+
+    #[test]
+    fn encryption_update_accepts_supported_wire_contracts() {
+        for value in [
+            serde_json::json!({ "enabled": false }),
+            serde_json::json!({
+                "enabled": true,
+                "backend": "vault",
+                "vault": { "endpoint": "https://vault.example.com" },
+                "kmsSecretName": "vault-token",
+                "defaultKeyId": "tenant-key"
+            }),
+            serde_json::json!({
+                "enabled": true,
+                "backend": "local",
+                "local": {
+                    "keyDirectory": "/var/lib/rustfs/kms",
+                    "masterKeySecretRef": { "name": "local-kms", "key": "master-key" },
+                    "allowInsecureDevDefaults": false
+                }
+            }),
+        ] {
+            serde_json::from_value::<UpdateEncryptionRequest>(value)
+                .expect("supported encryption request should deserialize");
+        }
+    }
+
+    #[test]
+    fn encryption_update_rejects_unknown_backends_and_fields() {
+        for value in [
+            serde_json::json!({ "enabled": true, "backend": "valut" }),
+            serde_json::json!({ "enabled": true, "enabeld": true }),
+            serde_json::json!({
+                "enabled": true,
+                "backend": "vault",
+                "vault": { "endpoint": "https://vault.example.com", "endpont": "typo" }
+            }),
+            serde_json::json!({
+                "enabled": true,
+                "backend": "local",
+                "local": { "allowInsecureDevDefault": true }
+            }),
+        ] {
+            serde_json::from_value::<UpdateEncryptionRequest>(value)
+                .expect_err("unknown encryption values and fields must be rejected");
+        }
     }
 }
