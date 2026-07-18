@@ -48,7 +48,6 @@ const OPAQUE_SECRET_TYPE: &str = "Opaque";
 const REDACTED_FIXTURE_BYTES: &[u8] = b"redacted-test-fixture";
 const MANAGED_CERTIFICATE_CASE_SUFFIX: &str = "cert-manager-managed";
 const EXTERNAL_SECRET_CASE_SUFFIX: &str = "cert-manager-external";
-const RUSTFS_TENANT_LABEL: &str = "rustfs.tenant";
 pub const POSITIVE_CERT_MANAGER_TLS_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,10 +85,6 @@ pub fn external_secret_case_config(config: &E2eConfig) -> E2eConfig {
 
 pub fn positive_cert_manager_tls_timeout(config: &E2eConfig) -> Duration {
     std::cmp::max(config.timeout, POSITIVE_CERT_MANAGER_TLS_TIMEOUT)
-}
-
-fn tenant_watch_labels(config: &E2eConfig) -> BTreeMap<String, String> {
-    BTreeMap::from([(RUSTFS_TENANT_LABEL.to_string(), config.tenant_name.clone())])
 }
 
 pub fn managed_certificate_storage_layout(config: &E2eConfig) -> storage::LocalStorageLayout {
@@ -1047,13 +1042,7 @@ fn external_tls_secret_manifest(
     secret_type: &str,
     data: BTreeMap<String, ByteString>,
 ) -> Result<String> {
-    tls_secret_manifest_with_labels(
-        &config.test_namespace,
-        name,
-        secret_type,
-        data,
-        tenant_watch_labels(config),
-    )
+    tls_secret_manifest(&config.test_namespace, name, secret_type, data)
 }
 
 fn tls_secret_manifest(
@@ -1062,22 +1051,10 @@ fn tls_secret_manifest(
     secret_type: &str,
     data: BTreeMap<String, ByteString>,
 ) -> Result<String> {
-    tls_secret_manifest_with_labels(namespace, name, secret_type, data, BTreeMap::new())
-}
-
-fn tls_secret_manifest_with_labels(
-    namespace: &str,
-    name: &str,
-    secret_type: &str,
-    data: BTreeMap<String, ByteString>,
-    labels: BTreeMap<String, String>,
-) -> Result<String> {
-    let labels = (!labels.is_empty()).then_some(labels);
     let secret = corev1::Secret {
         metadata: metav1::ObjectMeta {
             name: Some(name.to_string()),
             namespace: Some(namespace.to_string()),
-            labels,
             ..Default::default()
         },
         type_: Some(secret_type.to_string()),

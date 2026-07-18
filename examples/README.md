@@ -143,7 +143,7 @@ kubectl apply -f examples/provisioning-tenant.yaml
 kubectl wait --for=condition=Ready tenant/provisioning-demo --timeout=10m
 ```
 
-The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps and user Secrets so updates enqueue the owning Tenant.
+The operator labels referenced policy ConfigMaps. Secret updates are matched against every Tenant spec, so one Secret can be shared without a routing label.
 
 ---
 

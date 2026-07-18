@@ -11,8 +11,8 @@
 # - enableInternodeHttps=true requires a CA source. CertificateSecretCa expects
 #   cert-manager to write ca.crt into the TLS Secret. Use SecretRef or SystemCa
 #   only when that matches your trust model.
-# - Existing cert-manager Secrets used with manageCertificate=false should carry
-#   rustfs.tenant=<tenant-name> if you want Secret changes to enqueue the Tenant.
+# - Existing cert-manager Secrets used with manageCertificate=false need no Tenant
+#   routing label; Secret changes enqueue every Tenant that references them.
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:

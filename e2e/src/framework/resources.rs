@@ -80,15 +80,12 @@ kind: Secret
 metadata:
   name: {secret_name}
   namespace: {namespace}
-  labels:
-    rustfs.tenant: {tenant_name}
 type: Opaque
 stringData:
   {key}: {rpc_secret}
 "#,
         secret_name = rpc_secret_name(config),
         namespace = config.test_namespace,
-        tenant_name = config.tenant_name,
         key = RPC_SECRET_KEY,
         rpc_secret = TEST_RPC_SECRET,
     )
@@ -372,13 +369,13 @@ mod tests {
     }
 
     #[test]
-    fn rpc_secret_uses_tenant_watch_label() {
+    fn rpc_secret_does_not_require_tenant_watch_label() {
         let config = E2eConfig::defaults();
         let manifest = rpc_secret_manifest(&config);
 
         assert_eq!(rpc_secret_name(&config), "e2e-tenant-rpc-auth");
         assert!(manifest.contains("namespace: rustfs-e2e-smoke"));
-        assert!(manifest.contains("rustfs.tenant: e2e-tenant"));
+        assert!(!manifest.contains("rustfs.tenant"));
         assert!(manifest.contains("rpc-secret: test-dedicated-rpc-secret"));
     }
 }

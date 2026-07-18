@@ -331,7 +331,7 @@ Credential priority:
 
 For production, configure `spec.rpcSecret` so internode RPC authentication does
 not depend on the administrator credentials. Keep the Secret in the Tenant
-namespace and label externally managed Secrets with the Tenant name:
+namespace. The Secret does not need a Tenant routing label:
 
 ```yaml
 apiVersion: v1
@@ -339,8 +339,6 @@ kind: Secret
 metadata:
   name: rustfs-rpc-auth
   namespace: storage
-  labels:
-    rustfs.tenant: rustfs-a
 type: Opaque
 stringData:
   rpc-secret: "replace-with-a-dedicated-rpc-secret"
@@ -358,9 +356,9 @@ spec:
 ```
 
 The selected value must be valid UTF-8, non-blank, contain no NUL bytes, and
-must not be `rustfsadmin`. The `rustfs.tenant` label lets Secret updates enqueue
-the Tenant for prompt revalidation; it is not an authorization mechanism. When
-the configured Secret passes validation, the Operator reports
+must not be `rustfsadmin`. Secret updates enqueue every Tenant whose spec
+references that Secret, including when multiple Tenants share it. When the
+configured Secret passes validation, the Operator reports
 `RpcAuthReady=True`. Updating the Secret does not change the environment of
 already-running Pods; coordinated restart and hot reload are outside this
 feature.
@@ -598,13 +596,13 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 - `spec.users` for regular users. Each user must have at least one direct policy mapping.
 - `spec.buckets` for buckets and optional object lock.
 
-ConfigMaps and user Secrets must live in the Tenant namespace. The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps and user Secrets so updates enqueue the owning Tenant. References that do not exist yet are retried after they are created.
+ConfigMaps and user Secrets must live in the Tenant namespace. The operator maintains `rustfs.tenant=<tenant-name>` on referenced policy ConfigMaps. Secret updates are matched against every Tenant spec, so a Secret can be shared by multiple Tenants without a routing label. Legacy routing labels are removed from external Secrets when the operator starts.
 
 Policy documents are parsed by RustFS. Use S3 ARN resource patterns such as `arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/*`; for all buckets, use `arn:aws:s3:::*`. A bare `Resource: "*"` is not accepted by RustFS policy parsing.
 
 For each `spec.users[]` entry, set `credsSecret.name` to select a user credentials Secret in the Tenant namespace. If `credsSecret` is omitted, the operator reads a Secret with the same name as `user.name`, preserving the behavior of older manifests. An explicit reference is authoritative and does not fall back to the same-name Secret when it is invalid or missing. Each resolved Secret name must be unique within the Tenant; the API rejects duplicate references, and reconciliation also blocks them when an older installed CRD does not enforce the validation. Distinct Secrets must also contain distinct `accesskey` values. Reconciliation validates all user credentials before modifying any RustFS user and rejects every colliding entry.
 
-The Secret must contain `accesskey` and `secretkey`, or the MinIO-compatible keys `CONSOLE_ACCESS_KEY` and `CONSOLE_SECRET_KEY`. If both key formats are present, their values must match. `user.name` remains the declarative and status identity; the Secret's `accesskey` is the actual RustFS user. User access keys must be at least 8 characters and must not contain whitespace, `=`, or `,`; user secret keys must be at least 8 characters. The `rustfs.tenant` label only causes Secret updates to enqueue the Tenant; it does not select which Secret is read.
+The Secret must contain `accesskey` and `secretkey`, or the MinIO-compatible keys `CONSOLE_ACCESS_KEY` and `CONSOLE_SECRET_KEY`. If both key formats are present, their values must match. `user.name` remains the declarative and status identity; the Secret's `accesskey` is the actual RustFS user. User access keys must be at least 8 characters and must not contain whitespace, `=`, or `,`; user secret keys must be at least 8 characters. Secret selection and event routing both come from the Tenant spec; no Tenant label is required on the Secret.
 
 Updating a user Secret's `secretkey`, or changing `credsSecret.name` to another Secret with the same `accesskey`, rotates that RustFS user's credential. The `accesskey` is immutable after the first successful reconciliation; use a new user entry and Secret when it must change, then migrate clients before removing the old entry.
 
@@ -634,8 +632,6 @@ kind: Secret
 metadata:
   name: rustfs-user-app-user
   namespace: storage
-  labels:
-    rustfs.tenant: rustfs-a
 type: Opaque
 stringData:
   accesskey: appuser01

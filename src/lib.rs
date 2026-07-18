@@ -32,7 +32,7 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::reflector::ObjectRef;
-use kube::runtime::{Controller, watcher};
+use kube::runtime::{Controller, reflector::Store, watcher};
 use kube::{Api, Client, CustomResourceExt, Resource, api::ListParams};
 use kube_leader_election::{
     LeaderCallbacks, LeaderElector, LeaderElectorConfig, LeaseLock, SystemClock,
@@ -84,6 +84,7 @@ pub fn init_tracing() {
 
 mod cluster_dns;
 mod context;
+mod legacy_secret_labels;
 pub mod metrics;
 pub mod reconcile;
 mod status;
@@ -197,9 +198,13 @@ async fn run_controller(
     cancel: CancellationToken,
     cluster_domain: cluster_dns::ClusterDomain,
 ) {
+    legacy_secret_labels::cleanup_external_secret_labels(&client).await;
+
     let tenant_client = Api::<Tenant>::all(client.clone());
     let context = Context::new_with_cluster_domain(client.clone(), cluster_domain);
-    let controller = Controller::new(tenant_client, watcher::Config::default())
+    let controller = Controller::new(tenant_client, watcher::Config::default());
+    let secret_tenant_store = controller.store();
+    let controller = controller
         .watches(
             Api::<corev1::ConfigMap>::all(client.clone()),
             watcher::Config::default(),
@@ -208,7 +213,7 @@ async fn run_controller(
         .watches(
             Api::<corev1::Secret>::all(client.clone()),
             watcher::Config::default(),
-            tenant_refs_for_secret,
+            move |secret| tenant_refs_for_secret(secret, &secret_tenant_store),
         )
         .owns(
             Api::<corev1::ServiceAccount>::all(client.clone()),
@@ -584,12 +589,41 @@ fn cert_manager_certificate_api_resource() -> ApiResource {
     )
 }
 
-fn tenant_refs_for_secret(secret: corev1::Secret) -> Vec<ObjectRef<Tenant>> {
-    tenant_refs_from_metadata(
+fn tenant_refs_for_secret(
+    secret: corev1::Secret,
+    tenant_store: &Store<Tenant>,
+) -> Vec<ObjectRef<Tenant>> {
+    tenant_refs_for_secret_from_tenants(&secret, &tenant_store.state())
+}
+
+fn tenant_refs_for_secret_from_tenants(
+    secret: &corev1::Secret,
+    tenants: &[Arc<Tenant>],
+) -> Vec<ObjectRef<Tenant>> {
+    let mut refs = tenant_refs_from_metadata(
         secret.metadata.namespace.as_deref(),
         secret.metadata.owner_references.as_deref(),
-        secret.metadata.labels.as_ref(),
-    )
+        None,
+    );
+    let Some(namespace) = secret.metadata.namespace.as_deref() else {
+        return refs;
+    };
+    let Some(secret_name) = secret.metadata.name.as_deref() else {
+        return refs;
+    };
+
+    for tenant in tenants {
+        if tenant.metadata.deletion_timestamp.is_some()
+            || tenant.metadata.namespace.as_deref() != Some(namespace)
+            || !tenant.spec.referenced_secret_names().contains(secret_name)
+        {
+            continue;
+        }
+
+        push_unique_tenant_ref(&mut refs, ObjectRef::new(&tenant.name()).within(namespace));
+    }
+
+    refs
 }
 
 fn tenant_refs_for_config_map(config_map: corev1::ConfigMap) -> Vec<ObjectRef<Tenant>> {
@@ -702,6 +736,7 @@ pub async fn crd(file: Option<String>) -> Result<(), Box<dyn std::error::Error>>
 #[cfg(test)]
 mod controller_watch_tests {
     use super::*;
+    use crate::types::v1alpha1::tenant::{RpcSecretRef, TenantSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
     use std::collections::BTreeMap;
 
@@ -728,29 +763,37 @@ mod controller_watch_tests {
             ..Default::default()
         };
 
-        let refs = tenant_refs_for_secret(secret);
+        let refs = tenant_refs_for_secret_from_tenants(&secret, &[]);
 
         assert_single_ref(&refs, "tenant-a", "storage");
     }
 
     #[test]
-    fn secret_mapper_uses_rustfs_tenant_label_for_external_tenant_secret() {
+    fn secret_mapper_enqueues_every_tenant_referencing_a_shared_secret() {
         let secret = corev1::Secret {
             metadata: metav1::ObjectMeta {
-                name: Some("rustfs-rpc-auth".to_string()),
+                name: Some("shared-rpc-auth".to_string()),
                 namespace: Some("storage".to_string()),
                 labels: Some(BTreeMap::from([(
                     "rustfs.tenant".to_string(),
-                    "tenant-b".to_string(),
+                    "tenant-a".to_string(),
                 )])),
                 ..Default::default()
             },
             ..Default::default()
         };
+        let tenants = vec![
+            tenant_referencing_secret("tenant-a", "storage", "shared-rpc-auth"),
+            tenant_referencing_secret("tenant-b", "storage", "shared-rpc-auth"),
+            tenant_referencing_secret("tenant-other-namespace", "other", "shared-rpc-auth"),
+            tenant_referencing_secret("tenant-other-secret", "storage", "different-secret"),
+        ];
 
-        let refs = tenant_refs_for_secret(secret);
+        let refs = tenant_refs_for_secret_from_tenants(&secret, &tenants);
 
-        assert_single_ref(&refs, "tenant-b", "storage");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], ObjectRef::new("tenant-a").within("storage"));
+        assert_eq!(refs[1], ObjectRef::new("tenant-b").within("storage"));
     }
 
     #[test]
@@ -857,6 +900,24 @@ mod controller_watch_tests {
             controller: Some(true),
             block_owner_deletion: Some(true),
         }
+    }
+
+    fn tenant_referencing_secret(name: &str, namespace: &str, secret_name: &str) -> Arc<Tenant> {
+        Arc::new(Tenant {
+            metadata: metav1::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            spec: TenantSpec {
+                rpc_secret: Some(RpcSecretRef {
+                    name: secret_name.to_string(),
+                    key: "rpc-secret".to_string(),
+                }),
+                ..Default::default()
+            },
+            status: None,
+        })
     }
 
     fn assert_single_ref(refs: &[ObjectRef<Tenant>], name: &str, namespace: &str) {

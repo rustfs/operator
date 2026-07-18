@@ -332,8 +332,7 @@ spec:
 #### 独立的节点间 RPC Secret
 
 生产环境建议配置 `spec.rpcSecret`，避免节点间 RPC 认证依赖管理员凭据。
-Secret 必须与 Tenant 位于同一 namespace；若 Secret 由外部系统管理，请添加
-Tenant 标签：
+Secret 必须与 Tenant 位于同一 namespace，不需要 Tenant 路由标签：
 
 ```yaml
 apiVersion: v1
@@ -341,8 +340,6 @@ kind: Secret
 metadata:
   name: rustfs-rpc-auth
   namespace: storage
-  labels:
-    rustfs.tenant: rustfs-a
 type: Opaque
 stringData:
   rpc-secret: "replace-with-a-dedicated-rpc-secret"
@@ -360,8 +357,8 @@ spec:
 ```
 
 所选值必须是有效 UTF-8、不能为空、不能包含 NUL 字节，并且不能是
-`rustfsadmin`。`rustfs.tenant` 标签仅用于在 Secret 变化时及时触发 Tenant
-重新校验，不是授权机制。配置的 Secret 校验通过后，Operator 会报告
+`rustfsadmin`。Secret 更新会触发 spec 中引用它的所有 Tenant，包括多个 Tenant
+共享同一个 Secret 的情况。配置的 Secret 校验通过后，Operator 会报告
 `RpcAuthReady=True`。更新 Secret 不会改变已运行 Pod 的进程环境；协调重启和
 热加载不在此功能范围内。
 
@@ -598,13 +595,13 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
 - `spec.buckets`：bucket，可选择开启 object lock。
 
-ConfigMap 和 user Secret 必须位于 Tenant namespace。operator 会在被引用的 policy ConfigMap 和 user Secret 上维护 `rustfs.tenant=<tenant-name>` label，使资源变化能够触发 owning Tenant reconcile；尚未创建的引用资源会在创建后重试加 label。
+ConfigMap 和 user Secret 必须位于 Tenant namespace。operator 仍会在被引用的 policy ConfigMap 上维护 `rustfs.tenant=<tenant-name>` label。Secret 更新会按所有 Tenant spec 做反向匹配，因此同一个 Secret 可以被多个 Tenant 共享，不需要路由 label。operator 启动时会清理外部 Secret 上遗留的路由 label。
 
 Policy document 由 RustFS 解析。请使用 `arn:aws:s3:::bucket` 和 `arn:aws:s3:::bucket/*` 这类 S3 ARN resource 写法；如需匹配所有 bucket，请使用 `arn:aws:s3:::*`。RustFS policy parser 不接受裸 `Resource: "*"`。
 
 每个 `spec.users[]` 条目都可以通过 `credsSecret.name` 指定 Tenant namespace 中的 user credentials Secret。省略 `credsSecret` 时，Operator 继续读取与 `user.name` 同名的 Secret，以兼容旧版 manifest。显式引用是唯一来源；配置错误或 Secret 不存在时，不会再回退到同名 Secret。同一 Tenant 内解析后的 Secret 名称必须唯一；API 会拒绝重复引用，而在集群仍安装旧版 CRD、尚未启用该校验时，reconcile 也会阻止这些重复配置生效。不同 Secret 中的 `accesskey` 也必须唯一；reconcile 会先校验全部 user credentials，再修改任何 RustFS user，并拒绝所有冲突条目。
 
-Secret 必须包含 `accesskey` 和 `secretkey`，或者 MinIO 兼容 key：`CONSOLE_ACCESS_KEY` 和 `CONSOLE_SECRET_KEY`。如果两种 key 同时存在，值必须一致。`user.name` 仍是声明和 status 中的逻辑标识，Secret 内的 `accesskey` 才是实际 RustFS user。user access key 至少 8 个字符，且不能包含空白、`=` 或 `,`；user secret key 至少 8 个字符。`rustfs.tenant` label 只负责在 Secret 更新时触发 Tenant reconcile，不参与选择要读取的 Secret。
+Secret 必须包含 `accesskey` 和 `secretkey`，或者 MinIO 兼容 key：`CONSOLE_ACCESS_KEY` 和 `CONSOLE_SECRET_KEY`。如果两种 key 同时存在，值必须一致。`user.name` 仍是声明和 status 中的逻辑标识，Secret 内的 `accesskey` 才是实际 RustFS user。user access key 至少 8 个字符，且不能包含空白、`=` 或 `,`；user secret key 至少 8 个字符。Secret 的选择和事件路由都来自 Tenant spec，不需要在 Secret 上添加 Tenant label。
 
 更新 user Secret 的 `secretkey`，或者把 `credsSecret.name` 切换到具有相同 `accesskey` 的另一个 Secret，都会轮换对应 RustFS user 的凭据。首次成功 provisioning 后，`accesskey` 不可变；如需变更，请新建 user 条目和 Secret，迁移客户端后再移除旧条目。
 
@@ -634,8 +631,6 @@ kind: Secret
 metadata:
   name: rustfs-user-app-user
   namespace: storage
-  labels:
-    rustfs.tenant: rustfs-a
 type: Opaque
 stringData:
   accesskey: appuser01

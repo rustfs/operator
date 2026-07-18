@@ -49,8 +49,6 @@ kind: Secret
 metadata:
   name: rustfs-user-app-user
   namespace: default
-  labels:
-    rustfs.tenant: provisioning-demo
 type: Opaque
 stringData:
   accesskey: appuser01
