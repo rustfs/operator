@@ -17,7 +17,7 @@
 use crate::context::Context;
 use crate::reconcile::{error_policy, reconcile_rustfs};
 use crate::types::v1alpha1::policy_binding::PolicyBinding;
-use crate::types::v1alpha1::tenant::Tenant;
+use crate::types::v1alpha1::tenant::{RUSTFS_TENANT_LABEL, Tenant};
 use axum::{
     Router, body::Body, extract::State, http::StatusCode, middleware, response::IntoResponse,
     routing::get,
@@ -48,7 +48,6 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 use tracing::{info, warn};
 
-const RUSTFS_TENANT_LABEL: &str = "rustfs.tenant";
 const CERT_MANAGER_GROUP: &str = "cert-manager.io";
 const CERT_MANAGER_VERSION: &str = "v1";
 const CERT_MANAGER_CERTIFICATE_KIND: &str = "Certificate";

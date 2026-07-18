@@ -39,6 +39,7 @@ pub(crate) const MAX_TENANT_POOLS: u32 = 32;
 pub(crate) const MAX_TENANT_POLICIES: u32 = 256;
 pub(crate) const MAX_TENANT_USERS: u32 = 256;
 pub(crate) const MAX_TENANT_BUCKETS: u32 = 1024;
+pub(crate) const RUSTFS_TENANT_LABEL: &str = "rustfs.tenant";
 
 /// Reference to one key in a namespaced Kubernetes Secret.
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default, PartialEq)]
@@ -334,7 +335,7 @@ impl Tenant {
                 "app.kubernetes.io/managed-by".to_owned(),
                 "rustfs-operator".to_owned(),
             ),
-            ("rustfs.tenant".to_owned(), self.name()),
+            (RUSTFS_TENANT_LABEL.to_owned(), self.name()),
         ]
         .into_iter()
         .collect()
@@ -355,7 +356,7 @@ impl Tenant {
     /// Returns selector labels for Services and StatefulSets.
     /// These should be a stable subset of the full labels.
     pub(crate) fn selector_labels(&self) -> std::collections::BTreeMap<String, String> {
-        [("rustfs.tenant".to_owned(), self.name())]
+        [(RUSTFS_TENANT_LABEL.to_owned(), self.name())]
             .into_iter()
             .collect()
     }
