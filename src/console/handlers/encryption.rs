@@ -204,30 +204,40 @@ pub async fn update_encryption(
     ConsoleJson(body): ConsoleJson<UpdateEncryptionRequest>,
 ) -> Result<Json<EncryptionUpdateResponse>> {
     let client = create_client(&claims).await?;
-    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+    let response = update_encryption_with_client(&client, &namespace, &name, &body).await?;
+    Ok(Json(response))
+}
 
-    const MAX_RETRIES: u32 = 3;
+async fn update_encryption_with_client(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    body: &UpdateEncryptionRequest,
+) -> Result<EncryptionUpdateResponse> {
+    let api: Api<Tenant> = Api::namespaced(client.clone(), namespace);
+
+    const MAX_ATTEMPTS: u32 = 3;
     let mut last_conflict = None;
-    for _ in 0..MAX_RETRIES {
+    for _ in 0..MAX_ATTEMPTS {
         let mut tenant = api
-            .get(&name)
+            .get(name)
             .await
-            .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
-        apply_encryption_update(&mut tenant, &body)?;
+            .map_err(|e| error::map_kube_error(e, format!("Tenant '{name}'")))?;
+        apply_encryption_update(&mut tenant, body)?;
 
-        match api.replace(&name, &Default::default(), &tenant).await {
+        match api.replace(name, &Default::default(), &tenant).await {
             Ok(_) => {
-                return Ok(Json(EncryptionUpdateResponse {
+                return Ok(EncryptionUpdateResponse {
                     success: true,
                     message: if body.enabled {
                         "Encryption configuration updated".to_string()
                     } else {
                         "Encryption disabled".to_string()
                     },
-                }));
+                });
             }
             Err(error) => {
-                let mapped = error::map_kube_error(error, format!("Tenant '{}'", name));
+                let mapped = error::map_kube_error(error, format!("Tenant '{name}'"));
                 if !matches!(&mapped, Error::Conflict { .. }) {
                     return Err(mapped);
                 }
@@ -257,7 +267,8 @@ async fn create_client(claims: &Claims) -> Result<Client> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_encryption_update, trim_to_non_empty};
+    use super::{apply_encryption_update, trim_to_non_empty, update_encryption_with_client};
+    use crate::console::error::Error;
     use crate::console::models::encryption::{
         LocalMasterKeySecretRefInfo, UpdateEncryptionBackend, UpdateEncryptionRequest,
         UpdateLocalRequest, UpdateVaultRequest,
@@ -266,7 +277,51 @@ mod tests {
         EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef,
         VaultKmsConfig,
     };
+    use http::{Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::LocalObjectReference;
+    use kube::{Client, client::Body};
+    use serde_json::{Value, json};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tower::service_fn;
+
+    fn tenant_response(
+        resource_version: &str,
+        image: &str,
+        annotation: Option<(&str, &str)>,
+    ) -> Value {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.namespace = Some("storage".to_string());
+        tenant.metadata.resource_version = Some(resource_version.to_string());
+        tenant.metadata.annotations = annotation.map(|(key, value)| {
+            std::collections::BTreeMap::from([(key.to_string(), value.to_string())])
+        });
+        tenant.spec.image = Some(image.to_string());
+        serde_json::to_value(tenant).expect("Tenant response should serialize")
+    }
+
+    fn json_response(status: StatusCode, body: Value) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("response body should serialize"),
+            ))
+            .expect("response should build")
+    }
+
+    fn disabled_encryption_request() -> UpdateEncryptionRequest {
+        UpdateEncryptionRequest {
+            enabled: false,
+            backend: None,
+            vault: None,
+            local: None,
+            kms_secret_name: None,
+            default_key_id: None,
+        }
+    }
 
     #[test]
     fn trim_to_non_empty_drops_blank_strings() {
@@ -406,5 +461,158 @@ mod tests {
             "vault-token"
         );
         assert_eq!(encryption.default_key_id.as_deref(), Some("tenant-key"));
+    }
+
+    #[tokio::test]
+    async fn encryption_update_retries_conflict_against_latest_tenant() {
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let initial = tenant_response("1", "rustfs:initial", None);
+        let concurrent = tenant_response(
+            "2",
+            "rustfs:concurrent",
+            Some(("example.com/concurrent", "preserved")),
+        );
+        let service = service_fn({
+            let request_count = Arc::clone(&request_count);
+            move |request: Request<Body>| {
+                let request_number = request_count.fetch_add(1, Ordering::SeqCst);
+                let initial = initial.clone();
+                let concurrent = concurrent.clone();
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+                    let request_body = request
+                        .into_body()
+                        .collect_bytes()
+                        .await
+                        .expect("request body should be readable");
+                    assert_eq!(
+                        path,
+                        "/apis/rustfs.com/v1alpha1/namespaces/storage/tenants/tenant-a"
+                    );
+
+                    let response = match request_number {
+                        0 => {
+                            assert_eq!(method, http::Method::GET);
+                            json_response(StatusCode::OK, initial)
+                        }
+                        1 => {
+                            assert_eq!(method, http::Method::PUT);
+                            let body: Value = serde_json::from_slice(&request_body)
+                                .expect("replacement should be JSON");
+                            assert_eq!(
+                                body.pointer("/metadata/resourceVersion"),
+                                Some(&json!("1"))
+                            );
+                            assert_eq!(body.pointer("/spec/image"), Some(&json!("rustfs:initial")));
+                            assert_eq!(
+                                body.pointer("/spec/encryption/enabled"),
+                                Some(&json!(false))
+                            );
+                            json_response(
+                                StatusCode::CONFLICT,
+                                json!({
+                                    "status": "Failure",
+                                    "message": "tenant changed concurrently",
+                                    "reason": "Conflict",
+                                    "code": 409
+                                }),
+                            )
+                        }
+                        2 => {
+                            assert_eq!(method, http::Method::GET);
+                            json_response(StatusCode::OK, concurrent)
+                        }
+                        3 => {
+                            assert_eq!(method, http::Method::PUT);
+                            let body: Value = serde_json::from_slice(&request_body)
+                                .expect("replacement should be JSON");
+                            assert_eq!(
+                                body.pointer("/metadata/resourceVersion"),
+                                Some(&json!("2"))
+                            );
+                            assert_eq!(
+                                body.pointer("/metadata/annotations/example.com~1concurrent"),
+                                Some(&json!("preserved"))
+                            );
+                            assert_eq!(
+                                body.pointer("/spec/image"),
+                                Some(&json!("rustfs:concurrent"))
+                            );
+                            assert_eq!(
+                                body.pointer("/spec/encryption/enabled"),
+                                Some(&json!(false))
+                            );
+                            json_response(StatusCode::OK, body)
+                        }
+                        other => panic!("unexpected request number {other}"),
+                    };
+
+                    Ok::<_, std::convert::Infallible>(response)
+                }
+            }
+        });
+        let client = Client::new(service, "default");
+
+        let response = update_encryption_with_client(
+            &client,
+            "storage",
+            "tenant-a",
+            &disabled_encryption_request(),
+        )
+        .await
+        .expect("the retry should succeed");
+
+        assert!(response.success);
+        assert_eq!(request_count.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn encryption_update_returns_last_conflict_after_attempts_are_exhausted() {
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let request_count = Arc::clone(&request_count);
+            move |request: Request<Body>| {
+                let request_number = request_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let attempt = request_number / 2 + 1;
+                    let response = if request_number % 2 == 0 {
+                        assert_eq!(request.method(), http::Method::GET);
+                        json_response(
+                            StatusCode::OK,
+                            tenant_response(&attempt.to_string(), "rustfs:latest", None),
+                        )
+                    } else {
+                        assert_eq!(request.method(), http::Method::PUT);
+                        json_response(
+                            StatusCode::CONFLICT,
+                            json!({
+                                "status": "Failure",
+                                "message": format!("conflict attempt {attempt}"),
+                                "reason": "Conflict",
+                                "code": 409
+                            }),
+                        )
+                    };
+                    Ok::<_, std::convert::Infallible>(response)
+                }
+            }
+        });
+        let client = Client::new(service, "default");
+
+        let error = update_encryption_with_client(
+            &client,
+            "storage",
+            "tenant-a",
+            &disabled_encryption_request(),
+        )
+        .await
+        .expect_err("three conflicts should exhaust the update attempts");
+
+        assert!(matches!(
+            error,
+            Error::Conflict { message } if message == "conflict attempt 3"
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 6);
     }
 }
