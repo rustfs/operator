@@ -22,6 +22,24 @@ use snafu::Snafu;
 
 use crate::console::models::common::{ConsoleErrorDetails, ConsoleErrorResponse};
 
+pub(crate) const JSON_REJECTION_MESSAGE_MAX_BYTES: usize = 1024;
+const JSON_REJECTION_TRUNCATION_SUFFIX: &str = "... [truncated]";
+
+fn bounded_json_rejection_message(mut message: String) -> String {
+    if message.len() <= JSON_REJECTION_MESSAGE_MAX_BYTES {
+        return message;
+    }
+
+    let mut truncate_at =
+        JSON_REJECTION_MESSAGE_MAX_BYTES.saturating_sub(JSON_REJECTION_TRUNCATION_SUFFIX.len());
+    while !message.is_char_boundary(truncate_at) {
+        truncate_at -= 1;
+    }
+    message.truncate(truncate_at);
+    message.push_str(JSON_REJECTION_TRUNCATION_SUFFIX);
+    message
+}
+
 /// Console HTTP API error type
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -121,17 +139,17 @@ impl Error {
     pub(crate) fn from_json_rejection(rejection: JsonRejection) -> Self {
         match rejection {
             JsonRejection::JsonSyntaxError(error) => Self::JsonSyntax {
-                message: error.body_text(),
+                message: bounded_json_rejection_message(error.body_text()),
             },
             JsonRejection::JsonDataError(error) => Self::JsonData {
-                message: error.body_text(),
+                message: bounded_json_rejection_message(error.body_text()),
             },
             JsonRejection::MissingJsonContentType(error) => Self::UnsupportedMediaType {
-                message: error.body_text(),
+                message: bounded_json_rejection_message(error.body_text()),
             },
             rejection => Self::RequestBody {
                 status: rejection.status(),
-                message: rejection.body_text(),
+                message: bounded_json_rejection_message(rejection.body_text()),
             },
         }
     }
@@ -350,6 +368,34 @@ mod tests {
             reason: String::new(),
             code,
         })
+    }
+
+    #[test]
+    fn json_rejection_message_preserves_text_at_the_limit() {
+        let message = "x".repeat(JSON_REJECTION_MESSAGE_MAX_BYTES);
+
+        assert_eq!(bounded_json_rejection_message(message.clone()), message);
+    }
+
+    #[test]
+    fn json_rejection_message_is_truncated_to_the_byte_limit() {
+        let message = "x".repeat(JSON_REJECTION_MESSAGE_MAX_BYTES + 1);
+
+        let bounded = bounded_json_rejection_message(message);
+
+        assert_eq!(bounded.len(), JSON_REJECTION_MESSAGE_MAX_BYTES);
+        assert!(bounded.ends_with(JSON_REJECTION_TRUNCATION_SUFFIX));
+    }
+
+    #[test]
+    fn json_rejection_message_truncates_on_a_utf8_boundary() {
+        let message = "界".repeat(JSON_REJECTION_MESSAGE_MAX_BYTES);
+
+        let bounded = bounded_json_rejection_message(message);
+
+        assert!(bounded.len() <= JSON_REJECTION_MESSAGE_MAX_BYTES);
+        assert!(bounded.starts_with('界'));
+        assert!(bounded.ends_with(JSON_REJECTION_TRUNCATION_SUFFIX));
     }
 
     #[test]
