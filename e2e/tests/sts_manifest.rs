@@ -16,6 +16,31 @@ use serde_yaml_ng::Value;
 use std::collections::BTreeSet;
 use std::process::{Command, Output};
 
+const RESERVED_OPERATOR_ENV: &[(&str, &str)] = &[
+    ("OPERATOR_CLUSTER_DOMAIN", "clusterDomain"),
+    ("OPERATOR_METRICS_ENABLED", "operator.metrics.enabled"),
+    ("OPERATOR_METRICS_PORT", "operator.metrics.port"),
+    ("OPERATOR_NAMESPACE", "namespace"),
+    ("OPERATOR_STS_ENABLED", "sts.enabled"),
+    ("OPERATOR_STS_AUDIENCE", "sts.audience"),
+    ("OPERATOR_STS_PORT", "sts.port"),
+    (
+        "OPERATOR_STS_SERVICE_NAME",
+        "the generated STS Service name",
+    ),
+    ("OPERATOR_STS_TLS_ENABLED", "sts.tls.enabled"),
+    ("OPERATOR_STS_TLS_AUTO", "sts.tls.auto"),
+    (
+        "OPERATOR_TENANT_MONITOR_ENABLED",
+        "operator.tenantMonitor.enabled",
+    ),
+    (
+        "OPERATOR_TENANT_MONITOR_INTERVAL_SECONDS",
+        "operator.tenantMonitor.intervalSeconds",
+    ),
+    ("POD_NAME", "the Pod metadata.name field"),
+];
+
 #[test]
 fn k8s_dev_manifests_expose_sts_service_and_rbac_permissions() {
     // CRD/STS-specific RBAC and porting is required for STS flow.
@@ -55,7 +80,12 @@ fn k8s_dev_manifests_expose_sts_service_and_rbac_permissions() {
     // Ensure k8s dev manifests stay valid YAML after additions.
     let rbac_documents = yaml_documents(&k8s_rbac, "operator-rbac");
     assert_reference_cluster_role_is_read_only(&rbac_documents, "rustfs-operator");
-    assert_sts_tls_role_is_minimal(&rbac_documents, "rustfs-operator-sts-tls", "rustfs-system");
+    assert_sts_tls_role_is_minimal(
+        &rbac_documents,
+        "rustfs-operator-sts-tls",
+        "rustfs-system",
+        "rustfs-operator",
+    );
     assert_yaml_documents_parse(&k8s_deploy, "operator-deployment");
     assert_yaml_documents_parse(&k8s_sts_svc, "operator-sts-service");
 }
@@ -113,19 +143,7 @@ fn helm_sts_template_and_values_are_consistent() {
     assert!(helm_deploy.contains("name: OPERATOR_STS_TLS_AUTO"));
     assert!(helm_deploy.contains("value: {{ .Values.sts.tls.auto | quote }}"));
     assert!(!helm_deploy.contains("name: OPERATOR_STS_TLS_SECRET_NAME"));
-    for (name, value) in [
-        ("OPERATOR_CLUSTER_DOMAIN", "clusterDomain"),
-        ("OPERATOR_NAMESPACE", "namespace"),
-        ("OPERATOR_STS_ENABLED", "sts.enabled"),
-        ("OPERATOR_STS_AUDIENCE", "sts.audience"),
-        ("OPERATOR_STS_PORT", "sts.port"),
-        (
-            "OPERATOR_STS_SERVICE_NAME",
-            "the generated STS Service name",
-        ),
-        ("OPERATOR_STS_TLS_ENABLED", "sts.tls.enabled"),
-        ("OPERATOR_STS_TLS_AUTO", "sts.tls.auto"),
-    ] {
+    for &(name, value) in RESERVED_OPERATOR_ENV {
         assert!(
             helm_deploy.contains(&format!("\"{name}\" \"{value}\"")),
             "deployment template must reserve {name} for {value}"
@@ -136,7 +154,9 @@ fn helm_sts_template_and_values_are_consistent() {
     assert!(helm_clusterrole.contains("tokenreviews"));
     assert!(helm_clusterrole.contains("resources: [\"configmaps\", \"secrets\"]"));
     assert!(helm_clusterrole.contains("verbs: [\"get\", \"list\", \"watch\"]"));
-    assert!(helm_sts_tls_role.contains(".Values.sts.tls.auto"));
+    assert!(helm_sts_tls_role.contains(
+        "if and .Values.rbac.create .Values.sts.enabled .Values.sts.tls.enabled .Values.sts.tls.auto"
+    ));
     assert!(helm_sts_tls_role.contains("resourceNames: [\"sts-tls\"]"));
     assert!(helm_sts_tls_role.contains("verbs: [\"get\", \"update\"]"));
     assert!(!helm_sts_tls_role.contains("\"patch\""));
@@ -177,7 +197,12 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
     assert!(!default_stdout.contains("name: OPERATOR_STS_TLS_SECRET_NAME"));
     let default_documents = yaml_documents(&default_stdout, "helm-default-render");
     assert_reference_cluster_role_is_read_only(&default_documents, "rustfs-operator");
-    assert_sts_tls_role_is_minimal(&default_documents, "rustfs-operator-sts-tls", "default");
+    assert_sts_tls_role_is_minimal(
+        &default_documents,
+        "rustfs-operator-sts-tls",
+        "default",
+        "rustfs-operator",
+    );
 
     let Some(disabled_render) = helm_template(&["--set", "sts.enabled=false"]) else {
         return;
@@ -222,19 +247,53 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
     );
     assert_reference_cluster_role_is_read_only(&external_tls_documents, "rustfs-operator");
 
-    for (name, value) in [
-        ("OPERATOR_CLUSTER_DOMAIN", "clusterDomain"),
-        ("OPERATOR_NAMESPACE", "namespace"),
-        ("OPERATOR_STS_ENABLED", "sts.enabled"),
-        ("OPERATOR_STS_AUDIENCE", "sts.audience"),
-        ("OPERATOR_STS_PORT", "sts.port"),
-        (
-            "OPERATOR_STS_SERVICE_NAME",
-            "the generated STS Service name",
-        ),
-        ("OPERATOR_STS_TLS_ENABLED", "sts.tls.enabled"),
-        ("OPERATOR_STS_TLS_AUTO", "sts.tls.auto"),
+    for (setting, description) in [
+        ("sts.tls.enabled=false", "disabled STS TLS"),
+        ("rbac.create=false", "externally managed RBAC"),
     ] {
+        let render = helm_template(&["--set", setting])
+            .expect("helm was available for the preceding render");
+        assert!(
+            render.status.success(),
+            "{description} should render successfully: {}",
+            String::from_utf8_lossy(&render.stderr)
+        );
+        let stdout = String::from_utf8(render.stdout).expect("conditional render stdout is utf8");
+        assert!(
+            find_document(
+                &yaml_documents(&stdout, description),
+                "Role",
+                "rustfs-operator-sts-tls",
+            )
+            .is_none(),
+            "{description} must omit the STS TLS Secret write role"
+        );
+    }
+
+    let custom_rbac_render = helm_template(&[
+        "--namespace",
+        "operators",
+        "--set",
+        "serviceAccount.create=false",
+        "--set",
+        "serviceAccount.name=custom-operator",
+    ])
+    .expect("helm was available for the preceding render");
+    assert!(
+        custom_rbac_render.status.success(),
+        "custom STS RBAC render should succeed: {}",
+        String::from_utf8_lossy(&custom_rbac_render.stderr)
+    );
+    let custom_rbac_stdout =
+        String::from_utf8(custom_rbac_render.stdout).expect("custom RBAC stdout is utf8");
+    assert_sts_tls_role_is_minimal(
+        &yaml_documents(&custom_rbac_stdout, "helm-custom-rbac-render"),
+        "rustfs-operator-sts-tls",
+        "operators",
+        "custom-operator",
+    );
+
+    for &(name, value) in RESERVED_OPERATOR_ENV {
         let name_override = format!("operator.env[0].name={name}");
         let render = helm_template(&[
             "--set",
@@ -268,6 +327,10 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
 
 fn helm_template(args: &[&str]) -> Option<Output> {
     if !helm_is_available() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "helm must be installed in CI so chart render assertions cannot be skipped"
+        );
         eprintln!("skipping helm template assertions: helm binary is not available");
         return None;
     }
@@ -329,7 +392,10 @@ fn assert_reference_cluster_role_is_read_only(documents: &[Value], name: &str) {
     for resource in ["configmaps", "secrets"] {
         let matching = rules
             .iter()
-            .filter(|rule| yaml_strings(&rule["resources"]).contains(resource))
+            .filter(|rule| {
+                let resources = yaml_strings(&rule["resources"]);
+                resources.contains(resource) || resources.contains("*")
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             matching.len(),
@@ -341,10 +407,20 @@ fn assert_reference_cluster_role_is_read_only(documents: &[Value], name: &str) {
             BTreeSet::from(["get", "list", "watch"]),
             "ClusterRole {name} must keep {resource} read-only"
         );
+        assert_eq!(
+            yaml_strings(&matching[0]["apiGroups"]),
+            BTreeSet::from([""]),
+            "ClusterRole {name} must scope {resource} to the core API group"
+        );
     }
 }
 
-fn assert_sts_tls_role_is_minimal(documents: &[Value], name: &str, namespace: &str) {
+fn assert_sts_tls_role_is_minimal(
+    documents: &[Value],
+    name: &str,
+    namespace: &str,
+    service_account: &str,
+) {
     let role = find_document(documents, "Role", name)
         .unwrap_or_else(|| panic!("missing Role {namespace}/{name}"));
     assert_eq!(role["metadata"]["namespace"].as_str(), Some(namespace));
@@ -358,6 +434,10 @@ fn assert_sts_tls_role_is_minimal(documents: &[Value], name: &str, namespace: &s
         .find(|rule| yaml_strings(&rule["verbs"]) == BTreeSet::from(["create"]))
         .expect("STS TLS Role must contain the namespaced Secret create grant");
     assert_eq!(
+        yaml_strings(&create_rule["apiGroups"]),
+        BTreeSet::from([""])
+    );
+    assert_eq!(
         yaml_strings(&create_rule["resources"]),
         BTreeSet::from(["secrets"])
     );
@@ -367,6 +447,10 @@ fn assert_sts_tls_role_is_minimal(documents: &[Value], name: &str, namespace: &s
         .iter()
         .find(|rule| yaml_strings(&rule["resourceNames"]) == BTreeSet::from(["sts-tls"]))
         .expect("STS TLS Role must scope updates to sts-tls");
+    assert_eq!(
+        yaml_strings(&update_rule["apiGroups"]),
+        BTreeSet::from([""])
+    );
     assert_eq!(
         yaml_strings(&update_rule["resources"]),
         BTreeSet::from(["secrets"])
@@ -379,8 +463,19 @@ fn assert_sts_tls_role_is_minimal(documents: &[Value], name: &str, namespace: &s
     let binding = find_document(documents, "RoleBinding", name)
         .unwrap_or_else(|| panic!("missing RoleBinding {namespace}/{name}"));
     assert_eq!(binding["metadata"]["namespace"].as_str(), Some(namespace));
+    assert_eq!(
+        binding["roleRef"]["apiGroup"].as_str(),
+        Some("rbac.authorization.k8s.io")
+    );
     assert_eq!(binding["roleRef"]["kind"].as_str(), Some("Role"));
     assert_eq!(binding["roleRef"]["name"].as_str(), Some(name));
+    let subjects = binding["subjects"]
+        .as_sequence()
+        .expect("STS TLS RoleBinding subjects must be a sequence");
+    assert_eq!(subjects.len(), 1);
+    assert_eq!(subjects[0]["kind"].as_str(), Some("ServiceAccount"));
+    assert_eq!(subjects[0]["name"].as_str(), Some(service_account));
+    assert_eq!(subjects[0]["namespace"].as_str(), Some(namespace));
 }
 
 fn yaml_strings(value: &Value) -> BTreeSet<&str> {

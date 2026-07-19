@@ -5,6 +5,8 @@
 {{- end -}}
 {{- $reservedOperatorEnv := dict
   "OPERATOR_CLUSTER_DOMAIN" "clusterDomain"
+  "OPERATOR_METRICS_ENABLED" "operator.metrics.enabled"
+  "OPERATOR_METRICS_PORT" "operator.metrics.port"
   "OPERATOR_NAMESPACE" "namespace"
   "OPERATOR_STS_ENABLED" "sts.enabled"
   "OPERATOR_STS_AUDIENCE" "sts.audience"
@@ -12,6 +14,9 @@
   "OPERATOR_STS_SERVICE_NAME" "the generated STS Service name"
   "OPERATOR_STS_TLS_ENABLED" "sts.tls.enabled"
   "OPERATOR_STS_TLS_AUTO" "sts.tls.auto"
+  "OPERATOR_TENANT_MONITOR_ENABLED" "operator.tenantMonitor.enabled"
+  "OPERATOR_TENANT_MONITOR_INTERVAL_SECONDS" "operator.tenantMonitor.intervalSeconds"
+  "POD_NAME" "the Pod metadata.name field"
 -}}
 {{- range $env := .Values.operator.env }}
 {{- if hasKey $reservedOperatorEnv $env.name -}}
