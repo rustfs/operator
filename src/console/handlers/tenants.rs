@@ -234,32 +234,33 @@ pub async fn create_tenant(
     Extension(claims): Extension<Claims>,
     Json(req): Json<CreateTenantRequest>,
 ) -> Result<Json<TenantListItem>> {
+    let tenant = tenant_from_create_request(req)?;
+    let (name, namespace) = tenant_identity(&tenant)?;
+    let name = name.to_string();
+    let namespace = namespace.to_string();
+
+    // Validate the complete request before creating any Kubernetes resource. A rejected Tenant
+    // must not leave an empty Namespace behind.
+    let client = create_client(&claims).await?;
+    ensure_namespace_exists(&client, &namespace).await?;
+
+    let api: Api<Tenant> = Api::namespaced(client, &namespace);
+    let created = api
+        .create(&Default::default(), &tenant)
+        .await
+        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+
+    Ok(Json(tenant_to_list_item(created)))
+}
+
+fn tenant_from_create_request(req: CreateTenantRequest) -> Result<Tenant> {
     // Validate tenant name is DNS-1035 compliant before hitting the K8s API
     if let Err(e) = crate::types::v1alpha1::tenant::validate_dns1035_label(&req.name) {
         return Err(Error::BadRequest {
             message: format!("{}", e),
         });
     }
-
-    let client = create_client(&claims).await?;
-
-    // Preserve the existing JSON-create behavior; the complete YAML endpoint performs
-    // stricter namespace validation before reaching Kubernetes.
-    let ns_api: Api<corev1::Namespace> = Api::all(client.clone());
-    let ns_exists = ns_api.get(&req.namespace).await.is_ok();
-    if !ns_exists {
-        let ns = corev1::Namespace {
-            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-                name: Some(req.namespace.clone()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        ns_api
-            .create(&Default::default(), &ns)
-            .await
-            .map_err(|e| error::map_kube_error(e, format!("Namespace '{}'", req.namespace)))?;
-    }
+    validate_namespace_name(&req.namespace).map_err(|message| Error::BadRequest { message })?;
 
     // Build Tenant object
     let pools: Vec<Pool> = req
@@ -331,16 +332,7 @@ pub async fn create_tenant(
         status: None,
     };
     validate_tenant_for_write(&tenant)?;
-
-    let api: Api<Tenant> = Api::namespaced(client, &req.namespace);
-    let created = api
-        .create(&Default::default(), &tenant)
-        .await
-        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", req.name)))?;
-
-    let item = tenant_to_list_item(created);
-
-    Ok(Json(item))
+    Ok(tenant)
 }
 
 /// Create a Tenant from its complete YAML representation.
@@ -961,9 +953,10 @@ fn summarize_tenant_states(tenants: &[Tenant]) -> TenantStateCountsResponse {
 mod tests {
     use super::{
         apply_tenant_yaml_update, ensure_namespace_exists, parse_tenant_yaml,
-        parse_tenant_yaml_for_create, state_matches_filter,
+        parse_tenant_yaml_for_create, state_matches_filter, tenant_from_create_request,
     };
     use crate::console::error::Error;
+    use crate::console::models::tenant::{CreatePoolRequest, CreateTenantRequest};
     use crate::types::v1alpha1::tenant::RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION;
     use kube::{Client, client::Body};
     use std::sync::{
@@ -985,6 +978,54 @@ spec:
       persistence:
         volumesPerServer: 1
 "#;
+
+    fn minimal_create_request(image: Option<&str>) -> CreateTenantRequest {
+        CreateTenantRequest {
+            name: "tenant-a".to_string(),
+            namespace: "storage".to_string(),
+            pools: vec![CreatePoolRequest {
+                name: "pool-0".to_string(),
+                servers: 1,
+                volumes_per_server: 1,
+                storage_size: "1Gi".to_string(),
+                storage_class: None,
+            }],
+            image: image.map(str::to_string),
+            mount_path: None,
+            creds_secret: None,
+            policies: None,
+            users: None,
+            buckets: None,
+            security_context: None,
+        }
+    }
+
+    #[test]
+    fn json_create_rejects_invalid_tenant_before_kubernetes_work() {
+        let error = tenant_from_create_request(minimal_create_request(Some(
+            "rustfs/rustfs:1.0.0-alpha.99",
+        )))
+        .expect_err("an incompatible image must be rejected during request preparation");
+
+        assert!(matches!(
+            error,
+            Error::BadRequest { message } if message.contains("Tokio io_uring")
+        ));
+    }
+
+    #[test]
+    fn json_create_validates_namespace_before_kubernetes_work() {
+        let mut request = minimal_create_request(Some("rustfs/rustfs:1.0.0-beta.10"));
+        request.namespace = "Storage_Team".to_string();
+
+        let error = tenant_from_create_request(request)
+            .expect_err("an invalid namespace must be rejected during request preparation");
+
+        assert!(matches!(
+            error,
+            Error::BadRequest { message } if message.contains("metadata.namespace")
+        ));
+    }
 
     #[test]
     fn raw_yaml_update_validates_image_and_acknowledgement_from_the_same_request() {
