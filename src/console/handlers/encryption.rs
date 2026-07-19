@@ -25,13 +25,103 @@ use crate::types::v1alpha1::security_context::effective_run_as_non_root;
 use crate::types::v1alpha1::tenant::Tenant;
 use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
-use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 
 fn trim_to_non_empty(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn encryption_config_from_request(body: &UpdateEncryptionRequest) -> Result<EncryptionConfig> {
+    let encryption = if body.enabled {
+        let backend = match body.backend {
+            Some(UpdateEncryptionBackend::Vault) => KmsBackendType::Vault,
+            Some(UpdateEncryptionBackend::Local) | None => KmsBackendType::Local,
+        };
+        let vault_endpoint = body
+            .vault
+            .as_ref()
+            .and_then(|vault| trim_to_non_empty(Some(vault.endpoint.clone())));
+        let kms_secret_name = trim_to_non_empty(body.kms_secret_name.clone());
+        let default_key_id = trim_to_non_empty(body.default_key_id.clone());
+
+        if backend == KmsBackendType::Vault {
+            if vault_endpoint.is_none() {
+                return Err(Error::BadRequest {
+                    message: "Vault backend requires vault.endpoint to be non-empty".to_string(),
+                });
+            }
+            if kms_secret_name.is_none() {
+                return Err(Error::BadRequest {
+                    message: "Vault backend requires kmsSecretName".to_string(),
+                });
+            }
+        } else {
+            let local = body.local.as_ref();
+            let allow_insecure_dev_defaults = local
+                .and_then(|local| local.allow_insecure_dev_defaults)
+                .unwrap_or(false);
+            let master_key_ref_ok = local
+                .and_then(|local| local.master_key_secret_ref.as_ref())
+                .is_some_and(|secret| {
+                    !secret.name.trim().is_empty() && !secret.key.trim().is_empty()
+                });
+            if !allow_insecure_dev_defaults && !master_key_ref_ok {
+                return Err(Error::BadRequest {
+                    message: "Local backend requires local.masterKeySecretRef.name/key unless local.allowInsecureDevDefaults is true".to_string(),
+                });
+            }
+        }
+
+        let vault = if backend == KmsBackendType::Vault {
+            vault_endpoint.map(|endpoint| VaultKmsConfig { endpoint })
+        } else {
+            None
+        };
+        let local = if backend == KmsBackendType::Local {
+            body.local.as_ref().map(|local| LocalKmsConfig {
+                key_directory: trim_to_non_empty(local.key_directory.clone()),
+                master_key_secret_ref: local.master_key_secret_ref.as_ref().map(|secret| {
+                    LocalKmsMasterKeySecretRef {
+                        name: secret.name.trim().to_string(),
+                        key: secret.key.trim().to_string(),
+                    }
+                }),
+                allow_insecure_dev_defaults: local.allow_insecure_dev_defaults.unwrap_or(false),
+            })
+        } else {
+            None
+        };
+        let kms_secret = if backend == KmsBackendType::Vault {
+            kms_secret_name.map(|name| corev1::LocalObjectReference { name })
+        } else {
+            None
+        };
+
+        EncryptionConfig {
+            enabled: true,
+            backend,
+            vault,
+            local,
+            kms_secret,
+            default_key_id,
+        }
+    } else {
+        EncryptionConfig {
+            enabled: false,
+            ..Default::default()
+        }
+    };
+
+    Ok(encryption)
+}
+
+fn apply_encryption_update(tenant: &mut Tenant, body: &UpdateEncryptionRequest) -> Result<()> {
+    // Replace the complete encryption configuration in memory. The caller persists the Tenant with
+    // resourceVersion optimistic concurrency so fields omitted from the request are truly removed.
+    tenant.spec.encryption = Some(encryption_config_from_request(body)?);
+    Ok(())
 }
 
 /// GET /namespaces/:namespace/tenants/:name/encryption
@@ -116,104 +206,38 @@ pub async fn update_encryption(
     let client = create_client(&claims).await?;
     let api: Api<Tenant> = Api::namespaced(client, &namespace);
 
-    let _tenant = api
-        .get(&name)
-        .await
-        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+    const MAX_RETRIES: u32 = 3;
+    let mut last_conflict = None;
+    for _ in 0..MAX_RETRIES {
+        let mut tenant = api
+            .get(&name)
+            .await
+            .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+        apply_encryption_update(&mut tenant, &body)?;
 
-    let encryption = if body.enabled {
-        let backend = match body.backend {
-            Some(UpdateEncryptionBackend::Vault) => KmsBackendType::Vault,
-            Some(UpdateEncryptionBackend::Local) | None => KmsBackendType::Local,
-        };
-        let vault_endpoint = body
-            .vault
-            .as_ref()
-            .and_then(|v| trim_to_non_empty(Some(v.endpoint.clone())));
-        let kms_secret_name = trim_to_non_empty(body.kms_secret_name.clone());
-        let default_key_id = trim_to_non_empty(body.default_key_id.clone());
-
-        if backend == KmsBackendType::Vault {
-            if vault_endpoint.is_none() {
-                return Err(Error::BadRequest {
-                    message: "Vault backend requires vault.endpoint to be non-empty".to_string(),
-                });
+        match api.replace(&name, &Default::default(), &tenant).await {
+            Ok(_) => {
+                return Ok(Json(EncryptionUpdateResponse {
+                    success: true,
+                    message: if body.enabled {
+                        "Encryption configuration updated".to_string()
+                    } else {
+                        "Encryption disabled".to_string()
+                    },
+                }));
             }
-            if kms_secret_name.is_none() {
-                return Err(Error::BadRequest {
-                    message: "Vault backend requires kmsSecretName".to_string(),
-                });
-            }
-        } else {
-            let local = body.local.as_ref();
-            let allow_insecure_dev_defaults = local
-                .and_then(|l| l.allow_insecure_dev_defaults)
-                .unwrap_or(false);
-            let master_key_ref_ok = local
-                .and_then(|l| l.master_key_secret_ref.as_ref())
-                .is_some_and(|s| !s.name.trim().is_empty() && !s.key.trim().is_empty());
-            if !allow_insecure_dev_defaults && !master_key_ref_ok {
-                return Err(Error::BadRequest {
-                    message: "Local backend requires local.masterKeySecretRef.name/key unless local.allowInsecureDevDefaults is true".to_string(),
-                });
+            Err(error) => {
+                let mapped = error::map_kube_error(error, format!("Tenant '{}'", name));
+                if !matches!(&mapped, Error::Conflict { .. }) {
+                    return Err(mapped);
+                }
+                last_conflict = Some(mapped);
             }
         }
+    }
 
-        let vault = if backend == KmsBackendType::Vault {
-            vault_endpoint.map(|endpoint| VaultKmsConfig { endpoint })
-        } else {
-            None
-        };
-
-        let local = if backend == KmsBackendType::Local {
-            body.local.map(|l| LocalKmsConfig {
-                key_directory: trim_to_non_empty(l.key_directory),
-                master_key_secret_ref: l.master_key_secret_ref.map(|s| {
-                    LocalKmsMasterKeySecretRef {
-                        name: s.name.trim().to_string(),
-                        key: s.key.trim().to_string(),
-                    }
-                }),
-                allow_insecure_dev_defaults: l.allow_insecure_dev_defaults.unwrap_or(false),
-            })
-        } else {
-            None
-        };
-
-        let kms_secret = if backend == KmsBackendType::Vault {
-            kms_secret_name.map(|s| corev1::LocalObjectReference { name: s })
-        } else {
-            None
-        };
-
-        Some(EncryptionConfig {
-            enabled: true,
-            backend,
-            vault,
-            local,
-            kms_secret,
-            default_key_id,
-        })
-    } else {
-        Some(EncryptionConfig {
-            enabled: false,
-            ..Default::default()
-        })
-    };
-
-    let patch = serde_json::json!({ "spec": { "encryption": encryption } });
-
-    api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
-
-    Ok(Json(EncryptionUpdateResponse {
-        success: true,
-        message: if body.enabled {
-            "Encryption configuration updated".to_string()
-        } else {
-            "Encryption disabled".to_string()
-        },
+    Err(last_conflict.unwrap_or_else(|| Error::Conflict {
+        message: "Resource was modified by another request, please retry".to_string(),
     }))
 }
 
@@ -233,7 +257,16 @@ async fn create_client(claims: &Claims) -> Result<Client> {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_to_non_empty;
+    use super::{apply_encryption_update, trim_to_non_empty};
+    use crate::console::models::encryption::{
+        LocalMasterKeySecretRefInfo, UpdateEncryptionBackend, UpdateEncryptionRequest,
+        UpdateLocalRequest, UpdateVaultRequest,
+    };
+    use crate::types::v1alpha1::encryption::{
+        EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef,
+        VaultKmsConfig,
+    };
+    use k8s_openapi::api::core::v1::LocalObjectReference;
 
     #[test]
     fn trim_to_non_empty_drops_blank_strings() {
@@ -243,5 +276,135 @@ mod tests {
             trim_to_non_empty(Some("  /data/rustfs0/.kms-keys  ".to_string())),
             Some("/data/rustfs0/.kms-keys".to_string())
         );
+    }
+
+    #[test]
+    fn disabling_encryption_removes_all_previous_backend_fields() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Vault,
+            vault: Some(VaultKmsConfig {
+                endpoint: "https://vault.example.com".to_string(),
+            }),
+            local: Some(LocalKmsConfig {
+                key_directory: Some("/data/old-keys".to_string()),
+                master_key_secret_ref: Some(LocalKmsMasterKeySecretRef {
+                    name: "old-local-key".to_string(),
+                    key: "master-key".to_string(),
+                }),
+                allow_insecure_dev_defaults: false,
+            }),
+            kms_secret: Some(LocalObjectReference {
+                name: "old-vault-token".to_string(),
+            }),
+            default_key_id: Some("old-default-key".to_string()),
+        });
+        let request = UpdateEncryptionRequest {
+            enabled: false,
+            backend: None,
+            vault: None,
+            local: None,
+            kms_secret_name: None,
+            default_key_id: None,
+        };
+
+        apply_encryption_update(&mut tenant, &request).expect("disable should be valid");
+
+        let encryption = tenant.spec.encryption.expect("disabled configuration");
+        assert!(!encryption.enabled);
+        assert_eq!(encryption.backend, KmsBackendType::Local);
+        assert!(encryption.vault.is_none());
+        assert!(encryption.local.is_none());
+        assert!(encryption.kms_secret.is_none());
+        assert!(encryption.default_key_id.is_none());
+    }
+
+    #[test]
+    fn switching_vault_to_local_removes_vault_fields_and_clears_omitted_values() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Vault,
+            vault: Some(VaultKmsConfig {
+                endpoint: "https://vault.example.com".to_string(),
+            }),
+            kms_secret: Some(LocalObjectReference {
+                name: "vault-token".to_string(),
+            }),
+            default_key_id: Some("old-default-key".to_string()),
+            ..Default::default()
+        });
+        let request = UpdateEncryptionRequest {
+            enabled: true,
+            backend: Some(UpdateEncryptionBackend::Local),
+            vault: None,
+            local: Some(UpdateLocalRequest {
+                key_directory: None,
+                master_key_secret_ref: Some(LocalMasterKeySecretRefInfo {
+                    name: " local-master ".to_string(),
+                    key: " master-key ".to_string(),
+                }),
+                allow_insecure_dev_defaults: Some(false),
+            }),
+            kms_secret_name: None,
+            default_key_id: None,
+        };
+
+        apply_encryption_update(&mut tenant, &request).expect("local update should be valid");
+
+        let encryption = tenant.spec.encryption.expect("local configuration");
+        assert_eq!(encryption.backend, KmsBackendType::Local);
+        assert!(encryption.vault.is_none());
+        assert!(encryption.kms_secret.is_none());
+        assert!(encryption.default_key_id.is_none());
+        let local = encryption.local.expect("local settings");
+        assert!(local.key_directory.is_none());
+        let secret = local.master_key_secret_ref.expect("master key reference");
+        assert_eq!(secret.name, "local-master");
+        assert_eq!(secret.key, "master-key");
+    }
+
+    #[test]
+    fn switching_local_to_vault_removes_local_fields() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.encryption = Some(EncryptionConfig {
+            enabled: true,
+            backend: KmsBackendType::Local,
+            local: Some(LocalKmsConfig {
+                key_directory: Some("/data/old-keys".to_string()),
+                master_key_secret_ref: Some(LocalKmsMasterKeySecretRef {
+                    name: "old-local-key".to_string(),
+                    key: "master-key".to_string(),
+                }),
+                allow_insecure_dev_defaults: false,
+            }),
+            ..Default::default()
+        });
+        let request = UpdateEncryptionRequest {
+            enabled: true,
+            backend: Some(UpdateEncryptionBackend::Vault),
+            vault: Some(UpdateVaultRequest {
+                endpoint: " https://vault.example.com ".to_string(),
+            }),
+            local: None,
+            kms_secret_name: Some(" vault-token ".to_string()),
+            default_key_id: Some(" tenant-key ".to_string()),
+        };
+
+        apply_encryption_update(&mut tenant, &request).expect("vault update should be valid");
+
+        let encryption = tenant.spec.encryption.expect("vault configuration");
+        assert_eq!(encryption.backend, KmsBackendType::Vault);
+        assert!(encryption.local.is_none());
+        assert_eq!(
+            encryption.vault.expect("vault settings").endpoint,
+            "https://vault.example.com"
+        );
+        assert_eq!(
+            encryption.kms_secret.expect("vault secret").name,
+            "vault-token"
+        );
+        assert_eq!(encryption.default_key_id.as_deref(), Some("tenant-key"));
     }
 }
