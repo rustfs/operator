@@ -370,59 +370,60 @@ fn related_resource_metadata_refs<K: Resource>(resource: &K) -> Vec<ObjectRef<Te
     tenant_refs_from_metadata(
         metadata.namespace.as_deref(),
         metadata.owner_references.as_deref(),
-        metadata.labels.as_ref(),
+        None,
     )
 }
 
 /// Compact metadata retained across related-resource relists.
 ///
 /// The watch object can contain large annotations and managed fields. Replaying an event only
-/// needs its namespace/name plus the Tenant routes that came from owner references or the legacy
-/// label. Preserve only those routing fields before caching them.
+/// needs its namespace/name plus the Tenant routes that came from owner references. Preserve only
+/// those routing fields before caching them.
 #[derive(Clone, Debug)]
 struct RelatedResourceSnapshot {
-    metadata: metav1::ObjectMeta,
+    key: Option<RelatedResourceKey>,
     tenant_refs: Vec<ObjectRef<Tenant>>,
 }
 
 impl RelatedResourceSnapshot {
     fn from_resource<K: Resource>(resource: &K) -> Self {
         let source = resource.meta();
-        let tenant_refs = related_resource_metadata_refs(resource);
-        let owner_references = source
-            .owner_references
-            .iter()
-            .flatten()
-            .filter(|owner| {
-                tenant_ref_from_owner_reference(source.namespace.as_deref(), owner).is_some()
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let labels = source
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get(RUSTFS_TENANT_LABEL))
-            .filter(|name| source.namespace.is_some() && !name.is_empty())
-            .map(|name| BTreeMap::from([(RUSTFS_TENANT_LABEL.to_string(), name.clone())]));
-
         Self {
-            metadata: metav1::ObjectMeta {
-                name: source.name.clone(),
-                namespace: source.namespace.clone(),
-                owner_references: (!owner_references.is_empty()).then_some(owner_references),
-                labels,
-                ..Default::default()
-            },
-            tenant_refs,
+            key: RelatedResourceKey::from_metadata(source),
+            tenant_refs: related_resource_metadata_refs(resource),
         }
     }
 
     fn key(&self) -> Option<RelatedResourceKey> {
-        RelatedResourceKey::from_metadata(&self.metadata)
+        self.key.clone()
     }
 
     fn to_partial<K>(&self) -> PartialObjectMeta<K> {
-        self.metadata.clone().into_response_partial::<K>()
+        let metadata = self
+            .key
+            .as_ref()
+            .map(|key| metav1::ObjectMeta {
+                name: Some(key.name.clone()),
+                namespace: key.namespace.clone(),
+                // These objects are emitted only inside the controller stream. Reconstruct the
+                // minimal owner routes instead of retaining an ObjectMeta per cluster resource.
+                owner_references: (!self.tenant_refs.is_empty()).then(|| {
+                    self.tenant_refs
+                        .iter()
+                        .map(|tenant| metav1::OwnerReference {
+                            api_version: Tenant::api_version(&()).to_string(),
+                            kind: Tenant::kind(&()).to_string(),
+                            name: tenant.name.clone(),
+                            uid: String::new(),
+                            controller: None,
+                            block_owner_deletion: None,
+                        })
+                        .collect()
+                }),
+                ..Default::default()
+            })
+            .unwrap_or_default();
+        metadata.into_response_partial::<K>()
     }
 
     fn has_same_routes(&self, other: &Self) -> bool {
@@ -837,7 +838,7 @@ fn tenant_refs_for_secret<K: Resource>(
     let mut refs = tenant_refs_from_metadata(
         metadata.namespace.as_deref(),
         metadata.owner_references.as_deref(),
-        metadata.labels.as_ref(),
+        None,
     );
     refs.extend(index.refs_for_secret(metadata.namespace.as_deref(), metadata.name.as_deref()));
     deduplicate_tenant_refs(refs)
@@ -851,7 +852,7 @@ fn tenant_refs_for_config_map<K: Resource>(
     let mut refs = tenant_refs_from_metadata(
         metadata.namespace.as_deref(),
         metadata.owner_references.as_deref(),
-        metadata.labels.as_ref(),
+        None,
     );
     refs.extend(index.refs_for_config_map(metadata.namespace.as_deref(), metadata.name.as_deref()));
     deduplicate_tenant_refs(refs)
@@ -1147,40 +1148,12 @@ mod controller_watch_tests {
             },
             ..Default::default()
         };
-        let previous_label = corev1::Secret {
-            metadata: metav1::ObjectMeta {
-                name: Some("label-changed".to_string()),
-                namespace: Some("storage".to_string()),
-                labels: Some(BTreeMap::from([(
-                    RUSTFS_TENANT_LABEL.to_string(),
-                    "tenant-c".to_string(),
-                )])),
-                resource_version: Some("1".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let replacement_label = corev1::Secret {
-            metadata: metav1::ObjectMeta {
-                name: Some("label-changed".to_string()),
-                namespace: Some("storage".to_string()),
-                labels: Some(BTreeMap::from([(
-                    RUSTFS_TENANT_LABEL.to_string(),
-                    "tenant-d".to_string(),
-                )])),
-                resource_version: Some("2".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
         let events = stream::iter([
             Ok::<_, watcher::Error>(watcher::Event::Init),
             Ok(watcher::Event::InitApply(partial_secret(previous_owner))),
-            Ok(watcher::Event::InitApply(partial_secret(previous_label))),
             Ok(watcher::Event::InitDone),
             Ok(watcher::Event::Init),
             Ok(watcher::Event::InitApply(partial_secret(replacement_owner))),
-            Ok(watcher::Event::InitApply(partial_secret(replacement_label))),
             Ok(watcher::Event::InitDone),
         ]);
 
@@ -1188,28 +1161,29 @@ mod controller_watch_tests {
             .try_collect::<Vec<_>>()
             .await
             .expect("fixture events must be valid");
-        assert_eq!(emitted.len(), 6);
+        assert_eq!(emitted.len(), 3);
 
         let second_relist_tenants = emitted
             .iter()
-            .skip(2)
+            .skip(1)
             .flat_map(related_resource_metadata_refs)
             .map(|tenant| tenant.name)
             .collect::<BTreeSet<_>>();
         assert_eq!(
             second_relist_tenants,
-            BTreeSet::from([
-                "tenant-a".to_string(),
-                "tenant-b".to_string(),
-                "tenant-c".to_string(),
-                "tenant-d".to_string(),
-            ])
+            BTreeSet::from(["tenant-a".to_string(), "tenant-b".to_string()])
         );
     }
 
     #[tokio::test]
     async fn related_resource_large_relist_retains_only_compact_routing_metadata() {
         const RESOURCE_COUNT: usize = 10_000;
+
+        assert!(
+            std::mem::size_of::<RelatedResourceSnapshot>()
+                < std::mem::size_of::<metav1::ObjectMeta>(),
+            "routing snapshots must remain smaller than full Kubernetes metadata"
+        );
 
         let initial = stream::iter((0..RESOURCE_COUNT).map(|index| {
             let owner = (index == 1).then_some("tenant-a");
@@ -1313,7 +1287,7 @@ mod controller_watch_tests {
     }
 
     #[test]
-    fn secret_mapper_uses_rustfs_tenant_label_as_legacy_fallback() {
+    fn secret_mapper_ignores_legacy_routing_label_without_a_spec_reference() {
         let secret = corev1::Secret {
             metadata: metav1::ObjectMeta {
                 name: Some("legacy-secret".to_string()),
@@ -1332,11 +1306,11 @@ mod controller_watch_tests {
             &tenant_reference_index::TenantReferenceIndex::default(),
         );
 
-        assert_single_ref(&refs, "tenant-legacy", "storage");
+        assert!(refs.is_empty());
     }
 
     #[test]
-    fn config_map_mapper_uses_owner_reference_or_label() {
+    fn config_map_mapper_uses_tenant_owner_reference() {
         let owned = corev1::ConfigMap {
             metadata: metav1::ObjectMeta {
                 name: Some("policy".to_string()),
@@ -1352,7 +1326,10 @@ mod controller_watch_tests {
             &tenant_reference_index::TenantReferenceIndex::default(),
         );
         assert_single_ref(&refs, "tenant-policy", "storage");
+    }
 
+    #[test]
+    fn config_map_mapper_ignores_legacy_routing_label_without_a_spec_reference() {
         let labeled = corev1::ConfigMap {
             metadata: metav1::ObjectMeta {
                 name: Some("policy".to_string()),
@@ -1370,7 +1347,7 @@ mod controller_watch_tests {
             labeled,
             &tenant_reference_index::TenantReferenceIndex::default(),
         );
-        assert_single_ref(&refs, "tenant-policy-label", "storage");
+        assert!(refs.is_empty());
     }
 
     #[test]
@@ -1438,14 +1415,14 @@ mod controller_watch_tests {
     }
 
     #[test]
-    fn secret_mapper_deduplicates_legacy_metadata_and_index_references() {
+    fn secret_mapper_ignores_stale_label_when_an_index_reference_exists() {
         let secret = corev1::Secret {
             metadata: metav1::ObjectMeta {
                 name: Some("credentials".to_string()),
                 namespace: Some("storage".to_string()),
                 labels: Some(BTreeMap::from([(
                     "rustfs.tenant".to_string(),
-                    "tenant-a".to_string(),
+                    "tenant-stale".to_string(),
                 )])),
                 ..Default::default()
             },
