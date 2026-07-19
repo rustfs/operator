@@ -94,6 +94,11 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Setup Helm
+        uses: azure/setup-helm@v5.0.1
+        with:
+          version: 3.21.3
+
       - name: Run tests
         run: |
           cargo nextest run --all --no-tests pass

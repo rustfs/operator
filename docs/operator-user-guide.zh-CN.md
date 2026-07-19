@@ -207,7 +207,7 @@ sts:
 - `operator.leaderElect` 可以不配置；当 `operator.replicas > 1` 时 Chart 会自动启用 leader election。
 - 多副本 Console 部署需要保持 `console.jwtSecret` 稳定；不设置时 Chart 会生成或复用已有 Secret。
 - 生产环境应使用 HTTPS 并保持 `CONSOLE_COOKIE_SECURE` 启用。仅本地 HTTP 调试时才关闭。
-- `sts.tls.auto=true` 时，Operator 会创建或修复 `sts-tls`；Chart 通过命名空间级 Role 隔离写权限，全集群 Secret 和 ConfigMap 权限保持只读。
+- `sts.tls.auto=true` 时，Operator 会创建或修复 `sts-tls`；当 `rbac.create=true` 时，Chart 通过命名空间级 Role 隔离写权限，全集群 Secret 和 ConfigMap 权限保持只读。当 `rbac.create=false` 时，必须为 Operator ServiceAccount 自行提供等效的 Role 和 RoleBinding：允许在 Operator namespace 内 `create` Secret，并将 `get`、`update` 限定到名为 `sts-tls` 的资源。
 
 ## 6. 创建 Tenant
 
