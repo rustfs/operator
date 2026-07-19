@@ -52,6 +52,15 @@ impl TenantReferences {
         for policy in &tenant.spec.policies {
             references.insert_config_map(namespace, &policy.document.config_map_key_ref.name);
         }
+        for env in &tenant.spec.env {
+            if let Some(config_map) = env
+                .value_from
+                .as_ref()
+                .and_then(|source| source.config_map_key_ref.as_ref())
+            {
+                references.insert_config_map(namespace, &config_map.name);
+            }
+        }
         for secret_name in tenant.spec.referenced_secret_names() {
             references.insert_secret(namespace, &secret_name);
         }
@@ -290,6 +299,18 @@ mod tests {
             }),
             ..Default::default()
         });
+        tenant.spec.env.push(corev1::EnvVar {
+            name: "RUSTFS_REGION".to_string(),
+            value_from: Some(corev1::EnvVarSource {
+                config_map_key_ref: Some(corev1::ConfigMapKeySelector {
+                    key: "region".to_string(),
+                    name: "runtime-settings".to_string(),
+                    optional: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
         tenant.spec.users.push(ProvisioningUser {
             name: "provisioned-user".to_string(),
             creds_secret: Some(UserCredentialsSecretRef {
@@ -338,6 +359,11 @@ mod tests {
 
         assert_single_ref(
             &index.refs_for_config_map(Some("storage"), Some("policy-document")),
+            "tenant-a",
+            "storage",
+        );
+        assert_single_ref(
+            &index.refs_for_config_map(Some("storage"), Some("runtime-settings")),
             "tenant-a",
             "storage",
         );
