@@ -30,7 +30,9 @@ use hyper_util::service::TowerToHyperService;
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
-use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
+use kube::core::{
+    ApiResource, DynamicObject, GroupVersionKind, PartialObjectMeta, PartialObjectMetaExt,
+};
 use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{Controller, WatchStreamExt, watcher};
 use kube::{Api, Client, CustomResourceExt, Resource, api::ListParams};
@@ -355,8 +357,7 @@ struct RelatedResourceKey {
 }
 
 impl RelatedResourceKey {
-    fn from_resource<K: Resource>(resource: &K) -> Option<Self> {
-        let metadata = resource.meta();
+    fn from_metadata(metadata: &metav1::ObjectMeta) -> Option<Self> {
         Some(Self {
             namespace: metadata.namespace.clone(),
             name: metadata.name.clone()?,
@@ -373,56 +374,123 @@ fn related_resource_metadata_refs<K: Resource>(resource: &K) -> Vec<ObjectRef<Te
     )
 }
 
+/// Compact metadata retained across related-resource relists.
+///
+/// The watch object can contain large annotations and managed fields. Replaying an event only
+/// needs its namespace/name plus the Tenant routes that came from owner references or the legacy
+/// label. Preserve only those routing fields before caching them.
+#[derive(Clone, Debug)]
+struct RelatedResourceSnapshot {
+    metadata: metav1::ObjectMeta,
+    tenant_refs: Vec<ObjectRef<Tenant>>,
+}
+
+impl RelatedResourceSnapshot {
+    fn from_resource<K: Resource>(resource: &K) -> Self {
+        let source = resource.meta();
+        let tenant_refs = related_resource_metadata_refs(resource);
+        let owner_references = source
+            .owner_references
+            .iter()
+            .flatten()
+            .filter(|owner| {
+                tenant_ref_from_owner_reference(source.namespace.as_deref(), owner).is_some()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let labels = source
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(RUSTFS_TENANT_LABEL))
+            .filter(|name| source.namespace.is_some() && !name.is_empty())
+            .map(|name| BTreeMap::from([(RUSTFS_TENANT_LABEL.to_string(), name.clone())]));
+
+        Self {
+            metadata: metav1::ObjectMeta {
+                name: source.name.clone(),
+                namespace: source.namespace.clone(),
+                owner_references: (!owner_references.is_empty()).then_some(owner_references),
+                labels,
+                ..Default::default()
+            },
+            tenant_refs,
+        }
+    }
+
+    fn key(&self) -> Option<RelatedResourceKey> {
+        RelatedResourceKey::from_metadata(&self.metadata)
+    }
+
+    fn to_partial<K>(&self) -> PartialObjectMeta<K> {
+        self.metadata.clone().into_response_partial::<K>()
+    }
+
+    fn has_same_routes(&self, other: &Self) -> bool {
+        self.tenant_refs == other.tenant_refs
+    }
+}
+
 /// Decode related-resource watch events while recovering deletes lost across an RV relist.
 ///
 /// Kubernetes represents a relist as Init/InitApply/InitDone, without explicit Delete events for
-/// objects absent from the new snapshot. Keep the last complete metadata snapshot and replay
-/// objects that disappeared or changed Tenant-routing metadata after InitDone, so both the old and
-/// new Tenant mappings are reconciled.
+/// objects absent from the new snapshot. Keep only compact routing snapshots from the last
+/// complete list and replay objects that disappeared or changed Tenant routing after InitDone, so
+/// both the old and new Tenant mappings are reconciled.
 fn relist_aware_touched_objects<K, S>(
     events: S,
-) -> impl Stream<Item = Result<K, watcher::Error>> + Send
+) -> impl Stream<Item = Result<PartialObjectMeta<K>, watcher::Error>> + Send
 where
-    K: Clone + Resource + Send + 'static,
-    S: Stream<Item = Result<watcher::Event<K>, watcher::Error>> + Send + 'static,
+    K: Resource + Send + 'static,
+    S: Stream<Item = Result<watcher::Event<PartialObjectMeta<K>>, watcher::Error>> + Send + 'static,
 {
     futures::stream::unfold(
         (
             Box::pin(events),
-            BTreeMap::<RelatedResourceKey, K>::new(),
-            None::<BTreeMap<RelatedResourceKey, K>>,
-            VecDeque::<K>::new(),
+            BTreeMap::<RelatedResourceKey, Arc<RelatedResourceSnapshot>>::new(),
+            None::<BTreeMap<RelatedResourceKey, Arc<RelatedResourceSnapshot>>>,
+            VecDeque::<Arc<RelatedResourceSnapshot>>::new(),
         ),
         |(mut events, mut active, mut initializing, mut pending)| async move {
             loop {
-                if let Some(resource) = pending.pop_front() {
-                    return Some((Ok(resource), (events, active, initializing, pending)));
+                if let Some(snapshot) = pending.pop_front() {
+                    return Some((
+                        Ok(snapshot.to_partial::<K>()),
+                        (events, active, initializing, pending),
+                    ));
                 }
 
                 let event = events.next().await?;
                 match event {
                     Ok(watcher::Event::Apply(resource)) => {
-                        if let Some(key) = RelatedResourceKey::from_resource(&resource)
-                            && let Some(previous) = active.insert(key, resource.clone())
-                            && related_resource_metadata_refs(&previous)
-                                != related_resource_metadata_refs(&resource)
+                        let snapshot = Arc::new(RelatedResourceSnapshot::from_resource(&resource));
+                        if let Some(key) = snapshot.key()
+                            && let Some(previous) = active.insert(key, Arc::clone(&snapshot))
+                            && !previous.has_same_routes(&snapshot)
                         {
                             pending.push_back(previous);
                         }
-                        return Some((Ok(resource), (events, active, initializing, pending)));
+                        return Some((
+                            Ok(snapshot.to_partial::<K>()),
+                            (events, active, initializing, pending),
+                        ));
                     }
                     Ok(watcher::Event::Delete(resource)) => {
-                        if let Some(key) = RelatedResourceKey::from_resource(&resource) {
+                        let snapshot = RelatedResourceSnapshot::from_resource(&resource);
+                        if let Some(key) = snapshot.key() {
                             active.remove(&key);
                         }
-                        return Some((Ok(resource), (events, active, initializing, pending)));
+                        return Some((
+                            Ok(snapshot.to_partial::<K>()),
+                            (events, active, initializing, pending),
+                        ));
                     }
                     Ok(watcher::Event::Init) => initializing = Some(BTreeMap::new()),
                     Ok(watcher::Event::InitApply(resource)) => {
-                        if let Some(key) = RelatedResourceKey::from_resource(&resource) {
+                        let snapshot = Arc::new(RelatedResourceSnapshot::from_resource(&resource));
+                        if let Some(key) = snapshot.key() {
                             initializing
                                 .get_or_insert_with(BTreeMap::new)
-                                .insert(key, resource);
+                                .insert(key, snapshot);
                         }
                     }
                     Ok(watcher::Event::InitDone) => {
@@ -433,11 +501,10 @@ where
                                     .iter()
                                     .filter(|(key, previous)| {
                                         next.get(*key).is_none_or(|current| {
-                                            related_resource_metadata_refs(*previous)
-                                                != related_resource_metadata_refs(current)
+                                            !current.has_same_routes(previous)
                                         })
                                     })
-                                    .map(|(_, resource)| resource.clone()),
+                                    .map(|(_, snapshot)| Arc::clone(snapshot)),
                             );
                             active = next;
                         }
@@ -977,8 +1044,8 @@ mod controller_watch_tests {
             ..Default::default()
         };
         let events = stream::iter([
-            Ok::<_, watcher::Error>(watcher::Event::Apply(previous)),
-            Ok(watcher::Event::Apply(replacement)),
+            Ok::<_, watcher::Error>(watcher::Event::Apply(partial_secret(previous))),
+            Ok(watcher::Event::Apply(partial_secret(replacement))),
         ]);
 
         let emitted = relist_aware_touched_objects(events)
@@ -1023,13 +1090,13 @@ mod controller_watch_tests {
         retained.metadata.resource_version = Some("2".to_string());
         let events = stream::iter([
             Ok::<_, watcher::Error>(watcher::Event::Init),
-            Ok(watcher::Event::InitApply(deleted)),
-            Ok(watcher::Event::InitApply(first_retained)),
+            Ok(watcher::Event::InitApply(partial_secret(deleted))),
+            Ok(watcher::Event::InitApply(partial_secret(first_retained))),
             Ok(watcher::Event::InitDone),
             // An expired resource version restarts the watch. Kubernetes does not emit an
             // explicit Delete for objects that are absent from the replacement snapshot.
             Ok(watcher::Event::Init),
-            Ok(watcher::Event::InitApply(retained)),
+            Ok(watcher::Event::InitApply(partial_secret(retained))),
             Ok(watcher::Event::InitDone),
         ]);
 
@@ -1044,9 +1111,9 @@ mod controller_watch_tests {
 
         assert_eq!(names, vec!["deleted", "retained", "retained", "deleted"]);
         let replayed_delete = emitted.last().expect("missing object must be replayed");
-        assert_eq!(
-            replayed_delete.metadata.resource_version.as_deref(),
-            Some("1")
+        assert!(
+            replayed_delete.metadata.resource_version.is_none(),
+            "cached routing snapshots must discard resource versions"
         );
         assert_single_ref(
             &tenant_refs_for_secret(
@@ -1108,12 +1175,12 @@ mod controller_watch_tests {
         };
         let events = stream::iter([
             Ok::<_, watcher::Error>(watcher::Event::Init),
-            Ok(watcher::Event::InitApply(previous_owner)),
-            Ok(watcher::Event::InitApply(previous_label)),
+            Ok(watcher::Event::InitApply(partial_secret(previous_owner))),
+            Ok(watcher::Event::InitApply(partial_secret(previous_label))),
             Ok(watcher::Event::InitDone),
             Ok(watcher::Event::Init),
-            Ok(watcher::Event::InitApply(replacement_owner)),
-            Ok(watcher::Event::InitApply(replacement_label)),
+            Ok(watcher::Event::InitApply(partial_secret(replacement_owner))),
+            Ok(watcher::Event::InitApply(partial_secret(replacement_label))),
             Ok(watcher::Event::InitDone),
         ]);
 
@@ -1137,6 +1204,64 @@ mod controller_watch_tests {
                 "tenant-c".to_string(),
                 "tenant-d".to_string(),
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn related_resource_large_relist_retains_only_compact_routing_metadata() {
+        const RESOURCE_COUNT: usize = 10_000;
+
+        let initial = stream::iter((0..RESOURCE_COUNT).map(|index| {
+            let owner = (index == 1).then_some("tenant-a");
+            Ok::<_, watcher::Error>(watcher::Event::InitApply(large_partial_secret(
+                index, owner,
+            )))
+        }));
+        let replacement = stream::iter((1..RESOURCE_COUNT).map(|index| {
+            let owner = (index == 1).then_some("tenant-b");
+            Ok::<_, watcher::Error>(watcher::Event::InitApply(large_partial_secret(
+                index, owner,
+            )))
+        }));
+        let events = stream::iter([Ok::<_, watcher::Error>(watcher::Event::Init)])
+            .chain(initial)
+            .chain(stream::iter([
+                Ok(watcher::Event::InitDone),
+                Ok(watcher::Event::Init),
+            ]))
+            .chain(replacement)
+            .chain(stream::iter([Ok(watcher::Event::InitDone)]));
+
+        let emitted = relist_aware_touched_objects(events)
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("large relist fixture must be valid");
+
+        assert_eq!(emitted.len(), RESOURCE_COUNT * 2 + 1);
+        assert!(emitted.iter().all(|resource| {
+            resource.metadata.annotations.is_none()
+                && resource.metadata.labels.is_none()
+                && resource.metadata.resource_version.is_none()
+                && resource.metadata.uid.is_none()
+                && resource.metadata.finalizers.is_none()
+        }));
+        assert_eq!(
+            emitted
+                .iter()
+                .filter(|resource| resource.metadata.name.as_deref() == Some("resource-00000"))
+                .count(),
+            2,
+            "a resource absent from the replacement list must be replayed"
+        );
+        let changed_routes = emitted
+            .iter()
+            .filter(|resource| resource.metadata.name.as_deref() == Some("resource-00001"))
+            .flat_map(related_resource_metadata_refs)
+            .map(|tenant| tenant.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            changed_routes,
+            BTreeSet::from(["tenant-a".to_string(), "tenant-b".to_string()])
         );
     }
 
@@ -1427,6 +1552,34 @@ mod controller_watch_tests {
             controller: Some(true),
             block_owner_deletion: Some(true),
         }
+    }
+
+    fn partial_secret(secret: corev1::Secret) -> PartialObjectMeta<corev1::Secret> {
+        secret.metadata.into_response_partial::<corev1::Secret>()
+    }
+
+    fn large_partial_secret(
+        index: usize,
+        owner: Option<&str>,
+    ) -> PartialObjectMeta<corev1::Secret> {
+        metav1::ObjectMeta {
+            name: Some(format!("resource-{index:05}")),
+            namespace: Some("storage".to_string()),
+            annotations: Some(BTreeMap::from([(
+                "example.com/large".to_string(),
+                "x".repeat(4 * 1024),
+            )])),
+            labels: Some(BTreeMap::from([(
+                "example.com/unrelated".to_string(),
+                "discard-me".to_string(),
+            )])),
+            owner_references: owner.map(|name| vec![tenant_owner_ref(name)]),
+            resource_version: Some(format!("rv-{index}")),
+            uid: Some(format!("uid-{index}")),
+            finalizers: Some(vec!["example.com/finalizer".to_string()]),
+            ..Default::default()
+        }
+        .into_response_partial::<corev1::Secret>()
     }
 
     fn tenant_fixture(name: &str, namespace: &str) -> Tenant {
