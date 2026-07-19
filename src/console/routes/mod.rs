@@ -167,6 +167,7 @@ pub fn topology_routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::{auth_routes, cluster_routes, pod_routes, pool_routes, tenant_routes};
+    use crate::console::error::JSON_REJECTION_MESSAGE_MAX_BYTES;
     use crate::console::state::{AppState, Claims};
     use axum::{
         Extension, Router,
@@ -282,6 +283,29 @@ mod tests {
 
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_error_envelope(&body, "UnprocessableEntity", "InvalidJsonData");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn json_rejection_message_is_bounded_for_large_unknown_fields() -> TestResult {
+        let unknown_field = "x".repeat(JSON_REJECTION_MESSAGE_MAX_BYTES * 4);
+        let request_body = format!(r#"{{"{unknown_field}":true,"token":"test"}}"#);
+        let (status, body) = send_json_request(
+            Method::POST,
+            "/login",
+            Some("application/json"),
+            &request_body,
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error_envelope(&body, "UnprocessableEntity", "InvalidJsonData");
+        let message = body
+            .get("message")
+            .and_then(Value::as_str)
+            .expect("error message should be present");
+        assert!(message.len() <= JSON_REJECTION_MESSAGE_MAX_BYTES);
+        assert!(message.ends_with("... [truncated]"));
         Ok(())
     }
 
