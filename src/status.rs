@@ -611,6 +611,7 @@ impl StatusBuilder {
         let current_type = current_condition_type.as_str();
         for condition in &mut self.next.conditions {
             if condition.type_ == current_type
+                || is_summary_condition(&condition.type_)
                 || condition.status != ConditionStatus::False.as_str()
                 || !is_blocked_reason(&condition.reason)
             {
@@ -646,6 +647,13 @@ impl StatusBuilder {
             now: self.now.clone(),
         });
     }
+}
+
+fn is_summary_condition(type_: &str) -> bool {
+    matches!(
+        type_,
+        "Ready" | "Reconciling" | "Degraded" | LEGACY_PROGRESSING_CONDITION
+    )
 }
 
 fn sanitize_message(message: &str) -> String {
@@ -830,6 +838,31 @@ mod tests {
         assert_eq!(condition.last_transition_time.as_deref(), Some("old"));
         assert_eq!(condition.reason, "CredentialSecretMissingKey");
         assert_eq!(condition.observed_generation, Some(2));
+    }
+
+    #[test]
+    fn repeated_blocked_error_keeps_status_unchanged() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.generation = Some(1);
+        let error = context::Error::CredentialSecretMissingKey {
+            secret_name: "creds".to_string(),
+            key: "accesskey".to_string(),
+        };
+        let status_error = StatusError::from_context_error(&error);
+
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let mut first = builder.build();
+        for condition in &mut first.conditions {
+            condition.last_transition_time = Some("2026-01-01T00:00:00Z".to_string());
+        }
+
+        tenant.status = Some(first.clone());
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let second = builder.build();
+
+        assert_eq!(second, first);
     }
 
     #[test]
