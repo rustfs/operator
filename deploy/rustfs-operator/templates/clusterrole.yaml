@@ -14,9 +14,14 @@ rules:
     resources: ["tenants/status"]
     verbs: ["update", "patch"]
 
+  # Referenced Secrets and ConfigMaps are watched cluster-wide but never mutated.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+
   # Core resources managed by the operator
   - apiGroups: [""]
-    resources: ["configmaps", "secrets", "serviceaccounts", "pods", "services"]
+    resources: ["serviceaccounts", "pods", "services"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]

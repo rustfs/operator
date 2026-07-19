@@ -73,7 +73,7 @@ operator:
     timeoutSeconds: 5
     failureThreshold: 3
 
-  # Environment variables
+  # Extra environment variables. Do not duplicate chart-managed OPERATOR_* settings here.
   env:
     - name: RUST_LOG
       value: info
@@ -114,7 +114,9 @@ sts:
   tls:
     # Operator STS listens with TLS by default and uses this Secret for server certs.
     enabled: true
-    # When true, the operator creates the Secret if it is missing.
+    # When true, the chart grants namespaced create access plus update access to the fixed
+    # sts-tls Secret. The operator creates a missing Secret and replaces an invalid Secret only
+    # when it is marked as Operator-managed.
     auto: true
   service:
     type: ClusterIP

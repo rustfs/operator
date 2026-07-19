@@ -70,6 +70,13 @@ Namespace
 {{- end }}
 
 {{/*
+Name of the namespaced Role used by STS auto TLS.
+*/}}
+{{- define "rustfs-operator.stsTlsRoleName" -}}
+{{- printf "%s-sts-tls" (include "rustfs-operator.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Create the name of the console service account to use
 */}}
 {{- define "rustfs-operator.consoleServiceAccountName" -}}

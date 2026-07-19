@@ -173,7 +173,7 @@ Notes:
 - `operator.leaderElect` can be unset. The chart enables leader election automatically when `operator.replicas > 1`.
 - Keep `console.jwtSecret` stable when running multiple Console replicas. If unset, the chart generates or reuses a Secret.
 - Keep `CONSOLE_COOKIE_SECURE` enabled for production HTTPS. Only disable it for local HTTP testing.
-- `sts.tls.auto=true` lets the operator create the `sts-tls` Secret when missing.
+- `sts.tls.auto=true` lets the operator create or repair `sts-tls`; the chart isolates write access in a namespaced Role while keeping cluster-wide Secret and ConfigMap access read-only.
 
 ## 6. Create a Tenant
 
