@@ -3,9 +3,19 @@
 {{- if and (not .Values.operator.metrics.enabled) (or (hasKey $livenessProbe "httpGet") (hasKey $readinessProbe "httpGet")) -}}
 {{- fail "operator.metrics.enabled=false requires overriding operator.livenessProbe and operator.readinessProbe because the chart defaults use the metrics port" -}}
 {{- end -}}
+{{- $reservedOperatorEnv := dict
+  "OPERATOR_CLUSTER_DOMAIN" "clusterDomain"
+  "OPERATOR_NAMESPACE" "namespace"
+  "OPERATOR_STS_ENABLED" "sts.enabled"
+  "OPERATOR_STS_AUDIENCE" "sts.audience"
+  "OPERATOR_STS_PORT" "sts.port"
+  "OPERATOR_STS_SERVICE_NAME" "the generated STS Service name"
+  "OPERATOR_STS_TLS_ENABLED" "sts.tls.enabled"
+  "OPERATOR_STS_TLS_AUTO" "sts.tls.auto"
+-}}
 {{- range $env := .Values.operator.env }}
-{{- if eq $env.name "OPERATOR_CLUSTER_DOMAIN" -}}
-{{- fail "operator.env must not set OPERATOR_CLUSTER_DOMAIN; use clusterDomain instead" -}}
+{{- if hasKey $reservedOperatorEnv $env.name -}}
+{{- fail (printf "operator.env must not set %s; use %s instead" $env.name (get $reservedOperatorEnv $env.name)) -}}
 {{- end -}}
 {{- end -}}
 apiVersion: apps/v1

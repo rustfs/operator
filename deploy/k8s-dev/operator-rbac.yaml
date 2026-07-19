@@ -19,7 +19,10 @@ rules:
     resources: ["tenants/status"]
     verbs: ["update", "patch"]
   - apiGroups: [""]
-    resources: ["configmaps", "secrets", "serviceaccounts", "pods", "services"]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "pods", "services"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
@@ -77,6 +80,37 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: rustfs-operator
+subjects:
+  - kind: ServiceAccount
+    name: rustfs-operator
+    namespace: rustfs-system
+---
+# STS auto TLS needs to create one Secret and replace it only when a previously generated
+# Secret becomes invalid. Keep write access in the operator namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rustfs-operator-sts-tls
+  namespace: rustfs-system
+rules:
+  # Kubernetes cannot restrict create by resourceNames.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["sts-tls"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rustfs-operator-sts-tls
+  namespace: rustfs-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rustfs-operator-sts-tls
 subjects:
   - kind: ServiceAccount
     name: rustfs-operator

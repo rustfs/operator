@@ -1,0 +1,35 @@
+{{- if and .Values.rbac.create .Values.sts.enabled .Values.sts.tls.enabled .Values.sts.tls.auto -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "rustfs-operator.stsTlsRoleName" . }}
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+rules:
+  # Kubernetes cannot restrict create by resourceNames. Keep this grant namespaced; all reads
+  # remain covered by the cluster-wide metadata watch rule.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["sts-tls"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rustfs-operator.stsTlsRoleName" . }}
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "rustfs-operator.stsTlsRoleName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rustfs-operator.serviceAccountName" . }}
+    namespace: {{ include "rustfs-operator.namespace" . }}
+{{- end }}

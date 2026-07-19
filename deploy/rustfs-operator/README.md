@@ -59,7 +59,10 @@ The following table lists the configurable parameters of the RustFS Operator cha
 | `operator.tolerations` | Tolerations for pod scheduling | `[]` |
 | `operator.affinity` | Affinity rules for pod scheduling | `{}` |
 
-Use `clusterDomain` for custom Kubernetes DNS domains; `operator.env` must not set `OPERATOR_CLUSTER_DOMAIN`.
+Chart-managed environment variables must not be duplicated in `operator.env`. Configure
+`OPERATOR_CLUSTER_DOMAIN`, `OPERATOR_NAMESPACE`, and the chart-managed `OPERATOR_STS_*` settings
+through their documented chart values so the Deployment, Service, generated certificate, and RBAC
+manifests remain consistent.
 
 ### Operator STS Configuration
 
@@ -69,7 +72,7 @@ Use `clusterDomain` for custom Kubernetes DNS domains; `operator.env` must not s
 | `sts.audience` | Kubernetes TokenReview audience expected by the operator STS endpoint | `sts.rustfs.com` |
 | `sts.port` | Operator container port for STS | `4223` |
 | `sts.tls.enabled` | Serve the operator STS endpoint over TLS | `true` |
-| `sts.tls.auto` | Create the operator STS TLS Secret when missing | `true` |
+| `sts.tls.auto` | Create and replace an invalid Operator-managed STS TLS Secret with namespaced write RBAC | `true` |
 | `sts.service.type` | Kubernetes Service type for STS | `ClusterIP` |
 | `sts.service.port` | Kubernetes Service port for STS | `4223` |
 
@@ -81,7 +84,7 @@ POST /sts/{tenantNamespace}/{tenantName}
 
 This differs from MinIO Operator's namespace-only route. A `PolicyBinding` still lives in the Tenant namespace, but the workload must call STS with both the Tenant namespace and the Tenant name.
 
-The STS service is HTTPS by default. When `sts.tls.auto=true`, the operator creates the fixed `sts-tls` Secret in the operator namespace with `tls.crt`, `tls.key`, and `ca.crt`. Workloads must trust that CA. To use an externally issued certificate, pre-create `sts-tls` with a certificate signed by a CA already trusted by the workload and set `sts.tls.auto=false`.
+The STS service is HTTPS by default. When `sts.tls.auto=true`, the operator creates the fixed `sts-tls` Secret in the operator namespace with `tls.crt`, `tls.key`, and `ca.crt`. With `rbac.create=true`, the chart creates a namespaced Role that can create Secrets and update only `sts-tls`; the ClusterRole keeps all Secret and ConfigMap access read-only. Workloads must trust that CA. To use an externally issued certificate, pre-create `sts-tls` with a certificate signed by a CA already trusted by the workload and set `sts.tls.auto=false`; the chart then omits the namespaced Secret write Role.
 
 STS only issues credentials for TLS-enabled Tenants. For Tenant upstream calls, the operator selects the Tenant HTTPS service endpoint and trusts the CA recorded in `status.certificates.tls.caSecretRef`.
 
@@ -166,6 +169,8 @@ Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].c
 | `serviceAccount.create` | Create service account | `true` |
 | `serviceAccount.name` | Service account name | `""` (auto-generated) |
 | `serviceAccount.annotations` | Service account annotations | `{}` |
+
+The generated ClusterRole grants only `get`, `list`, and `watch` for Secrets and ConfigMaps. STS auto TLS write access is isolated to a Role in the operator namespace.
 
 ### Other Configuration
 
