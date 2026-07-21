@@ -18,7 +18,10 @@ use std::time::Duration;
 
 /// Configuration for the leader elector.
 ///
-/// Constraint: `lease_duration > renew_deadline > retry_period * 1.2`
+/// Timing constraint: `lease_duration > renew_deadline > retry_period * 1.2`.
+///
+/// Kubernetes persists the lease duration as whole `i32` seconds. The truncated value must be
+/// positive and remain greater than `renew_deadline`.
 #[derive(Debug, Clone)]
 pub struct LeaderElectorConfig {
     /// Unique identity for this instance (typically pod name or hostname).

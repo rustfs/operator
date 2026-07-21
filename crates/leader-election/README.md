@@ -74,7 +74,9 @@ elector.run(MyCallbacks, cancel).await;
 | `retry_period` | 2s | Interval between acquire/renew attempts (with jitter) |
 | `release_on_cancel` | `true` | Whether to release the lease when context is cancelled |
 
-**Constraint:** `lease_duration > renew_deadline > retry_period × 1.2`
+**Constraints:** `lease_duration > renew_deadline > retry_period × 1.2`. Kubernetes persists
+`lease_duration` as whole `i32` seconds, so the truncated value must be positive and remain
+greater than `renew_deadline`.
 
 ## RBAC
 

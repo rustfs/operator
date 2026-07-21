@@ -34,6 +34,8 @@ use crate::state::{LeaderElectorHandle, LeaderState};
 /// The leader elector — drives the acquire/renew/release loop against a Lock backend.
 pub struct LeaderElector<L: Lock> {
     config: LeaderElectorConfig,
+    /// Whole-second lease duration validated for the Kubernetes wire format.
+    lease_duration_seconds: i32,
     lock: L,
     observed: Arc<RwLock<ObservedState>>,
     clock: Box<dyn Clock>,
@@ -42,8 +44,9 @@ pub struct LeaderElector<L: Lock> {
 impl<L: Lock> LeaderElector<L> {
     /// Create a new LeaderElector with the given configuration, lock, and clock.
     ///
-    /// Returns `Error::InvalidConfig` if the timing constraints are violated:
-    /// `lease_duration > renew_deadline > retry_period * 1.2`
+    /// Returns `Error::InvalidConfig` if the timing constraints are violated or if
+    /// `lease_duration` cannot be represented as positive whole `i32` seconds. The persisted
+    /// whole-second duration must also remain greater than `renew_deadline`.
     pub fn new(
         config: LeaderElectorConfig,
         lock: L,
@@ -73,8 +76,37 @@ impl<L: Lock> LeaderElector<L> {
             });
         }
 
+        let lease_duration_seconds =
+            i32::try_from(config.lease_duration.as_secs()).map_err(|_| Error::InvalidConfig {
+                message: format!(
+                    "lease_duration ({:?}) must fit in the Kubernetes Lease int32 seconds field",
+                    config.lease_duration
+                ),
+            })?;
+        if lease_duration_seconds == 0 {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "lease_duration ({:?}) must be at least one second",
+                    config.lease_duration
+                ),
+            });
+        }
+
+        // Kubernetes stores only whole seconds. Re-check the timing constraint after
+        // truncation so the persisted lease cannot expire before the renew deadline.
+        let persisted_lease_duration = Duration::from_secs(config.lease_duration.as_secs());
+        if persisted_lease_duration <= config.renew_deadline {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "lease_duration rounded to whole seconds ({persisted_lease_duration:?}) must be greater than renew_deadline ({:?})",
+                    config.renew_deadline
+                ),
+            });
+        }
+
         Ok(Self {
             config,
+            lease_duration_seconds,
             lock,
             observed: Arc::new(RwLock::new(ObservedState::default())),
             clock: Box::new(clock),
@@ -396,8 +428,7 @@ impl<L: Lock> LeaderElector<L> {
         let observed = self.observed.read().await;
         match (observed.record.as_ref(), observed.observed_time) {
             (Some(record), Some(obs_time)) => {
-                let duration = Duration::from_secs(record.lease_duration_seconds as u64);
-                now < obs_time + duration
+                Self::is_lease_valid_at(obs_time, record.lease_duration_seconds, now)
             }
             _ => false,
         }
@@ -416,11 +447,32 @@ impl<L: Lock> LeaderElector<L> {
 
         match observed.observed_time {
             Some(observed_time) => {
-                let duration = Duration::from_secs(record.lease_duration_seconds as u64);
-                now < observed_time + duration
+                Self::is_lease_valid_at(observed_time, record.lease_duration_seconds, now)
             }
             None => false,
         }
+    }
+
+    /// Evaluate a lease duration without unchecked integer casts or panicking date arithmetic.
+    fn is_lease_valid_at(
+        observed_time: DateTime<Utc>,
+        lease_duration_seconds: i32,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if lease_duration_seconds <= 0 {
+            return false;
+        }
+
+        let Some(duration) = chrono::Duration::try_seconds(i64::from(lease_duration_seconds))
+        else {
+            return false;
+        };
+
+        // A positive lease whose deadline exceeds Chrono's representable range must not be
+        // expired early: doing so could allow two participants to lead concurrently.
+        observed_time
+            .checked_add_signed(duration)
+            .is_none_or(|deadline| now < deadline)
     }
 
     /// Build a new election record for this identity.
@@ -439,7 +491,7 @@ impl<L: Lock> LeaderElector<L> {
 
         LeaderElectionRecord {
             holder_identity: self.config.identity.clone(),
-            lease_duration_seconds: self.config.lease_duration.as_secs() as i32,
+            lease_duration_seconds: self.lease_duration_seconds,
             acquire_time,
             renew_time: now,
             leader_transitions: observed
@@ -600,6 +652,58 @@ mod tests {
     }
 
     #[test]
+    fn test_config_validation_lease_shorter_than_one_second() {
+        let config = LeaderElectorConfig {
+            identity: "node-1".to_string(),
+            lease_duration: Duration::from_millis(900),
+            renew_deadline: Duration::from_millis(500),
+            retry_period: Duration::from_millis(100),
+            release_on_cancel: true,
+        };
+        let result = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock);
+        assert!(matches!(result, Err(Error::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn test_config_validation_uses_persisted_whole_seconds() {
+        let config = LeaderElectorConfig {
+            identity: "node-1".to_string(),
+            lease_duration: Duration::from_millis(1500),
+            renew_deadline: Duration::from_millis(1200),
+            retry_period: Duration::from_millis(500),
+            release_on_cancel: true,
+        };
+        let result = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock);
+        assert!(matches!(result, Err(Error::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn test_config_validation_lease_exceeds_wire_format() {
+        let config = LeaderElectorConfig {
+            identity: "node-1".to_string(),
+            lease_duration: Duration::from_secs(u64::from(i32::MAX.unsigned_abs()) + 1),
+            renew_deadline: Duration::from_secs(10),
+            retry_period: Duration::from_secs(2),
+            release_on_cancel: true,
+        };
+        let result = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock);
+        assert!(matches!(result, Err(Error::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn test_config_validation_accepts_wire_format_maximum() {
+        let config = LeaderElectorConfig {
+            identity: "node-1".to_string(),
+            lease_duration: Duration::from_secs(u64::from(i32::MAX.unsigned_abs())),
+            renew_deadline: Duration::from_secs(10),
+            retry_period: Duration::from_secs(2),
+            release_on_cancel: true,
+        };
+        let elector = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock).unwrap();
+        assert_eq!(elector.lease_duration_seconds, i32::MAX);
+    }
+
+    #[test]
     fn test_jittered_retry_period() {
         let config = test_config("node-1");
         let elector = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock).unwrap();
@@ -683,6 +787,55 @@ mod tests {
                 .is_observed_lease_valid(&record, now + chrono::Duration::seconds(16))
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn test_non_positive_lease_durations_are_expired() {
+        let config = test_config("node-1");
+        let elector = LeaderElector::new(config, DummyLock::new("node-1"), SystemClock).unwrap();
+        let now = Utc::now();
+
+        for lease_duration_seconds in [i32::MIN, -1, 0] {
+            let record = LeaderElectionRecord {
+                holder_identity: "node-2".to_string(),
+                lease_duration_seconds,
+                acquire_time: now,
+                renew_time: now,
+                leader_transitions: 0,
+            };
+            elector.observe_record(record.clone(), now).await;
+
+            assert!(!elector.is_lease_valid(now).await);
+            assert!(!elector.is_observed_lease_valid(&record, now).await);
+        }
+    }
+
+    #[test]
+    fn test_lease_validity_boundaries_do_not_panic() {
+        let observed_time = Utc::now();
+
+        assert!(LeaderElector::<DummyLock>::is_lease_valid_at(
+            observed_time,
+            1,
+            observed_time
+        ));
+        assert!(!LeaderElector::<DummyLock>::is_lease_valid_at(
+            observed_time,
+            1,
+            observed_time + chrono::Duration::seconds(1)
+        ));
+        assert!(LeaderElector::<DummyLock>::is_lease_valid_at(
+            observed_time,
+            i32::MAX,
+            observed_time
+        ));
+
+        let maximum_time = DateTime::<Utc>::MAX_UTC;
+        assert!(LeaderElector::<DummyLock>::is_lease_valid_at(
+            maximum_time,
+            1,
+            maximum_time
+        ));
     }
 
     // ─── Dummy lock for unit tests ────────────────────────────────────
