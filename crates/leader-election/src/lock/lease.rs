@@ -257,4 +257,20 @@ mod tests {
         };
         assert!(spec_to_record(&spec).is_none());
     }
+
+    #[test]
+    fn spec_to_record_preserves_duration_for_core_validation() {
+        for lease_duration_seconds in [i32::MIN, -1, 0, i32::MAX] {
+            let spec = LeaseSpec {
+                holder_identity: Some("pod-1".into()),
+                lease_duration_seconds: Some(lease_duration_seconds),
+                acquire_time: Some(MicroTime(Utc::now())),
+                renew_time: Some(MicroTime(Utc::now())),
+                lease_transitions: Some(0),
+            };
+
+            let record = spec_to_record(&spec).expect("complete lease should produce a record");
+            assert_eq!(record.lease_duration_seconds, lease_duration_seconds);
+        }
+    }
 }

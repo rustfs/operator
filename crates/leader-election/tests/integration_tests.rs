@@ -417,6 +417,40 @@ async fn test_acquire_active_lease() {
 }
 
 #[tokio::test]
+async fn test_acquire_non_positive_lease_without_panicking() {
+    for lease_duration_seconds in [i32::MIN, -1, 0] {
+        let lock = FakeLock::new("node-2");
+        let now = Utc::now();
+        lock.set_record(LeaderElectionRecord {
+            holder_identity: "node-1".to_string(),
+            lease_duration_seconds,
+            acquire_time: now,
+            renew_time: now,
+            leader_transitions: 0,
+        })
+        .await;
+
+        let callbacks = Arc::new(TestCallbacks::new());
+        let elector = LeaderElector::new(test_config("node-2"), lock, MockClock::new(now)).unwrap();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let cb = callbacks.clone();
+        let handle =
+            tokio::spawn(async move { elector.run(SharedCallbacks(cb), cancel_clone).await });
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        cancel.cancel();
+
+        let run_result = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("elector should complete")
+            .expect("elector task should not panic");
+        assert!(run_result.is_ok());
+        assert_eq!(callbacks.started_count().await, 1);
+    }
+}
+
+#[tokio::test]
 async fn test_clock_skewed_candidate_waits_while_remote_record_changes() {
     let lock = FakeLock::new("shared");
     let remote_start = Utc::now();
