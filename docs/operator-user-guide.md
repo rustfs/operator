@@ -326,7 +326,7 @@ Key fields:
 | `name` | Pool name used in labels, StatefulSet names, and peer DNS. Must be unique in the Tenant. |
 | `servers` | Number of RustFS pods in the pool. Must be greater than `0`. Immutable after creation. |
 | `persistence.volumesPerServer` | Number of PVCs mounted into each server. Must be greater than `0`. Immutable after creation. |
-| `persistence.volumeClaimTemplate` | PVC spec used for each generated volume. Set storage size, access modes, and StorageClass here. |
+| `persistence.volumeClaimTemplate` | PVC spec used for each generated volume. Set storage size, access modes, and StorageClass at creation; these fields are immutable afterward. |
 | `persistence.path` | Base mount path. Defaults to `/data`; mounted paths become `{path}/rustfs0`, `{path}/rustfs1`, and so on. |
 | `nodeSelector`, `affinity`, `tolerations`, `topologySpreadConstraints` | Pool-level scheduling controls. |
 | `resources` | Container resource requests and limits for the pool. |
@@ -1001,7 +1001,7 @@ The operator reconciles StatefulSets and reports rollout status in Tenant condit
 
 ### Change Storage Capacity
 
-PVC expansion depends on the StorageClass and Kubernetes environment. Do not change immutable pool shape fields (`servers` and `volumesPerServer`) in place. To add capacity, add a new pool when appropriate and follow RustFS decommission and migration procedures.
+Do not change an existing pool's `volumeClaimTemplate` storage request, access modes, or StorageClass in place; the StatefulSet template is immutable. To add capacity, add a new pool when appropriate and follow RustFS decommission and migration procedures.
 
 ### Restart Tenant Pods
 

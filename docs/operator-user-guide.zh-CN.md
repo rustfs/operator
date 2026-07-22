@@ -317,7 +317,7 @@ Tenant 名称必须兼容 DNS-1035，且长度不超过 55 个字符，因为 Op
 | `name` | Pool 名称，用于 label、StatefulSet 名称和 peer DNS。同一个 Tenant 内必须唯一。 |
 | `servers` | 该 pool 的 RustFS Pod 数量。必须大于 `0`。创建后不可变。 |
 | `persistence.volumesPerServer` | 每个 server 挂载的 PVC 数量。必须大于 `0`。创建后不可变。 |
-| `persistence.volumeClaimTemplate` | 每个数据卷的 PVC spec，可设置容量、access mode 和 StorageClass。 |
+| `persistence.volumeClaimTemplate` | 每个数据卷的 PVC spec，可在创建时设置容量、access mode 和 StorageClass；创建后这些字段不可变。 |
 | `persistence.path` | 数据卷挂载基础路径。默认 `/data`，最终路径为 `{path}/rustfs0`、`{path}/rustfs1` 等。 |
 | `nodeSelector`、`affinity`、`tolerations`、`topologySpreadConstraints` | Pool 级调度控制。 |
 | `resources` | Pool 容器资源 request 和 limit。 |
@@ -977,7 +977,7 @@ Operator 会 reconcile StatefulSet，并通过 Tenant condition 和 pool status 
 
 ### 修改存储容量
 
-PVC 扩容取决于 StorageClass 和 Kubernetes 环境。不要原地修改不可变的 pool 形态字段（`servers` 和 `volumesPerServer`）。需要扩容时，可按需新增 pool，并结合 RustFS decommission 和迁移流程操作。
+不要原地修改已有 pool 的 `volumeClaimTemplate` 存储请求、access mode 或 StorageClass；StatefulSet 模板不可变。需要扩容时，可按需新增 pool，并结合 RustFS decommission 和迁移流程操作。
 
 ### 重启 Tenant Pod
 
