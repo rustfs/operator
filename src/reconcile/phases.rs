@@ -275,13 +275,23 @@ fn operator_resource_owned_by_tenant_or_predecessor(
                     .iter()
                     .any(|owner| owner.controller == Some(true) && !owner_matches_tenant(owner)))
     });
+    let current_owner_matches = tenant.meta().uid.as_ref().is_some_and(|tenant_uid| {
+        metadata.owner_references.as_ref().is_some_and(|owners| {
+            owners.iter().any(|owner| {
+                owner_matches_tenant(owner) && owner.uid.as_str() == tenant_uid.as_str()
+            })
+        })
+    });
     let legacy_manager_matches = metadata.managed_fields.as_ref().is_some_and(|fields| {
         fields
             .iter()
             .any(|field| field.manager.as_deref() == Some("rustfs-operator"))
     });
 
-    labels_match && legacy_manager_matches && owner_scope_matches
+    // Early Operator releases created Tenant resources before common labels were added. An exact
+    // current Tenant owner UID plus the legacy SSA manager is sufficient provenance for those
+    // resources, while stale unlabeled resources remain untouched.
+    legacy_manager_matches && owner_scope_matches && (labels_match || current_owner_matches)
 }
 
 fn security_patch_metadata(
@@ -1465,13 +1475,25 @@ mod tests {
             &tenant
         ));
 
-        let missing_labels = ObjectMeta {
+        let unlabeled_current_owned = ObjectMeta {
             owner_references: Some(vec![tenant.new_owner_ref()]),
             managed_fields: Some(operator_managed_fields()),
             ..Default::default()
         };
+        assert!(operator_resource_owned_by_tenant_or_predecessor(
+            &unlabeled_current_owned,
+            &tenant
+        ));
+
+        let mut stale_unlabeled_owner = tenant.new_owner_ref();
+        stale_unlabeled_owner.uid = "previous-tenant-uid".to_string();
+        let unlabeled_stale_owned = ObjectMeta {
+            owner_references: Some(vec![stale_unlabeled_owner]),
+            managed_fields: Some(operator_managed_fields()),
+            ..Default::default()
+        };
         assert!(!operator_resource_owned_by_tenant_or_predecessor(
-            &missing_labels,
+            &unlabeled_stale_owned,
             &tenant
         ));
 
