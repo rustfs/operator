@@ -24,9 +24,11 @@ pub trait LeaderCallbacks: Send + Sync {
     /// Receives a cancellation token that is cancelled when leadership is lost.
     async fn on_started_leading(&self, cancel: CancellationToken);
 
-    /// Called when this instance stops being the leader (always called, even if never led).
+    /// Called after each leadership epoch ends. Also called once if the elector stops before it
+    /// ever becomes leader.
     async fn on_stopped_leading(&self);
 
-    /// Called when a new leader is observed (fire-and-forget, runs in a separate task).
+    /// Called when a new leader is observed. Implementations should return quickly or spawn their
+    /// own work.
     async fn on_new_leader(&self, identity: String);
 }
