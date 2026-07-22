@@ -14,17 +14,19 @@
 
 //! Integration tests for leader election.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use tokio::sync::{Mutex, RwLock};
+use futures::StreamExt;
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use kube_leader_election::{
-    Clock, Error, LeaderCallbacks, LeaderElectionRecord, LeaderElector, LeaderElectorConfig, Lock,
+    Clock, Error, LeaderCallbacks, LeaderElectionRecord, LeaderElector, LeaderElectorConfig,
+    LeaderState, Lock,
 };
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
@@ -37,6 +39,9 @@ struct FakeLock {
     resource_version: Arc<Mutex<u64>>,
     /// If set, update() will fail with Conflict this many times before succeeding.
     conflict_count: Arc<AtomicUsize>,
+    /// If true, all update attempts fail until the test explicitly allows them again.
+    fail_updates: Arc<AtomicBool>,
+    update_failure: Arc<Notify>,
 }
 
 impl FakeLock {
@@ -46,6 +51,8 @@ impl FakeLock {
             record: Arc::new(RwLock::new(None)),
             resource_version: Arc::new(Mutex::new(0)),
             conflict_count: Arc::new(AtomicUsize::new(0)),
+            fail_updates: Arc::new(AtomicBool::new(false)),
+            update_failure: Arc::new(Notify::new()),
         }
     }
 
@@ -60,6 +67,16 @@ impl FakeLock {
     /// Configure the lock to fail with Conflict N times before succeeding.
     fn set_conflicts(&self, count: usize) {
         self.conflict_count.store(count, Ordering::SeqCst);
+    }
+
+    /// Configure every update to fail or succeed.
+    fn set_fail_updates(&self, fail: bool) {
+        self.fail_updates.store(fail, Ordering::SeqCst);
+    }
+
+    /// Wait until an update has failed because `fail_updates` is enabled.
+    async fn wait_for_update_failure(&self) {
+        self.update_failure.notified().await;
     }
 }
 
@@ -82,6 +99,11 @@ impl Lock for FakeLock {
     }
 
     async fn update(&self, record: LeaderElectionRecord) -> Result<(), Error> {
+        if self.fail_updates.load(Ordering::SeqCst) {
+            self.update_failure.notify_one();
+            return Err(Error::Conflict);
+        }
+
         // Simulate conflict if configured
         let remaining = self.conflict_count.load(Ordering::SeqCst);
         if remaining > 0 {
@@ -108,25 +130,30 @@ impl Lock for FakeLock {
 /// Mock clock with controllable time.
 #[derive(Clone)]
 struct MockClock {
-    now: Arc<RwLock<DateTime<Utc>>>,
+    now: Arc<StdRwLock<DateTime<Utc>>>,
 }
 
 impl MockClock {
     fn new(time: DateTime<Utc>) -> Self {
         Self {
-            now: Arc::new(RwLock::new(time)),
+            now: Arc::new(StdRwLock::new(time)),
         }
     }
 
     async fn set(&self, time: DateTime<Utc>) {
-        *self.now.write().await = time;
+        match self.now.write() {
+            Ok(mut now) => *now = time,
+            Err(poisoned) => *poisoned.into_inner() = time,
+        }
     }
 }
 
 impl Clock for MockClock {
     fn now(&self) -> DateTime<Utc> {
-        // Block on async read (safe in tests)
-        futures::executor::block_on(async { *self.now.read().await })
+        match self.now.read() {
+            Ok(now) => *now,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
     }
 }
 
@@ -417,6 +444,42 @@ async fn test_acquire_active_lease() {
 }
 
 #[tokio::test]
+async fn test_spawn_reports_observed_remote_leader() {
+    let lock = FakeLock::new("node-2");
+    let now = Utc::now();
+    lock.set_record(LeaderElectionRecord {
+        holder_identity: "node-1".to_string(),
+        lease_duration_seconds: 15,
+        acquire_time: now,
+        renew_time: now,
+        leader_transitions: 0,
+    })
+    .await;
+
+    let callbacks = Arc::new(TestCallbacks::new());
+    let elector = LeaderElector::new(test_config("node-2"), lock, MockClock::new(now)).unwrap();
+    let cancel = CancellationToken::new();
+    let (handle, join) = elector.spawn(SharedCallbacks(callbacks.clone()), cancel.clone());
+    let mut states = Box::pin(handle.state_stream());
+
+    let state = tokio::time::timeout(Duration::from_secs(2), states.next())
+        .await
+        .expect("elector should report the observed leader")
+        .expect("state stream should remain open");
+    assert_eq!(state, LeaderState::Following("node-1".to_string()));
+    assert_eq!(handle.current_leader().as_deref(), Some("node-1"));
+    assert!(!handle.is_leader());
+
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), join)
+        .await
+        .expect("elector should stop after cancellation")
+        .expect("elector task should not panic");
+    assert!(result.is_ok());
+    assert_eq!(callbacks.stopped_count().await, 1);
+}
+
+#[tokio::test]
 async fn test_acquire_non_positive_lease_without_panicking() {
     for lease_duration_seconds in [i32::MIN, -1, 0] {
         let lock = FakeLock::new("node-2");
@@ -624,6 +687,8 @@ async fn test_concurrent_acquire() {
         record: shared_record.clone(),
         resource_version: shared_rv.clone(),
         conflict_count: Arc::new(AtomicUsize::new(0)),
+        fail_updates: Arc::new(AtomicBool::new(false)),
+        update_failure: Arc::new(Notify::new()),
     };
 
     let lock2 = FakeLock {
@@ -631,6 +696,8 @@ async fn test_concurrent_acquire() {
         record: shared_record.clone(),
         resource_version: shared_rv.clone(),
         conflict_count: Arc::new(AtomicUsize::new(0)),
+        fail_updates: Arc::new(AtomicBool::new(false)),
+        update_failure: Arc::new(Notify::new()),
     };
 
     let clock1 = MockClock::new(Utc::now());
@@ -672,4 +739,67 @@ async fn test_concurrent_acquire() {
         1,
         "exactly one candidate should become leader"
     );
+}
+
+/// A renewal deadline revokes externally visible leadership before re-acquisition.
+#[tokio::test]
+async fn test_spawn_reports_non_leader_while_reacquiring() {
+    let now = Utc::now();
+    let lock = FakeLock::new("node-1");
+    let clock = MockClock::new(now);
+    let test_clock = clock.clone();
+    let callbacks = Arc::new(TestCallbacks::new());
+    let elector = LeaderElector::new(test_config("node-1"), lock.clone(), clock).unwrap();
+    let cancel = CancellationToken::new();
+
+    let (handle, join) = elector.spawn(SharedCallbacks(callbacks.clone()), cancel.clone());
+    let mut states = Box::pin(handle.state_stream());
+
+    let first_state = tokio::time::timeout(Duration::from_secs(2), states.next())
+        .await
+        .expect("elector should acquire the lease")
+        .expect("state stream should remain open");
+    assert_eq!(first_state, LeaderState::Leading);
+    assert!(handle.is_leader());
+
+    // Force the next renewal cycle to fail, then move the injected clock beyond the deadline.
+    // Updates remain blocked so the elector cannot immediately re-acquire after stepping down.
+    lock.set_fail_updates(true);
+    tokio::time::timeout(Duration::from_secs(2), lock.wait_for_update_failure())
+        .await
+        .expect("renewal should attempt an update");
+    test_clock.set(now + chrono::Duration::seconds(11)).await;
+
+    let lost_state = tokio::time::timeout(Duration::from_secs(2), states.next())
+        .await
+        .expect("renewal failure should publish a state change")
+        .expect("state stream should remain open");
+    assert_eq!(lost_state, LeaderState::Pending);
+    assert!(!handle.is_leader());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while callbacks.stopped_count().await != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("leadership loss should invoke the stopped callback once");
+
+    // Permit updates again and verify that leadership is only re-published after acquisition.
+    lock.set_fail_updates(false);
+    let reacquired_state = tokio::time::timeout(Duration::from_secs(2), states.next())
+        .await
+        .expect("elector should re-acquire the lease")
+        .expect("state stream should remain open");
+    assert_eq!(reacquired_state, LeaderState::Leading);
+    assert!(handle.is_leader());
+
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), join)
+        .await
+        .expect("elector should stop after cancellation")
+        .expect("elector task should not panic");
+    assert!(result.is_ok());
+    assert_eq!(callbacks.started_count().await, 2);
+    assert_eq!(callbacks.stopped_count().await, 2);
 }

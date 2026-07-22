@@ -58,7 +58,10 @@ impl LeaderElectorHandle {
                 if rx.changed().await.is_err() {
                     break;
                 }
-                yield rx.borrow().clone();
+                // Drop the watch borrow before yielding. Holding it across a yield would block
+                // producers from publishing the next state until the stream is polled again.
+                let state = rx.borrow().clone();
+                yield state;
             }
         }
     }

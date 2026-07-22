@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -123,21 +123,41 @@ impl<L: Lock> LeaderElector<L> {
         callbacks: impl LeaderCallbacks + 'static,
         cancel: CancellationToken,
     ) -> Result<(), Error> {
+        self.run_with_state(callbacks, cancel, None).await
+    }
+
+    /// Run the leader election loop with an optional external state channel.
+    async fn run_with_state(
+        &self,
+        callbacks: impl LeaderCallbacks + 'static,
+        cancel: CancellationToken,
+        state_tx: Option<watch::Sender<LeaderState>>,
+    ) -> Result<(), Error> {
         let callbacks = Arc::new(callbacks);
+        // Preserve the existing contract that a run cancelled before its first acquisition still
+        // receives one stopped notification. After a completed leadership epoch, do not emit a
+        // duplicate notification if cancellation arrives while re-acquiring.
+        let mut has_notified_stopped = false;
         info!(identity = %self.config.identity, lock = %self.lock.describe(), "starting leader election");
 
         loop {
             // Phase 1: acquire
             if cancel.is_cancelled() {
-                callbacks.on_stopped_leading().await;
+                if !has_notified_stopped {
+                    callbacks.on_stopped_leading().await;
+                }
                 return Ok(());
             }
 
-            if !self.acquire(&cancel, &callbacks).await {
+            if !self.acquire(&cancel, &callbacks, state_tx.as_ref()).await {
                 // Cancelled during acquire
-                callbacks.on_stopped_leading().await;
+                if !has_notified_stopped {
+                    callbacks.on_stopped_leading().await;
+                }
                 return Ok(());
             }
+
+            Self::publish_state(state_tx.as_ref(), LeaderState::Leading);
 
             // We are now the leader. Create a child token for the leading task.
             let leading_cancel = CancellationToken::new();
@@ -156,8 +176,10 @@ impl<L: Lock> LeaderElector<L> {
             let should_retry = self.renew(&cancel).await;
 
             // We lost leadership (or lost renew loop due cancel).
-            // Stop the leading task.
+            // Revoke the leading task and externally visible state before any asynchronous cleanup
+            // or re-acquisition work, so consumers cannot observe stale leadership.
             leading_cancel.cancel();
+            Self::publish_state(state_tx.as_ref(), LeaderState::Pending);
             // Wait for the leading task to finish.
             let _ = leading_handle.await;
 
@@ -166,10 +188,12 @@ impl<L: Lock> LeaderElector<L> {
                 self.release().await;
             }
 
+            // Phase 5: notify stopped once for every completed leadership epoch.
+            callbacks.on_stopped_leading().await;
+            has_notified_stopped = true;
+
             if !should_retry {
                 info!(identity = %self.config.identity, "stopped leading");
-                // Phase 5: notify stopped
-                callbacks.on_stopped_leading().await;
                 return Ok(());
             }
 
@@ -192,14 +216,10 @@ impl<L: Lock> LeaderElector<L> {
     {
         let (state_tx, state_rx) = tokio::sync::watch::channel(LeaderState::Pending);
         let handle = LeaderElectorHandle { state_rx };
-        let join = tokio::spawn(async move {
-            // Wrap callbacks to also update the watch channel
-            let wrapped = StateTrackingCallbacks {
-                inner: callbacks,
-                state_tx,
-            };
-            self.run(wrapped, cancel).await
-        });
+        let join =
+            tokio::spawn(
+                async move { self.run_with_state(callbacks, cancel, Some(state_tx)).await },
+            );
         (handle, join)
     }
 
@@ -210,6 +230,7 @@ impl<L: Lock> LeaderElector<L> {
         &self,
         cancel: &CancellationToken,
         callbacks: &Arc<impl LeaderCallbacks + ?Sized>,
+        state_tx: Option<&watch::Sender<LeaderState>>,
     ) -> bool {
         info!(identity = %self.config.identity, "attempting to acquire leader lock");
         loop {
@@ -223,9 +244,10 @@ impl<L: Lock> LeaderElector<L> {
                 }
             }
 
-            if self.try_acquire_or_renew().await {
+            let acquired = self.try_acquire_or_renew().await;
+            self.maybe_report_transition(callbacks, state_tx).await;
+            if acquired {
                 info!(identity = %self.config.identity, "successfully acquired lease");
-                self.maybe_report_transition(callbacks).await;
                 return true;
             }
         }
@@ -531,26 +553,52 @@ impl<L: Lock> LeaderElector<L> {
 
     /// Check if a new leader has been observed and fire the on_new_leader callback.
     /// Deduplicates: only fires when the leader identity changes.
-    async fn maybe_report_transition(&self, callbacks: &Arc<impl LeaderCallbacks + ?Sized>) {
-        let mut observed = self.observed.write().await;
-        let current_leader = observed
-            .record
-            .as_ref()
-            .map(|r| r.holder_identity.clone())
-            .unwrap_or_default();
+    async fn maybe_report_transition(
+        &self,
+        callbacks: &Arc<impl LeaderCallbacks + ?Sized>,
+        state_tx: Option<&watch::Sender<LeaderState>>,
+    ) {
+        let current_leader = {
+            let mut observed = self.observed.write().await;
+            let current_leader = observed
+                .record
+                .as_ref()
+                .map(|r| r.holder_identity.clone())
+                .unwrap_or_default();
 
-        // Dedup: skip if we already reported this leader
-        if observed.reported_leader.as_deref() == Some(&current_leader) {
+            // Dedup: skip if we already reported this leader.
+            if observed.reported_leader.as_deref() == Some(&current_leader) {
+                return;
+            }
+
+            observed.reported_leader = Some(current_leader.clone());
+            current_leader
+        };
+
+        if current_leader.is_empty() {
+            Self::publish_state(state_tx, LeaderState::Pending);
             return;
         }
 
-        observed.reported_leader = Some(current_leader.clone());
+        if current_leader != self.config.identity {
+            Self::publish_state(state_tx, LeaderState::Following(current_leader.clone()));
+        }
+        debug!(new_leader = %current_leader, "observed new leader");
+        // Call without holding the observed-state lock. Callbacks are expected to be fast or
+        // spawn their own work.
+        callbacks.on_new_leader(current_leader).await;
+    }
 
-        if !current_leader.is_empty() {
-            debug!(new_leader = %current_leader, "observed new leader");
-            // Fire the on_new_leader callback (runs in caller's task; callbacks are expected
-            // to be fast or spawn their own work).
-            callbacks.on_new_leader(current_leader).await;
+    /// Publish an externally observable state only when it actually changes.
+    fn publish_state(state_tx: Option<&watch::Sender<LeaderState>>, state: LeaderState) {
+        if let Some(state_tx) = state_tx {
+            state_tx.send_if_modified(|current| {
+                if *current == state {
+                    return false;
+                }
+                *current = state;
+                true
+            });
         }
     }
 
@@ -558,34 +606,6 @@ impl<L: Lock> LeaderElector<L> {
     fn jittered_retry_period(&self) -> Duration {
         let jitter = self.config.retry_period.as_secs_f64() * 0.2 * rand::random::<f64>();
         self.config.retry_period + Duration::from_secs_f64(jitter)
-    }
-}
-
-/// Internal callbacks wrapper that updates the watch channel on state transitions.
-struct StateTrackingCallbacks<C: LeaderCallbacks> {
-    inner: C,
-    state_tx: tokio::sync::watch::Sender<LeaderState>,
-}
-
-#[async_trait::async_trait]
-impl<C: LeaderCallbacks> LeaderCallbacks for StateTrackingCallbacks<C> {
-    async fn on_started_leading(&self, cancel: CancellationToken) {
-        let _ = self.state_tx.send(LeaderState::Leading);
-        self.inner.on_started_leading(cancel).await;
-    }
-
-    async fn on_stopped_leading(&self) {
-        let _ = self.state_tx.send(LeaderState::Pending);
-        self.inner.on_stopped_leading().await;
-    }
-
-    async fn on_new_leader(&self, identity: String) {
-        // Update state channel: if we're not currently Leading, report Following
-        let is_leading = matches!(&*self.state_tx.borrow(), LeaderState::Leading);
-        if !is_leading && !identity.is_empty() {
-            let _ = self.state_tx.send(LeaderState::Following(identity.clone()));
-        }
-        self.inner.on_new_leader(identity).await;
     }
 }
 
