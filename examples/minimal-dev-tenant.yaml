@@ -7,7 +7,7 @@
 # - 1 StatefulSet with 1 replica
 # - 1 PVC (1 server × 1 volume)
 # - 3 Services (IO at 9000, Console at 9001, Headless)
-# - RBAC resources (Role, ServiceAccount, RoleBinding)
+# - 1 ServiceAccount with Kubernetes API token automount disabled
 #
 # Total storage: 10Gi (1 volume × 10Gi default)
 

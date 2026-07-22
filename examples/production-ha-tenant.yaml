@@ -10,7 +10,7 @@
 # - 1 StatefulSet with 16 replicas
 # - 64 PVCs (16 servers × 4 volumes)
 # - 3 Services (IO at 9000, Console at 9001, Headless)
-# - RBAC resources
+# - 1 ServiceAccount with Kubernetes API token automount disabled
 #
 # Total storage: 6.4TB (64 volumes × 100Gi)
 

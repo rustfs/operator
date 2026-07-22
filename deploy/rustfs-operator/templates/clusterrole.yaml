@@ -32,7 +32,8 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
 
-  # RBAC resources created for tenants
+  # Legacy Tenant workload RBAC watch/cleanup. Write verbs remain during the
+  # security migration so an older binary can coexist during a rolling upgrade.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

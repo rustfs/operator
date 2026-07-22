@@ -23,7 +23,7 @@
 # - 2 StatefulSets (critical-pool on-demand, elastic-pool spot)
 # - 80 total PVCs
 # - 3 Services (shared)
-# - RBAC resources
+# - 1 ServiceAccount with Kubernetes API token automount disabled
 #
 # Cost Example:
 # - On-demand: 4 × c5.4xlarge = $2,720/month

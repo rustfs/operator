@@ -37,6 +37,7 @@ mod services;
 mod workloads;
 
 pub use workloads::RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION;
+pub(crate) use workloads::uses_unpartitioned_rolling_update;
 
 pub(crate) const MAX_TENANT_POOLS: u32 = 32;
 pub(crate) const MAX_TENANT_POLICIES: u32 = 256;
@@ -159,6 +160,8 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account_name: Option<String>,
 
+    /// Deprecated compatibility field. The operator never grants Kubernetes API permissions to
+    /// Tenant workloads. Configure a custom ServiceAccount and manage any required RBAC explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_service_account_rbac: Option<bool>,
 

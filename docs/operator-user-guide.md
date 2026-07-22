@@ -27,7 +27,7 @@ RustFS Operator manages RustFS object storage clusters on Kubernetes. Users desc
 The operator provides:
 
 - `Tenant` CRD (`rustfs.com/v1alpha1`) for declaring RustFS pools, persistence, scheduling, credentials, TLS, logging, encryption, and bootstrap provisioning.
-- Controller reconciliation for Tenant-owned RBAC, Services, StatefulSets, PVC templates, status conditions, and Kubernetes Events.
+- Controller reconciliation for Tenant ServiceAccounts, Services, StatefulSets, PVC templates, status conditions, and Kubernetes Events.
 - Helm chart under `deploy/rustfs-operator/` for production-style installation.
 - Operator Console API and UI for management workflows.
 - Optional operator STS endpoint for workload identity based temporary RustFS credentials.
@@ -50,7 +50,8 @@ A `Tenant` is one RustFS cluster. A Tenant can contain one or more pools, but al
 
 When a Tenant is applied, the operator creates and owns:
 
-- one ServiceAccount, Role, and RoleBinding when Tenant RBAC is enabled;
+- one ServiceAccount when `serviceAccountName` is omitted; Tenant workloads receive no
+  operator-managed Kubernetes API permissions;
 - one headless Service named `{tenant}-hl` for StatefulSet peer DNS;
 - one S3 Service named `{tenant}-io` on port `9000`;
 - one Tenant Console Service named `{tenant}-console` on port `9001`;
@@ -123,6 +124,17 @@ image-bound acknowledgement. Before upgrade, either pin a verified RustFS
 beta.9-or-later release tag, or verify the effective image and set
 `operator.rustfs.com/runtime-default-image-ack` to that exact image reference.
 
+The Operator also removes legacy Tenant workload Roles and RoleBindings and
+disables automatic Kubernetes API token mounting for its generated
+ServiceAccounts. Existing default-ServiceAccount Tenants roll once to apply the
+Pod template change. A custom image that calls the Kubernetes API must migrate
+before upgrade: create a user-owned ServiceAccount with the required token
+projection, bind a least-privilege Role under names other than the legacy
+`{tenant}-role` and `{tenant}-role-binding`, and set `spec.serviceAccountName`.
+Granting RBAC to the generated ServiceAccount is insufficient because its Pod
+template disables token mounting. `createServiceAccountRbac` is retained only
+as an ignored compatibility field.
+
 The built-in RustFS image fallback also changes from the mutable `latest` tag to
 `rustfs/rustfs:1.0.0-beta.10`. A Tenant that omits `spec.image` and has no
 `TENANT_RUSTFS_IMAGE` Operator environment override will therefore roll to that
@@ -132,9 +144,10 @@ control future RustFS upgrades independently of the Operator default.
 Treat this as a one-way workload security migration. After the new Operator has
 reconciled a Tenant, do not downgrade directly to an Operator version that
 predates these restricted defaults. An older controller omits the new seccomp
-and container security fields: restricted admission rejects that update, while
-a cluster without restricted admission can roll the workload back to weaker
-settings. Recover by rolling forward to this version or a newer fixed version.
+and container security fields and recreates the legacy broad workload RBAC:
+restricted admission may reject the Pod update, while a cluster without it can
+roll the workload back to weaker settings. Recover by rolling forward to this
+version or a newer fixed version.
 
 Uninstall:
 
@@ -413,7 +426,7 @@ Useful Tenant-level fields:
 | `scheduler` | Custom scheduler name. |
 | `env` | Additional RustFS container environment variables. Do not override operator-managed variables. |
 | `serviceAccountName` | Custom ServiceAccount for RustFS pods. |
-| `createServiceAccountRbac` | Whether the operator should create Role/RoleBinding for the Tenant ServiceAccount. |
+| `createServiceAccountRbac` | Deprecated compatibility field; ignored. Manage any custom ServiceAccount RBAC explicitly. |
 | `priorityClassName` | Tenant-level priority class. |
 | `lifecycle` | Kubernetes container lifecycle hooks. |
 | `podManagementPolicy` | StatefulSet pod management policy. |

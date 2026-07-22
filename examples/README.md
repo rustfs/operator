@@ -332,15 +332,14 @@ kubectl apply -f examples/spot-instance-tenant.yaml
 
 **Features demonstrated:**
 - Custom ServiceAccount usage (2 configurations)
-- Manual RBAC management (Role + RoleBinding)
-- Operator-managed RBAC with custom SA
+- Resource-scoped, user-managed RBAC
 - Cloud workload identity integration (AWS/GCP/Azure)
-- Additional permissions beyond defaults
+- Explicit permissions for custom images
 - Security best practices
 
 **Two configurations:**
-1. Custom SA without operator RBAC (you manage everything)
-2. Custom SA with operator RBAC (operator creates Role/RoleBinding)
+1. Custom SA with a user-managed, resource-scoped Role
+2. Custom SA for cloud workload identity without Kubernetes API RBAC
 
 **Use case:**
 - Existing RBAC policies
@@ -349,6 +348,10 @@ kubectl apply -f examples/spot-instance-tenant.yaml
 - Additional permissions needed
 
 **Deployment:**
+
+Replace `registry.example.com/rustfs-custom:1.0.0` and its matching acknowledgement
+annotation with a verified custom image before applying the complete file.
+
 ```bash
 kubectl apply -f examples/custom-rbac-tenant.yaml
 ```
@@ -456,10 +459,9 @@ spec:
 
 When you apply a Tenant, the operator creates:
 
-1. **RBAC Resources** (conditional based on configuration)
-   - Role
-   - ServiceAccount
-   - RoleBinding
+1. **ServiceAccount** (only when `serviceAccountName` is omitted)
+   - Kubernetes API token automount is disabled
+   - No workload Role or RoleBinding is created
 
 2. **Services**
    - IO Service: `rustfs` (S3 API, port **9000**)

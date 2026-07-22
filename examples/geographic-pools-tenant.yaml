@@ -26,7 +26,7 @@
 # - 3 StatefulSets (us-region, eu-region, apac-region)
 # - 96 total PVCs (32 per region)
 # - 3 Services (shared, accessible from all regions)
-# - RBAC resources
+# - 1 ServiceAccount with Kubernetes API token automount disabled
 
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant

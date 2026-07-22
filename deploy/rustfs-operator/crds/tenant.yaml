@@ -165,6 +165,9 @@ spec:
                     type: object
                 type: object
               createServiceAccountRbac:
+                description: |-
+                  Deprecated compatibility field. The operator never grants Kubernetes API permissions to
+                  Tenant workloads. Configure a custom ServiceAccount and manage any required RBAC explicitly.
                 nullable: true
                 type: boolean
               credsSecret:
