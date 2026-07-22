@@ -1712,9 +1712,7 @@ impl Tenant {
             });
         }
 
-        // Validate volumeClaimTemplates are unchanged (immutable field)
-        // Note: This is a simplified check. In reality, you can only change certain fields
-        // like storage size (depending on storage class), but template structure and names cannot change.
+        // Validate volumeClaimTemplates are unchanged (immutable field).
         let existing_vcts = existing_spec.volume_claim_templates.as_ref();
         let desired_vcts = desired_spec.volume_claim_templates.as_ref();
 
@@ -1752,15 +1750,60 @@ impl Tenant {
                     });
                 }
 
+                let existing_vct_spec = existing_vct.spec.as_ref();
+                let desired_vct_spec = desired_vct.spec.as_ref();
+                let existing_storage = existing_vct_spec
+                    .and_then(|spec| spec.resources.as_ref())
+                    .and_then(|resources| resources.requests.as_ref())
+                    .and_then(|requests| requests.get("storage"));
+                let desired_storage = desired_vct_spec
+                    .and_then(|spec| spec.resources.as_ref())
+                    .and_then(|resources| resources.requests.as_ref())
+                    .and_then(|requests| requests.get("storage"));
+
+                if existing_storage != desired_storage {
+                    return Err(types::error::Error::ImmutableFieldModified {
+                        name: ss_name.clone(),
+                        field: format!(
+                            "spec.volumeClaimTemplates[{}].spec.resources.requests.storage",
+                            i
+                        ),
+                        message: format!(
+                            "Storage request changed from '{}' to '{}'. Restore the original value; add a new pool to expand capacity.",
+                            existing_storage
+                                .map(|quantity| quantity.0.as_str())
+                                .unwrap_or("<unset>"),
+                            desired_storage
+                                .map(|quantity| quantity.0.as_str())
+                                .unwrap_or("<unset>")
+                        ),
+                    });
+                }
+
+                let existing_access_modes =
+                    existing_vct_spec.and_then(|spec| spec.access_modes.as_ref());
+                let desired_access_modes =
+                    desired_vct_spec.and_then(|spec| spec.access_modes.as_ref());
+
+                if existing_access_modes != desired_access_modes {
+                    return Err(types::error::Error::ImmutableFieldModified {
+                        name: ss_name.clone(),
+                        field: format!("spec.volumeClaimTemplates[{}].spec.accessModes", i),
+                        message: format!(
+                            "Access modes changed from '{}' to '{}'. Restore the original value or add a new pool with the required access modes.",
+                            existing_access_modes
+                                .map(|modes| modes.join(", "))
+                                .unwrap_or_else(|| "<unset>".to_string()),
+                            desired_access_modes
+                                .map(|modes| modes.join(", "))
+                                .unwrap_or_else(|| "<unset>".to_string())
+                        ),
+                    });
+                }
+
                 // Check if storage class changed (also problematic)
-                let existing_sc = existing_vct
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.storage_class_name.as_ref());
-                let desired_sc = desired_vct
-                    .spec
-                    .as_ref()
-                    .and_then(|s| s.storage_class_name.as_ref());
+                let existing_sc = existing_vct_spec.and_then(|s| s.storage_class_name.as_ref());
+                let desired_sc = desired_vct_spec.and_then(|s| s.storage_class_name.as_ref());
 
                 if existing_sc != desired_sc {
                     return Err(types::error::Error::ImmutableFieldModified {
@@ -1801,6 +1844,29 @@ mod tests {
     fn image_pull_secret(name: &str) -> corev1::LocalObjectReference {
         corev1::LocalObjectReference {
             name: name.to_string(),
+        }
+    }
+
+    fn volume_claim_template_spec(
+        storage: &str,
+        access_modes: &[&str],
+    ) -> corev1::PersistentVolumeClaimSpec {
+        let requests = std::collections::BTreeMap::from([(
+            "storage".to_string(),
+            k8s_openapi::apimachinery::pkg::api::resource::Quantity(storage.to_string()),
+        )]);
+        corev1::PersistentVolumeClaimSpec {
+            access_modes: Some(
+                access_modes
+                    .iter()
+                    .map(|mode| (*mode).to_string())
+                    .collect(),
+            ),
+            resources: Some(corev1::VolumeResourceRequirements {
+                requests: Some(requests),
+                ..Default::default()
+            }),
+            ..Default::default()
         }
     }
 
@@ -4490,6 +4556,62 @@ mod tests {
                     message.contains("volumesPerServer"),
                     "Error message should mention volumesPerServer"
                 );
+            }
+            _ => panic!("Expected ImmutableFieldModified error"),
+        }
+    }
+
+    #[test]
+    fn test_statefulset_storage_request_change_rejected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        tenant.spec.pools[0].persistence.volume_claim_template =
+            Some(volume_claim_template_spec("20Gi", &["ReadWriteOnce"]));
+        let pool = &tenant.spec.pools[0];
+
+        let err = tenant
+            .validate_statefulset_update(&statefulset, pool)
+            .expect_err("Validation should reject storage request changes");
+
+        match err {
+            crate::types::error::Error::ImmutableFieldModified { field, message, .. } => {
+                assert_eq!(
+                    field,
+                    "spec.volumeClaimTemplates[0].spec.resources.requests.storage"
+                );
+                assert!(message.contains("10Gi"));
+                assert!(message.contains("20Gi"));
+                assert!(message.contains("add a new pool"));
+            }
+            _ => panic!("Expected ImmutableFieldModified error"),
+        }
+    }
+
+    #[test]
+    fn test_statefulset_access_modes_change_rejected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        tenant.spec.pools[0].persistence.volume_claim_template =
+            Some(volume_claim_template_spec("10Gi", &["ReadWriteMany"]));
+        let pool = &tenant.spec.pools[0];
+
+        let err = tenant
+            .validate_statefulset_update(&statefulset, pool)
+            .expect_err("Validation should reject access mode changes");
+
+        match err {
+            crate::types::error::Error::ImmutableFieldModified { field, message, .. } => {
+                assert_eq!(field, "spec.volumeClaimTemplates[0].spec.accessModes");
+                assert!(message.contains("ReadWriteOnce"));
+                assert!(message.contains("ReadWriteMany"));
             }
             _ => panic!("Expected ImmutableFieldModified error"),
         }
