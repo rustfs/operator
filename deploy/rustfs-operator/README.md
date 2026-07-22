@@ -372,6 +372,16 @@ spec:
   image: "registry.example.com/rustfs/rustfs@sha256:<digest>"
 ```
 
+The Operator also removes legacy Tenant workload Roles and RoleBindings and
+disables automatic Kubernetes API token mounting for generated Tenant
+ServiceAccounts. Existing default-ServiceAccount Tenants roll once to apply the
+Pod template change. A custom image that calls the Kubernetes API must use a
+user-owned ServiceAccount with the required token projection and a
+least-privilege Role/RoleBinding under names other than the legacy
+`{tenant}-role` and `{tenant}-role-binding`, then set `spec.serviceAccountName`.
+Do not downgrade after reconciliation: an older Operator recreates the legacy
+broad workload RBAC.
+
 The annotation must change when the image reference changes and cannot override
 a known-incompatible official alpha or beta.1 through beta.8 reference that is
 not digest-qualified. For `tag@digest`, Kubernetes pulls by digest; after

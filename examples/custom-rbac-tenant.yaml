@@ -1,234 +1,120 @@
-# Custom RBAC Configuration Example
+# Custom ServiceAccount and RBAC examples
 #
-# This example demonstrates using a custom ServiceAccount with
-# the RustFS operator, useful when:
-# - Integrating with existing RBAC policies
-# - Using external authentication/authorization systems
-# - Applying organization-specific security policies
-# - Need additional permissions beyond operator-managed Role
-#
-# Two configurations shown:
-# 1. Custom SA without operator-managed RBAC (you manage everything)
-# 2. Custom SA with operator-managed RBAC (operator creates Role/RoleBinding)
+# RustFS Tenant workloads receive no operator-managed Kubernetes API permissions.
+# Use a custom ServiceAccount and grant only the exact permissions required by a
+# custom image or workload identity provider.
 
 ---
-# Configuration 1: Custom SA without operator-managed RBAC
-# You are responsible for all RBAC configuration
-
+# Configuration 1: user-managed, resource-scoped RBAC for a custom image that
+# reads one ConfigMap from the Kubernetes API.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: my-custom-sa
+  name: custom-api-sa
   namespace: default
-  labels:
-    app: rustfs
-  annotations:
-    # Example: Workload Identity annotation for cloud providers
-    iam.gke.io/gcp-service-account: "rustfs@project.iam.gserviceaccount.com"
+automountServiceAccountToken: true
 
 ---
-# Custom Role with additional permissions
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rustfs-runtime-config
+  namespace: default
+data:
+  example: "value"
+
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: custom-rustfs-role
+  name: rustfs-runtime-config-reader
   namespace: default
 rules:
-  # Standard RustFS permissions
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list", "watch"]
-
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["create", "delete", "get"]
-
-  - apiGroups: ["rustfs.com"]
-    resources: ["tenants"]
-    verbs: ["get", "list", "watch"]
-
-  # Additional custom permissions
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
-
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "delete"]
-
-  # Example: Access to monitoring resources
-  - apiGroups: ["monitoring.coreos.com"]
-    resources: ["servicemonitors"]
-    verbs: ["get", "create"]
+    resourceNames: ["rustfs-runtime-config"]
+    verbs: ["get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: custom-rustfs-binding
+  name: rustfs-runtime-config-reader
   namespace: default
 subjects:
   - kind: ServiceAccount
-    name: my-custom-sa
+    name: custom-api-sa
     namespace: default
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: custom-rustfs-role
+  name: rustfs-runtime-config-reader
 
 ---
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:
-  name: custom-rbac-tenant-1
+  name: custom-rbac-tenant
   namespace: default
+  annotations:
+    # Set only after verifying that this exact custom image supports the generated security profile.
+    operator.rustfs.com/runtime-default-image-ack: "registry.example.com/rustfs-custom:1.0.0"
 spec:
-  image: rustfs/rustfs:1.0.0-beta.10
-
-  # Use custom ServiceAccount
-  serviceAccountName: my-custom-sa
-
-  # Do NOT create RBAC (we manage it ourselves above)
-  createServiceAccountRbac: false
-
+  image: registry.example.com/rustfs-custom:1.0.0
+  serviceAccountName: custom-api-sa
   pools:
     - name: pool-0
       servers: 4
       persistence:
         volumesPerServer: 4
 
-  env:
-    - name: RUST_LOG
-      value: "info"
-
 ---
-# Configuration 2: Custom SA with operator-managed RBAC
-# Operator creates Role and RoleBinding for your custom SA
-# Useful when you want operator RBAC but need custom SA for other reasons
-# (e.g., workload identity, external auth)
-
+# Configuration 2: custom ServiceAccount for cloud workload identity. The cloud
+# provider webhook controls token projection; no Kubernetes Role is required.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: cloud-identity-sa
   namespace: default
   annotations:
-    # Example: AWS IAM Role annotation
     eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/RustFSRole"
-    # Example: Azure Managed Identity
+    # GKE example:
+    # iam.gke.io/gcp-service-account: "rustfs@project.iam.gserviceaccount.com"
+    # Azure example:
     # azure.workload.identity/client-id: "12345678-1234-1234-1234-123456789012"
 
 ---
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:
-  name: custom-rbac-tenant-2
+  name: cloud-identity-tenant
   namespace: default
 spec:
   image: rustfs/rustfs:1.0.0-beta.10
-
-  # Use custom ServiceAccount (with cloud identity annotations)
   serviceAccountName: cloud-identity-sa
-
-  # Let operator create RBAC for this custom SA
-  createServiceAccountRbac: true
-
   pools:
     - name: pool-0
       servers: 4
       persistence:
         volumesPerServer: 4
-
   env:
-    - name: RUST_LOG
-      value: "info"
-
-    # Example: Cloud-specific configuration
     - name: AWS_REGION
       value: "us-east-1"
 
 ---
-# Usage examples:
-
-# 1. Deploy custom SA without operator RBAC:
-#   kubectl apply -f custom-rbac-tenant.yaml
-#   # This creates: SA, Role, RoleBinding, and Tenant (custom-rbac-tenant-1)
-
-# 2. Verify RBAC:
-#   kubectl get sa my-custom-sa
-#   kubectl get role custom-rustfs-role
-#   kubectl get rolebinding custom-rustfs-binding
-
-# 3. Check ServiceAccount usage:
-#   kubectl get pods -l rustfs.tenant=custom-rbac-tenant-1 -o jsonpath='{.items[0].spec.serviceAccountName}'
-#   # Should output: my-custom-sa
-
-# 4. Test permissions:
-#   kubectl auth can-i get secrets --as=system:serviceaccount:default:my-custom-sa
-#   kubectl auth can-i create services --as=system:serviceaccount:default:my-custom-sa
-
-# 5. Deploy custom SA with operator RBAC:
-#   # Only apply the second ServiceAccount and Tenant
-#   kubectl apply -f - <<EOF
-#   apiVersion: v1
-#   kind: ServiceAccount
-#   metadata:
-#     name: cloud-identity-sa
-#     namespace: default
-#     annotations:
-#       eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/RustFSRole"
-#   ---
-#   apiVersion: rustfs.com/v1alpha1
-#   kind: Tenant
-#   metadata:
-#     name: custom-rbac-tenant-2
-#     namespace: default
-#   spec:
-#     image: rustfs/rustfs:1.0.0-beta.10
-#     serviceAccountName: cloud-identity-sa
-#     createServiceAccountRbac: true
-#     pools:
-#       - name: pool-0
-#         servers: 4
-#         persistence:
-#           volumesPerServer: 4
-#   EOF
-
-# 6. Verify operator created RBAC:
-#   kubectl get role custom-rbac-tenant-2-role
-#   kubectl get rolebinding custom-rbac-tenant-2-role-binding
-
----
-# RBAC configuration decision tree:
+# Verification:
 #
-# Use Case                                    | serviceAccountName | createServiceAccountRbac
-# -------------------------------------------|-------------------|------------------------
-# Default (operator manages everything)       | (not set)         | (not set or false)
-# Custom SA, you manage RBAC                 | my-sa             | false
-# Custom SA, operator manages RBAC           | my-sa             | true
-# Cloud workload identity                    | cloud-sa          | true
-# External auth system                       | external-sa       | true/false (depends)
-# Additional permissions needed              | custom-sa         | false (manage yourself)
-
----
-# Security best practices:
+# kubectl auth can-i get configmap/rustfs-runtime-config \
+#   --as=system:serviceaccount:default:custom-api-sa -n default
+# # yes
 #
-# 1. Principle of least privilege:
-#    - Only grant permissions actually needed
-#    - Use namespaced Roles, not ClusterRoles when possible
+# kubectl auth can-i list secrets \
+#   --as=system:serviceaccount:default:custom-api-sa -n default
+# # no
 #
-# 2. Separate concerns:
-#    - Use different SAs for different tenants
-#    - Isolate sensitive workloads in separate namespaces
+# kubectl auth can-i create services \
+#   --as=system:serviceaccount:default:custom-api-sa -n default
+# # no
 #
-# 3. Audit:
-#    - Regularly review ServiceAccount permissions
-#    - Monitor ServiceAccount usage with audit logs
-#
-# 4. Rotation:
-#    - Rotate ServiceAccount tokens periodically
-#    - Use short-lived credentials when possible
-#
-# 5. Cloud integration:
-#    - Use workload identity when available (GKE, EKS, AKS)
-#    - Avoid storing cloud credentials in Secrets
+# The deprecated createServiceAccountRbac field is ignored. The operator never
+# creates workload Roles or RoleBindings.

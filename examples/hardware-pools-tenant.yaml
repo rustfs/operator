@@ -24,7 +24,7 @@
 # - 3 StatefulSets with different disk size configurations
 # - 64 total PVCs (all same storage class, different sizes)
 # - 3 Services (shared)
-# - RBAC resources
+# - 1 ServiceAccount with Kubernetes API token automount disabled
 #
 # Total storage: ~220Ti (all SSD for consistent performance)
 

@@ -37,8 +37,9 @@ mod tls;
 const OUT_OF_SERVICE_TAINT_KEY: &str = "node.kubernetes.io/out-of-service";
 
 use phases::{
-    cleanup_removed_decommissioned_pool_statefulsets, finalize_tenant_status,
-    maybe_cleanup_terminating_pods, reconcile_pool_statefulsets, reconcile_rbac_resources,
+    cleanup_legacy_tenant_rbac, cleanup_removed_decommissioned_pool_statefulsets,
+    finalize_tenant_status, harden_existing_tenant_workload_identity,
+    maybe_cleanup_terminating_pods, reconcile_pool_statefulsets, reconcile_service_account,
     reconcile_services, validate_no_pool_rename, validate_tenant_prerequisites,
 };
 use pool_lifecycle::reconcile_pool_lifecycle;
@@ -62,7 +63,10 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     let ns = tenant.namespace()?;
     let latest_tenant = ctx.get::<Tenant>(&tenant.name(), &ns).await?;
 
+    let cleanup_result = cleanup_legacy_tenant_rbac(&ctx, &latest_tenant, &ns).await;
+
     if latest_tenant.metadata.deletion_timestamp.is_some() {
+        cleanup_result?;
         debug!(
             tenant = %tenant.name(),
             namespace = %ns,
@@ -71,6 +75,11 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         );
         return Ok(Action::await_change());
     }
+
+    let workload_identity_result =
+        harden_existing_tenant_workload_identity(&ctx, &latest_tenant, &ns).await;
+    context_result(cleanup_result, &ctx, &latest_tenant).await?;
+    context_result(workload_identity_result, &ctx, &latest_tenant).await?;
 
     if should_mark_reconcile_started(&latest_tenant) {
         patch_reconcile_started(&ctx, &latest_tenant).await;
@@ -81,7 +90,7 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
 
     maybe_cleanup_terminating_pods(&ctx, &latest_tenant, &ns).await?;
 
-    reconcile_rbac_resources(&ctx, &latest_tenant, &ns).await?;
+    reconcile_service_account(&ctx, &latest_tenant, &ns).await?;
 
     reconcile_services(&ctx, &latest_tenant, &ns, &tls_plan).await?;
 
@@ -108,11 +117,6 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     )
     .await?;
     finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan).await
-}
-
-#[cfg(test)]
-fn should_create_rbac(tenant: &Tenant) -> bool {
-    phases::should_create_rbac(tenant)
 }
 
 async fn context_result<T>(
@@ -986,8 +990,8 @@ mod tests {
         NodePodDeletionSafety, PodCleanupDecision, cleanup_decision_for_pod,
         force_delete_requires_fencing, node_pod_deletion_safety, object_owned_by_tenant,
         pod_controller_owner_name_and_uid, pod_has_owner_kind, pod_matches_policy_controller_kind,
-        replicaset_matches_pod_controller_and_tenant, should_create_rbac,
-        should_mark_reconcile_started, statefulset_matches_pod_controller_and_tenant,
+        replicaset_matches_pod_controller_and_tenant, should_mark_reconcile_started,
+        statefulset_matches_pod_controller_and_tenant,
     };
     use crate::types::v1alpha1::status::Status;
     use k8s_openapi::api::apps::v1 as appsv1;
@@ -1214,39 +1218,7 @@ mod tests {
         assert!(should_mark_reconcile_started(&stale));
     }
 
-    #[test]
-    fn test_should_create_rbac_default() {
-        let tenant = crate::tests::create_test_tenant(None, None);
-
-        assert!(should_create_rbac(&tenant));
-    }
-
-    // Test 11: RBAC creation logic - custom SA with createServiceAccountRbac=true
-    #[test]
-    fn test_should_create_rbac_custom_sa_with_rbac() {
-        let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(true));
-
-        assert!(should_create_rbac(&tenant));
-    }
-
-    // Test 12: RBAC creation logic - custom SA with createServiceAccountRbac=false
-    #[test]
-    fn test_should_skip_rbac_custom_sa_without_rbac() {
-        let tenant =
-            crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), Some(false));
-
-        assert!(!should_create_rbac(&tenant));
-    }
-
-    // Test 13: RBAC creation logic - custom SA with createServiceAccountRbac=None (default)
-    #[test]
-    fn test_should_skip_rbac_custom_sa_default() {
-        let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), None);
-
-        assert!(!should_create_rbac(&tenant));
-    }
-
-    // Test 14: Service account determination in reconcile logic
+    // Test: Service account determination in reconcile logic
     #[test]
     fn test_determine_sa_name_in_reconcile() {
         // Test default behavior

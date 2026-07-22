@@ -27,7 +27,7 @@ RustFS Operator 用于在 Kubernetes 中管理 RustFS 对象存储集群。用�
 Operator 提供以下能力：
 
 - `Tenant` CRD（`rustfs.com/v1alpha1`）：声明 RustFS pool、持久化、调度、凭据、TLS、日志、加密和初始化 provisioning。
-- 控制器 reconciliation：维护 Tenant 相关的 RBAC、Service、StatefulSet、PVC 模板、状态条件和 Kubernetes Event。
+- 控制器 reconciliation：维护 Tenant ServiceAccount、Service、StatefulSet、PVC 模板、状态条件和 Kubernetes Event。
 - Helm Chart：位于 `deploy/rustfs-operator/`，用于安装 Operator。
 - Operator Console API 和 UI：用于 Operator 管理场景。
 - 可选 Operator STS：基于 Kubernetes 工作负载身份签发临时 RustFS 凭据。
@@ -52,7 +52,8 @@ Operator 提供以下能力：
 
 创建 Tenant 后，Operator 会创建并维护：
 
-- Tenant RBAC 启用时的 ServiceAccount、Role、RoleBinding；
+- 未配置 `serviceAccountName` 时创建一个 ServiceAccount；Operator 不会向 Tenant
+  workload 授予 Kubernetes API 权限；
 - headless Service：`{tenant}-hl`，用于 StatefulSet peer DNS；
 - S3 Service：`{tenant}-io`，端口 `9000`；
 - Tenant Console Service：`{tenant}-console`，端口 `9001`；
@@ -121,6 +122,15 @@ StatefulSet template 如果尚未包含这些值，会在下一次 reconcile 时
 升级前应固定到已验证的 RustFS beta.9 或更高 release tag；也可先验证实际生效的镜像，
 再将 `operator.rustfs.com/runtime-default-image-ack` 设置为完全相同的镜像引用。
 
+Operator 还会删除旧版本为 Tenant workload 创建的 Role 和 RoleBinding，并禁止其
+自动挂载 Kubernetes API token。使用默认 ServiceAccount 的已有 Tenant 会因 Pod
+template 变化发生一次滚动更新。若自定义镜像需要调用 Kubernetes API，必须在升级前
+创建用户自管的 ServiceAccount 并配置所需 token projection，以非旧版
+`{tenant}-role`、`{tenant}-role-binding` 的名称绑定最小权限 Role，再设置
+`spec.serviceAccountName`。只给默认生成的 ServiceAccount 增加 RBAC 不足以恢复访问，
+因为其 Pod template 会禁用 token 挂载。`createServiceAccountRbac` 仅作为已忽略的
+兼容字段保留。
+
 内置 RustFS 镜像 fallback 也会从可变的 `latest` 改为
 `rustfs/rustfs:1.0.0-beta.10`。未设置 `spec.image`，且 Operator 没有配置
 `TENANT_RUSTFS_IMAGE` 环境变量覆盖的 Tenant，会在 reconcile 时滚动到该固定版本。
@@ -128,9 +138,9 @@ StatefulSet template 如果尚未包含这些值，会在下一次 reconcile 时
 
 应将此次变更视为单向 workload security migration。新版本 Operator 完成 Tenant
 reconcile 后，不要直接降级到尚未提供这些 restricted 默认值的旧版本。旧 Controller
-会省略新增的 seccomp 和容器安全字段：restricted 准入会拒绝该更新；未启用
-restricted 准入的集群则可能把 workload 滚动回较弱配置。故障恢复应向前升级到当前
-版本或更新的修复版本。
+会省略新增的 seccomp 和容器安全字段，并重新创建旧版宽权限 workload RBAC：
+restricted 准入可能拒绝 Pod 更新；未启用 restricted 准入的集群则可能把 workload
+滚动回较弱配置。故障恢复应向前升级到当前版本或更新的修复版本。
 
 卸载：
 
@@ -406,7 +416,7 @@ spec:
 | `scheduler` | 自定义 scheduler 名称。 |
 | `env` | 额外 RustFS 容器环境变量。不要覆盖 Operator 自动管理的变量。 |
 | `serviceAccountName` | RustFS Pod 使用的自定义 ServiceAccount。 |
-| `createServiceAccountRbac` | 是否由 Operator 为 Tenant ServiceAccount 创建 Role/RoleBinding。 |
+| `createServiceAccountRbac` | 已废弃的兼容字段，不再生效；自定义 ServiceAccount 所需 RBAC 必须显式管理。 |
 | `priorityClassName` | Tenant 级 PriorityClass。 |
 | `lifecycle` | Kubernetes 容器 lifecycle hook。 |
 | `podManagementPolicy` | StatefulSet pod management policy。 |

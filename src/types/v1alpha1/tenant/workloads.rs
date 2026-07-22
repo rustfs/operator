@@ -45,6 +45,20 @@ pub const RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION: &str =
 // Kubernetes caps Localhost AppArmor names at PATH_MAX - 1 bytes.
 const MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH: usize = 4095;
 
+pub(crate) fn uses_unpartitioned_rolling_update(
+    strategy: Option<&v1::StatefulSetUpdateStrategy>,
+) -> bool {
+    let strategy_type = strategy
+        .and_then(|strategy| strategy.type_.as_deref())
+        .unwrap_or("RollingUpdate");
+    let partition = strategy
+        .and_then(|strategy| strategy.rolling_update.as_ref())
+        .and_then(|rolling_update| rolling_update.partition)
+        .unwrap_or(0);
+
+    strategy_type == "RollingUpdate" && partition == 0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageUnverifiableReason {
     CustomRepository,
@@ -1249,6 +1263,15 @@ impl Tenant {
                     match_labels: Some(selector_labels),
                     ..Default::default()
                 },
+                update_strategy: self.spec.service_account_name.is_none().then(|| {
+                    v1::StatefulSetUpdateStrategy {
+                        type_: Some("RollingUpdate".to_string()),
+                        rolling_update: Some(v1::RollingUpdateStatefulSetStrategy {
+                            partition: Some(0),
+                            ..Default::default()
+                        }),
+                    }
+                }),
                 template: corev1::PodTemplateSpec {
                     metadata: Some(metav1::ObjectMeta {
                         labels: Some(labels),
@@ -1258,6 +1281,11 @@ impl Tenant {
                     }),
                     spec: Some(corev1::PodSpec {
                         service_account_name: Some(self.service_account_name()),
+                        automount_service_account_token: self
+                            .spec
+                            .service_account_name
+                            .is_none()
+                            .then_some(false),
                         containers: vec![container],
                         security_context: Some(pod_security_context),
                         volumes: Some(pod_volumes),
@@ -1402,6 +1430,22 @@ impl Tenant {
 
         // Check service account
         if existing_pod_spec.service_account_name != desired_pod_spec.service_account_name {
+            return Ok(true);
+        }
+
+        // Operator-created ServiceAccounts do not require Kubernetes API access. Compare this
+        // field only for the default ServiceAccount so custom workload identity webhooks remain
+        // free to manage token projection without causing a reconcile loop.
+        if self.spec.service_account_name.is_none()
+            && existing_pod_spec.automount_service_account_token
+                != desired_pod_spec.automount_service_account_token
+        {
+            return Ok(true);
+        }
+
+        if self.spec.service_account_name.is_none()
+            && !uses_unpartitioned_rolling_update(existing_spec.update_strategy.as_ref())
+        {
             return Ok(true);
         }
 
@@ -1741,7 +1785,8 @@ mod tests {
     use super::{
         DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER,
         MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH, RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION,
-        validate_declared_app_armor_profile, validate_declared_seccomp_profile,
+        uses_unpartitioned_rolling_update, validate_declared_app_armor_profile,
+        validate_declared_seccomp_profile,
     };
     use crate::types::v1alpha1::encryption::{
         EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef,
@@ -1750,6 +1795,7 @@ mod tests {
     use crate::types::v1alpha1::security_context::{MAX_KUBERNETES_ID, PodSecurityContextOverride};
     use crate::types::v1alpha1::tenant::{RpcSecretRef, Tenant};
     use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
+    use k8s_openapi::api::apps::v1;
     use k8s_openapi::api::core::v1 as corev1;
 
     fn image_pull_secret(name: &str) -> corev1::LocalObjectReference {
@@ -3732,6 +3778,12 @@ mod tests {
         let statefulset = tenant
             .new_statefulset(pool)
             .expect("Should create StatefulSet");
+        assert!(uses_unpartitioned_rolling_update(
+            statefulset
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.update_strategy.as_ref())
+        ));
 
         let pod_spec = statefulset
             .spec
@@ -3745,6 +3797,7 @@ mod tests {
             Some("test-tenant-sa".to_string()),
             "Pod should use default service account"
         );
+        assert_eq!(pod_spec.automount_service_account_token, Some(false));
     }
 
     // Test: StatefulSet uses custom service account
@@ -3756,6 +3809,13 @@ mod tests {
         let statefulset = tenant
             .new_statefulset(pool)
             .expect("Should create StatefulSet");
+        assert_eq!(
+            statefulset
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.update_strategy.as_ref()),
+            None
+        );
 
         let pod_spec = statefulset
             .spec
@@ -3768,6 +3828,108 @@ mod tests {
             pod_spec.service_account_name,
             Some("my-custom-sa".to_string()),
             "Pod should use custom service account"
+        );
+        assert_eq!(pod_spec.automount_service_account_token, None);
+    }
+
+    #[test]
+    fn default_service_account_token_hardening_triggers_statefulset_update() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+        statefulset
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_mut()
+            .expect("Pod template should have spec")
+            .automount_service_account_token = None;
+
+        assert!(
+            tenant
+                .statefulset_needs_update(&statefulset, pool)
+                .expect("Should compare StatefulSet"),
+            "Legacy default ServiceAccount token automount should trigger a rollout"
+        );
+    }
+
+    #[test]
+    fn default_service_account_token_hardening_replaces_non_rolling_strategy() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+        statefulset
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .update_strategy = Some(v1::StatefulSetUpdateStrategy {
+            type_: Some("OnDelete".to_string()),
+            ..Default::default()
+        });
+
+        assert!(
+            tenant
+                .statefulset_needs_update(&statefulset, pool)
+                .expect("Should compare StatefulSet"),
+            "OnDelete must not leave legacy Pods with mounted API tokens"
+        );
+    }
+
+    #[test]
+    fn default_service_account_token_hardening_removes_rolling_partition() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+        statefulset
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .update_strategy = Some(v1::StatefulSetUpdateStrategy {
+            type_: Some("RollingUpdate".to_string()),
+            rolling_update: Some(v1::RollingUpdateStatefulSetStrategy {
+                partition: Some(1),
+                ..Default::default()
+            }),
+        });
+
+        assert!(
+            tenant
+                .statefulset_needs_update(&statefulset, pool)
+                .expect("Should compare StatefulSet"),
+            "a rolling partition must not leave legacy Pods with mounted API tokens"
+        );
+    }
+
+    #[test]
+    fn custom_service_account_token_projection_does_not_reconcile_loop() {
+        let tenant = crate::tests::create_test_tenant(Some("my-custom-sa".to_string()), None);
+        let pool = &tenant.spec.pools[0];
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+        statefulset
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_mut()
+            .expect("Pod template should have spec")
+            .automount_service_account_token = Some(true);
+
+        assert!(
+            !tenant
+                .statefulset_needs_update(&statefulset, pool)
+                .expect("Should compare StatefulSet"),
+            "Custom ServiceAccount token projection should remain user-managed"
         );
     }
 

@@ -580,6 +580,28 @@ impl Context {
         .await
     }
 
+    /// Force-applies a narrow security patch without taking ownership of the full resource.
+    pub(crate) async fn force_apply_security_fields<T, P>(
+        &self,
+        name: &str,
+        namespace: &str,
+        patch: &P,
+    ) -> Result<T, Error>
+    where
+        T: Clone + DeserializeOwned + Debug + Resource<Scope = NamespaceResourceScope>,
+        <T as kube::Resource>::DynamicType: Default,
+        P: Serialize + Debug,
+    {
+        let api: Api<T> = Api::namespaced(self.client.clone(), namespace);
+        api.patch(
+            name,
+            &PatchParams::apply("rustfs-operator-security").force(),
+            &Patch::Apply(patch),
+        )
+        .context(KubeSnafu)
+        .await
+    }
+
     /// Validates that a credential Secret exists and contains required keys.
     ///
     /// This function only validates the Secret structure when `spec.credsSecret` is configured.

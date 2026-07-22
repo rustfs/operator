@@ -29,6 +29,7 @@ use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use hyper_util::service::TowerToHyperService;
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
+use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::core::{
     ApiResource, DynamicObject, GroupVersionKind, PartialObjectMeta, PartialObjectMetaExt,
@@ -241,6 +242,16 @@ async fn run_controller(
         .watches_stream(secrets, move |secret| {
             tenant_refs_for_secret(secret, &secret_reference_index)
         })
+        .watches(
+            Api::<rbacv1::Role>::all(client.clone()),
+            watcher::Config::default(),
+            tenant_refs_for_legacy_role,
+        )
+        .watches(
+            Api::<rbacv1::RoleBinding>::all(client.clone()),
+            watcher::Config::default(),
+            tenant_refs_for_legacy_role_binding,
+        )
         .owns(
             Api::<corev1::ServiceAccount>::all(client.clone()),
             watcher::Config::default(),
@@ -858,6 +869,32 @@ fn tenant_refs_for_config_map<K: Resource>(
     deduplicate_tenant_refs(refs)
 }
 
+fn tenant_refs_for_legacy_role(role: rbacv1::Role) -> Vec<ObjectRef<Tenant>> {
+    tenant_refs_for_legacy_rbac(&role, "role")
+}
+
+fn tenant_refs_for_legacy_role_binding(
+    role_binding: rbacv1::RoleBinding,
+) -> Vec<ObjectRef<Tenant>> {
+    tenant_refs_for_legacy_rbac(&role_binding, "role-binding")
+}
+
+fn tenant_refs_for_legacy_rbac<K: Resource>(resource: &K, suffix: &str) -> Vec<ObjectRef<Tenant>> {
+    let metadata = resource.meta();
+    let Some(resource_name) = metadata.name.as_deref() else {
+        return Vec::new();
+    };
+
+    tenant_refs_from_metadata(
+        metadata.namespace.as_deref(),
+        metadata.owner_references.as_deref(),
+        metadata.labels.as_ref(),
+    )
+    .into_iter()
+    .filter(|tenant| resource_name == format!("{}-{suffix}", tenant.name))
+    .collect()
+}
+
 fn tenant_refs_for_pod(pod: corev1::Pod) -> Vec<ObjectRef<Tenant>> {
     tenant_refs_from_metadata(
         pod.metadata.namespace.as_deref(),
@@ -1466,6 +1503,86 @@ mod controller_watch_tests {
         let refs = tenant_refs_for_pod(pod);
 
         assert_single_ref(&refs, "tenant-a", "storage");
+    }
+
+    #[test]
+    fn legacy_rbac_mapper_uses_tenant_owner_reference() {
+        let role = rbacv1::Role {
+            metadata: metav1::ObjectMeta {
+                name: Some("tenant-a-role".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-a")]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let role_binding = rbacv1::RoleBinding {
+            metadata: metav1::ObjectMeta {
+                name: Some("tenant-a-role-binding".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-a")]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_single_ref(&tenant_refs_for_legacy_role(role), "tenant-a", "storage");
+        assert_single_ref(
+            &tenant_refs_for_legacy_role_binding(role_binding),
+            "tenant-a",
+            "storage",
+        );
+    }
+
+    #[test]
+    fn legacy_rbac_mapper_uses_tenant_label_for_orphan() {
+        let role = rbacv1::Role {
+            metadata: metav1::ObjectMeta {
+                name: Some("tenant-a-role".to_string()),
+                namespace: Some("storage".to_string()),
+                labels: Some(BTreeMap::from([(
+                    RUSTFS_TENANT_LABEL.to_string(),
+                    "tenant-a".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_single_ref(&tenant_refs_for_legacy_role(role), "tenant-a", "storage");
+    }
+
+    #[test]
+    fn legacy_rbac_mapper_ignores_non_legacy_names() {
+        let role = rbacv1::Role {
+            metadata: metav1::ObjectMeta {
+                name: Some("tenant-a-custom-role".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-a")]),
+                labels: Some(BTreeMap::from([(
+                    RUSTFS_TENANT_LABEL.to_string(),
+                    "tenant-a".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let role_binding = rbacv1::RoleBinding {
+            metadata: metav1::ObjectMeta {
+                name: Some("tenant-a-role-binding-extra".to_string()),
+                namespace: Some("storage".to_string()),
+                owner_references: Some(vec![tenant_owner_ref("tenant-a")]),
+                labels: Some(BTreeMap::from([(
+                    RUSTFS_TENANT_LABEL.to_string(),
+                    "tenant-a".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(tenant_refs_for_legacy_role(role).is_empty());
+        assert!(tenant_refs_for_legacy_role_binding(role_binding).is_empty());
     }
 
     #[test]
