@@ -1623,17 +1623,17 @@ mod controller_watch_tests {
     #[test]
     fn tracked_tenant_crds_match_generated_schema() {
         let yaml = render_crds_yaml().expect("CRDs render to YAML");
-        let (tenant, _) = yaml
+        let (tenant, policy_binding) = yaml
             .split_once("---\n")
             .expect("Tenant and PolicyBinding CRDs should be separated");
 
         assert_eq!(
             tenant,
-            include_str!("../deploy/rustfs-operator/crds/tenant.yaml")
+            include_str!("../deploy/rustfs-operator/crds/tenant-crd.yaml")
         );
         assert_eq!(
-            tenant,
-            include_str!("../deploy/rustfs-operator/crds/tenant-crd.yaml")
+            policy_binding,
+            include_str!("../deploy/rustfs-operator/crds/policybinding-crd.yaml")
         );
     }
 
