@@ -96,7 +96,7 @@ kubectl logs -n rustfs-system \
 # Helm 不会升级 Chart crds/ 目录中已经存在的 CRD。
 kubectl apply --server-side --force-conflicts \
   --field-manager=rustfs-operator-crd-upgrade \
-  -f deploy/rustfs-operator/crds/tenant.yaml
+  -f deploy/rustfs-operator/crds/tenant-crd.yaml
 kubectl apply --server-side --force-conflicts \
   --field-manager=rustfs-operator-crd-upgrade \
   -f deploy/rustfs-operator/crds/policybinding-crd.yaml

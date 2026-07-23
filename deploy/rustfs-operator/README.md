@@ -339,7 +339,7 @@ To upgrade the operator:
 ```bash
 kubectl apply --server-side --force-conflicts \
   --field-manager=rustfs-operator-crd-upgrade \
-  -f deploy/rustfs-operator/crds/tenant.yaml
+  -f deploy/rustfs-operator/crds/tenant-crd.yaml
 kubectl apply --server-side --force-conflicts \
   --field-manager=rustfs-operator-crd-upgrade \
   -f deploy/rustfs-operator/crds/policybinding-crd.yaml
