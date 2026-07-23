@@ -30,6 +30,7 @@ use hyper_util::service::TowerToHyperService;
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::api::rbac::v1 as rbacv1;
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use kube::core::{
     ApiResource, DynamicObject, GroupVersionKind, PartialObjectMeta, PartialObjectMetaExt,
@@ -975,9 +976,34 @@ fn deduplicate_tenant_refs(refs: Vec<ObjectRef<Tenant>>) -> Vec<ObjectRef<Tenant
         .collect()
 }
 
+/// Drops collections that are empty rather than absent.
+///
+/// kube-rs derives `names.categories` as `Some(vec![])` when the type carries no
+/// `category` attribute. The API server prunes empty arrays, so the stored object
+/// has no `categories` key at all. Tools that compare the rendered manifest against
+/// the live object (Argo CD, Flux, `kubectl diff`) then see a desired `[]` versus an
+/// absent field and report the CRD as permanently out of sync - a sync succeeds and
+/// the resource immediately reads as drifted again.
+fn normalize_crd(crd: &mut CustomResourceDefinition) {
+    if crd
+        .spec
+        .names
+        .categories
+        .as_ref()
+        .is_some_and(Vec::is_empty)
+    {
+        crd.spec.names.categories = None;
+    }
+}
+
 pub fn render_crds_yaml() -> Result<String, serde_yaml_ng::Error> {
-    let tenant = serde_yaml_ng::to_string(&Tenant::crd())?;
-    let policy_binding = serde_yaml_ng::to_string(&PolicyBinding::crd())?;
+    let mut tenant_crd = Tenant::crd();
+    normalize_crd(&mut tenant_crd);
+    let mut policy_binding_crd = PolicyBinding::crd();
+    normalize_crd(&mut policy_binding_crd);
+
+    let tenant = serde_yaml_ng::to_string(&tenant_crd)?;
+    let policy_binding = serde_yaml_ng::to_string(&policy_binding_crd)?;
     Ok(format!("{tenant}---\n{policy_binding}"))
 }
 
@@ -1018,6 +1044,32 @@ mod controller_watch_tests {
         assert_eq!(resource.api_version, "cert-manager.io/v1");
         assert_eq!(resource.kind, "Certificate");
         assert_eq!(resource.plural, "certificates");
+    }
+
+    #[test]
+    fn rendered_crds_omit_empty_categories() {
+        let yaml = render_crds_yaml().expect("CRDs render");
+
+        // The API server prunes empty arrays, so emitting `categories: []` leaves
+        // GitOps tooling diffing a desired [] against an absent field forever.
+        assert!(
+            !yaml.contains("categories:"),
+            "rendered CRDs must not carry an empty categories list:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn normalize_crd_keeps_populated_categories() {
+        let mut crd = Tenant::crd();
+        crd.spec.names.categories = Some(vec!["storage".to_owned()]);
+
+        normalize_crd(&mut crd);
+
+        assert_eq!(
+            crd.spec.names.categories,
+            Some(vec!["storage".to_owned()]),
+            "normalization must only drop empty category lists"
+        );
     }
 
     #[tokio::test]

@@ -5,7 +5,6 @@ metadata:
 spec:
   group: rustfs.com
   names:
-    categories: []
     kind: Tenant
     plural: tenants
     shortNames:
