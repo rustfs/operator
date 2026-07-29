@@ -563,7 +563,7 @@ async fn add_canned_policy_reports_upstream_policy_parse_error() {
 }
 
 #[tokio::test]
-async fn server_info_uses_expected_path_and_parses_health_fields() {
+async fn server_info_uses_expected_path_and_parses_wrapped_health_fields() {
     let capture = Capture::default();
     let route_capture = capture.clone();
 
@@ -586,25 +586,32 @@ async fn server_info_uses_expected_path_and_parses_health_fields() {
                     (
                         StatusCode::OK,
                         serde_json::json!({
-                            "usage": {"size": 42},
-                            "backend": {
-                                "onlineDisks": 3,
-                                "offlineDisks": 1,
-                                "standardSCParity": 2,
-                                "totalSets": [1],
-                                "totalDrivesPerSet": [4]
-                            },
-                            "pools": {
-                                "0": {
+                            "info": {
+                                "usage": {"size": 42},
+                                "backend": {
+                                    "onlineDisks": 3,
+                                    "offlineDisks": 1,
+                                    "standardSCParity": 2,
+                                    "totalSets": [1],
+                                    "totalDrivesPerSet": [4]
+                                },
+                                "pools": {
                                     "0": {
-                                        "rawUsage": 100,
-                                        "rawCapacity": 400,
-                                        "usage": 50,
-                                        "objectsCount": 2,
-                                        "healDisks": 1
+                                        "0": {
+                                            "rawUsage": 100,
+                                            "rawCapacity": 400,
+                                            "usage": 50,
+                                            "objectsCount": 2,
+                                            "healDisks": 1
+                                        }
                                     }
                                 }
-                            }
+                            },
+                            "admin_discovery": {
+                                "runtimeCapabilities": "/rustfs/admin/v4/runtime/capabilities",
+                                "clusterSnapshot": "/rustfs/admin/v4/cluster/snapshot",
+                                "extensionsCatalog": "/rustfs/admin/v4/extensions/catalog"
+                            },
                         })
                         .to_string(),
                     )

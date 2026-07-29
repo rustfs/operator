@@ -22,7 +22,7 @@ use super::helpers::{body_mentions_not_found, build_query_pairs, extract_canned_
 use super::{
     ADD_CANNED_POLICY_PATH, ADD_USER_PATH, ADMIN_SIGNING_SERVICE, INFO_CANNED_POLICY_PATH,
     JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, RustfsAdminClient, RustfsClientError,
-    RustfsServerInfo, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
+    RustfsServerInfo, RustfsServerInfoResponse, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -148,7 +148,8 @@ impl RustfsAdminClient {
         let body = self
             .send_admin_request("GET", SERVER_INFO_PATH, "", "", None)
             .await?;
-        serde_json::from_str::<RustfsServerInfo>(&body)
+        serde_json::from_str::<RustfsServerInfoResponse>(&body)
+            .map(|response| response.info)
             .map_err(|_| RustfsClientError::ParseResponseFailed)
     }
 
