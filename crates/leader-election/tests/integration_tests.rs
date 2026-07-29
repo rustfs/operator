@@ -56,6 +56,18 @@ impl FakeLock {
         }
     }
 
+    /// Create another participant backed by the same distributed lock state.
+    fn for_identity(&self, identity: &str) -> Self {
+        Self {
+            identity: identity.to_string(),
+            record: Arc::clone(&self.record),
+            resource_version: Arc::clone(&self.resource_version),
+            conflict_count: Arc::new(AtomicUsize::new(0)),
+            fail_updates: Arc::new(AtomicBool::new(false)),
+            update_failure: Arc::new(Notify::new()),
+        }
+    }
+
     /// Configure the lock to return a specific record on get().
     async fn set_record(&self, record: LeaderElectionRecord) {
         let mut r = self.record.write().await;
@@ -444,39 +456,77 @@ async fn test_acquire_active_lease() {
 }
 
 #[tokio::test]
-async fn test_spawn_reports_observed_remote_leader() {
-    let lock = FakeLock::new("node-2");
+async fn test_spawn_reports_remote_leader_to_all_followers() {
     let now = Utc::now();
-    lock.set_record(LeaderElectionRecord {
-        holder_identity: "node-1".to_string(),
-        lease_duration_seconds: 15,
-        acquire_time: now,
-        renew_time: now,
-        leader_transitions: 0,
-    })
-    .await;
+    let shared_lock = FakeLock::new("node-1");
+    let config = |identity: &str| LeaderElectorConfig {
+        identity: identity.to_string(),
+        lease_duration: Duration::from_secs(1),
+        renew_deadline: Duration::from_millis(500),
+        retry_period: Duration::from_millis(10),
+        release_on_cancel: false,
+    };
 
-    let callbacks = Arc::new(TestCallbacks::new());
-    let elector = LeaderElector::new(test_config("node-2"), lock, MockClock::new(now)).unwrap();
-    let cancel = CancellationToken::new();
-    let (handle, join) = elector.spawn(SharedCallbacks(callbacks.clone()), cancel.clone());
-    let mut states = Box::pin(handle.state_stream());
-
-    let state = tokio::time::timeout(Duration::from_secs(2), states.next())
+    let leader_callbacks = Arc::new(TestCallbacks::new());
+    let leader =
+        LeaderElector::new(config("node-1"), shared_lock.clone(), MockClock::new(now)).unwrap();
+    let leader_cancel = CancellationToken::new();
+    let (leader_handle, leader_join) = leader.spawn(
+        SharedCallbacks(leader_callbacks.clone()),
+        leader_cancel.clone(),
+    );
+    let mut leader_states = Box::pin(leader_handle.state_stream());
+    let leader_state = tokio::time::timeout(Duration::from_secs(2), leader_states.next())
         .await
-        .expect("elector should report the observed leader")
+        .expect("leader should acquire the lease")
         .expect("state stream should remain open");
-    assert_eq!(state, LeaderState::Following("node-1".to_string()));
-    assert_eq!(handle.current_leader().as_deref(), Some("node-1"));
-    assert!(!handle.is_leader());
+    assert_eq!(leader_state, LeaderState::Leading);
+    drop(leader_states);
 
-    cancel.cancel();
-    let result = tokio::time::timeout(Duration::from_secs(2), join)
+    let mut followers = Vec::new();
+    for identity in ["node-2", "node-3"] {
+        let callbacks = Arc::new(TestCallbacks::new());
+        let elector = LeaderElector::new(
+            config(identity),
+            shared_lock.for_identity(identity),
+            MockClock::new(now),
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let (handle, join) = elector.spawn(SharedCallbacks(callbacks.clone()), cancel.clone());
+        followers.push((identity, callbacks, cancel, handle, join));
+    }
+
+    for (identity, _, _, handle, _) in &mut followers {
+        let mut states = Box::pin(handle.state_stream());
+        let state = tokio::time::timeout(Duration::from_secs(2), states.next())
+            .await
+            .unwrap_or_else(|_| panic!("{identity} should observe the remote leader"))
+            .expect("state stream should remain open");
+        assert_eq!(state, LeaderState::Following("node-1".to_string()));
+        assert_eq!(handle.current_leader().as_deref(), Some("node-1"));
+        assert!(!handle.is_leader());
+    }
+
+    for (_, _, cancel, _, _) in &followers {
+        cancel.cancel();
+    }
+    for (identity, callbacks, _, _, join) in followers {
+        let result = tokio::time::timeout(Duration::from_secs(2), join)
+            .await
+            .unwrap_or_else(|_| panic!("{identity} should stop after cancellation"))
+            .expect("elector task should not panic");
+        assert!(result.is_ok());
+        assert_eq!(callbacks.leaders().await, ["node-1"]);
+        assert_eq!(callbacks.stopped_count().await, 1);
+    }
+
+    leader_cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), leader_join)
         .await
-        .expect("elector should stop after cancellation")
+        .expect("leader should stop after cancellation")
         .expect("elector task should not panic");
     assert!(result.is_ok());
-    assert_eq!(callbacks.stopped_count().await, 1);
 }
 
 #[tokio::test]
