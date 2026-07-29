@@ -138,6 +138,11 @@ pub struct RustfsServerInfo {
     pub pools: Option<BTreeMap<String, BTreeMap<String, RustfsErasureSetInfo>>>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+pub(super) struct RustfsServerInfoResponse {
+    pub info: RustfsServerInfo,
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
 pub struct RustfsServerUsage {
     #[serde(default)]
