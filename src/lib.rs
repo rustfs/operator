@@ -1036,7 +1036,8 @@ mod controller_watch_tests {
     use serde::Deserialize;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn parse_crds(yaml: &str) -> Vec<CustomResourceDefinition> {
         serde_yaml_ng::Deserializer::from_str(yaml)
@@ -1045,6 +1046,42 @@ mod controller_watch_tests {
                     .expect("CRD document should deserialize")
             })
             .collect()
+    }
+
+    fn is_helm_manifest_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                ["yaml", "yml", "json"]
+                    .iter()
+                    .any(|expected| extension.eq_ignore_ascii_case(expected))
+            })
+    }
+
+    fn chart_crd_manifest_paths(crd_dir: &Path) -> Vec<PathBuf> {
+        let mut directories = vec![crd_dir.to_path_buf()];
+        let mut manifests = Vec::new();
+
+        while let Some(directory) = directories.pop() {
+            for entry in fs::read_dir(&directory)
+                .expect("chart CRD directory should be readable")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("chart CRD directory entries should be readable")
+            {
+                let path = entry.path();
+                let file_type = entry
+                    .file_type()
+                    .expect("chart CRD entry type should be readable");
+                if file_type.is_dir() {
+                    directories.push(path);
+                } else if file_type.is_file() && is_helm_manifest_path(&path) {
+                    manifests.push(path);
+                }
+            }
+        }
+
+        manifests.sort();
+        manifests
     }
 
     #[test]
@@ -1713,22 +1750,9 @@ mod controller_watch_tests {
             .map(|crd| crd.metadata.name.expect("generated CRD should have a name"))
             .collect::<BTreeSet<_>>();
         let crd_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("deploy/rustfs-operator/crds");
-        let mut entries = fs::read_dir(&crd_dir)
-            .expect("chart CRD directory should be readable")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("chart CRD directory entries should be readable");
-        entries.sort_by_key(|entry| entry.path());
 
         let mut tracked_names = BTreeMap::new();
-        for entry in entries {
-            let path = entry.path();
-            if !matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some("yaml" | "yml")
-            ) {
-                continue;
-            }
-
+        for path in chart_crd_manifest_paths(&crd_dir) {
             let yaml = fs::read_to_string(&path).expect("tracked CRD should be readable");
             for crd in parse_crds(&yaml) {
                 let name = crd.metadata.name.expect("tracked CRD should have a name");
@@ -1744,6 +1768,48 @@ mod controller_watch_tests {
             generated_names,
             "chart CRD names must match the generated CRDs"
         );
+    }
+
+    #[test]
+    fn chart_crd_manifest_paths_match_helm_file_selection() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should follow the Unix epoch")
+            .as_nanos();
+        let crd_dir = std::env::temp_dir().join(format!(
+            "rustfs-operator-crd-manifests-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(crd_dir.join("nested"))
+            .expect("nested test CRD directory should be created");
+        for relative_path in [
+            "tenant.yaml",
+            "policybinding.YML",
+            "nested/duplicate.JSON",
+            "README.md",
+        ] {
+            fs::write(crd_dir.join(relative_path), [])
+                .expect("test CRD manifest should be created");
+        }
+
+        let paths = chart_crd_manifest_paths(&crd_dir)
+            .into_iter()
+            .map(|path| {
+                path.strip_prefix(&crd_dir)
+                    .expect("test manifest should be under the CRD directory")
+                    .to_path_buf()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("nested/duplicate.JSON"),
+                PathBuf::from("policybinding.YML"),
+                PathBuf::from("tenant.yaml"),
+            ]
+        );
+        fs::remove_dir_all(&crd_dir).expect("test CRD directory should be removed");
     }
 
     fn tenant_owner_ref(name: &str) -> metav1::OwnerReference {
