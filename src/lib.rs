@@ -1033,7 +1033,19 @@ mod controller_watch_tests {
     use crate::types::v1alpha1::tenant::RpcSecretRef;
     use futures::{TryStreamExt, stream};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
+    use serde::Deserialize;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn parse_crds(yaml: &str) -> Vec<CustomResourceDefinition> {
+        serde_yaml_ng::Deserializer::from_str(yaml)
+            .map(|document| {
+                CustomResourceDefinition::deserialize(document)
+                    .expect("CRD document should deserialize")
+            })
+            .collect()
+    }
 
     #[test]
     fn cert_manager_certificate_api_resource_is_stable() {
@@ -1050,12 +1062,13 @@ mod controller_watch_tests {
     fn rendered_crds_omit_empty_categories() {
         let yaml = render_crds_yaml().expect("CRDs render");
 
-        // The API server prunes empty arrays, so emitting `categories: []` leaves
-        // GitOps tooling diffing a desired [] against an absent field forever.
-        assert!(
-            !yaml.contains("categories:"),
-            "rendered CRDs must not carry an empty categories list:\n{yaml}"
-        );
+        for crd in parse_crds(&yaml) {
+            let name = crd.metadata.name.as_deref().unwrap_or("<unnamed>");
+            assert!(
+                crd.spec.names.categories.is_none(),
+                "rendered CRD {name} must omit an empty spec.names.categories list"
+            );
+        }
     }
 
     #[test]
@@ -1673,7 +1686,7 @@ mod controller_watch_tests {
     }
 
     #[test]
-    fn tracked_tenant_crds_match_generated_schema() {
+    fn tracked_crds_match_generated_schema() {
         let yaml = render_crds_yaml().expect("CRDs render to YAML");
         let (tenant, policy_binding) = yaml
             .split_once("---\n")
@@ -1686,6 +1699,50 @@ mod controller_watch_tests {
         assert_eq!(
             policy_binding,
             include_str!("../deploy/rustfs-operator/crds/policybinding-crd.yaml")
+        );
+        assert_eq!(
+            policy_binding,
+            include_str!("../deploy/k8s-dev/policybinding-crd.yaml")
+        );
+    }
+
+    #[test]
+    fn chart_crd_names_match_generated_crds_without_duplicates() {
+        let generated_names = parse_crds(&render_crds_yaml().expect("CRDs render to YAML"))
+            .into_iter()
+            .map(|crd| crd.metadata.name.expect("generated CRD should have a name"))
+            .collect::<BTreeSet<_>>();
+        let crd_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("deploy/rustfs-operator/crds");
+        let mut entries = fs::read_dir(&crd_dir)
+            .expect("chart CRD directory should be readable")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("chart CRD directory entries should be readable");
+        entries.sort_by_key(|entry| entry.path());
+
+        let mut tracked_names = BTreeMap::new();
+        for entry in entries {
+            let path = entry.path();
+            if !matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("yaml" | "yml")
+            ) {
+                continue;
+            }
+
+            let yaml = fs::read_to_string(&path).expect("tracked CRD should be readable");
+            for crd in parse_crds(&yaml) {
+                let name = crd.metadata.name.expect("tracked CRD should have a name");
+                assert!(
+                    tracked_names.insert(name.clone(), path.clone()).is_none(),
+                    "chart contains duplicate CRD {name}"
+                );
+            }
+        }
+
+        assert_eq!(
+            tracked_names.into_keys().collect::<BTreeSet<_>>(),
+            generated_names,
+            "chart CRD names must match the generated CRDs"
         );
     }
 
