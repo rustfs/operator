@@ -30,9 +30,39 @@ use super::{
     ADD_USER_PATH, CreateBucketResult, LIST_CANNED_POLICIES_PATH, MAX_UPSTREAM_ERROR_BODY_BYTES,
     POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient,
     RustfsClientError, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
-    helpers::{extract_canned_policy_document, extract_credentials, parse_assume_role_response},
+    helpers::{
+        build_canonical_query, build_form_body, extract_canned_policy_document,
+        extract_credentials, parse_assume_role_response,
+    },
     tls_tenant_base_url,
 };
+
+#[test]
+fn canonical_query_uses_sigv4_uri_encoding_and_encoded_sort_order() {
+    let query = build_canonical_query(&[
+        ("z", "a b~c/雪"),
+        ("a~", "second"),
+        ("a ", "first"),
+        ("amp", "&="),
+        ("dup", "z"),
+        ("dup", "a"),
+        ("empty", ""),
+        ("雪", "key"),
+    ]);
+
+    assert_eq!(
+        query,
+        "%E9%9B%AA=key&a%20=first&amp=%26%3D&a~=second&dup=a&dup=z&empty=&z=a%20b~c%2F%E9%9B%AA"
+    );
+}
+
+#[test]
+fn form_body_keeps_html_form_encoding() {
+    assert_eq!(
+        build_form_body(&[("Policy", "a b~c/雪")]),
+        "Policy=a+b%7Ec%2F%E9%9B%AA"
+    );
+}
 
 fn secret_with_fields(fields: Vec<(&str, &[u8])>) -> corev1::Secret {
     let mut data = BTreeMap::new();
@@ -802,10 +832,13 @@ async fn add_user_uses_expected_path_query_and_body() {
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
     let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
-    client.add_user("app-user", "secret123").await.unwrap();
+    client.add_user("app user~+/雪", "secret123").await.unwrap();
 
     assert_eq!(&*capture.path.lock().await, ADD_USER_PATH);
-    assert_eq!(&*capture.query.lock().await, "accessKey=app-user");
+    assert_eq!(
+        &*capture.query.lock().await,
+        "accessKey=app%20user~%2B%2F%E9%9B%AA"
+    );
     assert_eq!(
         &*capture.body.lock().await,
         r#"{"secretKey":"secret123","status":"enabled"}"#

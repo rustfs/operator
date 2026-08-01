@@ -18,7 +18,9 @@
 
 use std::collections::BTreeMap;
 
-use super::helpers::{body_mentions_not_found, build_query_pairs, extract_canned_policy_document};
+use super::helpers::{
+    body_mentions_not_found, build_canonical_query, extract_canned_policy_document,
+};
 use super::{
     ADD_CANNED_POLICY_PATH, ADD_USER_PATH, ADMIN_SIGNING_SERVICE, INFO_CANNED_POLICY_PATH,
     JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, RustfsAdminClient, RustfsClientError,
@@ -37,7 +39,7 @@ impl RustfsAdminClient {
             return Err(RustfsClientError::InvalidPolicyName);
         }
 
-        let query = build_query_pairs(&[("name", policy_name)]);
+        let query = build_canonical_query(&[("name", policy_name)]);
         let path = INFO_CANNED_POLICY_PATH;
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let url = if query.is_empty() {
@@ -84,7 +86,7 @@ impl RustfsAdminClient {
         serde_json::from_str::<Value>(policy_document)
             .map_err(|_| RustfsClientError::InvalidPolicyDocument)?;
 
-        let query = build_query_pairs(&[("name", policy_name)]);
+        let query = build_canonical_query(&[("name", policy_name)]);
         let path = ADD_CANNED_POLICY_PATH;
         let url = format!("{}{}?{query}", self.base_url.trim_end_matches('/'), path);
 
@@ -158,7 +160,7 @@ impl RustfsAdminClient {
             return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
         }
 
-        let query = build_query_pairs(&[("accessKey", access_key)]);
+        let query = build_canonical_query(&[("accessKey", access_key)]);
         let path = USER_INFO_PATH;
         let url = format!("{}{}?{query}", self.base_url.trim_end_matches('/'), path);
         let signed = self.sign_request("GET", path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
@@ -207,7 +209,7 @@ impl RustfsAdminClient {
             "status": "enabled",
         })
         .to_string();
-        let query = build_query_pairs(&[("accessKey", access_key)]);
+        let query = build_canonical_query(&[("accessKey", access_key)]);
 
         self.send_admin_request("PUT", ADD_USER_PATH, &query, &body, Some(JSON_CONTENT_TYPE))
             .await
@@ -227,7 +229,7 @@ impl RustfsAdminClient {
         }
 
         let policy_names = policies.join(",");
-        let query = build_query_pairs(&[
+        let query = build_canonical_query(&[
             ("isGroup", "false"),
             ("policyName", policy_names.as_str()),
             ("userOrGroup", access_key),

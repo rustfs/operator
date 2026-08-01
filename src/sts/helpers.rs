@@ -69,7 +69,8 @@ pub(super) fn get_secret_value(
     Ok(value)
 }
 
-pub(super) fn build_query_pairs(params: &[(&str, &str)]) -> String {
+/// Encode an `application/x-www-form-urlencoded` request body.
+pub(super) fn build_form_body(params: &[(&str, &str)]) -> String {
     let mut pairs: Vec<(String, String)> = params
         .iter()
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -82,6 +83,37 @@ pub(super) fn build_query_pairs(params: &[(&str, &str)]) -> String {
     }
 
     serializer.finish()
+}
+
+/// Encode and sort query parameters according to the AWS SigV4 rules.
+pub(super) fn build_canonical_query(params: &[(&str, &str)]) -> String {
+    let mut pairs: Vec<(String, String)> = params
+        .iter()
+        .map(|(key, value)| (uri_encode(key), uri_encode(value)))
+        .collect();
+    pairs.sort_unstable();
+
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn uri_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
 }
 
 pub(super) fn create_bucket_body(region: Option<&str>) -> String {
