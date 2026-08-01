@@ -183,7 +183,11 @@ Their Helm settings are `sts.admission` and `console.loginAdmission`; each confi
 second, burst capacity, maximum in-flight requests, body size, and end-to-end timeout. Defaults are
 5 requests/second, burst 10, 16 in flight, 64 KiB, and 30 seconds. Because limits are per process,
 aggregate STS capacity increases with `operator.replicas` and aggregate login capacity increases
-with `console.replicas`.
+with `console.replicas`. Within a process, every client and tenant path for an endpoint shares the
+same token bucket and concurrency pool. This is a global load-shedding ceiling, not a per-client
+fairness guarantee: one busy or malicious source can exhaust the local allowance and cause other
+clients or tenants routed to that process to be rejected. Enforce source-aware fairness at a trusted
+ingress or another identity-aware layer when required.
 
 Example production-oriented values:
 
@@ -964,6 +968,14 @@ kubectl -n rustfs-system port-forward svc/rustfs-operator-metrics 18080:8080
 curl http://127.0.0.1:18080/healthz
 curl http://127.0.0.1:18080/readyz
 curl http://127.0.0.1:18080/metrics
+```
+
+The fixed-cardinality `rustfs_operator_unauthenticated_requests_total{endpoint,outcome}` counter
+covers all STS and Console login requests. Use the following query to monitor aggregate endpoint
+QPS across replicas; `outcome` is `success`, `error`, or `rejected`:
+
+```promql
+sum by (endpoint) (rate(rustfs_operator_unauthenticated_requests_total[5m]))
 ```
 
 Enable Prometheus Operator integration:

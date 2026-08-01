@@ -13,8 +13,11 @@
 // limitations under the License.
 
 use serde_yaml_ng::Value;
-use std::collections::BTreeSet;
-use std::process::{Command, Output};
+use std::{
+    collections::BTreeSet,
+    path::Path,
+    process::{Command, Output},
+};
 
 const RESERVED_OPERATOR_ENV: &[(&str, &str)] = &[
     ("OPERATOR_CLUSTER_DOMAIN", "clusterDomain"),
@@ -23,6 +26,23 @@ const RESERVED_OPERATOR_ENV: &[(&str, &str)] = &[
     ("OPERATOR_NAMESPACE", "namespace"),
     ("OPERATOR_STS_ENABLED", "sts.enabled"),
     ("OPERATOR_STS_AUDIENCE", "sts.audience"),
+    (
+        "OPERATOR_STS_ADMISSION_REQUESTS_PER_SECOND",
+        "sts.admission.requestsPerSecond",
+    ),
+    ("OPERATOR_STS_ADMISSION_BURST", "sts.admission.burst"),
+    (
+        "OPERATOR_STS_ADMISSION_MAX_IN_FLIGHT",
+        "sts.admission.maxInFlight",
+    ),
+    (
+        "OPERATOR_STS_ADMISSION_BODY_LIMIT_BYTES",
+        "sts.admission.bodyLimitBytes",
+    ),
+    (
+        "OPERATOR_STS_ADMISSION_TIMEOUT_SECONDS",
+        "sts.admission.timeoutSeconds",
+    ),
     ("OPERATOR_STS_PORT", "sts.port"),
     (
         "OPERATOR_STS_SERVICE_NAME",
@@ -195,6 +215,12 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
     assert!(default_stdout.contains("value: \"true\""));
     assert!(default_stdout.contains("name: OPERATOR_STS_TLS_AUTO"));
     assert!(!default_stdout.contains("name: OPERATOR_STS_TLS_SECRET_NAME"));
+    for name in admission_env_names() {
+        assert!(
+            default_stdout.contains(&format!("name: {name}")),
+            "default chart values must configure {name}"
+        );
+    }
     let default_documents = yaml_documents(&default_stdout, "helm-default-render");
     assert_reference_cluster_role_is_read_only(&default_documents, "rustfs-operator");
     assert_sts_tls_role_is_minimal(
@@ -325,6 +351,102 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
     assert!(external_stderr.contains("operator STS currently supports only ClusterIP"));
 }
 
+#[test]
+fn helm_template_renders_reused_values_without_admission_maps() {
+    if !helm_is_available() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "helm must be installed in CI so chart render assertions cannot be skipped"
+        );
+        eprintln!("skipping helm template assertions: helm binary is not available");
+        return;
+    }
+
+    let chart = chart_without_admission_defaults();
+    let render = helm_template_chart(chart.path(), &[]);
+    assert!(
+        render.status.success(),
+        "values reused from a release without admission maps must render successfully: {}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+
+    let stdout = String::from_utf8(render.stdout).expect("reused-values helm stdout is utf8");
+    let documents = yaml_documents(&stdout, "helm-reused-values-render");
+    assert!(
+        find_document(&documents, "Deployment", "rustfs-operator").is_some(),
+        "operator Deployment must still render"
+    );
+    assert!(
+        find_document(&documents, "Deployment", "rustfs-operator-console").is_some(),
+        "Console Deployment must still render"
+    );
+    for name in admission_env_names() {
+        assert!(
+            !stdout.contains(&format!("name: {name}")),
+            "missing admission values must leave {name} unset so the binary default is used"
+        );
+    }
+}
+
+fn admission_env_names() -> [&'static str; 10] {
+    [
+        "OPERATOR_STS_ADMISSION_REQUESTS_PER_SECOND",
+        "OPERATOR_STS_ADMISSION_BURST",
+        "OPERATOR_STS_ADMISSION_MAX_IN_FLIGHT",
+        "OPERATOR_STS_ADMISSION_BODY_LIMIT_BYTES",
+        "OPERATOR_STS_ADMISSION_TIMEOUT_SECONDS",
+        "CONSOLE_LOGIN_ADMISSION_REQUESTS_PER_SECOND",
+        "CONSOLE_LOGIN_ADMISSION_BURST",
+        "CONSOLE_LOGIN_ADMISSION_MAX_IN_FLIGHT",
+        "CONSOLE_LOGIN_ADMISSION_BODY_LIMIT_BYTES",
+        "CONSOLE_LOGIN_ADMISSION_TIMEOUT_SECONDS",
+    ]
+}
+
+fn chart_without_admission_defaults() -> tempfile::TempDir {
+    let chart = tempfile::tempdir().expect("temporary chart directory is created");
+    copy_directory(Path::new("../deploy/rustfs-operator"), chart.path());
+
+    let values_path = chart.path().join("values.yaml");
+    let mut values: Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(&values_path).expect("temporary chart values exist"),
+    )
+    .expect("chart values parse");
+    remove_mapping_key(&mut values, "sts", "admission");
+    remove_mapping_key(&mut values, "console", "loginAdmission");
+    std::fs::write(
+        values_path,
+        serde_yaml_ng::to_string(&values).expect("old release values serialize"),
+    )
+    .expect("old release values are written");
+    chart
+}
+
+fn remove_mapping_key(values: &mut Value, section: &str, key: &str) {
+    values[section]
+        .as_mapping_mut()
+        .unwrap_or_else(|| panic!("chart values must contain the {section} mapping"))
+        .remove(Value::String(key.to_string()));
+}
+
+fn copy_directory(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("temporary chart directory is created");
+    for entry in std::fs::read_dir(source).expect("chart directory is readable") {
+        let entry = entry.expect("chart entry is readable");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .expect("chart entry type is readable")
+            .is_dir()
+        {
+            copy_directory(&source_path, &destination_path);
+        } else {
+            std::fs::copy(source_path, destination_path).expect("chart file is copied");
+        }
+    }
+}
+
 fn helm_template(args: &[&str]) -> Option<Output> {
     if !helm_is_available() {
         assert!(
@@ -335,11 +457,17 @@ fn helm_template(args: &[&str]) -> Option<Output> {
         return None;
     }
 
-    let mut command = Command::new("helm");
-    command.args(["template", "rustfs-operator", "../deploy/rustfs-operator"]);
-    command.args(args);
+    Some(helm_template_chart(
+        Path::new("../deploy/rustfs-operator"),
+        args,
+    ))
+}
 
-    Some(command.output().expect("helm template command runs"))
+fn helm_template_chart(chart: &Path, args: &[&str]) -> Output {
+    let mut command = Command::new("helm");
+    command.arg("template").arg("rustfs-operator").arg(chart);
+    command.args(args);
+    command.output().expect("helm template command runs")
 }
 
 fn helm_is_available() -> bool {

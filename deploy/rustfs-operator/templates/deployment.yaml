@@ -1,5 +1,6 @@
 {{- $livenessProbe := default dict .Values.operator.livenessProbe -}}
 {{- $readinessProbe := default dict .Values.operator.readinessProbe -}}
+{{- $stsAdmission := default dict .Values.sts.admission -}}
 {{- if and (not .Values.operator.metrics.enabled) (or (hasKey $livenessProbe "httpGet") (hasKey $readinessProbe "httpGet")) -}}
 {{- fail "operator.metrics.enabled=false requires overriding operator.livenessProbe and operator.readinessProbe because the chart defaults use the metrics port" -}}
 {{- end -}}
@@ -112,16 +113,18 @@ spec:
               value: {{ .Values.sts.enabled | quote }}
             - name: OPERATOR_STS_AUDIENCE
               value: {{ .Values.sts.audience | quote }}
+          {{- with $stsAdmission }}
             - name: OPERATOR_STS_ADMISSION_REQUESTS_PER_SECOND
-              value: {{ .Values.sts.admission.requestsPerSecond | quote }}
+              value: {{ .requestsPerSecond | quote }}
             - name: OPERATOR_STS_ADMISSION_BURST
-              value: {{ .Values.sts.admission.burst | quote }}
+              value: {{ .burst | quote }}
             - name: OPERATOR_STS_ADMISSION_MAX_IN_FLIGHT
-              value: {{ .Values.sts.admission.maxInFlight | quote }}
+              value: {{ .maxInFlight | quote }}
             - name: OPERATOR_STS_ADMISSION_BODY_LIMIT_BYTES
-              value: {{ .Values.sts.admission.bodyLimitBytes | quote }}
+              value: {{ .bodyLimitBytes | quote }}
             - name: OPERATOR_STS_ADMISSION_TIMEOUT_SECONDS
-              value: {{ .Values.sts.admission.timeoutSeconds | quote }}
+              value: {{ .timeoutSeconds | quote }}
+          {{- end }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:

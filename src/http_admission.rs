@@ -125,7 +125,7 @@ impl AdmissionConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdmissionRejection {
-    RateLimited,
+    RateLimited { retry_after_seconds: u64 },
     ConcurrencyLimited,
     BodyTooLarge,
     BodyReadFailed,
@@ -135,7 +135,7 @@ pub(crate) enum AdmissionRejection {
 impl AdmissionRejection {
     pub(crate) fn reason(self) -> AdmissionReason {
         match self {
-            Self::RateLimited => AdmissionReason::RateLimit,
+            Self::RateLimited { .. } => AdmissionReason::RateLimit,
             Self::ConcurrencyLimited => AdmissionReason::ConcurrencyLimit,
             Self::BodyTooLarge => AdmissionReason::BodyTooLarge,
             Self::BodyReadFailed => AdmissionReason::BodyReadFailure,
@@ -264,7 +264,13 @@ impl AdmissionControl {
         bucket.last_refill = now;
 
         if bucket.tokens < 1.0 {
-            return Err(AdmissionRejection::RateLimited);
+            let retry_after_seconds = ((1.0 - bucket.tokens)
+                / self.inner.config.requests_per_second)
+                .ceil()
+                .max(1.0) as u64;
+            return Err(AdmissionRejection::RateLimited {
+                retry_after_seconds,
+            });
         }
         bucket.tokens -= 1.0;
         Ok(permit)
@@ -419,7 +425,26 @@ mod tests {
         assert_eq!(admission.execute(async { Ok(()) }).await, Ok(()));
         assert_eq!(
             admission.execute(async { Ok(()) }).await,
-            Err(AdmissionRejection::RateLimited)
+            Err(AdmissionRejection::RateLimited {
+                retry_after_seconds: 1_000_000,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_delay_tracks_the_refill_rate() {
+        let admission = AdmissionControl::new(AdmissionConfig {
+            requests_per_second: 0.1,
+            burst: 1,
+            ..test_config()
+        });
+
+        assert_eq!(admission.execute(async { Ok(()) }).await, Ok(()));
+        assert_eq!(
+            admission.execute(async { Ok(()) }).await,
+            Err(AdmissionRejection::RateLimited {
+                retry_after_seconds: 10,
+            })
         );
     }
 

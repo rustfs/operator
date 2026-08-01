@@ -24,6 +24,7 @@ use axum::{
 use crate::{
     console::{handlers, models::common::ConsoleErrorResponse, state::AppState},
     http_admission::{AdmissionConfig, AdmissionControl, AdmissionEndpoint, AdmissionRejection},
+    metrics::UnauthenticatedRequestOutcome,
 };
 
 /// Login / session routes (partially unauthenticated)
@@ -63,54 +64,58 @@ async fn enforce_login_admission(
         })
         .await;
 
-    match result {
-        Ok(response) => response,
-        Err(rejection) => {
-            crate::metrics::record_unauthenticated_admission_rejection(
-                AdmissionEndpoint::ConsoleLogin,
-                rejection.reason(),
-            );
-            login_admission_rejection_response(rejection)
+    let (response, outcome) = match result {
+        Ok(response) => {
+            let outcome = UnauthenticatedRequestOutcome::from_status(response.status());
+            (response, outcome)
         }
-    }
+        Err(rejection) => (
+            login_admission_rejection_response(rejection),
+            UnauthenticatedRequestOutcome::Rejected(rejection.reason()),
+        ),
+    };
+    crate::metrics::record_unauthenticated_request(AdmissionEndpoint::ConsoleLogin, outcome);
+    response
 }
 
 fn login_admission_rejection_response(rejection: AdmissionRejection) -> Response {
     let (status, code, reason, message, retry_after) = match rejection {
-        AdmissionRejection::RateLimited => (
+        AdmissionRejection::RateLimited {
+            retry_after_seconds,
+        } => (
             StatusCode::TOO_MANY_REQUESTS,
             "TooManyRequests",
             "LoginRateLimited",
             "Login request rate exceeded; retry later.",
-            true,
+            Some(retry_after_seconds),
         ),
         AdmissionRejection::ConcurrencyLimited => (
             StatusCode::TOO_MANY_REQUESTS,
             "TooManyRequests",
             "LoginConcurrencyLimited",
             "Too many login requests are already in progress.",
-            true,
+            Some(1),
         ),
         AdmissionRejection::BodyTooLarge => (
             StatusCode::PAYLOAD_TOO_LARGE,
             "RequestBodyError",
             "InvalidRequestBody",
             "The login request body exceeds the maximum allowed size.",
-            false,
+            None,
         ),
         AdmissionRejection::BodyReadFailed => (
             StatusCode::BAD_REQUEST,
             "RequestBodyError",
             "InvalidRequestBody",
             "The login request body could not be read.",
-            false,
+            None,
         ),
         AdmissionRejection::TimedOut => (
             StatusCode::SERVICE_UNAVAILABLE,
             "ServiceUnavailable",
             "LoginTimedOut",
             "The login request timed out; retry later.",
-            true,
+            Some(1),
         ),
     };
     let mut response = (
@@ -124,10 +129,12 @@ fn login_admission_rejection_response(rejection: AdmissionRejection) -> Response
         }),
     )
         .into_response();
-    if retry_after {
+    if let Some(retry_after_seconds) = retry_after
+        && let Ok(retry_after) = retry_after_seconds.to_string().parse::<HeaderValue>()
+    {
         response
             .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            .insert(header::RETRY_AFTER, retry_after);
     }
     response
 }
@@ -278,6 +285,7 @@ mod tests {
     use crate::console::error::JSON_REJECTION_MESSAGE_MAX_BYTES;
     use crate::console::state::{AppState, Claims};
     use crate::http_admission::{AdmissionConfig, AdmissionControl, AdmissionRejection};
+    use crate::metrics::{UnauthenticatedRequestOutcome, capture_request_metrics};
     use axum::{
         Extension, Router,
         body::{Body, to_bytes},
@@ -328,7 +336,7 @@ mod tests {
 
     fn restrictive_admission(body_limit_bytes: usize) -> AdmissionControl {
         AdmissionControl::new(AdmissionConfig {
-            requests_per_second: 0.000_001,
+            requests_per_second: 0.1,
             burst: 1,
             max_in_flight: 1,
             body_limit_bytes,
@@ -347,34 +355,47 @@ mod tests {
         let app = auth_routes_with_admission(admission)
             .with_state(AppState::new("test-secret".to_string()));
 
-        let response = app
-            .clone()
-            .oneshot(
+        let (response, captured) = capture_request_metrics(
+            app.clone().oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/login")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"token":"test"}"#))?,
-            )
-            .await?;
+            ),
+        )
+        .await;
+        let response = response?;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
+            captured.unauthenticated_requests,
+            vec![(
+                crate::http_admission::AdmissionEndpoint::ConsoleLogin,
+                UnauthenticatedRequestOutcome::Rejected(
+                    crate::http_admission::AdmissionReason::RateLimit
+                ),
+            )]
+        );
+        assert_eq!(
             response.headers().get(header::RETRY_AFTER),
-            Some(&HeaderValue::from_static("1"))
+            Some(&HeaderValue::from_static("10"))
         );
         let body = to_bytes(response.into_body(), usize::MAX).await?;
         let body: Value = serde_json::from_slice(&body)?;
         assert_error_envelope(&body, "TooManyRequests", "LoginRateLimited");
 
-        let response = app
-            .oneshot(
+        let (response, captured) = capture_request_metrics(
+            app.oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/logout")
                     .body(Body::empty())?,
-            )
-            .await?;
+            ),
+        )
+        .await;
+        let response = response?;
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(captured.unauthenticated_requests.is_empty());
         Ok(())
     }
 
@@ -393,6 +414,7 @@ mod tests {
             )
             .await?;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
         let body = to_bytes(response.into_body(), usize::MAX).await?;
         let body: Value = serde_json::from_slice(&body)?;
         assert_error_envelope(&body, "RequestBodyError", "InvalidRequestBody");
