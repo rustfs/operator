@@ -19,7 +19,7 @@
 use reqwest::StatusCode;
 
 use super::helpers::{
-    body_mentions_not_found, bucket_already_exists, build_query_pairs, create_bucket_body,
+    body_mentions_not_found, bucket_already_exists, build_canonical_query, create_bucket_body,
 };
 use super::{ADMIN_SIGNING_SERVICE, CreateBucketResult, RustfsAdminClient, RustfsClientError};
 
@@ -100,7 +100,7 @@ impl RustfsAdminClient {
         }
 
         let path = format!("/{bucket}");
-        let query = build_query_pairs(&[("object-lock", "")]);
+        let query = build_canonical_query(&[("object-lock", "")]);
         let signed = self.sign_request("GET", &path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
         let host = self.host()?;
 

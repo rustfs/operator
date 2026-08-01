@@ -14,7 +14,7 @@
 
 //! STS boundary:
 //!   - temporary credentials and AssumeRole request composition/response parsing.
-use super::helpers::{build_query_pairs, parse_assume_role_response};
+use super::helpers::{build_form_body, parse_assume_role_response};
 use super::{
     ASSUME_ROLE_PATH, FORM_CONTENT_TYPE, RustfsAdminClient, RustfsClientError, STS_SIGNING_SERVICE,
 };
@@ -39,7 +39,7 @@ impl RustfsAdminClient {
             params.push(("Policy", policy.to_string()));
         }
 
-        let body = build_query_pairs(
+        let body = build_form_body(
             &params
                 .iter()
                 .map(|(k, v)| (&k[..], &v[..]))

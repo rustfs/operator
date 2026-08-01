@@ -15,7 +15,7 @@
 //! Pool boundary:
 //!   - list/status and decommission lifecycle operations for tenant pools.
 
-use super::helpers::build_query_pairs;
+use super::helpers::build_canonical_query;
 use super::{
     POOLS_CANCEL_PATH, POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH,
     RustfsAdminClient, RustfsClientError, RustfsPoolListItem, RustfsPoolStatus,
@@ -37,7 +37,7 @@ impl RustfsAdminClient {
         &self,
         pool_id: &str,
     ) -> Result<RustfsPoolStatus, RustfsClientError> {
-        let query = build_query_pairs(&[("by-id", "true"), ("pool", pool_id)]);
+        let query = build_canonical_query(&[("by-id", "true"), ("pool", pool_id)]);
         let body = self
             .send_admin_request("GET", POOLS_STATUS_PATH, &query, "", None)
             .await?;
@@ -50,7 +50,7 @@ impl RustfsAdminClient {
         &self,
         pool_id: &str,
     ) -> Result<(), RustfsClientError> {
-        let query = build_query_pairs(&[("by-id", "true"), ("pool", pool_id)]);
+        let query = build_canonical_query(&[("by-id", "true"), ("pool", pool_id)]);
         self.send_admin_request("POST", POOLS_DECOMMISSION_PATH, &query, "", None)
             .await?;
         Ok(())
@@ -60,7 +60,7 @@ impl RustfsAdminClient {
         &self,
         pool_id: &str,
     ) -> Result<(), RustfsClientError> {
-        let query = build_query_pairs(&[("by-id", "true"), ("pool", pool_id)]);
+        let query = build_canonical_query(&[("by-id", "true"), ("pool", pool_id)]);
         self.send_admin_request("POST", POOLS_CANCEL_PATH, &query, "", None)
             .await?;
         Ok(())
