@@ -41,7 +41,7 @@ impl ProvisioningStatus {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum ProvisioningPhase {
     Pending,
@@ -56,6 +56,23 @@ pub enum ProvisioningItemState {
     Ready,
     Failed,
     Retained,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum ProvisioningUserOwnershipState {
+    PendingCreate,
+    Managed,
+}
+
+/// Durable proof that the operator claimed a RustFS user identity before mutating it.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisioningUserOwnershipStatus {
+    pub state: ProvisioningUserOwnershipState,
+    pub tenant_uid: String,
+    pub user_name: String,
+    pub access_key_hash: String,
 }
 
 impl ProvisioningItemState {
@@ -101,6 +118,9 @@ pub struct ProvisioningItemStatus {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_applied_access_key_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<ProvisioningUserOwnershipStatus>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
