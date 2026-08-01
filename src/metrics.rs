@@ -40,6 +40,7 @@ struct Metrics {
     sts_requests_total: Mutex<BTreeMap<String, u64>>,
     sts_request_duration: Mutex<BTreeMap<String, DurationSummary>>,
     unauthenticated_admission_rejections_total: Mutex<BTreeMap<AdmissionKey, u64>>,
+    unauthenticated_requests_total: Mutex<BTreeMap<UnauthenticatedRequestKey, u64>>,
     http_requests_total: Mutex<BTreeMap<HttpKey, u64>>,
     http_request_duration: Mutex<BTreeMap<HttpKey, DurationSummary>>,
     tenant_monitor_polls_total: Mutex<BTreeMap<String, u64>>,
@@ -58,6 +59,44 @@ struct HttpKey {
 struct AdmissionKey {
     endpoint: &'static str,
     reason: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct UnauthenticatedRequestKey {
+    endpoint: &'static str,
+    outcome: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnauthenticatedRequestOutcome {
+    Success,
+    Error,
+    Rejected(AdmissionReason),
+}
+
+impl UnauthenticatedRequestOutcome {
+    pub(crate) fn from_status(status: StatusCode) -> Self {
+        if status.is_success() {
+            Self::Success
+        } else {
+            Self::Error
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Rejected(_) => "rejected",
+        }
+    }
+
+    fn rejection_reason(self) -> Option<AdmissionReason> {
+        match self {
+            Self::Rejected(reason) => Some(reason),
+            Self::Success | Self::Error => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -107,7 +146,51 @@ pub struct TenantStorageMetrics {
 
 fn metrics() -> &'static Metrics {
     static METRICS: OnceLock<Metrics> = OnceLock::new();
-    METRICS.get_or_init(Metrics::default)
+    METRICS.get_or_init(|| Metrics {
+        unauthenticated_admission_rejections_total: Mutex::new(
+            initial_admission_rejection_counters(),
+        ),
+        unauthenticated_requests_total: Mutex::new(initial_unauthenticated_request_counters()),
+        ..Metrics::default()
+    })
+}
+
+fn initial_admission_rejection_counters() -> BTreeMap<AdmissionKey, u64> {
+    let mut counters = BTreeMap::new();
+    for endpoint in [AdmissionEndpoint::Sts, AdmissionEndpoint::ConsoleLogin] {
+        for reason in [
+            AdmissionReason::RateLimit,
+            AdmissionReason::ConcurrencyLimit,
+            AdmissionReason::BodyTooLarge,
+            AdmissionReason::BodyReadFailure,
+            AdmissionReason::Timeout,
+        ] {
+            counters.insert(
+                AdmissionKey {
+                    endpoint: endpoint.as_str(),
+                    reason: reason.as_str(),
+                },
+                0,
+            );
+        }
+    }
+    counters
+}
+
+fn initial_unauthenticated_request_counters() -> BTreeMap<UnauthenticatedRequestKey, u64> {
+    let mut counters = BTreeMap::new();
+    for endpoint in [AdmissionEndpoint::Sts, AdmissionEndpoint::ConsoleLogin] {
+        for outcome in ["success", "error", "rejected"] {
+            counters.insert(
+                UnauthenticatedRequestKey {
+                    endpoint: endpoint.as_str(),
+                    outcome,
+                },
+                0,
+            );
+        }
+    }
+    counters
 }
 
 pub fn set_operator_leader(is_leader: bool) {
@@ -137,33 +220,75 @@ pub fn record_sts_request(success: bool, duration: Duration) {
     let result = result_label(success);
     increment_string_counter(&metrics().sts_requests_total, result);
     observe_string_duration(&metrics().sts_request_duration, result, duration);
+    #[cfg(test)]
+    let _ = TEST_REQUEST_METRICS.try_with(|captured| {
+        captured.borrow_mut().sts_request_results.push(success);
+    });
 }
 
-#[cfg(test)]
-pub(crate) fn sts_request_count(success: bool) -> u64 {
-    let result = result_label(success);
-    metrics()
-        .sts_requests_total
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(result)
-        .copied()
-        .unwrap_or_default()
-}
-
-pub(crate) fn record_unauthenticated_admission_rejection(
+pub(crate) fn record_unauthenticated_request(
     endpoint: AdmissionEndpoint,
-    reason: AdmissionReason,
+    outcome: UnauthenticatedRequestOutcome,
 ) {
-    let key = AdmissionKey {
+    let key = UnauthenticatedRequestKey {
         endpoint: endpoint.as_str(),
-        reason: reason.as_str(),
+        outcome: outcome.as_str(),
     };
     let mut counters = metrics()
-        .unauthenticated_admission_rejections_total
+        .unauthenticated_requests_total
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *counters.entry(key).or_default() += 1;
+    drop(counters);
+
+    if let Some(reason) = outcome.rejection_reason() {
+        let key = AdmissionKey {
+            endpoint: endpoint.as_str(),
+            reason: reason.as_str(),
+        };
+        let mut counters = metrics()
+            .unauthenticated_admission_rejections_total
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *counters.entry(key).or_default() += 1;
+    }
+
+    #[cfg(test)]
+    let _ = TEST_REQUEST_METRICS.try_with(|captured| {
+        captured
+            .borrow_mut()
+            .unauthenticated_requests
+            .push((endpoint, outcome));
+    });
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct TestRequestMetrics {
+    pub(crate) sts_request_results: Vec<bool>,
+    pub(crate) unauthenticated_requests: Vec<(AdmissionEndpoint, UnauthenticatedRequestOutcome)>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_REQUEST_METRICS: std::cell::RefCell<TestRequestMetrics>;
+}
+
+#[cfg(test)]
+pub(crate) async fn capture_request_metrics<F>(future: F) -> (F::Output, TestRequestMetrics)
+where
+    F: std::future::Future,
+{
+    TEST_REQUEST_METRICS
+        .scope(
+            std::cell::RefCell::new(TestRequestMetrics::default()),
+            async {
+                let output = future.await;
+                let captured = TEST_REQUEST_METRICS.with(|metrics| metrics.borrow().clone());
+                (output, captured)
+            },
+        )
+        .await
 }
 
 pub fn record_http_request(component: &str, method: &str, status: StatusCode, duration: Duration) {
@@ -332,6 +457,7 @@ pub fn render() -> String {
         &metrics().sts_request_duration,
     );
     render_admission_rejection_counter(&mut output);
+    render_unauthenticated_request_counter(&mut output);
 
     render_http_counter(&mut output);
     render_http_duration_summary(&mut output);
@@ -368,6 +494,24 @@ fn render_admission_rejection_counter(output: &mut String) {
         output.push_str(&format!(
             "{name}{{{}}} {}\n",
             labels(&[("endpoint", key.endpoint), ("reason", key.reason)]),
+            value
+        ));
+    }
+}
+
+fn render_unauthenticated_request_counter(output: &mut String) {
+    let name = "rustfs_operator_unauthenticated_requests_total";
+    output.push_str(&format!(
+        "# HELP {name} Total number of requests to unauthenticated control-plane-backed endpoints.\n# TYPE {name} counter\n"
+    ));
+    let counters = metrics()
+        .unauthenticated_requests_total
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (key, value) in counters.iter() {
+        output.push_str(&format!(
+            "{name}{{{}}} {}\n",
+            labels(&[("endpoint", key.endpoint), ("outcome", key.outcome)]),
             value
         ));
     }
@@ -659,14 +803,61 @@ mod tests {
 
     #[test]
     fn admission_rejection_metrics_use_fixed_labels() {
-        record_unauthenticated_admission_rejection(
+        record_unauthenticated_request(
             AdmissionEndpoint::Sts,
-            AdmissionReason::RateLimit,
+            UnauthenticatedRequestOutcome::Rejected(AdmissionReason::RateLimit),
         );
 
         assert!(render().contains(
             "rustfs_operator_unauthenticated_admission_rejections_total{endpoint=\"sts\",reason=\"rate_limit\"}"
         ));
+    }
+
+    #[test]
+    fn unauthenticated_request_metrics_use_fixed_endpoint_and_outcome_labels() {
+        record_unauthenticated_request(
+            AdmissionEndpoint::ConsoleLogin,
+            UnauthenticatedRequestOutcome::Success,
+        );
+        record_unauthenticated_request(
+            AdmissionEndpoint::Sts,
+            UnauthenticatedRequestOutcome::Rejected(AdmissionReason::Timeout),
+        );
+
+        let rendered = render();
+        assert!(rendered.contains(
+            "rustfs_operator_unauthenticated_requests_total{endpoint=\"console_login\",outcome=\"success\"}"
+        ));
+        assert!(rendered.contains(
+            "rustfs_operator_unauthenticated_requests_total{endpoint=\"sts\",outcome=\"rejected\"}"
+        ));
+    }
+
+    #[test]
+    fn unauthenticated_request_outcome_keeps_downstream_errors_distinct() {
+        assert_eq!(
+            UnauthenticatedRequestOutcome::from_status(StatusCode::OK),
+            UnauthenticatedRequestOutcome::Success
+        );
+        assert_eq!(
+            UnauthenticatedRequestOutcome::from_status(StatusCode::BAD_REQUEST),
+            UnauthenticatedRequestOutcome::Error
+        );
+        assert_eq!(
+            UnauthenticatedRequestOutcome::from_status(StatusCode::INTERNAL_SERVER_ERROR),
+            UnauthenticatedRequestOutcome::Error
+        );
+    }
+
+    #[test]
+    fn unauthenticated_metric_series_have_zero_baselines() {
+        let rejection_counters = initial_admission_rejection_counters();
+        let request_counters = initial_unauthenticated_request_counters();
+
+        assert_eq!(rejection_counters.len(), 10);
+        assert!(rejection_counters.values().all(|value| *value == 0));
+        assert_eq!(request_counters.len(), 6);
+        assert!(request_counters.values().all(|value| *value == 0));
     }
 
     #[test]

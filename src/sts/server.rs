@@ -29,6 +29,7 @@ use crate::console::state::AppState;
 use crate::http_admission::{
     AdmissionConfig, AdmissionControl, AdmissionEndpoint, AdmissionRejection,
 };
+use crate::metrics::UnauthenticatedRequestOutcome;
 use crate::sts::binding;
 use crate::sts::error::{StsError, StsErrorType, render_sts_error_xml_with_type};
 use crate::sts::rustfs_client::{RustfsAdminClient, RustfsClientError};
@@ -74,23 +75,24 @@ async fn enforce_sts_admission(
         })
         .await;
 
-    let response = match result {
-        Ok(response) => response,
-        Err(rejection) => {
-            crate::metrics::record_unauthenticated_admission_rejection(
-                AdmissionEndpoint::Sts,
-                rejection.reason(),
-            );
-            sts_admission_rejection_response(rejection)
+    let (response, outcome) = match result {
+        Ok(response) => {
+            let outcome = UnauthenticatedRequestOutcome::from_status(response.status());
+            (response, outcome)
         }
+        Err(rejection) => (
+            sts_admission_rejection_response(rejection),
+            UnauthenticatedRequestOutcome::Rejected(rejection.reason()),
+        ),
     };
+    crate::metrics::record_unauthenticated_request(AdmissionEndpoint::Sts, outcome);
     crate::metrics::record_sts_request(response.status().is_success(), started.elapsed());
     response
 }
 
 fn sts_admission_rejection_response(rejection: AdmissionRejection) -> Response {
     let (status, code, message, retry_after, error_type) = match rejection {
-        AdmissionRejection::RateLimited => (
+        AdmissionRejection::RateLimited { .. } => (
             StatusCode::BAD_REQUEST,
             "ThrottlingException",
             "Rate exceeded for this STS endpoint.",
@@ -690,7 +692,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::http_admission::AdmissionConfig;
+    use crate::http_admission::{AdmissionConfig, AdmissionReason};
+    use crate::metrics::{UnauthenticatedRequestOutcome, capture_request_metrics};
     use crate::sts::types::{STS_API_VERSION, STS_WEB_IDENTITY_ACTION, StsAssumeRoleCredentials};
     use crate::types::v1alpha1::policy_binding::{PolicyBindingApplication, PolicyBindingSpec};
     use axum::{
@@ -701,7 +704,7 @@ mod tests {
 
     fn restrictive_admission(body_limit_bytes: usize) -> AdmissionControl {
         AdmissionControl::new(AdmissionConfig {
-            requests_per_second: 0.000_001,
+            requests_per_second: 0.1,
             burst: 1,
             max_in_flight: 1,
             body_limit_bytes,
@@ -786,8 +789,8 @@ mod tests {
         let app =
             routes_with_admission(admission).with_state(AppState::new("test-secret".to_string()));
 
-        let response = app
-            .oneshot(
+        let (response, captured) = capture_request_metrics(
+            app.oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/sts/tenant-a/rustfs-a")
@@ -796,11 +799,20 @@ mod tests {
                         "Version=2011-06-15&Action=AssumeRoleWithWebIdentity&WebIdentityToken=abc",
                     ))
                     .expect("request should build"),
-            )
-            .await
-            .expect("request should complete");
+            ),
+        )
+        .await;
+        let response = response.expect("request should complete");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(captured.sts_request_results, vec![false]);
+        assert_eq!(
+            captured.unauthenticated_requests,
+            vec![(
+                AdmissionEndpoint::Sts,
+                UnauthenticatedRequestOutcome::Rejected(AdmissionReason::RateLimit),
+            )]
+        );
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
             Some(&HeaderValue::from_static("application/xml"))
@@ -844,22 +856,26 @@ mod tests {
 
     #[tokio::test]
     async fn sts_extractor_rejections_are_included_in_request_metrics() {
-        let before = crate::metrics::sts_request_count(false);
         let app = routes().with_state(AppState::new("test-secret".to_string()));
 
-        let response = app
-            .oneshot(
+        let (response, captured) = capture_request_metrics(
+            app.oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/sts/tenant-a/rustfs-a")
                     .body(Body::from("not-a-form"))
                     .expect("request should build"),
-            )
-            .await
-            .expect("request should complete");
+            ),
+        )
+        .await;
+        let response = response.expect("request should complete");
 
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert!(crate::metrics::sts_request_count(false) > before);
+        assert_eq!(captured.sts_request_results, vec![false]);
+        assert_eq!(
+            captured.unauthenticated_requests,
+            vec![(AdmissionEndpoint::Sts, UnauthenticatedRequestOutcome::Error)]
+        );
     }
 
     #[tokio::test]

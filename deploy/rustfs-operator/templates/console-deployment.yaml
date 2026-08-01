@@ -1,3 +1,4 @@
+{{- $consoleLoginAdmission := default dict .Values.console.loginAdmission -}}
 {{- $reservedConsoleEnv := dict
   "CONSOLE_LOGIN_ADMISSION_REQUESTS_PER_SECOND" "console.loginAdmission.requestsPerSecond"
   "CONSOLE_LOGIN_ADMISSION_BURST" "console.loginAdmission.burst"
@@ -60,16 +61,18 @@ spec:
                 secretKeyRef:
                   name: {{ include "rustfs-operator.fullname" . }}-console-secret
                   key: jwt-secret
+          {{- with $consoleLoginAdmission }}
             - name: CONSOLE_LOGIN_ADMISSION_REQUESTS_PER_SECOND
-              value: {{ .Values.console.loginAdmission.requestsPerSecond | quote }}
+              value: {{ .requestsPerSecond | quote }}
             - name: CONSOLE_LOGIN_ADMISSION_BURST
-              value: {{ .Values.console.loginAdmission.burst | quote }}
+              value: {{ .burst | quote }}
             - name: CONSOLE_LOGIN_ADMISSION_MAX_IN_FLIGHT
-              value: {{ .Values.console.loginAdmission.maxInFlight | quote }}
+              value: {{ .maxInFlight | quote }}
             - name: CONSOLE_LOGIN_ADMISSION_BODY_LIMIT_BYTES
-              value: {{ .Values.console.loginAdmission.bodyLimitBytes | quote }}
+              value: {{ .bodyLimitBytes | quote }}
             - name: CONSOLE_LOGIN_ADMISSION_TIMEOUT_SECONDS
-              value: {{ .Values.console.loginAdmission.timeoutSeconds | quote }}
+              value: {{ .timeoutSeconds | quote }}
+          {{- end }}
             {{- with .Values.console.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

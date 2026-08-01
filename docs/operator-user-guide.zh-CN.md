@@ -175,7 +175,10 @@ helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
 `sts.admission` 与 `console.loginAdmission`，分别控制每秒请求数、突发容量、最大并发、
 请求体大小和端到端超时。默认值为每秒 5 个请求、突发 10、最大并发 16、64 KiB 和
 30 秒。限制按进程生效，因此 STS 总容量随 `operator.replicas` 增长，登录总容量随
-`console.replicas` 增长。
+`console.replicas` 增长。同一进程内，一个端点的所有客户端和 Tenant 路径共享同一个
+令牌桶与并发池；它是全局负载卸载上限，并不保证客户端之间的公平性。繁忙或恶意来源
+可以耗尽本进程配额，导致路由到该进程的其他客户端或 Tenant 请求被拒绝。如需按来源
+保证公平性，应在可信 Ingress 或其他能够可靠识别身份的边界实施。
 
 生产风格 values 示例：
 
@@ -941,6 +944,14 @@ kubectl -n rustfs-system port-forward svc/rustfs-operator-metrics 18080:8080
 curl http://127.0.0.1:18080/healthz
 curl http://127.0.0.1:18080/readyz
 curl http://127.0.0.1:18080/metrics
+```
+
+固定基数指标 `rustfs_operator_unauthenticated_requests_total{endpoint,outcome}` 覆盖所有
+STS 与 Console 登录请求。可用以下查询汇总所有副本的端点 QPS；`outcome` 取值为
+`success`、`error` 或 `rejected`：
+
+```promql
+sum by (endpoint) (rate(rustfs_operator_unauthenticated_requests_total[5m]))
 ```
 
 启用 Prometheus Operator 集成：
