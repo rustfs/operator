@@ -25,6 +25,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use snafu::Snafu;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -427,6 +428,12 @@ enum NodePodDeletionSafety {
     Fenced,
 }
 
+enum CachedNodeLookup {
+    Found(Box<corev1::Node>),
+    NotFound,
+    Failed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PodDeletionPlan {
     force: bool,
@@ -486,6 +493,7 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
         .map_err(|source| Error::Context {
             source: context::Error::Kube { source },
         })?;
+    let mut node_lookup_by_name = HashMap::new();
 
     for pod in pods.items {
         // Only act on terminating pods to keep the behavior conservative.
@@ -595,14 +603,40 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
             continue;
         };
 
-        let node_deletion_safety = match nodes_api.get(&node_name).await {
-            Ok(node) => node_pod_deletion_safety(&node, &pod),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => NodePodDeletionSafety::Fenced,
-            Err(source) => {
-                return Err(Error::Context {
-                    source: context::Error::Kube { source },
-                });
-            }
+        if !node_lookup_by_name.contains_key(&node_name) {
+            let lookup = match nodes_api.get(&node_name).await {
+                Ok(node) => CachedNodeLookup::Found(Box::new(node)),
+                Err(kube::Error::Api(ae)) if ae.code == 404 => CachedNodeLookup::NotFound,
+                Err(source) => {
+                    warn!(
+                        tenant = %tenant.name(),
+                        namespace = %namespace,
+                        node = %node_name,
+                        error = %source,
+                        "skipping terminating pod cleanup because the Node could not be inspected"
+                    );
+                    let _ = ctx
+                        .record(
+                            tenant,
+                            EventType::Warning,
+                            "PodCleanupNodeLookupFailed",
+                            &format!(
+                                "Skipped terminating Pod cleanup because Node '{}' could not be inspected; the Operator will retry on a later reconcile",
+                                node_name
+                            ),
+                        )
+                        .await;
+                    CachedNodeLookup::Failed
+                }
+            };
+            node_lookup_by_name.insert(node_name.clone(), lookup);
+        }
+
+        let node_deletion_safety = match node_lookup_by_name.get(&node_name) {
+            Some(CachedNodeLookup::Found(node)) => node_pod_deletion_safety(node, &pod),
+            Some(CachedNodeLookup::NotFound) => NodePodDeletionSafety::Fenced,
+            Some(CachedNodeLookup::Failed) => continue,
+            None => continue,
         };
 
         if node_deletion_safety == NodePodDeletionSafety::Ready {
@@ -988,15 +1022,227 @@ mod tests {
     use super::is_node_down;
     use super::{
         NodePodDeletionSafety, PodCleanupDecision, cleanup_decision_for_pod,
-        force_delete_requires_fencing, node_pod_deletion_safety, object_owned_by_tenant,
-        pod_controller_owner_name_and_uid, pod_has_owner_kind, pod_matches_policy_controller_kind,
+        cleanup_stuck_terminating_pods_on_down_nodes, force_delete_requires_fencing,
+        node_pod_deletion_safety, object_owned_by_tenant, pod_controller_owner_name_and_uid,
+        pod_has_owner_kind, pod_matches_policy_controller_kind,
         replicaset_matches_pod_controller_and_tenant, should_mark_reconcile_started,
         statefulset_matches_pod_controller_and_tenant,
     };
+    use crate::context::Context;
     use crate::types::v1alpha1::status::Status;
+    use http::{Method, Request, Response, StatusCode};
     use k8s_openapi::api::apps::v1 as appsv1;
     use k8s_openapi::api::core::v1 as corev1;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
+    use kube::{Client, client::Body};
+    use serde_json::{Value, json};
+    use std::convert::Infallible;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tower::service_fn;
+
+    fn kube_response(status: StatusCode, body: Value) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("response should serialize"),
+            ))
+            .expect("response should build")
+    }
+
+    fn terminating_tenant_pod(tenant: &crate::Tenant, name: &str) -> corev1::Pod {
+        corev1::Pod {
+            metadata: metav1::ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                uid: Some(format!("{name}-uid")),
+                deletion_timestamp: Some(metav1::Time(chrono::Utc::now())),
+                owner_references: Some(vec![tenant.new_owner_ref()]),
+                ..Default::default()
+            },
+            spec: Some(corev1::PodSpec {
+                node_name: Some("node-a".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn node_lookup_failure_skips_pod_cleanup_without_repeating_or_deleting() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pods = vec![
+            terminating_tenant_pod(&tenant, "pod-a"),
+            terminating_tenant_pod(&tenant, "pod-b"),
+        ];
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let pods = pods.clone();
+            let request_count = Arc::clone(&request_count);
+            move |request: Request<Body>| {
+                let pods = pods.clone();
+                let request_number = request_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let response = match request_number {
+                        0 => {
+                            assert_eq!(request.method(), Method::GET);
+                            assert_eq!(request.uri().path(), "/api/v1/namespaces/default/pods");
+                            kube_response(
+                                StatusCode::OK,
+                                json!({
+                                    "apiVersion": "v1",
+                                    "kind": "PodList",
+                                    "metadata": {},
+                                    "items": pods
+                                }),
+                            )
+                        }
+                        1 => {
+                            assert_eq!(request.method(), Method::GET);
+                            assert_eq!(request.uri().path(), "/api/v1/nodes/node-a");
+                            kube_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                json!({
+                                    "apiVersion": "v1",
+                                    "kind": "Status",
+                                    "status": "Failure",
+                                    "reason": "InternalError",
+                                    "code": 500
+                                }),
+                            )
+                        }
+                        2 => {
+                            assert_eq!(request.method(), Method::POST);
+                            assert!(request.uri().path().contains("/events"));
+                            kube_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                json!({
+                                    "apiVersion": "v1",
+                                    "kind": "Status",
+                                    "status": "Failure",
+                                    "reason": "InternalError",
+                                    "code": 500
+                                }),
+                            )
+                        }
+                        _ => panic!("unexpected Kubernetes request: {request:?}"),
+                    };
+                    Ok::<_, Infallible>(response)
+                }
+            }
+        });
+        let ctx = Context::new(Client::new(service, "default"));
+
+        cleanup_stuck_terminating_pods_on_down_nodes(
+            &tenant,
+            "default",
+            &ctx,
+            crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete,
+        )
+        .await
+        .expect("Node lookup failures must not block the main reconcile path");
+
+        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn cached_node_is_evaluated_against_each_pods_tolerations() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pod_without_toleration = terminating_tenant_pod(&tenant, "pod-a");
+        let mut pod_with_toleration = terminating_tenant_pod(&tenant, "pod-b");
+        pod_with_toleration
+            .spec
+            .as_mut()
+            .expect("test Pod should have a spec")
+            .tolerations = Some(vec![corev1::Toleration {
+            key: Some(super::OUT_OF_SERVICE_TAINT_KEY.to_string()),
+            operator: Some("Exists".to_string()),
+            effect: Some("NoExecute".to_string()),
+            ..Default::default()
+        }]);
+        let pods = vec![pod_without_toleration, pod_with_toleration];
+        let node = node_with_out_of_service_taint();
+        let node_get_count = Arc::new(AtomicUsize::new(0));
+        let pod_delete_count = Arc::new(AtomicUsize::new(0));
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let pods = pods.clone();
+            let node = node.clone();
+            let node_get_count = Arc::clone(&node_get_count);
+            let pod_delete_count = Arc::clone(&pod_delete_count);
+            let event_count = Arc::clone(&event_count);
+            move |request: Request<Body>| {
+                let pods = pods.clone();
+                let node = node.clone();
+                let node_get_count = Arc::clone(&node_get_count);
+                let pod_delete_count = Arc::clone(&pod_delete_count);
+                let event_count = Arc::clone(&event_count);
+                async move {
+                    let path = request.uri().path();
+                    let response = match (request.method(), path) {
+                        (&Method::GET, "/api/v1/namespaces/default/pods") => kube_response(
+                            StatusCode::OK,
+                            json!({
+                                "apiVersion": "v1",
+                                "kind": "PodList",
+                                "metadata": {},
+                                "items": pods
+                            }),
+                        ),
+                        (&Method::GET, "/api/v1/nodes/node-a") => {
+                            node_get_count.fetch_add(1, Ordering::SeqCst);
+                            kube_response(
+                                StatusCode::OK,
+                                serde_json::to_value(node).expect("Node should serialize"),
+                            )
+                        }
+                        (&Method::DELETE, "/api/v1/namespaces/default/pods/pod-a") => {
+                            pod_delete_count.fetch_add(1, Ordering::SeqCst);
+                            kube_response(
+                                StatusCode::OK,
+                                json!({
+                                    "apiVersion": "v1",
+                                    "kind": "Status",
+                                    "status": "Success"
+                                }),
+                            )
+                        }
+                        (&Method::POST, path) if path.contains("/events") => {
+                            event_count.fetch_add(1, Ordering::SeqCst);
+                            kube_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                json!({
+                                    "apiVersion": "v1",
+                                    "kind": "Status",
+                                    "status": "Failure",
+                                    "reason": "InternalError",
+                                    "code": 500
+                                }),
+                            )
+                        }
+                        _ => panic!("unexpected Kubernetes request: {request:?}"),
+                    };
+                    Ok::<_, Infallible>(response)
+                }
+            }
+        });
+        let ctx = Context::new(Client::new(service, "default"));
+
+        cleanup_stuck_terminating_pods_on_down_nodes(
+            &tenant,
+            "default",
+            &ctx,
+            crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete,
+        )
+        .await
+        .expect("cached Nodes should preserve per-Pod fencing checks");
+
+        assert_eq!(node_get_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pod_delete_count.load(Ordering::SeqCst), 1);
+        assert_eq!(event_count.load(Ordering::SeqCst), 2);
+    }
 
     fn node_with_ready_status(status: &str) -> corev1::Node {
         corev1::Node {
