@@ -52,6 +52,26 @@ const CERT_MANAGER_ISSUER_PLURAL: &str = "issuers";
 const CERT_MANAGER_CLUSTER_ISSUER_KIND: &str = "ClusterIssuer";
 const CERT_MANAGER_CLUSTER_ISSUER_PLURAL: &str = "clusterissuers";
 const STATUS_MESSAGE_LIMIT: usize = 256;
+// etcd's default 1.5 MiB request limit is the hard upper envelope for Kubernetes objects. Reserve
+// 512 KiB for Certificate metadata/spec fields and 1 MiB for the rest of Tenant status.
+const ETCD_DEFAULT_MAX_REQUEST_BYTES: u64 = 3 * 1024 * 1024 / 2;
+const TLS_CERTIFICATE_NON_SAN_MARGIN_BYTES: u64 = 512 * 1024;
+const TLS_STATUS_NON_SAN_MARGIN_BYTES: u64 = 1024 * 1024;
+const MAX_CERTIFICATE_SAN_BYTES: u64 =
+    ETCD_DEFAULT_MAX_REQUEST_BYTES - TLS_CERTIFICATE_NON_SAN_MARGIN_BYTES;
+const MAX_TLS_STATUS_SAN_BYTES: u64 =
+    ETCD_DEFAULT_MAX_REQUEST_BYTES - TLS_STATUS_NON_SAN_MARGIN_BYTES;
+// A String plus BTreeSet/Vec bookkeeping is conservatively budgeted at 64 bytes independent of
+// the string payload, which is limited separately by serialized byte budgets.
+const SAN_NAME_CONTAINER_OVERHEAD_BYTES: u64 = 64;
+const MAX_TLS_STATUS_SAN_NAME_COPIES: u64 =
+    MAX_TLS_STATUS_SAN_BYTES / SAN_NAME_CONTAINER_OVERHEAD_BYTES;
+const MAX_TLS_SAN_NAMES_PER_LIST: u64 = MAX_TLS_STATUS_SAN_NAME_COPIES;
+const MAX_TLS_SAN_COVERAGE_LOOKUPS: u64 = MAX_TLS_STATUS_SAN_NAME_COPIES * 2;
+// Concrete-name verification is delegated to webpki, which may scan the complete certificate SAN
+// extension for each name. Bound the conservative certificate-DER bytes scanned across all names.
+const MAX_TLS_SAN_VERIFICATION_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+const STATUS_DNS_NAMES_FIELD_OVERHEAD_BYTES: u64 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CertManagerPrerequisite {
@@ -176,6 +196,13 @@ async fn reconcile_cert_manager_tls(
         Err(failure) => return tls_validation_blocked(ctx, tenant, config, failure).await,
     };
 
+    let cluster_domain = ctx.cluster_domain();
+    let san_budget = match san_budget::validate(tenant, namespace, cluster_domain, config, &entries)
+    {
+        Ok(budget) => budget,
+        Err(failure) => return tls_validation_blocked(ctx, tenant, config, failure).await,
+    };
+
     if entries
         .iter()
         .any(|entry| entry.cert_manager.manage_certificate)
@@ -197,7 +224,6 @@ async fn reconcile_cert_manager_tls(
 
     let mut observed = Vec::with_capacity(entries.len());
     let mut desired_managed_certificate_names = BTreeSet::new();
-    let cluster_domain = ctx.cluster_domain();
     for entry in entries {
         let cert_manager = &entry.cert_manager;
         let Some(secret_name) = cert_manager
@@ -237,13 +263,9 @@ async fn reconcile_cert_manager_tls(
             let certificate_name = certificate_name(tenant, &entry);
             desired_managed_certificate_names.insert(certificate_name.clone());
 
-            if let Err(failure) = validate_managed_certificate_san_config(
-                tenant,
-                namespace,
-                config,
-                &entry,
-                cluster_domain,
-            ) {
+            if let Err(failure) =
+                validate_managed_certificate_san_config(&san_budget, config, &entry)
+            {
                 return tls_validation_blocked(ctx, tenant, config, failure).await;
             }
 
@@ -263,12 +285,10 @@ async fn reconcile_cert_manager_tls(
             }
 
             let desired_certificate = build_cert_manager_certificate(
-                tenant,
-                namespace,
+                &san_budget,
                 cert_manager,
                 &entry.hosts,
                 include_generated_dns_names(&entry),
-                cluster_domain,
                 CertManagerCertificateNames {
                     secret: &secret_name,
                     certificate: &certificate_name,
@@ -369,8 +389,7 @@ async fn reconcile_cert_manager_tls(
         )
         .await?;
 
-        let san_dns_names =
-            san_validation_dns_names(tenant, namespace, config, &entry, cluster_domain);
+        let san_dns_names = san_validation_dns_names(&san_budget, config, &entry);
         if config.require_san_match
             && let Err(failure) =
                 validate_tls_secret_san_match(&secret_name, &cert_bytes, &san_dns_names)
@@ -902,14 +921,14 @@ struct CertManagerCertificateNames<'a> {
 }
 
 fn build_cert_manager_certificate(
-    tenant: &Tenant,
-    namespace: &str,
+    san_budget: &ValidatedTlsSanBudget<'_>,
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
     include_generated_dns_names: bool,
-    cluster_domain: &str,
     names: CertManagerCertificateNames<'_>,
 ) -> DynamicObject {
+    let tenant = san_budget.tenant();
+    let namespace = san_budget.namespace();
     let mut spec = Map::new();
     spec.insert("secretName".to_string(), json!(names.secret));
     if let Some(issuer_ref) = cert_manager.issuer_ref.as_ref() {
@@ -925,12 +944,10 @@ fn build_cert_manager_certificate(
     spec.insert(
         "dnsNames".to_string(),
         json!(certificate_dns_names(
-            tenant,
-            namespace,
+            san_budget,
             cert_manager,
             hosts,
             include_generated_dns_names,
-            cluster_domain,
         )),
     );
     spec.insert(
@@ -1117,13 +1134,14 @@ fn issuer_ref_value(issuer_ref: &CertManagerIssuerRef) -> Value {
 }
 
 fn certificate_dns_names(
-    tenant: &Tenant,
-    namespace: &str,
+    san_budget: &ValidatedTlsSanBudget<'_>,
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
     include_generated_dns_names: bool,
-    cluster_domain: &str,
 ) -> Vec<String> {
+    let tenant = san_budget.tenant();
+    let namespace = san_budget.namespace();
+    let cluster_domain = san_budget.cluster_domain();
     let mut names = BTreeSet::new();
     names.extend(hosts.iter().filter(|name| !name.is_empty()).cloned());
     names.extend(
@@ -1171,57 +1189,508 @@ fn include_generated_dns_names(entry: &TlsCertificateEntry) -> bool {
         .unwrap_or(entry.default || entry.legacy)
 }
 
+mod san_budget {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct SanListEstimate {
+        names: u64,
+        encoded_item_bytes: u64,
+    }
+
+    impl SanListEstimate {
+        fn add_name(&mut self, name: &str) -> Result<(), TlsValidationFailure> {
+            let encoded = serde_json::to_string(name).map_err(|_| overflow_failure())?;
+            self.names = checked_add(self.names, 1)?;
+            self.encoded_item_bytes = checked_add(
+                self.encoded_item_bytes,
+                checked_add(to_u64(encoded.len())?, 1)?,
+            )?;
+            Ok(())
+        }
+
+        fn add_ascii_batch(
+            &mut self,
+            count: u64,
+            total_name_bytes: u64,
+        ) -> Result<(), TlsValidationFailure> {
+            self.names = checked_add(self.names, count)?;
+            let quotes_and_commas = checked_multiply(count, 3)?;
+            self.encoded_item_bytes = checked_add(
+                self.encoded_item_bytes,
+                checked_add(total_name_bytes, quotes_and_commas)?,
+            )?;
+            Ok(())
+        }
+
+        fn merge(&mut self, other: Self) -> Result<(), TlsValidationFailure> {
+            self.names = checked_add(self.names, other.names)?;
+            self.encoded_item_bytes =
+                checked_add(self.encoded_item_bytes, other.encoded_item_bytes)?;
+            Ok(())
+        }
+
+        fn array_bytes(self) -> Result<u64, TlsValidationFailure> {
+            checked_add(self.encoded_item_bytes, 2)
+        }
+    }
+
+    /// Proof that every `servers`-driven SAN expansion for this Tenant, namespace, and cluster
+    /// domain fits the Certificate, status, allocation, and comparison budgets. The private proof
+    /// field prevents callers outside this module from constructing a token without validation.
+    #[derive(Debug)]
+    pub(super) struct ValidatedTlsSanBudget<'a> {
+        tenant: &'a Tenant,
+        namespace: &'a str,
+        cluster_domain: &'a str,
+        _proof: Proof,
+    }
+
+    #[derive(Debug)]
+    struct Proof;
+
+    impl<'a> ValidatedTlsSanBudget<'a> {
+        pub(super) fn tenant(&self) -> &'a Tenant {
+            self.tenant
+        }
+
+        pub(super) fn namespace(&self) -> &'a str {
+            self.namespace
+        }
+
+        pub(super) fn cluster_domain(&self) -> &'a str {
+            self.cluster_domain
+        }
+    }
+
+    pub(super) fn validate<'a>(
+        tenant: &'a Tenant,
+        namespace: &'a str,
+        cluster_domain: &'a str,
+        config: &TlsConfig,
+        entries: &[TlsCertificateEntry],
+    ) -> Result<ValidatedTlsSanBudget<'a>, TlsValidationFailure> {
+        if config.mode != TlsMode::CertManager {
+            return Ok(token(tenant, namespace, cluster_domain));
+        }
+
+        let generated = generated_names_estimate(tenant, namespace, cluster_domain)?;
+        let required = required_names_estimate(tenant, namespace, cluster_domain)?;
+        let mut status_bytes = 0_u64;
+        let mut status_name_copies = 0_u64;
+        let mut coverage_lookups = 0_u64;
+
+        for entry in entries {
+            let custom = custom_names_estimate(entry)?;
+            let status_hosts = status_hosts_estimate(entry)?;
+            let include_generated = include_generated_dns_names(entry);
+
+            if entry.cert_manager.manage_certificate {
+                let mut certificate = custom;
+                if include_generated {
+                    certificate.merge(generated)?;
+                }
+                validate_list(
+                    &format!("cert-manager Certificate '{}' dnsNames", entry.name),
+                    certificate,
+                    MAX_CERTIFICATE_SAN_BYTES,
+                )?;
+            }
+
+            let mut status = custom;
+            if config.enable_internode_https && entry.default {
+                status.merge(required)?;
+            } else if include_generated {
+                status.merge(generated)?;
+            }
+            validate_list(
+                &format!("TLS status for certificate '{}'", entry.name),
+                status,
+                MAX_TLS_STATUS_SAN_BYTES,
+            )?;
+            add_status_copy(&mut status_bytes, &mut status_name_copies, status)?;
+            // certificates[].hosts is serialized independently from certificates[].dnsNames.
+            // Hosts are also part of dnsNames, so both copies must be charged to the status budget.
+            add_status_copy(&mut status_bytes, &mut status_name_copies, status_hosts)?;
+            if entry.default {
+                // The default certificate SAN list is retained both in certificates[] and in the
+                // compatibility top-level status.dnsNames field.
+                add_status_copy(&mut status_bytes, &mut status_name_copies, status)?;
+            }
+
+            if entry.cert_manager.manage_certificate
+                && config.enable_internode_https
+                && entry.default
+                && !include_generated
+            {
+                coverage_lookups = checked_add(coverage_lookups, custom.names)?;
+                coverage_lookups = checked_add(coverage_lookups, required.names)?;
+            }
+            if config.require_san_match {
+                coverage_lookups = checked_add(coverage_lookups, status.names)?;
+            }
+        }
+
+        if status_bytes > MAX_TLS_STATUS_SAN_BYTES {
+            return Err(budget_failure(format!(
+                "spec.tls would serialize at least {status_bytes} bytes of DNS SAN lists into Tenant status, exceeding the {MAX_TLS_STATUS_SAN_BYTES}-byte TLS status budget derived from etcd's {ETCD_DEFAULT_MAX_REQUEST_BYTES}-byte request limit"
+            )));
+        }
+        if status_name_copies > MAX_TLS_STATUS_SAN_NAME_COPIES {
+            return Err(budget_failure(format!(
+                "spec.tls would retain {status_name_copies} DNS SAN name copies in Tenant status, exceeding the allocation budget of {MAX_TLS_STATUS_SAN_NAME_COPIES}"
+            )));
+        }
+        if coverage_lookups > MAX_TLS_SAN_COVERAGE_LOOKUPS {
+            return Err(budget_failure(format!(
+                "spec.tls requires {coverage_lookups} DNS SAN coverage operations, exceeding the comparison budget of {MAX_TLS_SAN_COVERAGE_LOOKUPS}"
+            )));
+        }
+
+        Ok(token(tenant, namespace, cluster_domain))
+    }
+
+    fn token<'a>(
+        tenant: &'a Tenant,
+        namespace: &'a str,
+        cluster_domain: &'a str,
+    ) -> ValidatedTlsSanBudget<'a> {
+        ValidatedTlsSanBudget {
+            tenant,
+            namespace,
+            cluster_domain,
+            _proof: Proof,
+        }
+    }
+
+    fn validate_list(
+        label: &str,
+        estimate: SanListEstimate,
+        max_bytes: u64,
+    ) -> Result<(), TlsValidationFailure> {
+        if estimate.names > MAX_TLS_SAN_NAMES_PER_LIST {
+            return Err(budget_failure(format!(
+                "{label} would contain {} names, exceeding the per-list allocation budget of {MAX_TLS_SAN_NAMES_PER_LIST}",
+                estimate.names
+            )));
+        }
+        let bytes = estimate.array_bytes()?;
+        if bytes > max_bytes {
+            return Err(budget_failure(format!(
+                "{label} would serialize to at least {bytes} bytes, exceeding its {max_bytes}-byte budget derived from etcd's {ETCD_DEFAULT_MAX_REQUEST_BYTES}-byte request limit"
+            )));
+        }
+        Ok(())
+    }
+
+    fn add_status_copy(
+        total_bytes: &mut u64,
+        total_names: &mut u64,
+        estimate: SanListEstimate,
+    ) -> Result<(), TlsValidationFailure> {
+        if estimate.names == 0 {
+            return Ok(());
+        }
+        *total_bytes = checked_add(
+            *total_bytes,
+            checked_add(
+                estimate.array_bytes()?,
+                STATUS_DNS_NAMES_FIELD_OVERHEAD_BYTES,
+            )?,
+        )?;
+        *total_names = checked_add(*total_names, estimate.names)?;
+        Ok(())
+    }
+
+    fn custom_names_estimate(
+        entry: &TlsCertificateEntry,
+    ) -> Result<SanListEstimate, TlsValidationFailure> {
+        let mut estimate = SanListEstimate::default();
+        for name in entry
+            .hosts
+            .iter()
+            .chain(entry.cert_manager.dns_names.iter())
+            .filter(|name| !name.is_empty())
+        {
+            estimate.add_name(name)?;
+        }
+        Ok(estimate)
+    }
+
+    fn status_hosts_estimate(
+        entry: &TlsCertificateEntry,
+    ) -> Result<SanListEstimate, TlsValidationFailure> {
+        let mut estimate = SanListEstimate::default();
+        for name in &entry.hosts {
+            estimate.add_name(name)?;
+        }
+        Ok(estimate)
+    }
+
+    fn generated_names_estimate(
+        tenant: &Tenant,
+        namespace: &str,
+        cluster_domain: &str,
+    ) -> Result<SanListEstimate, TlsValidationFailure> {
+        let tenant_name = tenant.name();
+        let io_service = format!("{tenant_name}-io");
+        let headless_service = tenant.headless_service_name();
+        let mut estimate = SanListEstimate::default();
+        for name in [
+            format!("{io_service}.{namespace}.svc"),
+            cluster_dns::service_fqdn(&io_service, namespace, cluster_domain),
+            format!("{headless_service}.{namespace}.svc"),
+            cluster_dns::service_fqdn(&headless_service, namespace, cluster_domain),
+        ] {
+            estimate.add_name(&name)?;
+        }
+        add_pod_names(&mut estimate, tenant, namespace, cluster_domain, false)?;
+        Ok(estimate)
+    }
+
+    fn required_names_estimate(
+        tenant: &Tenant,
+        namespace: &str,
+        cluster_domain: &str,
+    ) -> Result<SanListEstimate, TlsValidationFailure> {
+        let headless_service = tenant.headless_service_name();
+        let mut estimate = SanListEstimate::default();
+        estimate.add_name(&cluster_dns::service_fqdn(
+            &headless_service,
+            namespace,
+            cluster_domain,
+        ))?;
+        add_pod_names(&mut estimate, tenant, namespace, cluster_domain, true)?;
+        Ok(estimate)
+    }
+
+    fn add_pod_names(
+        estimate: &mut SanListEstimate,
+        tenant: &Tenant,
+        namespace: &str,
+        cluster_domain: &str,
+        skip_single_node_single_disk: bool,
+    ) -> Result<(), TlsValidationFailure> {
+        let tenant_name = tenant.name();
+        let suffix = format!(
+            ".{}.{namespace}.svc.{cluster_domain}",
+            tenant.headless_service_name()
+        );
+        for pool in &tenant.spec.pools {
+            if pool.servers <= 0 {
+                return Err(budget_failure(format!(
+                    "spec.tls cannot expand DNS SANs for pool '{}' with servers={}; servers must be greater than 0",
+                    pool.name, pool.servers
+                )));
+            }
+            if skip_single_node_single_disk
+                && tenant.spec.pools.len() == 1
+                && pool.is_single_node_single_disk()
+            {
+                continue;
+            }
+
+            let count = pool.servers as u64;
+            let prefix = format!("{tenant_name}-{}-", pool.name);
+            let fixed_name_bytes = checked_add(to_u64(prefix.len())?, to_u64(suffix.len())?)?;
+            let total_name_bytes = checked_add(
+                checked_multiply(count, fixed_name_bytes)?,
+                ordinal_digit_sum(count)?,
+            )?;
+            estimate.add_ascii_batch(count, total_name_bytes)?;
+        }
+        Ok(())
+    }
+
+    fn ordinal_digit_sum(count: u64) -> Result<u64, TlsValidationFailure> {
+        let mut remaining = count;
+        let mut range = 10_u64;
+        let mut digits = 1_u64;
+        let mut total = 0_u64;
+        while remaining > 0 {
+            let in_range = remaining.min(range);
+            total = checked_add(total, checked_multiply(in_range, digits)?)?;
+            remaining -= in_range;
+            if remaining == 0 {
+                break;
+            }
+            range = checked_multiply(range, 10)?;
+            digits = checked_add(digits, 1)?;
+        }
+        Ok(total)
+    }
+
+    fn to_u64(value: usize) -> Result<u64, TlsValidationFailure> {
+        u64::try_from(value).map_err(|_| overflow_failure())
+    }
+
+    fn checked_add(left: u64, right: u64) -> Result<u64, TlsValidationFailure> {
+        left.checked_add(right).ok_or_else(overflow_failure)
+    }
+
+    fn checked_multiply(left: u64, right: u64) -> Result<u64, TlsValidationFailure> {
+        left.checked_mul(right).ok_or_else(overflow_failure)
+    }
+
+    fn overflow_failure() -> TlsValidationFailure {
+        budget_failure(
+            "spec.tls DNS SAN resource calculation overflowed before expansion".to_string(),
+        )
+    }
+
+    fn budget_failure(message: String) -> TlsValidationFailure {
+        TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ordinal_digit_sum_matches_generated_ordinals() {
+            assert_eq!(ordinal_digit_sum(1), Ok(1));
+            assert_eq!(ordinal_digit_sum(10), Ok(10));
+            assert_eq!(ordinal_digit_sum(11), Ok(12));
+            assert_eq!(ordinal_digit_sum(100), Ok(190));
+        }
+
+        #[test]
+        fn ordinal_digit_sum_rejects_arithmetic_overflow() {
+            let failure = ordinal_digit_sum(u64::MAX)
+                .expect_err("unrepresentable aggregate name length must fail closed");
+            assert!(failure.message.contains("overflowed before expansion"));
+        }
+
+        #[test]
+        fn generated_name_estimate_conservatively_covers_serialized_output() {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.metadata.name = Some("tenant-a".to_string());
+            tenant.spec.pools[0].servers = 12;
+            let config = TlsConfig {
+                mode: TlsMode::CertManager,
+                require_san_match: false,
+                ..Default::default()
+            };
+            let entries = vec![TlsCertificateEntry {
+                name: "default".to_string(),
+                default: true,
+                hosts: Vec::new(),
+                cert_manager: CertManagerTlsConfig::default(),
+                legacy: false,
+            }];
+            let budget = validate(
+                &tenant,
+                "storage",
+                cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+                &config,
+                &entries,
+            )
+            .expect("small generated SAN set should fit");
+            let estimate =
+                generated_names_estimate(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN)
+                    .expect("estimate should succeed");
+            let generated = super::super::generated_dns_names(&budget);
+            let serialized = serde_json::to_vec(&generated).expect("SAN list should serialize");
+
+            assert_eq!(estimate.names, generated.len() as u64);
+            assert!(estimate.array_bytes().expect("byte estimate") >= serialized.len() as u64);
+        }
+
+        #[test]
+        fn status_budget_counts_hosts_and_all_default_dns_name_copies() {
+            let entry = TlsCertificateEntry {
+                name: "default".to_string(),
+                default: true,
+                hosts: vec!["api.example.com".to_string(), "雪.example.com".to_string()],
+                cert_manager: CertManagerTlsConfig {
+                    dns_names: vec!["console.example.com".to_string()],
+                    ..Default::default()
+                },
+                legacy: false,
+            };
+            let status = custom_names_estimate(&entry).expect("status estimate should succeed");
+            let hosts = status_hosts_estimate(&entry).expect("host estimate should succeed");
+            let mut estimated_bytes = 0_u64;
+            let mut estimated_names = 0_u64;
+            add_status_copy(&mut estimated_bytes, &mut estimated_names, status)
+                .expect("certificate dnsNames should fit");
+            add_status_copy(&mut estimated_bytes, &mut estimated_names, hosts)
+                .expect("certificate hosts should fit");
+            add_status_copy(&mut estimated_bytes, &mut estimated_names, status)
+                .expect("top-level default dnsNames should fit");
+
+            let dns_names = entry
+                .hosts
+                .iter()
+                .chain(entry.cert_manager.dns_names.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            let actual_list_bytes = serde_json::to_vec(&dns_names)
+                .expect("dnsNames should serialize")
+                .len() as u64
+                * 2
+                + serde_json::to_vec(&entry.hosts)
+                    .expect("hosts should serialize")
+                    .len() as u64;
+            let actual_name_copies = dns_names.len() as u64 * 2 + entry.hosts.len() as u64;
+
+            assert!(estimated_bytes >= actual_list_bytes);
+            assert!(estimated_names >= actual_name_copies);
+        }
+
+        #[test]
+        fn byte_budgets_leave_explicit_etcd_object_margins() {
+            assert_eq!(ETCD_DEFAULT_MAX_REQUEST_BYTES, 1_572_864);
+            assert_eq!(MAX_CERTIFICATE_SAN_BYTES, 1_048_576);
+            assert_eq!(MAX_TLS_STATUS_SAN_BYTES, 524_288);
+        }
+    }
+}
+
+use san_budget::ValidatedTlsSanBudget;
+
 fn validate_managed_certificate_san_config(
-    tenant: &Tenant,
-    namespace: &str,
+    san_budget: &ValidatedTlsSanBudget<'_>,
     config: &TlsConfig,
     entry: &TlsCertificateEntry,
-    cluster_domain: &str,
 ) -> Result<(), TlsValidationFailure> {
     if !config.enable_internode_https || !entry.default || include_generated_dns_names(entry) {
         return Ok(());
     }
 
-    let generated_names = required_tls_dns_names(tenant, namespace, cluster_domain);
-    let configured_names = certificate_dns_names(
-        tenant,
-        namespace,
-        &entry.cert_manager,
-        &entry.hosts,
-        false,
-        cluster_domain,
-    )
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    let missing_names = generated_names
+    let generated_names = required_tls_dns_names(san_budget);
+    let configured_names =
+        certificate_dns_names(san_budget, &entry.cert_manager, &entry.hosts, false)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+    let configured_coverage = DnsSanCoverage::from_names(
+        configured_names.iter().map(String::as_str),
+        "configured TLS DNS names",
+    )?;
+    let missing_name = generated_names
         .iter()
-        .filter(|name| {
-            !configured_names
-                .iter()
-                .any(|configured| dns_name_covers(configured, name))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+        .find(|name| !configured_coverage.covers(name));
 
-    if missing_names.is_empty() {
+    let Some(missing_name) = missing_name else {
         return Ok(());
-    }
+    };
 
     Err(TlsValidationFailure {
         reason: Reason::CertificateInvalid,
         message: format!(
             "spec.tls certificate '{}' cannot set certManager.includeGeneratedDnsNames=false while enableInternodeHttps=true unless certManager.dnsNames or hosts explicitly cover generated peer DNS names such as '{}'",
-            entry.name, missing_names[0]
+            entry.name, missing_name
         ),
     })
 }
 
 fn san_validation_dns_names(
-    tenant: &Tenant,
-    namespace: &str,
+    san_budget: &ValidatedTlsSanBudget<'_>,
     config: &TlsConfig,
     entry: &TlsCertificateEntry,
-    cluster_domain: &str,
 ) -> Vec<String> {
     let mut names = BTreeSet::new();
     names.extend(entry.hosts.iter().filter(|name| !name.is_empty()).cloned());
@@ -1234,14 +1703,17 @@ fn san_validation_dns_names(
             .cloned(),
     );
     if entry.default && config.enable_internode_https {
-        names.extend(required_tls_dns_names(tenant, namespace, cluster_domain));
+        names.extend(required_tls_dns_names(san_budget));
     } else if include_generated_dns_names(entry) {
-        names.extend(generated_dns_names(tenant, namespace, cluster_domain));
+        names.extend(generated_dns_names(san_budget));
     }
     names.into_iter().collect()
 }
 
-fn required_tls_dns_names(tenant: &Tenant, namespace: &str, cluster_domain: &str) -> Vec<String> {
+fn required_tls_dns_names(san_budget: &ValidatedTlsSanBudget<'_>) -> Vec<String> {
+    let tenant = san_budget.tenant();
+    let namespace = san_budget.namespace();
+    let cluster_domain = san_budget.cluster_domain();
     let mut names = BTreeSet::new();
     let tenant_name = tenant.name();
     let headless_service = tenant.headless_service_name();
@@ -1267,7 +1739,10 @@ fn required_tls_dns_names(tenant: &Tenant, namespace: &str, cluster_domain: &str
     names.into_iter().collect()
 }
 
-fn generated_dns_names(tenant: &Tenant, namespace: &str, cluster_domain: &str) -> Vec<String> {
+fn generated_dns_names(san_budget: &ValidatedTlsSanBudget<'_>) -> Vec<String> {
+    let tenant = san_budget.tenant();
+    let namespace = san_budget.namespace();
+    let cluster_domain = san_budget.cluster_domain();
     let mut names = BTreeSet::new();
     let tenant_name = tenant.name();
     let io_service = format!("{tenant_name}-io");
@@ -1298,20 +1773,56 @@ fn generated_dns_names(tenant: &Tenant, namespace: &str, cluster_domain: &str) -
     names.into_iter().collect()
 }
 
-fn dns_name_covers(pattern: &str, dns_name: &str) -> bool {
-    if pattern == dns_name {
-        return true;
+#[derive(Debug)]
+struct DnsSanCoverage {
+    exact: BTreeSet<String>,
+    wildcards: BTreeSet<String>,
+}
+
+impl DnsSanCoverage {
+    fn from_names<'a>(
+        names: impl IntoIterator<Item = &'a str>,
+        label: &str,
+    ) -> Result<Self, TlsValidationFailure> {
+        let mut exact = BTreeSet::new();
+        let mut wildcards = BTreeSet::new();
+        let mut count = 0_u64;
+        for name in names {
+            count = count.checked_add(1).ok_or_else(|| TlsValidationFailure {
+                reason: Reason::CertificateInvalid,
+                message: format!("{label} count overflowed the TLS SAN comparison budget"),
+            })?;
+            if count > MAX_TLS_SAN_NAMES_PER_LIST {
+                return Err(TlsValidationFailure {
+                    reason: Reason::CertificateInvalid,
+                    message: format!(
+                        "{label} contains more than {MAX_TLS_SAN_NAMES_PER_LIST} names, exceeding the TLS SAN comparison allocation budget"
+                    ),
+                });
+            }
+            let normalized = name.to_ascii_lowercase();
+            if is_dns_wildcard_pattern(&normalized) {
+                wildcards.insert(normalized);
+            } else {
+                exact.insert(normalized);
+            }
+        }
+        Ok(Self { exact, wildcards })
     }
-    let Some(suffix) = pattern.strip_prefix("*.") else {
-        return false;
-    };
-    let Some(label) = dns_name
-        .strip_suffix(suffix)
-        .and_then(|prefix| prefix.strip_suffix('.'))
-    else {
-        return false;
-    };
-    !label.is_empty() && !label.contains('.')
+
+    fn covers(&self, dns_name: &str) -> bool {
+        let normalized = dns_name.to_ascii_lowercase();
+        if is_dns_wildcard_pattern(&normalized) {
+            return self.wildcards.contains(&normalized);
+        }
+        if self.exact.contains(&normalized) {
+            return true;
+        }
+        let Some((_, suffix)) = normalized.split_once('.') else {
+            return false;
+        };
+        self.wildcards.contains(&format!("*.{suffix}"))
+    }
 }
 
 fn is_dns_wildcard_pattern(name: &str) -> bool {
@@ -1499,6 +2010,15 @@ fn validate_tls_secret_san_match(
     if expected_dns_names.is_empty() {
         return Ok(());
     }
+    if expected_dns_names.len() as u64 > MAX_TLS_SAN_COVERAGE_LOOKUPS {
+        return Err(TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: format!(
+                "TLS SAN validation requires {} DNS name lookups, exceeding the comparison budget of {MAX_TLS_SAN_COVERAGE_LOOKUPS}",
+                expected_dns_names.len()
+            ),
+        });
+    }
 
     let certs = rustls_pemfile::certs(&mut Cursor::new(cert_bytes))
         .collect::<Result<Vec<CertificateDer<'static>>, _>>()
@@ -1523,39 +2043,88 @@ fn validate_tls_secret_san_match(
             secret_name, TLS_CERT_KEY
         ),
     })?;
-    let presented_dns_names = cert.valid_dns_names().collect::<Vec<_>>();
-
-    let mut missing = Vec::new();
-    for dns_name in expected_dns_names {
-        if is_dns_wildcard_pattern(dns_name) {
-            if !presented_dns_names
-                .iter()
-                .any(|presented| presented.eq_ignore_ascii_case(dns_name))
-            {
-                missing.push(dns_name.clone());
+    let mut presented_count = 0_u64;
+    let mut presented_wildcards = BTreeSet::new();
+    for presented in cert.valid_dns_names() {
+        presented_count = presented_count.checked_add(1).ok_or_else(|| {
+            TlsValidationFailure {
+                reason: Reason::CertificateInvalid,
+                message: format!(
+                    "TLS certificate in Secret '{secret_name}' SAN count overflowed the comparison budget"
+                ),
             }
-            continue;
+        })?;
+        if presented_count > MAX_TLS_SAN_NAMES_PER_LIST {
+            return Err(TlsValidationFailure {
+                reason: Reason::CertificateInvalid,
+                message: format!(
+                    "TLS certificate in Secret '{secret_name}' contains more than {MAX_TLS_SAN_NAMES_PER_LIST} DNS names, exceeding the TLS SAN comparison allocation budget"
+                ),
+            });
         }
-        let server_name =
-            ServerName::try_from(dns_name.as_str()).map_err(|_| TlsValidationFailure {
-                reason: Reason::CertificateSanMismatch,
-                message: format!("required TLS DNS name '{dns_name}' is invalid"),
-            })?;
-        if cert.verify_is_valid_for_subject_name(&server_name).is_err() {
-            missing.push(dns_name.clone());
+        if is_dns_wildcard_pattern(presented) {
+            presented_wildcards.insert(presented.to_ascii_lowercase());
         }
     }
 
-    if missing.is_empty() {
+    // webpki intentionally owns concrete DNS-name matching semantics, including absolute names
+    // with a trailing dot. It may scan every GeneralName (not only valid DNS names), so charge the
+    // complete DER length before performing one scan per concrete name.
+    let concrete_expected_count = expected_dns_names
+        .iter()
+        .filter(|name| !is_dns_wildcard_pattern(name))
+        .count() as u64;
+    let verification_scan_bytes = u64::try_from(cert_der.as_ref().len())
+        .ok()
+        .and_then(|der_bytes| der_bytes.checked_mul(concrete_expected_count))
+        .ok_or_else(|| TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: "TLS SAN verification work calculation overflowed its resource budget"
+                .to_string(),
+        })?;
+    if verification_scan_bytes > MAX_TLS_SAN_VERIFICATION_SCAN_BYTES {
+        return Err(TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: format!(
+                "TLS SAN validation may scan {verification_scan_bytes} certificate DER bytes, exceeding the verification budget of {MAX_TLS_SAN_VERIFICATION_SCAN_BYTES}"
+            ),
+        });
+    }
+    let mut missing_count = 0_u64;
+    let mut missing_examples = Vec::new();
+    for dns_name in expected_dns_names {
+        let covered = if is_dns_wildcard_pattern(dns_name) {
+            presented_wildcards.contains(&dns_name.to_ascii_lowercase())
+        } else {
+            let server_name =
+                ServerName::try_from(dns_name.as_str()).map_err(|_| TlsValidationFailure {
+                    reason: Reason::CertificateSanMismatch,
+                    message: format!("required TLS DNS name '{dns_name}' is invalid"),
+                })?;
+            cert.verify_is_valid_for_subject_name(&server_name).is_ok()
+        };
+        if !covered {
+            missing_count += 1;
+            if missing_examples.len() < 3 {
+                missing_examples.push(dns_name.as_str());
+            }
+        }
+    }
+
+    if missing_count == 0 {
         Ok(())
     } else {
+        let omitted = missing_count.saturating_sub(missing_examples.len() as u64);
+        let detail = if omitted == 0 {
+            missing_examples.join(", ")
+        } else {
+            format!("{} (and {omitted} more)", missing_examples.join(", "))
+        };
         Err(TlsValidationFailure {
             reason: Reason::CertificateSanMismatch,
             message: format!(
                 "TLS certificate in Secret '{}' key '{}' does not cover required DNS names: {}",
-                secret_name,
-                TLS_CERT_KEY,
-                missing.join(", ")
+                secret_name, TLS_CERT_KEY, detail
             ),
         })
     }
@@ -2040,6 +2609,96 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
     }
 
     #[test]
+    fn tls_san_budget_allows_external_secret_without_expansion() {
+        let tenant = tenant_with_pool_servers(&[i32::MAX]);
+        let config = TlsConfig {
+            mode: TlsMode::CertManager,
+            require_san_match: false,
+            ..Default::default()
+        };
+        let entries = vec![tls_budget_entry(false, Some(false))];
+
+        let budget = san_budget::validate(
+            &tenant,
+            "storage",
+            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+            &config,
+            &entries,
+        )
+        .expect("zero-expansion external Secret should not inherit a topology limit");
+
+        assert_eq!(budget.tenant().name(), tenant.name());
+    }
+
+    #[test]
+    fn tls_san_budget_rejects_oversized_status_before_expansion() {
+        let mut tenant = tenant_with_pool_servers(&[800]);
+        tenant.metadata.name = Some("tenant-long".to_string());
+        let config = TlsConfig {
+            mode: TlsMode::CertManager,
+            require_san_match: false,
+            ..Default::default()
+        };
+        let entries = vec![tls_budget_entry(false, None)];
+        let namespace = "n".repeat(63);
+        let cluster_domain = format!("{}a", "a.".repeat(119));
+
+        let failure = san_budget::validate(&tenant, &namespace, &cluster_domain, &config, &entries)
+            .expect_err("duplicated default status SAN bytes must be bounded before expansion");
+
+        assert!(failure.message.contains("Tenant status"));
+        assert!(failure.message.contains("derived from etcd"));
+    }
+
+    #[test]
+    fn tls_san_budget_rejects_oversized_certificate_before_expansion() {
+        let mut tenant = tenant_with_pool_servers(&[4000]);
+        tenant.metadata.name = Some("tenant-long".to_string());
+        let config = TlsConfig {
+            mode: TlsMode::CertManager,
+            require_san_match: false,
+            ..Default::default()
+        };
+        let entries = vec![tls_budget_entry(true, None)];
+        let namespace = "n".repeat(63);
+        let cluster_domain = format!("{}a", "a.".repeat(119));
+
+        let failure = san_budget::validate(&tenant, &namespace, &cluster_domain, &config, &entries)
+            .expect_err("oversized Certificate dnsNames must fail before expansion");
+
+        assert!(failure.message.contains("cert-manager Certificate"));
+        assert!(failure.message.contains("derived from etcd"));
+    }
+
+    #[test]
+    fn dns_san_coverage_indexes_exact_and_single_label_wildcards() {
+        let coverage =
+            DnsSanCoverage::from_names(["API.EXAMPLE.COM", "*.storage.example.com"], "test SANs")
+                .expect("small SAN set should index");
+
+        assert!(coverage.covers("api.example.com"));
+        assert!(coverage.covers("pod.storage.example.com"));
+        assert!(coverage.covers("*.storage.example.com"));
+        assert!(!coverage.covers("nested.pod.storage.example.com"));
+        assert!(!coverage.covers("storage.example.com"));
+    }
+
+    #[test]
+    fn dns_san_coverage_rejects_oversized_configured_set() {
+        let names = (0..=MAX_TLS_SAN_NAMES_PER_LIST)
+            .map(|index| format!("name-{index}.example.com"))
+            .collect::<Vec<_>>();
+
+        let failure = DnsSanCoverage::from_names(
+            names.iter().map(String::as_str),
+            "presented certificate SANs",
+        )
+        .expect_err("presented SAN index allocation must be bounded");
+
+        assert!(failure.message.contains("comparison allocation budget"));
+    }
+
+    #[test]
     fn default_secret_type_rejects_unconventional_server_secret() {
         let secret = tls_secret("server-tls", "7", Some("Opaque"), true, true, None);
 
@@ -2290,6 +2949,41 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
     }
 
     #[test]
+    fn require_san_match_preserves_webpki_absolute_dns_name_semantics() {
+        assert_eq!(
+            validate_tls_secret_san_match(
+                "server-tls",
+                CERT_WITH_PEER_SANS_PEM,
+                &["localhost.".to_string()],
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn require_san_match_bounds_scans_across_non_dns_sans() {
+        let ip_sans = (0..1024)
+            .map(|index| format!("10.{}.{}.1", index / 256, index % 256))
+            .collect::<Vec<_>>();
+        let certificate = rcgen::generate_simple_self_signed(ip_sans)
+            .expect("IP subjectAltNames should generate a certificate");
+        let expected_dns_names = (0..4096)
+            .map(|index| format!("peer-{index}.example.com"))
+            .collect::<Vec<_>>();
+
+        let failure = validate_tls_secret_san_match(
+            "server-tls",
+            certificate.cert.pem().as_bytes(),
+            &expected_dns_names,
+        )
+        .expect_err("non-DNS GeneralNames must be included in the scan-work budget");
+
+        assert_eq!(failure.reason, Reason::CertificateInvalid);
+        assert!(failure.message.contains("certificate DER bytes"));
+        assert!(failure.message.contains("verification budget"));
+    }
+
+    #[test]
     fn require_san_match_rejects_certificate_missing_required_peer_dns_names() {
         let expected_dns_names = vec![
             "tenant-a-primary-0.tenant-a-hl.storage.svc.cluster.local".to_string(),
@@ -2426,14 +3120,14 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         let Some(cert_manager) = config.cert_manager.as_ref() else {
             panic!("test config must include cert-manager settings");
         };
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
 
         let certificate = build_cert_manager_certificate(
-            &tenant,
-            "storage",
+            &san_budget,
             cert_manager,
             &[],
             true,
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
             CertManagerCertificateNames {
                 secret: "tenant-a-server-tls",
                 certificate: "tenant-a-server",
@@ -2518,14 +3212,13 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         tenant.metadata.namespace = Some("mse".to_string());
         tenant.spec.pools[0].name = "mse-nvme-500".to_string();
         tenant.spec.pools[0].servers = 3;
+        let san_budget = validated_test_san_budget(&tenant, "mse", "k8s.mse.cloud");
 
         let certificate = build_cert_manager_certificate(
-            &tenant,
-            "mse",
+            &san_budget,
             &CertManagerTlsConfig::default(),
             &[],
             true,
-            "k8s.mse.cloud",
             CertManagerCertificateNames {
                 secret: "prod-rustfs-private-certificate-secret",
                 certificate: "prod-rustfs-private-certificate",
@@ -2567,14 +3260,14 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             include_generated_dns_names: Some(false),
             ..Default::default()
         };
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
 
         let certificate = build_cert_manager_certificate(
-            &tenant,
-            "storage",
+            &san_budget,
             &cert_manager,
             &["s3.example.com".to_string()],
             false,
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
             CertManagerCertificateNames {
                 secret: "tenant-a-public-tls",
                 certificate: "tenant-a-public-tls",
@@ -2673,14 +3366,14 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             cert_manager: CertManagerTlsConfig::default(),
             legacy: false,
         };
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
 
         let certificate = build_cert_manager_certificate(
-            &tenant,
-            "storage",
+            &san_budget,
             &entry.cert_manager,
             &entry.hosts,
             include_generated_dns_names(&entry),
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
             CertManagerCertificateNames {
                 secret: "tenant-a-public-tls",
                 certificate: "tenant-a-public-tls",
@@ -2717,14 +3410,14 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             },
             legacy: false,
         };
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
 
         let certificate = build_cert_manager_certificate(
-            &tenant,
-            "storage",
+            &san_budget,
             &entry.cert_manager,
             &entry.hosts,
             include_generated_dns_names(&entry),
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
             CertManagerCertificateNames {
                 secret: "tenant-a-public-tls",
                 certificate: "tenant-a-public-tls",
@@ -2758,11 +3451,12 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             enable_internode_https: true,
             ..Default::default()
         };
-        let generated_pod_dns =
-            generated_dns_names(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN)
-                .into_iter()
-                .find(|name| name.contains("-0."))
-                .expect("generated names should include a pod DNS name");
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
+        let generated_pod_dns = generated_dns_names(&san_budget)
+            .into_iter()
+            .find(|name| name.contains("-0."))
+            .expect("generated names should include a pod DNS name");
 
         let default_entry = TlsCertificateEntry {
             name: "internal".to_string(),
@@ -2774,13 +3468,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             },
             legacy: false,
         };
-        let names = san_validation_dns_names(
-            &tenant,
-            "storage",
-            &config,
-            &default_entry,
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
-        );
+        let names = san_validation_dns_names(&san_budget, &config, &default_entry);
         assert!(names.contains(&generated_pod_dns));
 
         let non_default_entry = TlsCertificateEntry {
@@ -2793,13 +3481,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             },
             legacy: false,
         };
-        let names = san_validation_dns_names(
-            &tenant,
-            "storage",
-            &config,
-            &non_default_entry,
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
-        );
+        let names = san_validation_dns_names(&san_budget, &config, &non_default_entry);
         assert!(names.contains(&"s3.example.com".to_string()));
         assert!(names.contains(&generated_pod_dns));
 
@@ -2807,13 +3489,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             cert_manager: CertManagerTlsConfig::default(),
             ..non_default_entry
         };
-        let names = san_validation_dns_names(
-            &tenant,
-            "storage",
-            &config,
-            &public_default,
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
-        );
+        let names = san_validation_dns_names(&san_budget, &config, &public_default);
         assert_eq!(names, vec!["s3.example.com".to_string()]);
     }
 
@@ -2838,15 +3514,11 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             },
             legacy: false,
         };
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
 
-        let failure = validate_managed_certificate_san_config(
-            &tenant,
-            "storage",
-            &config,
-            &entry,
-            cluster_dns::DEFAULT_CLUSTER_DOMAIN,
-        )
-        .expect_err("managed internode cert must cover generated peer DNS names");
+        let failure = validate_managed_certificate_san_config(&san_budget, &config, &entry)
+            .expect_err("managed internode cert must cover generated peer DNS names");
 
         assert_eq!(failure.reason, Reason::CertificateInvalid);
         assert!(
@@ -2857,16 +3529,9 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             failure.message
         );
 
-        entry.cert_manager.dns_names =
-            generated_dns_names(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
+        entry.cert_manager.dns_names = generated_dns_names(&san_budget);
         assert_eq!(
-            validate_managed_certificate_san_config(
-                &tenant,
-                "storage",
-                &config,
-                &entry,
-                cluster_dns::DEFAULT_CLUSTER_DOMAIN,
-            ),
+            validate_managed_certificate_san_config(&san_budget, &config, &entry),
             Ok(())
         );
     }
@@ -2897,20 +3562,14 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             },
             legacy: false,
         };
+        let san_budget = validated_test_san_budget(&tenant, "mse", "k8s.mse.cloud");
 
         assert_eq!(
-            validate_managed_certificate_san_config(
-                &tenant,
-                "mse",
-                &config,
-                &entry,
-                "k8s.mse.cloud",
-            ),
+            validate_managed_certificate_san_config(&san_budget, &config, &entry),
             Ok(())
         );
 
-        let expected_dns_names =
-            san_validation_dns_names(&tenant, "mse", &config, &entry, "k8s.mse.cloud");
+        let expected_dns_names = san_validation_dns_names(&san_budget, &config, &entry);
         assert!(
             expected_dns_names
                 .iter()
@@ -3290,6 +3949,54 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             name: name.to_string(),
             key: key.to_string(),
         }
+    }
+
+    fn tenant_with_pool_servers(servers: &[i32]) -> Tenant {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let template = tenant.spec.pools[0].clone();
+        tenant.spec.pools = servers
+            .iter()
+            .enumerate()
+            .map(|(index, servers)| {
+                let mut pool = template.clone();
+                pool.name = format!("pool-{index}");
+                pool.servers = *servers;
+                pool
+            })
+            .collect();
+        tenant
+    }
+
+    fn tls_budget_entry(
+        manage_certificate: bool,
+        include_generated_dns_names: Option<bool>,
+    ) -> TlsCertificateEntry {
+        TlsCertificateEntry {
+            name: "default".to_string(),
+            default: true,
+            hosts: Vec::new(),
+            cert_manager: CertManagerTlsConfig {
+                manage_certificate,
+                include_generated_dns_names,
+                ..Default::default()
+            },
+            legacy: false,
+        }
+    }
+
+    fn validated_test_san_budget<'a>(
+        tenant: &'a Tenant,
+        namespace: &'a str,
+        cluster_domain: &'a str,
+    ) -> ValidatedTlsSanBudget<'a> {
+        let config = TlsConfig {
+            mode: TlsMode::CertManager,
+            require_san_match: false,
+            ..Default::default()
+        };
+        let entries = vec![tls_budget_entry(false, None)];
+        san_budget::validate(tenant, namespace, cluster_domain, &config, &entries)
+            .expect("test SAN expansion should fit the production budget")
     }
 
     fn observed_tls_certificate(
