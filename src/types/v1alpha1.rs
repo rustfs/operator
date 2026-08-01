@@ -279,6 +279,18 @@ mod tenant_provisioning_crd_tests {
                 ["nullable"],
             json!(true)
         );
+        let ownership = &status["properties"]["provisioning"]["properties"]["users"]["items"]["properties"]
+            ["ownership"];
+        assert_eq!(ownership["type"], json!("object"));
+        assert_eq!(ownership["nullable"], json!(true));
+        assert_eq!(
+            ownership["required"],
+            json!(["accessKeyHash", "state", "tenantUid", "userName"])
+        );
+        assert_eq!(
+            ownership["properties"]["state"]["enum"],
+            json!(["PendingCreate", "Managed"])
+        );
 
         assert!(
             spec["properties"]["policies"]["x-kubernetes-validations"].is_null(),

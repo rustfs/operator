@@ -171,6 +171,8 @@ pub enum Reason {
     UserPolicyNotFound,
     UserPolicyInvalid,
     UserPolicySetFailed,
+    UserOwnershipConflict,
+    UserOwnershipCheckpointFailed,
     BucketCreateFailed,
     BucketObjectLockConflict,
     KubernetesApiError,
@@ -240,6 +242,8 @@ impl Reason {
             Self::UserPolicyNotFound => "UserPolicyNotFound",
             Self::UserPolicyInvalid => "UserPolicyInvalid",
             Self::UserPolicySetFailed => "UserPolicySetFailed",
+            Self::UserOwnershipConflict => "UserOwnershipConflict",
+            Self::UserOwnershipCheckpointFailed => "UserOwnershipCheckpointFailed",
             Self::BucketCreateFailed => "BucketCreateFailed",
             Self::BucketObjectLockConflict => "BucketObjectLockConflict",
             Self::KubernetesApiError => "KubernetesApiError",
@@ -512,6 +516,7 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "UserPolicyNotFound"
             | "UserPolicyInvalid"
             | "UserPolicySetFailed"
+            | "UserOwnershipConflict"
             | "BucketCreateFailed"
             | "BucketObjectLockConflict"
     )

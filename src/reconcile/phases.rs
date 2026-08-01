@@ -1290,6 +1290,19 @@ pub(super) async fn finalize_tenant_status(
                     message,
                 )
             }
+            ProvisioningOutcome::Retry {
+                message,
+                retry_after,
+            } => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    message = %message,
+                    retry_after_seconds = retry_after.as_secs(),
+                    "retrying after RustFS user ownership checkpoint contention or transient failure"
+                );
+                return Ok(Action::requeue(retry_after));
+            }
         }
     } else {
         builder.finish_reconciling(
