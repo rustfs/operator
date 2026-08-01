@@ -13,18 +13,123 @@
 // limitations under the License.
 
 use axum::{
-    Router,
+    Json, Router,
+    extract::{Request, State},
+    http::{HeaderValue, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
 
-use crate::console::{handlers, state::AppState};
+use crate::{
+    console::{handlers, models::common::ConsoleErrorResponse, state::AppState},
+    http_admission::{AdmissionConfig, AdmissionControl, AdmissionEndpoint, AdmissionRejection},
+};
 
 /// Login / session routes (partially unauthenticated)
 pub fn auth_routes() -> Router<AppState> {
+    auth_routes_with_config(AdmissionConfig::for_endpoint(
+        AdmissionEndpoint::ConsoleLogin,
+    ))
+}
+
+pub(crate) fn auth_routes_with_config(config: AdmissionConfig) -> Router<AppState> {
+    auth_routes_with_admission(AdmissionControl::new(config))
+}
+
+fn auth_routes_with_admission(admission: AdmissionControl) -> Router<AppState> {
+    let login = Router::new().route(
+        "/login",
+        post(handlers::auth::login).route_layer(middleware::from_fn_with_state(
+            admission,
+            enforce_login_admission,
+        )),
+    );
     Router::new()
-        .route("/login", post(handlers::auth::login))
+        .merge(login)
         .route("/logout", post(handlers::auth::logout))
         .route("/session", get(handlers::auth::session_check))
+}
+
+async fn enforce_login_admission(
+    State(admission): State<AdmissionControl>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let result = admission
+        .execute(async {
+            let request = admission.read_bounded_request(request).await?;
+            Ok(next.run(request).await)
+        })
+        .await;
+
+    match result {
+        Ok(response) => response,
+        Err(rejection) => {
+            crate::metrics::record_unauthenticated_admission_rejection(
+                AdmissionEndpoint::ConsoleLogin,
+                rejection.reason(),
+            );
+            login_admission_rejection_response(rejection)
+        }
+    }
+}
+
+fn login_admission_rejection_response(rejection: AdmissionRejection) -> Response {
+    let (status, code, reason, message, retry_after) = match rejection {
+        AdmissionRejection::RateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "TooManyRequests",
+            "LoginRateLimited",
+            "Login request rate exceeded; retry later.",
+            true,
+        ),
+        AdmissionRejection::ConcurrencyLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "TooManyRequests",
+            "LoginConcurrencyLimited",
+            "Too many login requests are already in progress.",
+            true,
+        ),
+        AdmissionRejection::BodyTooLarge => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "RequestBodyError",
+            "InvalidRequestBody",
+            "The login request body exceeds the maximum allowed size.",
+            false,
+        ),
+        AdmissionRejection::BodyReadFailed => (
+            StatusCode::BAD_REQUEST,
+            "RequestBodyError",
+            "InvalidRequestBody",
+            "The login request body could not be read.",
+            false,
+        ),
+        AdmissionRejection::TimedOut => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailable",
+            "LoginTimedOut",
+            "The login request timed out; retry later.",
+            true,
+        ),
+    };
+    let mut response = (
+        status,
+        Json(ConsoleErrorResponse {
+            code: code.to_string(),
+            reason: reason.to_string(),
+            message: message.to_string(),
+            next_actions: Vec::new(),
+            details: None,
+        }),
+    )
+        .into_response();
+    if retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
 }
 
 /// Tenant CRUD, YAML, encryption, security context
@@ -166,13 +271,17 @@ pub fn topology_routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::{auth_routes, cluster_routes, pod_routes, pool_routes, tenant_routes};
+    use super::{
+        auth_routes, auth_routes_with_admission, cluster_routes,
+        login_admission_rejection_response, pod_routes, pool_routes, tenant_routes,
+    };
     use crate::console::error::JSON_REJECTION_MESSAGE_MAX_BYTES;
     use crate::console::state::{AppState, Claims};
+    use crate::http_admission::{AdmissionConfig, AdmissionControl, AdmissionRejection};
     use axum::{
         Extension, Router,
         body::{Body, to_bytes},
-        http::{Method, Request, StatusCode, header},
+        http::{HeaderValue, Method, Request, StatusCode, header},
     };
     use serde_json::Value;
     use tower::ServiceExt;
@@ -215,6 +324,94 @@ mod tests {
         assert_eq!(body.get("code").and_then(Value::as_str), Some(code));
         assert_eq!(body.get("reason").and_then(Value::as_str), Some(reason));
         assert!(body.get("message").and_then(Value::as_str).is_some());
+    }
+
+    fn restrictive_admission(body_limit_bytes: usize) -> AdmissionControl {
+        AdmissionControl::new(AdmissionConfig {
+            requests_per_second: 0.000_001,
+            burst: 1,
+            max_in_flight: 1,
+            body_limit_bytes,
+            timeout: std::time::Duration::from_secs(1),
+        })
+    }
+
+    #[tokio::test]
+    async fn login_rate_limit_uses_console_error_contract_and_does_not_cover_logout() -> TestResult
+    {
+        let admission = restrictive_admission(64 * 1024);
+        admission
+            .execute(async { Ok::<(), AdmissionRejection>(()) })
+            .await
+            .expect("test should consume the initial token");
+        let app = auth_routes_with_admission(admission)
+            .with_state(AppState::new("test-secret".to_string()));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"test"}"#))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("1"))
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body: Value = serde_json::from_slice(&body)?;
+        assert_error_envelope(&body, "TooManyRequests", "LoginRateLimited");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/logout")
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_oversized_body_is_rejected_before_json_extraction() -> TestResult {
+        let app = auth_routes_with_admission(restrictive_admission(4))
+            .with_state(AppState::new("test-secret".to_string()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"test"}"#))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body: Value = serde_json::from_slice(&body)?;
+        assert_error_envelope(&body, "RequestBodyError", "InvalidRequestBody");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_timeout_uses_retryable_console_error_contract() -> TestResult {
+        let response = login_admission_rejection_response(AdmissionRejection::TimedOut);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("1"))
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let body: Value = serde_json::from_slice(&body)?;
+        assert_error_envelope(&body, "ServiceUnavailable", "LoginTimedOut");
+        Ok(())
     }
 
     #[tokio::test]

@@ -178,6 +178,13 @@ Common chart sections:
 | `namespace` | Namespace override for chart resources; defaults to the Helm release namespace. |
 | `commonLabels` / `commonAnnotations` | Labels and annotations added to chart-managed resources. |
 
+The unauthenticated STS and Console login routes use separate, per-process admission controls.
+Their Helm settings are `sts.admission` and `console.loginAdmission`; each configures requests per
+second, burst capacity, maximum in-flight requests, body size, and end-to-end timeout. Defaults are
+5 requests/second, burst 10, 16 in flight, 64 KiB, and 30 seconds. Because limits are per process,
+aggregate STS capacity increases with `operator.replicas` and aggregate login capacity increases
+with `console.replicas`.
+
 Example production-oriented values:
 
 ```yaml
@@ -205,6 +212,12 @@ console:
   enabled: true
   replicas: 2
   jwtSecret: "<stable-base64-or-random-secret>"
+  loginAdmission:
+    requestsPerSecond: 5
+    burst: 10
+    maxInFlight: 16
+    bodyLimitBytes: 65536
+    timeoutSeconds: 30
   ingress:
     enabled: true
     className: nginx
@@ -214,6 +227,12 @@ console:
 sts:
   enabled: true
   audience: sts.rustfs.com
+  admission:
+    requestsPerSecond: 5
+    burst: 10
+    maxInFlight: 16
+    bodyLimitBytes: 65536
+    timeoutSeconds: 30
   tls:
     enabled: true
     auto: true

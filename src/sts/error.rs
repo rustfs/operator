@@ -18,6 +18,21 @@ pub const STS_XML_NAMESPACE: &str = "https://sts.amazonaws.com/doc/2011-06-15/";
 /// Placeholder request id for deterministic test payloads.
 pub const STS_REQUEST_ID: &str = "00000000-0000-0000-0000-000000000000";
 
+#[derive(Clone, Copy)]
+pub(crate) enum StsErrorType {
+    Sender,
+    Receiver,
+}
+
+impl StsErrorType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sender => "Sender",
+            Self::Receiver => "Receiver",
+        }
+    }
+}
+
 /// Validation and stub errors for STS request handling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StsError {
@@ -103,11 +118,20 @@ pub fn escape_xml(value: &str) -> String {
 }
 
 pub fn render_sts_error_xml(code: &str, message: &str) -> String {
+    render_sts_error_xml_with_type(StsErrorType::Sender, code, message)
+}
+
+pub(crate) fn render_sts_error_xml_with_type(
+    error_type: StsErrorType,
+    code: &str,
+    message: &str,
+) -> String {
     let message = escape_xml(message);
     let request_id = STS_REQUEST_ID;
+    let error_type = error_type.as_str();
 
     format!(
-        "<ErrorResponse xmlns=\"{ns}\"><Error><Type>Sender</Type><Code>{code}</Code><Message>{message}</Message></Error><RequestId>{request_id}</RequestId></ErrorResponse>",
+        "<ErrorResponse xmlns=\"{ns}\"><Error><Type>{error_type}</Type><Code>{code}</Code><Message>{message}</Message></Error><RequestId>{request_id}</RequestId></ErrorResponse>",
         ns = STS_XML_NAMESPACE,
     )
 }

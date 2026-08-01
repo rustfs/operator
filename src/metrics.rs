@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::http_admission::{AdmissionEndpoint, AdmissionReason};
 use axum::{
     extract::Request,
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -38,6 +39,7 @@ struct Metrics {
     operator_leader: AtomicU64,
     sts_requests_total: Mutex<BTreeMap<String, u64>>,
     sts_request_duration: Mutex<BTreeMap<String, DurationSummary>>,
+    unauthenticated_admission_rejections_total: Mutex<BTreeMap<AdmissionKey, u64>>,
     http_requests_total: Mutex<BTreeMap<HttpKey, u64>>,
     http_request_duration: Mutex<BTreeMap<HttpKey, DurationSummary>>,
     tenant_monitor_polls_total: Mutex<BTreeMap<String, u64>>,
@@ -50,6 +52,12 @@ struct HttpKey {
     component: String,
     method: String,
     status: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct AdmissionKey {
+    endpoint: &'static str,
+    reason: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -129,6 +137,33 @@ pub fn record_sts_request(success: bool, duration: Duration) {
     let result = result_label(success);
     increment_string_counter(&metrics().sts_requests_total, result);
     observe_string_duration(&metrics().sts_request_duration, result, duration);
+}
+
+#[cfg(test)]
+pub(crate) fn sts_request_count(success: bool) -> u64 {
+    let result = result_label(success);
+    metrics()
+        .sts_requests_total
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(result)
+        .copied()
+        .unwrap_or_default()
+}
+
+pub(crate) fn record_unauthenticated_admission_rejection(
+    endpoint: AdmissionEndpoint,
+    reason: AdmissionReason,
+) {
+    let key = AdmissionKey {
+        endpoint: endpoint.as_str(),
+        reason: reason.as_str(),
+    };
+    let mut counters = metrics()
+        .unauthenticated_admission_rejections_total
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *counters.entry(key).or_default() += 1;
 }
 
 pub fn record_http_request(component: &str, method: &str, status: StatusCode, duration: Duration) {
@@ -296,6 +331,7 @@ pub fn render() -> String {
         "result",
         &metrics().sts_request_duration,
     );
+    render_admission_rejection_counter(&mut output);
 
     render_http_counter(&mut output);
     render_http_duration_summary(&mut output);
@@ -317,6 +353,24 @@ pub fn render() -> String {
     render_tenant_storage(&mut output);
 
     output
+}
+
+fn render_admission_rejection_counter(output: &mut String) {
+    let name = "rustfs_operator_unauthenticated_admission_rejections_total";
+    output.push_str(&format!(
+        "# HELP {name} Total number of unauthenticated endpoint requests rejected by admission control.\n# TYPE {name} counter\n"
+    ));
+    let counters = metrics()
+        .unauthenticated_admission_rejections_total
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (key, value) in counters.iter() {
+        output.push_str(&format!(
+            "{name}{{{}}} {}\n",
+            labels(&[("endpoint", key.endpoint), ("reason", key.reason)]),
+            value
+        ));
+    }
 }
 
 fn update_tenant_storage_snapshot(namespace: &str, tenant: &str, snapshot: TenantStorageSnapshot) {
@@ -601,6 +655,18 @@ mod tests {
         assert_eq!(status_class(StatusCode::OK), "2xx");
         assert_eq!(status_class(StatusCode::NOT_FOUND), "4xx");
         assert_eq!(status_class(StatusCode::INTERNAL_SERVER_ERROR), "5xx");
+    }
+
+    #[test]
+    fn admission_rejection_metrics_use_fixed_labels() {
+        record_unauthenticated_admission_rejection(
+            AdmissionEndpoint::Sts,
+            AdmissionReason::RateLimit,
+        );
+
+        assert!(render().contains(
+            "rustfs_operator_unauthenticated_admission_rejections_total{endpoint=\"sts\",reason=\"rate_limit\"}"
+        ));
     }
 
     #[test]

@@ -15,8 +15,9 @@
 use async_trait::async_trait;
 use axum::{
     Router,
-    extract::{Form, Path, State},
-    http::{StatusCode, header},
+    extract::{Form, Path, Request, State},
+    http::{HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -25,8 +26,11 @@ use kube::{Api, Client, api::ListParams};
 use std::time::Instant;
 
 use crate::console::state::AppState;
+use crate::http_admission::{
+    AdmissionConfig, AdmissionControl, AdmissionEndpoint, AdmissionRejection,
+};
 use crate::sts::binding;
-use crate::sts::error::StsError;
+use crate::sts::error::{StsError, StsErrorType, render_sts_error_xml_with_type};
 use crate::sts::rustfs_client::{RustfsAdminClient, RustfsClientError};
 use crate::sts::session_policy;
 use crate::sts::token_review::{self, TokenReviewError};
@@ -40,10 +44,98 @@ const DEFAULT_STS_AUDIENCE: &str = "sts.rustfs.com";
 
 /// Build STS routes mounted at root path `/sts`.
 pub fn routes() -> Router<AppState> {
+    routes_with_config(AdmissionConfig::for_endpoint(AdmissionEndpoint::Sts))
+}
+
+pub(crate) fn routes_with_config(config: AdmissionConfig) -> Router<AppState> {
+    routes_with_admission(AdmissionControl::new(config))
+}
+
+fn routes_with_admission(admission: AdmissionControl) -> Router<AppState> {
     Router::new().route(
         "/sts/:tenant_namespace/:tenant_name",
-        post(assume_role_with_web_identity_for_tenant),
+        post(assume_role_with_web_identity_for_tenant).route_layer(middleware::from_fn_with_state(
+            admission,
+            enforce_sts_admission,
+        )),
     )
+}
+
+async fn enforce_sts_admission(
+    State(admission): State<AdmissionControl>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let started = Instant::now();
+    let result = admission
+        .execute(async {
+            let request = admission.read_bounded_request(request).await?;
+            Ok(next.run(request).await)
+        })
+        .await;
+
+    let response = match result {
+        Ok(response) => response,
+        Err(rejection) => {
+            crate::metrics::record_unauthenticated_admission_rejection(
+                AdmissionEndpoint::Sts,
+                rejection.reason(),
+            );
+            sts_admission_rejection_response(rejection)
+        }
+    };
+    crate::metrics::record_sts_request(response.status().is_success(), started.elapsed());
+    response
+}
+
+fn sts_admission_rejection_response(rejection: AdmissionRejection) -> Response {
+    let (status, code, message, retry_after, error_type) = match rejection {
+        AdmissionRejection::RateLimited => (
+            StatusCode::BAD_REQUEST,
+            "ThrottlingException",
+            "Rate exceeded for this STS endpoint.",
+            false,
+            StsErrorType::Sender,
+        ),
+        AdmissionRejection::ConcurrencyLimited => (
+            StatusCode::BAD_REQUEST,
+            "ThrottlingException",
+            "Too many STS requests are already in progress.",
+            false,
+            StsErrorType::Sender,
+        ),
+        AdmissionRejection::BodyTooLarge => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "RequestEntityTooLarge",
+            "The request body exceeds the maximum allowed size.",
+            false,
+            StsErrorType::Sender,
+        ),
+        AdmissionRejection::BodyReadFailed => (
+            StatusCode::BAD_REQUEST,
+            "InvalidQueryParameter",
+            "The request body could not be read.",
+            false,
+            StsErrorType::Sender,
+        ),
+        AdmissionRejection::TimedOut => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailable",
+            "The STS request timed out.",
+            true,
+            StsErrorType::Receiver,
+        ),
+    };
+    let mut response = xml_response(
+        status,
+        render_sts_error_xml_with_type(error_type, code, message),
+    );
+    if retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
 }
 
 /// Handle POST /sts/{tenantNamespace}/{tenantName}.
@@ -52,10 +144,7 @@ async fn assume_role_with_web_identity_for_tenant(
     Path((tenant_namespace, tenant_name)): Path<(String, String)>,
     Form(form): Form<AssumeRoleWithWebIdentityForm>,
 ) -> Response {
-    let started = Instant::now();
-    let response = assume_role_with_web_identity(state, tenant_namespace, tenant_name, form).await;
-    crate::metrics::record_sts_request(response.status().is_success(), started.elapsed());
-    response
+    assume_role_with_web_identity(state, tenant_namespace, tenant_name, form).await
 }
 
 async fn assume_role_with_web_identity(
@@ -601,6 +690,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::http_admission::AdmissionConfig;
     use crate::sts::types::{STS_API_VERSION, STS_WEB_IDENTITY_ACTION, StsAssumeRoleCredentials};
     use crate::types::v1alpha1::policy_binding::{PolicyBindingApplication, PolicyBindingSpec};
     use axum::{
@@ -608,6 +698,16 @@ mod tests {
         http::{Request, StatusCode},
     };
     use tower::ServiceExt;
+
+    fn restrictive_admission(body_limit_bytes: usize) -> AdmissionControl {
+        AdmissionControl::new(AdmissionConfig {
+            requests_per_second: 0.000_001,
+            burst: 1,
+            max_in_flight: 1,
+            body_limit_bytes,
+            timeout: std::time::Duration::from_secs(1),
+        })
+    }
 
     #[tokio::test]
     async fn namespace_only_route_is_not_registered() {
@@ -674,6 +774,109 @@ mod tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("<ErrorResponse"));
         assert!(text.contains("<Code>MissingParameter</Code>"));
+    }
+
+    #[tokio::test]
+    async fn sts_rate_limit_is_immediate_and_preserves_xml_contract() {
+        let admission = restrictive_admission(64 * 1024);
+        admission
+            .execute(async { Ok::<(), AdmissionRejection>(()) })
+            .await
+            .expect("test should consume the initial token");
+        let app =
+            routes_with_admission(admission).with_state(AppState::new("test-secret".to_string()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sts/tenant-a/rustfs-a")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(
+                        "Version=2011-06-15&Action=AssumeRoleWithWebIdentity&WebIdentityToken=abc",
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/xml"))
+        );
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should be readable");
+        let text = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
+        assert!(text.contains("<Code>ThrottlingException</Code>"));
+    }
+
+    #[tokio::test]
+    async fn sts_oversized_body_is_rejected_with_xml_before_form_extraction() {
+        let app = routes_with_admission(restrictive_admission(4))
+            .with_state(AppState::new("test-secret".to_string()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sts/tenant-a/rustfs-a")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("12345"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/xml"))
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should be readable");
+        let text = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
+        assert!(text.contains("<Code>RequestEntityTooLarge</Code>"));
+    }
+
+    #[tokio::test]
+    async fn sts_extractor_rejections_are_included_in_request_metrics() {
+        let before = crate::metrics::sts_request_count(false);
+        let app = routes().with_state(AppState::new("test-secret".to_string()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sts/tenant-a/rustfs-a")
+                    .body(Body::from("not-a-form"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(crate::metrics::sts_request_count(false) > before);
+    }
+
+    #[tokio::test]
+    async fn sts_timeout_is_a_retryable_receiver_error() {
+        let response = sts_admission_rejection_response(AdmissionRejection::TimedOut);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("1"))
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should be readable");
+        let text = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
+        assert!(text.contains("<Type>Receiver</Type>"));
+        assert!(text.contains("<Code>ServiceUnavailable</Code>"));
     }
 
     #[tokio::test]

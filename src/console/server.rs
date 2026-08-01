@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::console::{openapi::ApiDoc, routes, state::AppState};
+use crate::http_admission::{AdmissionConfig, AdmissionEndpoint};
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, Response, StatusCode, Uri, header};
 use axum::{Router, middleware, response::IntoResponse, routing::get};
@@ -62,6 +63,17 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(port, "Starting RustFS Operator Console");
 
+    let login_admission_config = AdmissionConfig::from_env(AdmissionEndpoint::ConsoleLogin)?;
+    tracing::info!(
+        requests_per_second = login_admission_config.requests_per_second,
+        burst = login_admission_config.burst,
+        max_in_flight = login_admission_config.max_in_flight,
+        body_limit_bytes = login_admission_config.body_limit_bytes,
+        timeout_seconds = login_admission_config.timeout.as_secs(),
+        scope = "per-process",
+        "Console login admission configured"
+    );
+
     let jwt_secret = load_jwt_secret();
 
     let state = match Client::try_default().await {
@@ -89,7 +101,7 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         // OpenAPI / Swagger (unauthenticated)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         // REST API v1
-        .nest("/api/v1", api_routes())
+        .nest("/api/v1", api_routes(login_admission_config))
         // Shared state
         .with_state(state.clone());
     let app = with_static_frontend(app)
@@ -131,9 +143,9 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Merge all `/api/v1` route trees.
-fn api_routes() -> Router<AppState> {
+fn api_routes(login_admission_config: AdmissionConfig) -> Router<AppState> {
     Router::new()
-        .merge(routes::auth_routes())
+        .merge(routes::auth_routes_with_config(login_admission_config))
         .merge(routes::tenant_routes())
         .merge(routes::pool_routes())
         .merge(routes::pod_routes())

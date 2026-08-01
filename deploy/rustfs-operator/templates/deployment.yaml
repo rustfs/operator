@@ -10,6 +10,11 @@
   "OPERATOR_NAMESPACE" "namespace"
   "OPERATOR_STS_ENABLED" "sts.enabled"
   "OPERATOR_STS_AUDIENCE" "sts.audience"
+  "OPERATOR_STS_ADMISSION_REQUESTS_PER_SECOND" "sts.admission.requestsPerSecond"
+  "OPERATOR_STS_ADMISSION_BURST" "sts.admission.burst"
+  "OPERATOR_STS_ADMISSION_MAX_IN_FLIGHT" "sts.admission.maxInFlight"
+  "OPERATOR_STS_ADMISSION_BODY_LIMIT_BYTES" "sts.admission.bodyLimitBytes"
+  "OPERATOR_STS_ADMISSION_TIMEOUT_SECONDS" "sts.admission.timeoutSeconds"
   "OPERATOR_STS_PORT" "sts.port"
   "OPERATOR_STS_SERVICE_NAME" "the generated STS Service name"
   "OPERATOR_STS_TLS_ENABLED" "sts.tls.enabled"
@@ -107,6 +112,16 @@ spec:
               value: {{ .Values.sts.enabled | quote }}
             - name: OPERATOR_STS_AUDIENCE
               value: {{ .Values.sts.audience | quote }}
+            - name: OPERATOR_STS_ADMISSION_REQUESTS_PER_SECOND
+              value: {{ .Values.sts.admission.requestsPerSecond | quote }}
+            - name: OPERATOR_STS_ADMISSION_BURST
+              value: {{ .Values.sts.admission.burst | quote }}
+            - name: OPERATOR_STS_ADMISSION_MAX_IN_FLIGHT
+              value: {{ .Values.sts.admission.maxInFlight | quote }}
+            - name: OPERATOR_STS_ADMISSION_BODY_LIMIT_BYTES
+              value: {{ .Values.sts.admission.bodyLimitBytes | quote }}
+            - name: OPERATOR_STS_ADMISSION_TIMEOUT_SECONDS
+              value: {{ .Values.sts.admission.timeoutSeconds | quote }}
             - name: POD_NAME
               valueFrom:
                 fieldRef:

@@ -2529,6 +2529,7 @@ dependencies = [
  "hmac 0.12.1",
  "hostname",
  "http 1.4.0",
+ "http-body-util",
  "hyper 1.9.0",
  "hyper-util",
  "k8s-openapi",
