@@ -20,7 +20,7 @@ pub const STS_API_VERSION: &str = "2011-06-15";
 pub const STS_WEB_IDENTITY_ACTION: &str = "AssumeRoleWithWebIdentity";
 pub const STS_DEFAULT_DURATION_SECONDS: u64 = 3600;
 pub const STS_MIN_DURATION_SECONDS: u64 = 900;
-pub const STS_MAX_DURATION_SECONDS: u64 = 31_536_000;
+pub const STS_MAX_DURATION_SECONDS: u64 = 43_200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StsParsedRequest {
@@ -330,7 +330,7 @@ mod tests {
                 STS_API_VERSION,
                 STS_WEB_IDENTITY_ACTION,
                 "token",
-                Some("31536001"),
+                Some("43201"),
                 None,
             ),
         );
@@ -364,7 +364,7 @@ mod tests {
                 STS_API_VERSION,
                 STS_WEB_IDENTITY_ACTION,
                 "token",
-                Some("31536000"),
+                Some("43200"),
                 None,
             ),
         )
@@ -372,6 +372,28 @@ mod tests {
 
         assert_eq!(minimum.duration_seconds, STS_MIN_DURATION_SECONDS);
         assert_eq!(maximum.duration_seconds, STS_MAX_DURATION_SECONDS);
+    }
+
+    #[test]
+    fn parse_rejects_legacy_one_year_duration() {
+        let request = parse_sts_form(
+            "tenant-a".to_string(),
+            "rustfs-a".to_string(),
+            form(
+                STS_API_VERSION,
+                STS_WEB_IDENTITY_ACTION,
+                "token",
+                Some("31536000"),
+                None,
+            ),
+        );
+
+        assert!(matches!(
+            request,
+            Err(StsError::InvalidParameterValue {
+                parameter: "DurationSeconds"
+            })
+        ));
     }
 
     #[test]
