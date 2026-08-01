@@ -25,7 +25,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use snafu::Snafu;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -89,7 +89,7 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
     validate_tenant_prerequisites(&ctx, &latest_tenant).await?;
     let tls_plan = tls::reconcile_tls(&ctx, &latest_tenant, &ns).await?;
 
-    maybe_cleanup_terminating_pods(&ctx, &latest_tenant, &ns).await?;
+    let pod_cleanup_outcome = maybe_cleanup_terminating_pods(&ctx, &latest_tenant, &ns).await?;
 
     reconcile_service_account(&ctx, &latest_tenant, &ns).await?;
 
@@ -117,7 +117,7 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         &removed_pool_cleanup,
     )
     .await?;
-    finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan).await
+    finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan, pod_cleanup_outcome).await
 }
 
 async fn context_result<T>(
@@ -428,10 +428,11 @@ enum NodePodDeletionSafety {
     Fenced,
 }
 
-enum CachedNodeLookup {
-    Found(Box<corev1::Node>),
-    NotFound,
-    Failed,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum PodCleanupOutcome {
+    #[default]
+    Complete,
+    RetryNeeded,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -476,7 +477,7 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
     namespace: &str,
     ctx: &Context,
     policy: crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown,
-) -> Result<(), Error> {
+) -> Result<PodCleanupOutcome, Error> {
     let pods_api: kube::Api<corev1::Pod> = kube::Api::namespaced(ctx.client.clone(), namespace);
     let nodes_api: kube::Api<corev1::Node> = kube::Api::all(ctx.client.clone());
     let statefulsets_api: kube::Api<appsv1::StatefulSet> =
@@ -493,7 +494,7 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
         .map_err(|source| Error::Context {
             source: context::Error::Kube { source },
         })?;
-    let mut node_lookup_by_name = HashMap::new();
+    let mut failed_node_names = HashSet::new();
 
     for pod in pods.items {
         // Only act on terminating pods to keep the behavior conservative.
@@ -603,40 +604,27 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
             continue;
         };
 
-        if !node_lookup_by_name.contains_key(&node_name) {
-            let lookup = match nodes_api.get(&node_name).await {
-                Ok(node) => CachedNodeLookup::Found(Box::new(node)),
-                Err(kube::Error::Api(ae)) if ae.code == 404 => CachedNodeLookup::NotFound,
-                Err(source) => {
-                    warn!(
-                        tenant = %tenant.name(),
-                        namespace = %namespace,
-                        node = %node_name,
-                        error = %source,
-                        "skipping terminating pod cleanup because the Node could not be inspected"
-                    );
-                    let _ = ctx
-                        .record(
-                            tenant,
-                            EventType::Warning,
-                            "PodCleanupNodeLookupFailed",
-                            &format!(
-                                "Skipped terminating Pod cleanup because Node '{}' could not be inspected; the Operator will retry on a later reconcile",
-                                node_name
-                            ),
-                        )
-                        .await;
-                    CachedNodeLookup::Failed
-                }
-            };
-            node_lookup_by_name.insert(node_name.clone(), lookup);
+        if failed_node_names.contains(&node_name) {
+            continue;
         }
 
-        let node_deletion_safety = match node_lookup_by_name.get(&node_name) {
-            Some(CachedNodeLookup::Found(node)) => node_pod_deletion_safety(node, &pod),
-            Some(CachedNodeLookup::NotFound) => NodePodDeletionSafety::Fenced,
-            Some(CachedNodeLookup::Failed) => continue,
-            None => continue,
+        // Fencing is destructive-operation evidence, so refresh it for every Pod instead of
+        // reusing a Node snapshot across the reconcile loop. Only failed lookups are remembered to
+        // avoid repeatedly calling an already failing dependency.
+        let node_deletion_safety = match nodes_api.get(&node_name).await {
+            Ok(node) => node_pod_deletion_safety(&node, &pod),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => NodePodDeletionSafety::Fenced,
+            Err(source) => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    node = %node_name,
+                    error = %source,
+                    "skipping terminating pod cleanup because the Node could not be inspected"
+                );
+                failed_node_names.insert(node_name);
+                continue;
+            }
         };
 
         if node_deletion_safety == NodePodDeletionSafety::Ready {
@@ -716,7 +704,22 @@ async fn cleanup_stuck_terminating_pods_on_down_nodes(
         }
     }
 
-    Ok(())
+    if failed_node_names.is_empty() {
+        Ok(PodCleanupOutcome::Complete)
+    } else {
+        let failed_node_count = failed_node_names.len();
+        let _ = ctx
+            .record(
+                tenant,
+                EventType::Warning,
+                "PodCleanupNodeLookupFailed",
+                &format!(
+                    "Skipped terminating Pod cleanup because {failed_node_count} Node lookup(s) failed; the Operator will retry after a bounded delay"
+                ),
+            )
+            .await;
+        Ok(PodCleanupOutcome::RetryNeeded)
+    }
 }
 
 fn pod_matches_policy_controller_kind(
@@ -1021,7 +1024,7 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
 mod tests {
     use super::is_node_down;
     use super::{
-        NodePodDeletionSafety, PodCleanupDecision, cleanup_decision_for_pod,
+        NodePodDeletionSafety, PodCleanupDecision, PodCleanupOutcome, cleanup_decision_for_pod,
         cleanup_stuck_terminating_pods_on_down_nodes, force_delete_requires_fencing,
         node_pod_deletion_safety, object_owned_by_tenant, pod_controller_owner_name_and_uid,
         pod_has_owner_kind, pod_matches_policy_controller_kind,
@@ -1073,9 +1076,16 @@ mod tests {
     #[tokio::test]
     async fn node_lookup_failure_skips_pod_cleanup_without_repeating_or_deleting() {
         let tenant = crate::tests::create_test_tenant(None, None);
+        let mut pod_on_second_node = terminating_tenant_pod(&tenant, "pod-c");
+        pod_on_second_node
+            .spec
+            .as_mut()
+            .expect("test Pod should have a spec")
+            .node_name = Some("node-b".to_string());
         let pods = vec![
             terminating_tenant_pod(&tenant, "pod-a"),
             terminating_tenant_pod(&tenant, "pod-b"),
+            pod_on_second_node,
         ];
         let request_count = Arc::new(AtomicUsize::new(0));
         let service = service_fn({
@@ -1114,6 +1124,20 @@ mod tests {
                             )
                         }
                         2 => {
+                            assert_eq!(request.method(), Method::GET);
+                            assert_eq!(request.uri().path(), "/api/v1/nodes/node-b");
+                            kube_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                json!({
+                                    "apiVersion": "v1",
+                                    "kind": "Status",
+                                    "status": "Failure",
+                                    "reason": "InternalError",
+                                    "code": 500
+                                }),
+                            )
+                        }
+                        3 => {
                             assert_eq!(request.method(), Method::POST);
                             assert!(request.uri().path().contains("/events"));
                             kube_response(
@@ -1135,7 +1159,7 @@ mod tests {
         });
         let ctx = Context::new(Client::new(service, "default"));
 
-        cleanup_stuck_terminating_pods_on_down_nodes(
+        let outcome = cleanup_stuck_terminating_pods_on_down_nodes(
             &tenant,
             "default",
             &ctx,
@@ -1144,38 +1168,33 @@ mod tests {
         .await
         .expect("Node lookup failures must not block the main reconcile path");
 
-        assert_eq!(request_count.load(Ordering::SeqCst), 3);
+        assert_eq!(outcome, PodCleanupOutcome::RetryNeeded);
+        assert_eq!(request_count.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
-    async fn cached_node_is_evaluated_against_each_pods_tolerations() {
+    async fn node_fencing_is_refreshed_before_each_pod_deletion() {
         let tenant = crate::tests::create_test_tenant(None, None);
-        let pod_without_toleration = terminating_tenant_pod(&tenant, "pod-a");
-        let mut pod_with_toleration = terminating_tenant_pod(&tenant, "pod-b");
-        pod_with_toleration
-            .spec
-            .as_mut()
-            .expect("test Pod should have a spec")
-            .tolerations = Some(vec![corev1::Toleration {
-            key: Some(super::OUT_OF_SERVICE_TAINT_KEY.to_string()),
-            operator: Some("Exists".to_string()),
-            effect: Some("NoExecute".to_string()),
-            ..Default::default()
-        }]);
-        let pods = vec![pod_without_toleration, pod_with_toleration];
-        let node = node_with_out_of_service_taint();
+        let pods = vec![
+            terminating_tenant_pod(&tenant, "pod-a"),
+            terminating_tenant_pod(&tenant, "pod-b"),
+        ];
+        let fenced_node = node_with_out_of_service_taint();
+        let ready_node = node_with_ready_status("True");
         let node_get_count = Arc::new(AtomicUsize::new(0));
         let pod_delete_count = Arc::new(AtomicUsize::new(0));
         let event_count = Arc::new(AtomicUsize::new(0));
         let service = service_fn({
             let pods = pods.clone();
-            let node = node.clone();
+            let fenced_node = fenced_node.clone();
+            let ready_node = ready_node.clone();
             let node_get_count = Arc::clone(&node_get_count);
             let pod_delete_count = Arc::clone(&pod_delete_count);
             let event_count = Arc::clone(&event_count);
             move |request: Request<Body>| {
                 let pods = pods.clone();
-                let node = node.clone();
+                let fenced_node = fenced_node.clone();
+                let ready_node = ready_node.clone();
                 let node_get_count = Arc::clone(&node_get_count);
                 let pod_delete_count = Arc::clone(&pod_delete_count);
                 let event_count = Arc::clone(&event_count);
@@ -1192,7 +1211,11 @@ mod tests {
                             }),
                         ),
                         (&Method::GET, "/api/v1/nodes/node-a") => {
-                            node_get_count.fetch_add(1, Ordering::SeqCst);
+                            let node = if node_get_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                                fenced_node
+                            } else {
+                                ready_node
+                            };
                             kube_response(
                                 StatusCode::OK,
                                 serde_json::to_value(node).expect("Node should serialize"),
@@ -1230,18 +1253,19 @@ mod tests {
         });
         let ctx = Context::new(Client::new(service, "default"));
 
-        cleanup_stuck_terminating_pods_on_down_nodes(
+        let outcome = cleanup_stuck_terminating_pods_on_down_nodes(
             &tenant,
             "default",
             &ctx,
             crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete,
         )
         .await
-        .expect("cached Nodes should preserve per-Pod fencing checks");
+        .expect("fencing refresh should preserve safe cleanup");
 
-        assert_eq!(node_get_count.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome, PodCleanupOutcome::Complete);
+        assert_eq!(node_get_count.load(Ordering::SeqCst), 2);
         assert_eq!(pod_delete_count.load(Ordering::SeqCst), 1);
-        assert_eq!(event_count.load(Ordering::SeqCst), 2);
+        assert_eq!(event_count.load(Ordering::SeqCst), 1);
     }
 
     fn node_with_ready_status(status: &str) -> corev1::Node {

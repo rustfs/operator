@@ -15,8 +15,9 @@
 use super::pool_lifecycle::{PoolLifecycleDecision, PoolLifecycleDecisions};
 use super::provisioning::{ProvisioningOutcome, reconcile_provisioning};
 use super::{
-    Error, cleanup_stuck_terminating_pods_on_down_nodes, context, context_result,
-    patch_status_and_record, patch_status_error, statefulset_owned_by_tenant, types_result,
+    Error, PodCleanupOutcome, cleanup_stuck_terminating_pods_on_down_nodes, context,
+    context_result, patch_status_and_record, patch_status_error, statefulset_owned_by_tenant,
+    types_result,
 };
 use crate::context::Context;
 use crate::status::{StatusBuilder, StatusError};
@@ -148,15 +149,15 @@ pub(super) async fn maybe_cleanup_terminating_pods(
     ctx: &Context,
     tenant: &Tenant,
     namespace: &str,
-) -> Result<(), Error> {
+) -> Result<PodCleanupOutcome, Error> {
     // Optional: unblock StatefulSet pods stuck terminating when their node is down.
     // This is inspired by Longhorn's "Pod Deletion Policy When Node is Down".
     if let Some(policy) = tenant.spec.pod_deletion_policy_when_node_is_down.clone()
         && policy != crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::DoNothing
     {
-        cleanup_stuck_terminating_pods_on_down_nodes(tenant, namespace, ctx, policy).await?;
+        return cleanup_stuck_terminating_pods_on_down_nodes(tenant, namespace, ctx, policy).await;
     }
-    Ok(())
+    Ok(PodCleanupOutcome::Complete)
 }
 
 pub(super) async fn cleanup_legacy_tenant_rbac(
@@ -823,10 +824,18 @@ fn pod_deletion_policy_requeue_after(
     }
 }
 
-fn reconcile_requeue_after(tenant: &Tenant, summary: &PoolReconcileSummary) -> Option<Duration> {
+fn reconcile_requeue_after(
+    tenant: &Tenant,
+    summary: &PoolReconcileSummary,
+    pod_cleanup_outcome: PodCleanupOutcome,
+) -> Option<Duration> {
     let lifecycle_requeue = summary.lifecycle_requeue_after;
     let updating_requeue = summary.any_updating.then_some(Duration::from_secs(10));
-    let pod_cleanup_requeue = pod_deletion_policy_requeue_after(tenant, summary);
+    let pod_cleanup_requeue = if pod_cleanup_outcome == PodCleanupOutcome::RetryNeeded {
+        Some(POD_DELETION_POLICY_REQUEUE_INTERVAL)
+    } else {
+        pod_deletion_policy_requeue_after(tenant, summary)
+    };
 
     earliest_requeue_after(
         earliest_requeue_after(lifecycle_requeue, updating_requeue),
@@ -1145,10 +1154,11 @@ pub(super) async fn finalize_tenant_status(
     tenant: &Tenant,
     summary: PoolReconcileSummary,
     tls_plan: TlsPlan,
+    pod_cleanup_outcome: PodCleanupOutcome,
 ) -> Result<Action, Error> {
     let mut builder = StatusBuilder::from_tenant(tenant);
     let pool_count = summary.pool_statuses.len();
-    let requeue_after = reconcile_requeue_after(tenant, &summary);
+    let requeue_after = reconcile_requeue_after(tenant, &summary, pod_cleanup_outcome);
     builder.set_pool_statuses(summary.pool_statuses);
     if let Some(tls_status) = tls_plan.status {
         builder.set_tls_status(tls_status);
@@ -2220,8 +2230,25 @@ mod tests {
         };
 
         assert_eq!(
-            reconcile_requeue_after(&tenant, &summary),
+            reconcile_requeue_after(&tenant, &summary, PodCleanupOutcome::Complete),
             Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn failed_node_lookup_requeues_even_when_tenant_summary_is_ready() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pod_deletion_policy_when_node_is_down =
+            Some(crate::types::v1alpha1::k8s::PodDeletionPolicyWhenNodeIsDown::ForceDelete);
+        let summary = PoolReconcileSummary {
+            total_replicas: 4,
+            ready_replicas: 4,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            reconcile_requeue_after(&tenant, &summary, PodCleanupOutcome::RetryNeeded),
+            Some(POD_DELETION_POLICY_REQUEUE_INTERVAL)
         );
     }
 }
