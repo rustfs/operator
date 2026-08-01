@@ -88,6 +88,7 @@ pub fn init_tracing() {
 
 mod cluster_dns;
 mod context;
+mod http_admission;
 pub mod metrics;
 pub mod reconcile;
 mod status;
@@ -129,6 +130,17 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
     }
 
     if operator_sts_enabled() {
+        let sts_admission_config =
+            http_admission::AdmissionConfig::from_env(http_admission::AdmissionEndpoint::Sts)?;
+        info!(
+            requests_per_second = sts_admission_config.requests_per_second,
+            burst = sts_admission_config.burst,
+            max_in_flight = sts_admission_config.max_in_flight,
+            body_limit_bytes = sts_admission_config.body_limit_bytes,
+            timeout_seconds = sts_admission_config.timeout.as_secs(),
+            scope = "per-process",
+            "operator STS admission configured"
+        );
         let sts_port = operator_sts_port();
         let sts_state = crate::console::state::AppState::new(String::new())
             .with_kube_client(client.clone())
@@ -148,7 +160,14 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         };
         let sts_listener = bind_sts_listener(sts_port, tls_server_config.is_some()).await?;
         tokio::spawn(async move {
-            if let Err(error) = run_sts_server(sts_listener, sts_state, tls_server_config).await {
+            if let Err(error) = run_sts_server(
+                sts_listener,
+                sts_state,
+                tls_server_config,
+                sts_admission_config,
+            )
+            .await
+            {
                 warn!(%error, "Operator STS server stopped unexpectedly");
             }
         });
@@ -770,9 +789,10 @@ async fn run_sts_server(
     listener: tokio::net::TcpListener,
     state: crate::console::state::AppState,
     tls_config: Option<Arc<rustls::ServerConfig>>,
+    admission_config: http_admission::AdmissionConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
-        .merge(crate::sts::server::routes())
+        .merge(crate::sts::server::routes_with_config(admission_config))
         .with_state(state);
 
     if let Some(tls_config) = tls_config {

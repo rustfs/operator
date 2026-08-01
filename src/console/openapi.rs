@@ -217,6 +217,8 @@ pub struct ApiDoc;
         (status = 415, body = ConsoleErrorResponse),
         (status = 422, body = ConsoleErrorResponse),
         (status = 401, body = ConsoleErrorResponse),
+        (status = 429, body = ConsoleErrorResponse),
+        (status = 503, body = ConsoleErrorResponse),
         (status = 500, body = ConsoleErrorResponse)
     ),
     tag = "auth"

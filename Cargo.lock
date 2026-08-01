@@ -1642,6 +1642,7 @@ dependencies = [
  "hmac",
  "hostname",
  "http",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "k8s-openapi",

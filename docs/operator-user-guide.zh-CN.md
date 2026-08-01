@@ -171,6 +171,12 @@ helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
 | `namespace` | Chart 资源命名空间覆盖；默认使用 Helm release namespace。 |
 | `commonLabels` / `commonAnnotations` | 添加到 Chart 管理资源上的统一 label 和 annotation。 |
 
+未认证的 STS 与 Console 登录路由使用彼此独立的进程级准入控制。对应 Helm 配置为
+`sts.admission` 与 `console.loginAdmission`，分别控制每秒请求数、突发容量、最大并发、
+请求体大小和端到端超时。默认值为每秒 5 个请求、突发 10、最大并发 16、64 KiB 和
+30 秒。限制按进程生效，因此 STS 总容量随 `operator.replicas` 增长，登录总容量随
+`console.replicas` 增长。
+
 生产风格 values 示例：
 
 ```yaml
@@ -198,6 +204,12 @@ console:
   enabled: true
   replicas: 2
   jwtSecret: "<stable-base64-or-random-secret>"
+  loginAdmission:
+    requestsPerSecond: 5
+    burst: 10
+    maxInFlight: 16
+    bodyLimitBytes: 65536
+    timeoutSeconds: 30
   ingress:
     enabled: true
     className: nginx
@@ -207,6 +219,12 @@ console:
 sts:
   enabled: true
   audience: sts.rustfs.com
+  admission:
+    requestsPerSecond: 5
+    burst: 10
+    maxInFlight: 16
+    bodyLimitBytes: 65536
+    timeoutSeconds: 30
   tls:
     enabled: true
     auto: true

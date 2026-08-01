@@ -111,6 +111,13 @@ sts:
   audience: sts.rustfs.com
   # STS service/port in operator pods
   port: 4223
+  # Per-operator-process admission limits for the unauthenticated STS route.
+  admission:
+    requestsPerSecond: 5
+    burst: 10
+    maxInFlight: 16
+    bodyLimitBytes: 65536
+    timeoutSeconds: 30
   tls:
     # Operator STS listens with TLS by default and uses this Secret for server certs.
     enabled: true
@@ -163,6 +170,14 @@ console:
 
   # Log level for console (trace, debug, info, warn, error)
   logLevel: info
+
+  # Per-Console-process admission limits for the unauthenticated login route.
+  loginAdmission:
+    requestsPerSecond: 5
+    burst: 10
+    maxInFlight: 16
+    bodyLimitBytes: 65536
+    timeoutSeconds: 30
 
   # Secret used to encrypt Console session cookies.
   # All Console replicas must use the same secret.

@@ -26,6 +26,14 @@ spec:
           annotations:
             summary: RustFS Operator reconcile errors
             description: RustFS Operator has reported reconcile errors in the last 10 minutes.
+        - alert: RustfsUnauthenticatedAdmissionRejections
+          expr: sum by (endpoint, reason) (increase(rustfs_operator_unauthenticated_admission_rejections_total[5m])) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: RustFS unauthenticated endpoint requests are being rejected
+            description: Admission control rejected more than 10 unauthenticated endpoint requests in five minutes.
         - alert: RustfsTenantStorageUnhealthy
           expr: rustfs_operator_tenant_storage_poll_success == 1 and rustfs_operator_tenant_storage_healthy == 0
           for: 10m

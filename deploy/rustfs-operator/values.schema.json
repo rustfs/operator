@@ -16,6 +16,61 @@
         }
       ],
       "description": "Kubernetes cluster DNS domain used for Tenant peer URLs, generated TLS SANs, and operator STS auto TLS."
+    },
+    "sts": {
+      "type": "object",
+      "properties": {
+        "admission": {
+          "$ref": "#/definitions/admission"
+        }
+      }
+    },
+    "console": {
+      "type": "object",
+      "properties": {
+        "loginAdmission": {
+          "$ref": "#/definitions/admission"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "admission": {
+      "type": "object",
+      "required": [
+        "requestsPerSecond",
+        "burst",
+        "maxInFlight",
+        "bodyLimitBytes",
+        "timeoutSeconds"
+      ],
+      "properties": {
+        "requestsPerSecond": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 1000
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "maxInFlight": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "bodyLimitBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        }
+      }
     }
   }
 }
