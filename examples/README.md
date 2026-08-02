@@ -9,6 +9,7 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 | Example | Use Case | Complexity | Storage | Best For |
 |---------|----------|------------|---------|----------|
 | [minimal-dev-tenant.yaml](./minimal-dev-tenant.yaml) | Development/Learning | ⭐ Simple | 10Gi | **Start here** if new |
+| [openshift-tenant.yaml](./openshift-tenant.yaml) | OpenShift SCC | ⭐ Simple | 80Gi | OpenShift `restricted-v2` namespaces |
 | [simple-tenant.yaml](./simple-tenant.yaml) | Documentation Reference | ⭐⭐ Moderate | Configurable | Learning all options |
 | [secret-credentials-tenant.yaml](./secret-credentials-tenant.yaml) | Secret-based Credentials | ⭐ Simple | Configurable | **Production credential security** |
 | [provisioning-tenant.yaml](./provisioning-tenant.yaml) | Policy/User/Bucket Provisioning | ⭐⭐ Moderate | 40Gi | Tenant bootstrap automation |
@@ -25,6 +26,13 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 1. Start with **minimal-dev-tenant.yaml** to see it work
 2. Read **simple-tenant.yaml** to understand all options
 3. Explore other examples based on your use case
+
+On OpenShift, use **openshift-tenant.yaml** only with an arbitrary-UID-compatible
+RustFS image. Its two explicit empty Pool security contexts form one delegation
+signal for UID, GID, FSGroup, and container security settings. Both objects are
+required; a lone empty object retains Operator defaults for compatibility. Do
+not copy the pair to a generic Kubernetes namespace unless its admission policy
+supplies equivalent security settings.
 
 **Important Notes:**
 - RustFS S3 API runs on port **9000**

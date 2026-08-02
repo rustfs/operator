@@ -1,3 +1,5 @@
+{{- $openShift := default dict .Values.openshift -}}
+{{- $openShiftEnabled := default false $openShift.enabled -}}
 {{- if and .Values.console.enabled .Values.console.frontend.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -47,8 +49,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if not $openShiftEnabled }}
           {{- with .Values.console.frontend.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- end }}
 {{- end }}

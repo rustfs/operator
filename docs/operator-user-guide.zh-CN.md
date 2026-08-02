@@ -81,6 +81,29 @@ helm install rustfs-operator deploy/rustfs-operator/ \
   --create-namespace
 ```
 
+在 OpenShift 上，应让 SCC 管理 Operator、Console 和可选独立前端的运行身份：
+
+```bash
+helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
+  --namespace rustfs-system \
+  --create-namespace \
+  --set openshift.enabled=true
+```
+
+该行为与 MinIO Operator 的安装方式一致：Chart 管理的 Deployment 不渲染 Pod
+和容器 `securityContext`，由安装 namespace 的 SecurityContextConstraints（SCC）
+分配合法 UID 和 FSGroup。这仅表示 manifest 与 SCC 兼容，不代表已获得 OpenShift
+认证。普通 Kubernetes 安装必须保留默认的 `openshift.enabled=false`。当前支持目标
+限定为 `restricted-v2`；`restricted-v3` 还要求 `spec.hostUsers: false`，目前尚未覆盖。
+
+仅有 SCC 兼容 manifest 还不够，RustFS server 镜像也必须支持 SCC 分配的任意 UID。
+部署 Tenant 前，应确认 `/data`、`/logs` 等镜像层可写目录属于 group `0`，并且 group
+权限与 owner 权限相同。如果这些目录仍为 `10001:10001`、权限 `0750`，即使 Pod spec
+不再固定 UID 也无法兼容；Operator 不能修复镜像内部的文件所有权。
+
+可选独立前端应保持关闭，除非其镜像已验证 nginx 运行目录支持任意 UID，并能绑定
+非特权端口。仅让 SCC 分配身份不能修复不兼容的前端镜像。
+
 验证 Operator 和 Console Pod：
 
 ```bash
@@ -108,6 +131,48 @@ helm upgrade rustfs-operator deploy/rustfs-operator/ \
 引入的字段。CRD 是集群级资源，并由所有 Tenant namespace 共享，升级前应审查变更。
 专用 field manager 会显式接管 Chart 管理的 CRD 字段，因此也适用于最初由 Helm
 创建的 CRD。
+
+已有安装启用 OpenShift 支持时，应严格按以下顺序执行：先应用两个 CRD，再使用
+`openshift.enabled=true` 升级 Chart，等待 Operator 和 Console rollout 完成，最后
+更新 Tenant 安全上下文。升级 Controller 前，应先盘点 Tenant 和 Pool 两个层级已有的
+成对空对象：
+
+```bash
+kubectl get tenants.rustfs.com -A -o json | jq -r '
+  def empty_object: type == "object" and length == 0;
+  .items[] as $tenant |
+  ([
+    (select(($tenant.spec | has("securityContext")) and
+            ($tenant.spec | has("containerSecurityContext")) and
+            ($tenant.spec.securityContext | empty_object) and
+            ($tenant.spec.containerSecurityContext | empty_object)) | "spec"),
+    ($tenant.spec.pools[]? |
+      select((has("securityContext")) and
+             (has("containerSecurityContext")) and
+             (.securityContext | empty_object) and
+             (.containerSecurityContext | empty_object)) |
+      "pool:" + .name)
+  ]) as $locations |
+  select($locations | length > 0) |
+  [$tenant.metadata.namespace, $tenant.metadata.name, ($locations | join(","))] |
+  @tsv'
+```
+
+此版本会有意把成对的 `{}`/`{}` 从“继承 Operator 默认值”改为“委托给平台
+准入控制器”；单独出现的空对象仍保持旧行为。每一条扫描结果都必须作为破坏性迁移
+决定处理：需要保留 Operator 默认值时，应在升级前删除这两个字段；只有验证目标 SCC
+和镜像后，才能保留这一对空对象。
+
+Chart 升级不会改写 Tenant 或 PVC API 对象。把已有 Pool 改成成对空安全上下文会改变
+StatefulSet Pod template 并滚动该 Pool。SCC 分配的 FSGroup 发生变化时，kubelet 或
+CSI driver 在首次挂载时还可能修改卷内权限；大容量卷启动会变慢，`fsGroupPolicy`、
+root-squash 或权限行为不兼容的存储甚至可能挂载或写入失败。应先用已有数据验证
+StorageClass，保留可恢复备份，并安排维护窗口。单副本 Tenant 在重启期间可能不可用，
+多副本 Tenant 会暂时以较低容量运行。不要降级到会把空对象对重新解释为固定 UID/GID
+的旧 Controller，否则 OpenShift SCC 可能拒绝回滚后的 Pod。应向前升级；或者先恢复
+一套符合 SCC 的完整安全上下文，再执行降级。
+关闭 `openshift.enabled` 或回滚到没有该配置的 Chart 也会重新引入 Operator/Console
+固定身份并滚动这些 Deployment；只有 namespace SCC 允许这些固定 ID 时才能执行。
 
 未配置 `users[].credsSecret` 的已有 manifest 保持兼容。只有在新 Operator rollout
 全部完成后，才能依赖显式的 user Secret 引用；旧 binary 仍会按 user 同名规则读取
@@ -163,6 +228,7 @@ helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
 
 | 配置段 | 用途 |
 |--------|------|
+| `openshift` | Operator、Console 和可选前端 Deployment 的 SCC 兼容渲染；默认关闭。 |
 | `operator` | Operator Deployment 副本数、镜像、资源、探针、metrics、调度、leader election 和 Tenant monitor。 |
 | `sts` | Operator STS 端点、Service 端口、TokenReview audience 和 TLS。 |
 | `serviceAccount` / `rbac` | Operator ServiceAccount 和 RBAC 创建策略。 |
@@ -452,6 +518,23 @@ capabilities，满足 Kubernetes Pod Security `restricted` 对应要求。显式
 放宽这些默认值，因此可能被集群准入策略拒绝。为兼容存量配置，如果显式配置
 `runAsUser: 0`、但没有显式配置 `runAsNonRoot`，Operator 会推导
 `runAsNonRoot: false`；该配置不能用于 `restricted` namespace。
+
+在 OpenShift 上，应在 Pool 级使用显式空对象，把运行身份和容器安全设置交给
+namespace SCC；该契约与 MinIO Operator 保持一致：
+
+```yaml
+spec:
+  pools:
+    - name: pool-0
+      securityContext: {}
+      containerSecurityContext: {}
+```
+
+完整示例见 `examples/openshift-tenant.yaml`。省略字段与显式空对象对的含义不同：省略
+表示使用 RustFS 默认值，成对的 `{}`/`{}` 表示由 SCC 管理；单独空对象为兼容旧配置
+仍保留默认值。普通 Kubernetes 集群若没有其他准入控制器补充等价设置，不应使用这
+一空对象对。把已有 Pool 更新成该形式会滚动 StatefulSet Pod。示例有意使用占位镜像，
+必须替换为经过验证、支持任意 UID 的 RustFS 镜像。
 
 `RuntimeDefault` 还要求 RustFS 镜像能够在容器运行时默认 seccomp 下启动。
 `rustfs/rustfs:1.0.0-beta.8` 的 Tokio runtime 启用了 io_uring，因此不兼容；
