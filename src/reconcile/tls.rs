@@ -30,7 +30,7 @@ use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
-use rustls::pki_types::{CertificateDer, DnsName, ServerName};
+use rustls::pki_types::{DnsName, ServerName};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -52,15 +52,18 @@ const CERT_MANAGER_ISSUER_PLURAL: &str = "issuers";
 const CERT_MANAGER_CLUSTER_ISSUER_KIND: &str = "ClusterIssuer";
 const CERT_MANAGER_CLUSTER_ISSUER_PLURAL: &str = "clusterissuers";
 const STATUS_MESSAGE_LIMIT: usize = 256;
-// etcd's default 1.5 MiB request limit is the hard upper envelope for Kubernetes objects. Reserve
-// 512 KiB for Certificate metadata/spec fields and 1 MiB for the rest of Tenant status.
+// etcd's default 1.5 MiB request limit is the hard upper envelope for Kubernetes objects. Keep
+// explicit space for the etcd key, protobuf transaction envelope, admission defaults, and other
+// server-side metadata that are not represented by the JSON payload serialized here.
 const ETCD_DEFAULT_MAX_REQUEST_BYTES: u64 = 3 * 1024 * 1024 / 2;
-const TLS_CERTIFICATE_NON_SAN_MARGIN_BYTES: u64 = 512 * 1024;
-const TLS_STATUS_NON_SAN_MARGIN_BYTES: u64 = 1024 * 1024;
-const MAX_CERTIFICATE_SAN_BYTES: u64 =
-    ETCD_DEFAULT_MAX_REQUEST_BYTES - TLS_CERTIFICATE_NON_SAN_MARGIN_BYTES;
-const MAX_TLS_STATUS_SAN_BYTES: u64 =
-    ETCD_DEFAULT_MAX_REQUEST_BYTES - TLS_STATUS_NON_SAN_MARGIN_BYTES;
+const KUBERNETES_OBJECT_PROTOCOL_MARGIN_BYTES: u64 = 64 * 1024;
+const MAX_KUBERNETES_OBJECT_JSON_BYTES: u64 =
+    ETCD_DEFAULT_MAX_REQUEST_BYTES - KUBERNETES_OBJECT_PROTOCOL_MARGIN_BYTES;
+// These are allocation caps, not substitutes for the complete-object checks below.
+const MAX_CERTIFICATE_SAN_BYTES: u64 = MAX_KUBERNETES_OBJECT_JSON_BYTES;
+const MAX_TLS_STATUS_SAN_BYTES: u64 = 512 * 1024;
+const TLS_STATUS_FIXED_ESTIMATE_BYTES: u64 = 16 * 1024;
+const TLS_STATUS_PER_CERTIFICATE_ESTIMATE_BYTES: u64 = 2 * 1024;
 // A String plus BTreeSet/Vec bookkeeping is conservatively budgeted at 64 bytes independent of
 // the string payload, which is limited separately by serialized byte budgets.
 const SAN_NAME_CONTAINER_OVERHEAD_BYTES: u64 = 64;
@@ -68,8 +71,11 @@ const MAX_TLS_STATUS_SAN_NAME_COPIES: u64 =
     MAX_TLS_STATUS_SAN_BYTES / SAN_NAME_CONTAINER_OVERHEAD_BYTES;
 const MAX_TLS_SAN_NAMES_PER_LIST: u64 = MAX_TLS_STATUS_SAN_NAME_COPIES;
 const MAX_TLS_SAN_COVERAGE_LOOKUPS: u64 = MAX_TLS_STATUS_SAN_NAME_COPIES * 2;
+const MAX_TLS_CERTIFICATE_ENTRIES: u64 = 64;
+const MAX_TLS_SECRET_MATERIAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TLS_CERTIFICATE_DER_BYTES: u64 = 8 * 1024 * 1024;
 // Concrete-name verification is delegated to webpki, which may scan the complete certificate SAN
-// extension for each name. Bound the conservative certificate-DER bytes scanned across all names.
+// extension for each name. This is a single reconcile-wide budget, not a per-certificate limit.
 const MAX_TLS_SAN_VERIFICATION_SCAN_BYTES: u64 = 16 * 1024 * 1024;
 const STATUS_DNS_NAMES_FIELD_OVERHEAD_BYTES: u64 = 16;
 
@@ -114,9 +120,110 @@ struct TlsCertificateEntry {
 struct ObservedTlsCertificate {
     entry: TlsCertificateEntry,
     secret_name: String,
-    secret: Secret,
+    secret_resource_version: Option<String>,
+    cert_bytes: Vec<u8>,
+    ca_bytes: Option<Vec<u8>>,
     certificate_ref: Option<CertificateObjectRef>,
     san_dns_names: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct TlsCertificateRuntimeBudget {
+    secret_material_bytes: u64,
+    der_bytes: u64,
+    verification_scan_bytes: u64,
+}
+
+impl TlsCertificateRuntimeBudget {
+    fn charge_secret_material(&mut self, bytes: usize) -> Result<(), TlsValidationFailure> {
+        self.secret_material_bytes = checked_resource_add(
+            self.secret_material_bytes,
+            bytes,
+            "PEM/secret-material byte",
+        )?;
+        if self.secret_material_bytes > MAX_TLS_SECRET_MATERIAL_BYTES {
+            return Err(resource_budget_failure(format!(
+                "TLS reconciliation loaded {} PEM/secret-material bytes, exceeding the reconcile-wide budget of {MAX_TLS_SECRET_MATERIAL_BYTES}",
+                self.secret_material_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn charge_der(&mut self, der_bytes: usize) -> Result<u64, TlsValidationFailure> {
+        let der_bytes = u64::try_from(der_bytes).map_err(|_| {
+            resource_budget_failure(
+                "TLS certificate DER length overflowed its resource budget".to_string(),
+            )
+        })?;
+        self.der_bytes = self.der_bytes.checked_add(der_bytes).ok_or_else(|| {
+            resource_budget_failure(
+                "TLS certificate DER byte count overflowed its resource budget".to_string(),
+            )
+        })?;
+        if self.der_bytes > MAX_TLS_CERTIFICATE_DER_BYTES {
+            return Err(resource_budget_failure(format!(
+                "TLS reconciliation parsed {} certificate DER bytes, exceeding the reconcile-wide budget of {MAX_TLS_CERTIFICATE_DER_BYTES}",
+                self.der_bytes
+            )));
+        }
+        Ok(der_bytes)
+    }
+
+    fn charge_scan(
+        &mut self,
+        der_bytes: u64,
+        concrete_names: u64,
+    ) -> Result<(), TlsValidationFailure> {
+        // valid_dns_names performs one complete SAN traversal before webpki performs one traversal
+        // for every concrete reference name.
+        let scans = concrete_names.checked_add(1).ok_or_else(|| {
+            resource_budget_failure(
+                "TLS SAN verification scan count overflowed its resource budget".to_string(),
+            )
+        })?;
+        let scan_bytes = der_bytes.checked_mul(scans).ok_or_else(|| {
+            resource_budget_failure(
+                "TLS SAN verification work calculation overflowed its resource budget".to_string(),
+            )
+        })?;
+        self.verification_scan_bytes = self
+            .verification_scan_bytes
+            .checked_add(scan_bytes)
+            .ok_or_else(|| {
+                resource_budget_failure(
+                    "TLS SAN verification work calculation overflowed its resource budget"
+                        .to_string(),
+                )
+            })?;
+        if self.verification_scan_bytes > MAX_TLS_SAN_VERIFICATION_SCAN_BYTES {
+            return Err(resource_budget_failure(format!(
+                "TLS SAN validation may scan {} certificate DER bytes, exceeding the reconcile-wide verification budget of {MAX_TLS_SAN_VERIFICATION_SCAN_BYTES}",
+                self.verification_scan_bytes
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn checked_resource_add(
+    current: u64,
+    bytes: usize,
+    label: &str,
+) -> Result<u64, TlsValidationFailure> {
+    let bytes = u64::try_from(bytes).map_err(|_| {
+        resource_budget_failure(format!("TLS {label} count overflowed its resource budget"))
+    })?;
+    current.checked_add(bytes).ok_or_else(|| {
+        resource_budget_failure(format!("TLS {label} count overflowed its resource budget"))
+    })
+}
+
+fn resource_budget_failure(message: String) -> TlsValidationFailure {
+    TlsValidationFailure {
+        reason: Reason::CertificateInvalid,
+        message,
+    }
 }
 
 impl CertManagerCertificateObservation {
@@ -202,6 +309,7 @@ async fn reconcile_cert_manager_tls(
         Ok(budget) => budget,
         Err(failure) => return tls_validation_blocked(ctx, tenant, config, failure).await,
     };
+    let mut runtime_budget = TlsCertificateRuntimeBudget::default();
 
     if entries
         .iter()
@@ -294,6 +402,11 @@ async fn reconcile_cert_manager_tls(
                     certificate: &certificate_name,
                 },
             );
+            if let Err(failure) =
+                san_budget::validate_certificate_object(&desired_certificate, &certificate_name)
+            {
+                return tls_validation_blocked(ctx, tenant, config, failure).await;
+            }
             let observed_certificate = match apply_cert_manager_certificate(
                 ctx,
                 namespace,
@@ -378,21 +491,42 @@ async fn reconcile_cert_manager_tls(
             Reason::CertificateSecretMissingKey,
         )
         .await?;
-        require_secret_key(
-            ctx,
-            tenant,
-            config,
+        if let Err(failure) = runtime_budget.charge_secret_material(cert_bytes.len()) {
+            return tls_validation_blocked(ctx, tenant, config, failure).await;
+        }
+        let key_bytes = match require_secret_key_bytes(
             &secret,
             &secret_name,
             TLS_KEY_KEY,
             Reason::CertificateSecretMissingKey,
-        )
-        .await?;
+        ) {
+            Ok(bytes) => bytes,
+            Err(failure) => return tls_validation_blocked(ctx, tenant, config, failure).await,
+        };
+        if let Err(failure) = runtime_budget.charge_secret_material(key_bytes.len()) {
+            return tls_validation_blocked(ctx, tenant, config, failure).await;
+        }
+
+        let ca_bytes = entry
+            .default
+            .then(|| secret_bytes(&secret, CA_CERT_KEY))
+            .flatten()
+            .map(ToOwned::to_owned);
+        if let Some(bytes) = ca_bytes.as_deref()
+            && let Err(failure) = runtime_budget.charge_secret_material(bytes.len())
+        {
+            return tls_validation_blocked(ctx, tenant, config, failure).await;
+        }
+        let secret_resource_version = secret.metadata.resource_version.clone();
 
         let san_dns_names = san_validation_dns_names(&san_budget, config, &entry);
         if config.require_san_match
-            && let Err(failure) =
-                validate_tls_secret_san_match(&secret_name, &cert_bytes, &san_dns_names)
+            && let Err(failure) = validate_tls_secret_san_match_with_budget(
+                &secret_name,
+                &cert_bytes,
+                &san_dns_names,
+                &mut runtime_budget,
+            )
         {
             return tls_validation_blocked(ctx, tenant, config, failure).await;
         }
@@ -400,7 +534,9 @@ async fn reconcile_cert_manager_tls(
         observed.push(ObservedTlsCertificate {
             entry,
             secret_name,
-            secret,
+            secret_resource_version,
+            cert_bytes,
+            ca_bytes,
             certificate_ref,
             san_dns_names,
         });
@@ -428,11 +564,12 @@ async fn reconcile_cert_manager_tls(
     let mut explicit_ca_bytes: Option<Vec<u8>> = None;
 
     match ca_trust.source {
-        CaTrustSource::CertificateSecretCa => match certificate_secret_ca_material(
-            &default_certificate.secret,
+        CaTrustSource::CertificateSecretCa => match certificate_ca_material(
+            default_certificate.ca_bytes.as_deref(),
             &default_certificate.secret_name,
             config.enable_internode_https,
             trust_system_ca,
+            &mut runtime_budget,
         ) {
             Ok(Some(material)) => {
                 server_ca_key = Some(material.key);
@@ -472,10 +609,14 @@ async fn reconcile_cert_manager_tls(
                 Reason::CaBundleMissing,
             )
             .await?;
+            if let Err(failure) = runtime_budget.charge_secret_material(ca_bytes.len()) {
+                return tls_validation_blocked(ctx, tenant, config, failure).await;
+            }
             if let Err(failure) = validate_ca_bundle_bytes(
                 &ca_secret_ref.name,
                 &ca_secret_ref.key,
                 ca_bytes.as_slice(),
+                &mut runtime_budget,
             ) {
                 return tls_validation_blocked(ctx, tenant, config, failure).await;
             }
@@ -515,10 +656,16 @@ async fn reconcile_cert_manager_tls(
             )
             .await?,
         );
+        if let Some(bytes) = client_ca_bytes.as_deref()
+            && let Err(failure) = runtime_budget.charge_secret_material(bytes.len())
+        {
+            return tls_validation_blocked(ctx, tenant, config, failure).await;
+        }
         if let Err(failure) = validate_ca_bundle_bytes(
             &client_ca_secret_ref.name,
             &client_ca_secret_ref.key,
             client_ca_bytes.as_deref().unwrap_or_default(),
+            &mut runtime_budget,
         ) {
             return tls_validation_blocked(ctx, tenant, config, failure).await;
         }
@@ -563,6 +710,9 @@ async fn reconcile_cert_manager_tls(
         client_ca.as_ref().zip(client_ca_secret.as_ref()),
         &hash,
     );
+    if let Err(failure) = san_budget::validate_tenant_tls_status(tenant, &status) {
+        return tls_validation_blocked(ctx, tenant, config, failure).await;
+    }
     let server_certificates = observed
         .iter()
         .map(|certificate| TlsServerCertificateMount {
@@ -1273,6 +1423,12 @@ mod san_budget {
         if config.mode != TlsMode::CertManager {
             return Ok(token(tenant, namespace, cluster_domain));
         }
+        let entry_count = to_u64(entries.len())?;
+        if entry_count > MAX_TLS_CERTIFICATE_ENTRIES {
+            return Err(budget_failure(format!(
+                "spec.tls contains {entry_count} certificate entries, exceeding the reconcile-wide limit of {MAX_TLS_CERTIFICATE_ENTRIES}"
+            )));
+        }
 
         let generated = generated_names_estimate(tenant, namespace, cluster_domain)?;
         let required = required_names_estimate(tenant, namespace, cluster_domain)?;
@@ -1346,8 +1502,26 @@ mod san_budget {
                 "spec.tls requires {coverage_lookups} DNS SAN coverage operations, exceeding the comparison budget of {MAX_TLS_SAN_COVERAGE_LOOKUPS}"
             )));
         }
+        validate_projected_tenant_status_size(tenant, config, entry_count, status_bytes)?;
 
         Ok(token(tenant, namespace, cluster_domain))
+    }
+
+    pub(super) fn validate_certificate_object(
+        certificate: &DynamicObject,
+        name: &str,
+    ) -> Result<(), TlsValidationFailure> {
+        validate_complete_object_size(certificate, &format!("cert-manager Certificate '{name}'"))
+    }
+
+    pub(super) fn validate_tenant_tls_status(
+        tenant: &Tenant,
+        tls_status: &TlsCertificateStatus,
+    ) -> Result<(), TlsValidationFailure> {
+        let mut candidate = tenant.clone();
+        let status = candidate.status.get_or_insert_default();
+        status.certificates.tls = Some(tls_status.clone());
+        validate_complete_object_size(&candidate, "Tenant with reconciled TLS status")
     }
 
     fn token<'a>(
@@ -1399,6 +1573,60 @@ mod san_budget {
             )?,
         )?;
         *total_names = checked_add(*total_names, estimate.names)?;
+        Ok(())
+    }
+
+    fn validate_projected_tenant_status_size(
+        tenant: &Tenant,
+        config: &TlsConfig,
+        entry_count: u64,
+        status_san_bytes: u64,
+    ) -> Result<(), TlsValidationFailure> {
+        let mut tenant_without_tls = tenant.clone();
+        if let Some(status) = tenant_without_tls.status.as_mut() {
+            status.certificates.tls = None;
+        }
+        let base_bytes = serialized_len(&tenant_without_tls)?;
+        let config_bytes = serialized_len(config)?;
+        // The ready status repeats only a subset of TLS config, but charge two complete config
+        // copies so arbitrary user strings are never hidden behind a fixed "rest of object"
+        // allowance. Per-certificate and fixed allowances cover observed resourceVersions,
+        // Certificate condition metadata, timestamps, hashes, JSON field names, and future small
+        // status additions. The protocol margin is checked separately for the complete object.
+        let repeated_config_bytes = checked_multiply(config_bytes, 2)?;
+        let certificate_metadata_bytes =
+            checked_multiply(entry_count, TLS_STATUS_PER_CERTIFICATE_ESTIMATE_BYTES)?;
+        let projected_status_bytes = checked_add(
+            checked_add(status_san_bytes, repeated_config_bytes)?,
+            checked_add(TLS_STATUS_FIXED_ESTIMATE_BYTES, certificate_metadata_bytes)?,
+        )?;
+        let projected_object_bytes = checked_add(base_bytes, projected_status_bytes)?;
+        validate_object_bytes(projected_object_bytes, "Tenant with projected TLS status")
+    }
+
+    fn validate_complete_object_size<T: serde::Serialize>(
+        value: &T,
+        label: &str,
+    ) -> Result<(), TlsValidationFailure> {
+        validate_object_bytes(serialized_len(value)?, label)
+    }
+
+    fn serialized_len<T: serde::Serialize>(value: &T) -> Result<u64, TlsValidationFailure> {
+        let bytes = serde_json::to_vec(value).map_err(|error| {
+            budget_failure(format!(
+                "failed to serialize Kubernetes object while calculating the TLS resource budget: {error}"
+            ))
+        })?;
+        to_u64(bytes.len())
+    }
+
+    fn validate_object_bytes(bytes: u64, label: &str) -> Result<(), TlsValidationFailure> {
+        let with_protocol_margin = checked_add(bytes, KUBERNETES_OBJECT_PROTOCOL_MARGIN_BYTES)?;
+        if with_protocol_margin > ETCD_DEFAULT_MAX_REQUEST_BYTES {
+            return Err(budget_failure(format!(
+                "{label} would serialize to at least {bytes} JSON bytes before the {KUBERNETES_OBJECT_PROTOCOL_MARGIN_BYTES}-byte Kubernetes/etcd protocol margin, exceeding the conservative {MAX_KUBERNETES_OBJECT_JSON_BYTES}-byte object budget"
+            )));
+        }
         Ok(())
     }
 
@@ -1514,7 +1742,13 @@ mod san_budget {
             if remaining == 0 {
                 break;
             }
-            range = checked_multiply(range, 10)?;
+            // 0..=9 contains ten one-digit ordinals. Every subsequent decimal band contains
+            // 9 * 10^(digits - 1) ordinals (90 two-digit, 900 three-digit, ...).
+            range = if digits == 1 {
+                90
+            } else {
+                checked_multiply(range, 10)?
+            };
             digits = checked_add(digits, 1)?;
         }
         Ok(total)
@@ -1555,6 +1789,12 @@ mod san_budget {
             assert_eq!(ordinal_digit_sum(10), Ok(10));
             assert_eq!(ordinal_digit_sum(11), Ok(12));
             assert_eq!(ordinal_digit_sum(100), Ok(190));
+            assert_eq!(ordinal_digit_sum(101), Ok(193));
+            assert_eq!(ordinal_digit_sum(1000), Ok(2890));
+            let expected_8192 = (0_u64..8192)
+                .map(|ordinal| ordinal.to_string().len() as u64)
+                .sum::<u64>();
+            assert_eq!(ordinal_digit_sum(8192), Ok(expected_8192));
         }
 
         #[test]
@@ -1568,12 +1808,43 @@ mod san_budget {
         fn generated_name_estimate_conservatively_covers_serialized_output() {
             let mut tenant = crate::tests::create_test_tenant(None, None);
             tenant.metadata.name = Some("tenant-a".to_string());
-            tenant.spec.pools[0].servers = 12;
+            for servers in [101, 1000, 8192] {
+                tenant.spec.pools[0].servers = servers;
+                let budget = token(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
+                let estimate = generated_names_estimate(
+                    &tenant,
+                    "storage",
+                    cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+                )
+                .expect("estimate should succeed");
+                let generated = super::super::generated_dns_names(&budget);
+                let serialized = serde_json::to_vec(&generated).expect("SAN list should serialize");
+
+                assert_eq!(estimate.names, generated.len() as u64);
+                assert!(
+                    estimate.array_bytes().expect("byte estimate") >= serialized.len() as u64,
+                    "servers={servers} must use a conservative serialized-byte estimate"
+                );
+            }
+        }
+
+        #[test]
+        fn projected_tenant_budget_counts_existing_non_tls_object_bytes() {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
             let config = TlsConfig {
                 mode: TlsMode::CertManager,
                 require_san_match: false,
                 ..Default::default()
             };
+            tenant.spec.tls = Some(config.clone());
+            let current_bytes = serde_json::to_vec(&tenant)
+                .expect("Tenant should serialize")
+                .len();
+            let padding = MAX_KUBERNETES_OBJECT_JSON_BYTES as usize - current_bytes - 8 * 1024;
+            tenant.metadata.annotations = Some(std::collections::BTreeMap::from([(
+                "budget.test/padding".to_string(),
+                "x".repeat(padding),
+            )]));
             let entries = vec![TlsCertificateEntry {
                 name: "default".to_string(),
                 default: true,
@@ -1581,22 +1852,73 @@ mod san_budget {
                 cert_manager: CertManagerTlsConfig::default(),
                 legacy: false,
             }];
-            let budget = validate(
+
+            let failure = validate(
                 &tenant,
                 "storage",
                 cluster_dns::DEFAULT_CLUSTER_DOMAIN,
                 &config,
                 &entries,
             )
-            .expect("small generated SAN set should fit");
-            let estimate =
-                generated_names_estimate(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN)
-                    .expect("estimate should succeed");
-            let generated = super::super::generated_dns_names(&budget);
-            let serialized = serde_json::to_vec(&generated).expect("SAN list should serialize");
+            .expect_err("projected status must account for the existing complete Tenant object");
 
-            assert_eq!(estimate.names, generated.len() as u64);
-            assert!(estimate.array_bytes().expect("byte estimate") >= serialized.len() as u64);
+            assert!(failure.message.contains("projected TLS status"));
+            assert!(failure.message.contains("protocol margin"));
+        }
+
+        #[test]
+        fn complete_certificate_budget_counts_non_san_fields() {
+            let mut certificate = DynamicObject::new(
+                "tenant-a-server-tls",
+                &super::super::certificate_api_resource(),
+            )
+            .data(json!({
+                "spec": {
+                    "secretName": "tenant-a-server-tls",
+                    "commonName": "x".repeat(MAX_KUBERNETES_OBJECT_JSON_BYTES as usize),
+                    "dnsNames": []
+                }
+            }));
+            certificate.metadata.namespace = Some("storage".to_string());
+
+            let failure = validate_certificate_object(&certificate, "tenant-a-server-tls")
+                .expect_err("non-SAN Certificate fields must count toward the complete object");
+
+            assert!(failure.message.contains("cert-manager Certificate"));
+            assert!(failure.message.contains("object budget"));
+        }
+
+        #[test]
+        fn certificate_entry_count_is_bounded_before_expansion() {
+            let tenant = crate::tests::create_test_tenant(None, None);
+            let config = TlsConfig {
+                mode: TlsMode::CertManager,
+                require_san_match: false,
+                ..Default::default()
+            };
+            let entries = (0..=MAX_TLS_CERTIFICATE_ENTRIES)
+                .map(|index| TlsCertificateEntry {
+                    name: format!("certificate-{index}"),
+                    default: index == 0,
+                    hosts: vec![format!("host-{index}.example.com")],
+                    cert_manager: CertManagerTlsConfig {
+                        include_generated_dns_names: Some(false),
+                        ..Default::default()
+                    },
+                    legacy: false,
+                })
+                .collect::<Vec<_>>();
+
+            let failure = validate(
+                &tenant,
+                "storage",
+                cluster_dns::DEFAULT_CLUSTER_DOMAIN,
+                &config,
+                &entries,
+            )
+            .expect_err("certificate entry count must be bounded before SAN expansion");
+
+            assert!(failure.message.contains("certificate entries"));
         }
 
         #[test]
@@ -1644,7 +1966,8 @@ mod san_budget {
         #[test]
         fn byte_budgets_leave_explicit_etcd_object_margins() {
             assert_eq!(ETCD_DEFAULT_MAX_REQUEST_BYTES, 1_572_864);
-            assert_eq!(MAX_CERTIFICATE_SAN_BYTES, 1_048_576);
+            assert_eq!(KUBERNETES_OBJECT_PROTOCOL_MARGIN_BYTES, 65_536);
+            assert_eq!(MAX_CERTIFICATE_SAN_BYTES, 1_507_328);
             assert_eq!(MAX_TLS_STATUS_SAN_BYTES, 524_288);
         }
     }
@@ -2002,10 +2325,11 @@ fn supported_tls_secret_type(secret_type: &str) -> bool {
     )
 }
 
-fn validate_tls_secret_san_match(
+fn validate_tls_secret_san_match_with_budget(
     secret_name: &str,
     cert_bytes: &[u8],
     expected_dns_names: &[String],
+    runtime_budget: &mut TlsCertificateRuntimeBudget,
 ) -> Result<(), TlsValidationFailure> {
     if expected_dns_names.is_empty() {
         return Ok(());
@@ -2020,29 +2344,50 @@ fn validate_tls_secret_san_match(
         });
     }
 
-    let certs = rustls_pemfile::certs(&mut Cursor::new(cert_bytes))
-        .collect::<Result<Vec<CertificateDer<'static>>, _>>()
+    let mut cursor = Cursor::new(cert_bytes);
+    let mut certs = rustls_pemfile::certs(&mut cursor);
+    let cert_der = certs
+        .next()
+        .transpose()
         .map_err(|_| TlsValidationFailure {
             reason: Reason::CertificateInvalid,
             message: format!(
                 "TLS certificate in Secret '{}' key '{}' must contain a valid PEM certificate",
                 secret_name, TLS_CERT_KEY
             ),
-        })?;
-    let cert_der = certs.first().ok_or_else(|| TlsValidationFailure {
+        })?
+        .ok_or_else(|| TlsValidationFailure {
         reason: Reason::CertificateInvalid,
         message: format!(
             "TLS certificate in Secret '{}' key '{}' must contain at least one valid PEM certificate",
             secret_name, TLS_CERT_KEY
         ),
     })?;
-    let cert = webpki::EndEntityCert::try_from(cert_der).map_err(|_| TlsValidationFailure {
+    let leaf_der_bytes = runtime_budget.charge_der(cert_der.as_ref().len())?;
+    // Validate the remaining PEM certificate blocks without retaining the chain in memory.
+    for certificate in certs {
+        let certificate = certificate.map_err(|_| TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: format!(
+                "TLS certificate in Secret '{}' key '{}' must contain a valid PEM certificate",
+                secret_name, TLS_CERT_KEY
+            ),
+        })?;
+        runtime_budget.charge_der(certificate.as_ref().len())?;
+    }
+    let cert = webpki::EndEntityCert::try_from(&cert_der).map_err(|_| TlsValidationFailure {
         reason: Reason::CertificateInvalid,
         message: format!(
             "TLS certificate in Secret '{}' key '{}' must be a valid X.509 end-entity certificate",
             secret_name, TLS_CERT_KEY
         ),
     })?;
+    let concrete_expected_count = expected_dns_names
+        .iter()
+        .filter(|name| !is_dns_wildcard_pattern(name))
+        .count() as u64;
+    runtime_budget.charge_scan(leaf_der_bytes, concrete_expected_count)?;
+
     let mut presented_count = 0_u64;
     let mut presented_wildcards = BTreeSet::new();
     for presented in cert.valid_dns_names() {
@@ -2067,29 +2412,6 @@ fn validate_tls_secret_san_match(
         }
     }
 
-    // webpki intentionally owns concrete DNS-name matching semantics, including absolute names
-    // with a trailing dot. It may scan every GeneralName (not only valid DNS names), so charge the
-    // complete DER length before performing one scan per concrete name.
-    let concrete_expected_count = expected_dns_names
-        .iter()
-        .filter(|name| !is_dns_wildcard_pattern(name))
-        .count() as u64;
-    let verification_scan_bytes = u64::try_from(cert_der.as_ref().len())
-        .ok()
-        .and_then(|der_bytes| der_bytes.checked_mul(concrete_expected_count))
-        .ok_or_else(|| TlsValidationFailure {
-            reason: Reason::CertificateInvalid,
-            message: "TLS SAN verification work calculation overflowed its resource budget"
-                .to_string(),
-        })?;
-    if verification_scan_bytes > MAX_TLS_SAN_VERIFICATION_SCAN_BYTES {
-        return Err(TlsValidationFailure {
-            reason: Reason::CertificateInvalid,
-            message: format!(
-                "TLS SAN validation may scan {verification_scan_bytes} certificate DER bytes, exceeding the verification budget of {MAX_TLS_SAN_VERIFICATION_SCAN_BYTES}"
-            ),
-        });
-    }
     let mut missing_count = 0_u64;
     let mut missing_examples = Vec::new();
     for dns_name in expected_dns_names {
@@ -2130,14 +2452,31 @@ fn validate_tls_secret_san_match(
     }
 }
 
-fn certificate_secret_ca_material(
-    secret: &Secret,
+#[cfg(test)]
+fn validate_tls_secret_san_match(
+    secret_name: &str,
+    cert_bytes: &[u8],
+    expected_dns_names: &[String],
+) -> Result<(), TlsValidationFailure> {
+    let mut runtime_budget = TlsCertificateRuntimeBudget::default();
+    runtime_budget.charge_secret_material(cert_bytes.len())?;
+    validate_tls_secret_san_match_with_budget(
+        secret_name,
+        cert_bytes,
+        expected_dns_names,
+        &mut runtime_budget,
+    )
+}
+
+fn certificate_ca_material(
+    ca_bytes: Option<&[u8]>,
     secret_name: &str,
     enable_internode_https: bool,
     trust_system_ca: bool,
+    runtime_budget: &mut TlsCertificateRuntimeBudget,
 ) -> Result<Option<ServerCaMaterial>, TlsValidationFailure> {
-    if let Some(ca_bytes) = secret_bytes(secret, CA_CERT_KEY) {
-        validate_ca_bundle_bytes(secret_name, CA_CERT_KEY, ca_bytes)?;
+    if let Some(ca_bytes) = ca_bytes {
+        validate_ca_bundle_bytes(secret_name, CA_CERT_KEY, ca_bytes, runtime_budget)?;
         return Ok(Some(ServerCaMaterial {
             key: CA_CERT_KEY.to_string(),
             bytes: ca_bytes.to_vec(),
@@ -2157,21 +2496,50 @@ fn certificate_secret_ca_material(
     Ok(None)
 }
 
+#[cfg(test)]
+fn certificate_secret_ca_material(
+    secret: &Secret,
+    secret_name: &str,
+    enable_internode_https: bool,
+    trust_system_ca: bool,
+) -> Result<Option<ServerCaMaterial>, TlsValidationFailure> {
+    let mut runtime_budget = TlsCertificateRuntimeBudget::default();
+    certificate_ca_material(
+        secret_bytes(secret, CA_CERT_KEY),
+        secret_name,
+        enable_internode_https,
+        trust_system_ca,
+        &mut runtime_budget,
+    )
+}
+
 fn validate_ca_bundle_bytes(
     secret_name: &str,
     key: &str,
     bytes: &[u8],
+    runtime_budget: &mut TlsCertificateRuntimeBudget,
 ) -> Result<(), TlsValidationFailure> {
-    let parsed = rustls_pemfile::certs(&mut Cursor::new(bytes)).collect::<Result<Vec<_>, _>>();
-    match parsed {
-        Ok(certs) if !certs.is_empty() => Ok(()),
-        Ok(_) | Err(_) => Err(TlsValidationFailure {
-            reason: Reason::CaBundleInvalid,
-            message: format!(
-                "CA bundle in Secret '{}' key '{}' must contain at least one valid PEM certificate",
-                secret_name, key
-            ),
-        }),
+    let mut cursor = Cursor::new(bytes);
+    let mut parsed = rustls_pemfile::certs(&mut cursor);
+    let Some(first) = parsed.next() else {
+        return Err(invalid_ca_bundle(secret_name, key));
+    };
+    let first = first.map_err(|_| invalid_ca_bundle(secret_name, key))?;
+    runtime_budget.charge_der(first.as_ref().len())?;
+    for certificate in parsed {
+        let certificate = certificate.map_err(|_| invalid_ca_bundle(secret_name, key))?;
+        runtime_budget.charge_der(certificate.as_ref().len())?;
+    }
+    Ok(())
+}
+
+fn invalid_ca_bundle(secret_name: &str, key: &str) -> TlsValidationFailure {
+    TlsValidationFailure {
+        reason: Reason::CaBundleInvalid,
+        message: format!(
+            "CA bundle in Secret '{}' key '{}' must contain at least one valid PEM certificate",
+            secret_name, key
+        ),
     }
 }
 
@@ -2295,7 +2663,7 @@ fn cert_manager_tls_status(
     let server_secret_ref = SecretStatusRef {
         name: default_certificate.secret_name.clone(),
         key: None,
-        resource_version: default_certificate.secret.metadata.resource_version.clone(),
+        resource_version: default_certificate.secret_resource_version.clone(),
     };
     TlsCertificateStatus {
         mode: tls_mode_name(config.mode).to_string(),
@@ -2309,11 +2677,7 @@ fn cert_manager_tls_status(
             .iter()
             .map(tls_server_certificate_status)
             .collect(),
-        ca_secret_ref: ca_status_ref(
-            &default_certificate.secret_name,
-            &default_certificate.secret,
-            explicit_ca,
-        ),
+        ca_secret_ref: ca_status_ref(default_certificate, explicit_ca),
         client_ca_secret_ref: client_ca.map(|(secret_ref, ca_secret)| SecretStatusRef {
             name: secret_ref.name.clone(),
             key: Some(secret_ref.key.clone()),
@@ -2341,15 +2705,14 @@ fn tls_server_certificate_status(
         server_secret_ref: SecretStatusRef {
             name: certificate.secret_name.clone(),
             key: None,
-            resource_version: certificate.secret.metadata.resource_version.clone(),
+            resource_version: certificate.secret_resource_version.clone(),
         },
         dns_names: certificate.san_dns_names.clone(),
     }
 }
 
 fn ca_status_ref(
-    secret_name: &str,
-    secret: &Secret,
+    default_certificate: &ObservedTlsCertificate,
     explicit_ca: Option<(&SecretKeyReference, &Secret)>,
 ) -> Option<SecretStatusRef> {
     if let Some((secret_ref, ca_secret)) = explicit_ca {
@@ -2359,11 +2722,14 @@ fn ca_status_ref(
             resource_version: ca_secret.metadata.resource_version.clone(),
         });
     }
-    secret_bytes(secret, CA_CERT_KEY).map(|_| SecretStatusRef {
-        name: secret_name.to_string(),
-        key: Some(CA_CERT_KEY.to_string()),
-        resource_version: secret.metadata.resource_version.clone(),
-    })
+    default_certificate
+        .ca_bytes
+        .as_ref()
+        .map(|_| SecretStatusRef {
+            name: default_certificate.secret_name.clone(),
+            key: Some(CA_CERT_KEY.to_string()),
+            resource_version: default_certificate.secret_resource_version.clone(),
+        })
 }
 
 #[cfg(test)]
@@ -2442,23 +2808,14 @@ fn tls_hash(
         hash_str(
             &mut hasher,
             "serverSecret.resourceVersion",
-            certificate
-                .secret
-                .metadata
-                .resource_version
-                .as_deref()
-                .unwrap_or(""),
+            certificate.secret_resource_version.as_deref().unwrap_or(""),
         );
-        hash_bytes(
-            &mut hasher,
-            "tls.crt",
-            secret_bytes(&certificate.secret, TLS_CERT_KEY),
-        );
+        hash_bytes(&mut hasher, "tls.crt", Some(&certificate.cert_bytes));
         if certificate.entry.default {
             hash_bytes(
                 &mut hasher,
                 "secret.ca.crt",
-                secret_bytes(&certificate.secret, CA_CERT_KEY),
+                certificate.ca_bytes.as_deref(),
             );
         }
     }
@@ -2651,7 +3008,7 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
     }
 
     #[test]
-    fn tls_san_budget_rejects_oversized_certificate_before_expansion() {
+    fn tls_san_budget_rejects_oversized_managed_certificate_status_before_expansion() {
         let mut tenant = tenant_with_pool_servers(&[4000]);
         tenant.metadata.name = Some("tenant-long".to_string());
         let config = TlsConfig {
@@ -2664,10 +3021,70 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         let cluster_domain = format!("{}a", "a.".repeat(119));
 
         let failure = san_budget::validate(&tenant, &namespace, &cluster_domain, &config, &entries)
-            .expect_err("oversized Certificate dnsNames must fail before expansion");
+            .expect_err("oversized managed certificate status must fail before expansion");
 
-        assert!(failure.message.contains("cert-manager Certificate"));
+        assert!(failure.message.contains("TLS status"));
         assert!(failure.message.contains("derived from etcd"));
+    }
+
+    #[test]
+    fn reconcile_wide_certificate_runtime_budget_accumulates_across_certificates() {
+        let mut budget = TlsCertificateRuntimeBudget::default();
+        let der_bytes = 1024_usize;
+        let concrete_names = MAX_TLS_SAN_VERIFICATION_SCAN_BYTES / 2 / der_bytes as u64;
+
+        let first_der = budget
+            .charge_der(der_bytes)
+            .expect("one certificate should fit the reconcile-wide DER budget");
+        budget
+            .charge_scan(first_der, concrete_names)
+            .expect("one certificate should fit the reconcile-wide scan budget");
+        let second_der = budget
+            .charge_der(der_bytes)
+            .expect("a second small certificate should fit the DER budget");
+        let failure = budget
+            .charge_scan(second_der, concrete_names)
+            .expect_err("the second certificate must consume the same shared scan budget");
+
+        assert!(
+            failure
+                .message
+                .contains("reconcile-wide verification budget")
+        );
+    }
+
+    #[test]
+    fn reconcile_wide_secret_material_budget_includes_private_keys() {
+        let mut budget = TlsCertificateRuntimeBudget::default();
+        let certificate_bytes = MAX_TLS_SECRET_MATERIAL_BYTES as usize / 2;
+        let private_key_bytes = MAX_TLS_SECRET_MATERIAL_BYTES as usize - certificate_bytes;
+
+        budget
+            .charge_secret_material(certificate_bytes)
+            .expect("certificate PEM should fit half the shared budget");
+        budget
+            .charge_secret_material(private_key_bytes)
+            .expect("private-key PEM should consume the rest of the shared budget");
+        let failure = budget
+            .charge_secret_material(1)
+            .expect_err("secret material from another certificate must exceed the shared budget");
+
+        assert!(failure.message.contains("reconcile-wide budget"));
+        assert!(failure.message.contains("secret-material"));
+    }
+
+    #[test]
+    fn reconcile_wide_der_budget_is_cumulative_across_parsed_bundles() {
+        let mut budget = TlsCertificateRuntimeBudget::default();
+
+        budget
+            .charge_der(MAX_TLS_CERTIFICATE_DER_BYTES as usize)
+            .expect("the exact DER budget should be accepted");
+        let failure = budget
+            .charge_der(1)
+            .expect_err("additional parsed DER bytes must exceed the shared budget");
+
+        assert!(failure.message.contains("reconcile-wide budget"));
     }
 
     #[test]
@@ -4008,6 +4425,11 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         cert_manager: CertManagerTlsConfig,
         san_dns_names: Vec<&str>,
     ) -> ObservedTlsCertificate {
+        let secret_resource_version = secret.metadata.resource_version.clone();
+        let cert_bytes = secret_bytes(&secret, TLS_CERT_KEY)
+            .map(ToOwned::to_owned)
+            .unwrap_or_default();
+        let ca_bytes = secret_bytes(&secret, CA_CERT_KEY).map(ToOwned::to_owned);
         ObservedTlsCertificate {
             entry: TlsCertificateEntry {
                 name: name.to_string(),
@@ -4017,7 +4439,9 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
                 legacy: false,
             },
             secret_name: secret_name.to_string(),
-            secret,
+            secret_resource_version,
+            cert_bytes,
+            ca_bytes,
             certificate_ref: None,
             san_dns_names: san_dns_names.into_iter().map(ToString::to_string).collect(),
         }
