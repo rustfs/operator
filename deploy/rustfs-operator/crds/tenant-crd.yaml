@@ -2511,27 +2511,6 @@ spec:
                         observedSecretResourceVersion:
                           nullable: true
                           type: string
-                        ownership:
-                          description: Durable proof that the operator claimed a RustFS user identity before mutating it.
-                          nullable: true
-                          properties:
-                            accessKeyHash:
-                              type: string
-                            state:
-                              enum:
-                              - PendingCreate
-                              - Managed
-                              type: string
-                            tenantUid:
-                              type: string
-                            userName:
-                              type: string
-                          required:
-                          - accessKeyHash
-                          - state
-                          - tenantUid
-                          - userName
-                          type: object
                         policies:
                           items:
                             type: string
@@ -2594,27 +2573,6 @@ spec:
                         observedSecretResourceVersion:
                           nullable: true
                           type: string
-                        ownership:
-                          description: Durable proof that the operator claimed a RustFS user identity before mutating it.
-                          nullable: true
-                          properties:
-                            accessKeyHash:
-                              type: string
-                            state:
-                              enum:
-                              - PendingCreate
-                              - Managed
-                              type: string
-                            tenantUid:
-                              type: string
-                            userName:
-                              type: string
-                          required:
-                          - accessKeyHash
-                          - state
-                          - tenantUid
-                          - userName
-                          type: object
                         policies:
                           items:
                             type: string
@@ -2634,6 +2592,9 @@ spec:
                     type: array
                   users:
                     items:
+                      description: |-
+                        User-specific provisioning status. The flattened item preserves the existing status wire
+                        format while keeping ownership metadata out of policy and bucket status schemas.
                       properties:
                         desiredHash:
                           nullable: true

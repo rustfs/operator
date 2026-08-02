@@ -666,6 +666,32 @@ mod tests {
     use crate::types::v1alpha1::status::Condition;
 
     #[test]
+    fn user_ownership_provisioning_failures_block_top_level_status() {
+        for reason in [
+            Reason::UserOwnershipConflict,
+            Reason::UserOwnershipCheckpointFailed,
+        ] {
+            let tenant = crate::tests::create_test_tenant(None, None);
+            let mut builder = StatusBuilder::from_tenant(&tenant);
+            builder.finish_provisioning_failed(reason, "ownership safety check failed".to_string());
+            let status = builder.build();
+
+            assert_eq!(status.current_state, "Blocked");
+            assert_eq!(
+                crate::types::v1alpha1::status::primary_condition(&status)
+                    .map(|condition| condition.reason.as_str()),
+                Some(reason.as_str())
+            );
+            assert_eq!(
+                status
+                    .condition(ConditionType::ProvisioningReady)
+                    .map(|condition| condition.status.as_str()),
+                Some("False")
+            );
+        }
+    }
+
+    #[test]
     fn status_builder_maps_credential_missing_key() {
         let tenant = crate::tests::create_test_tenant(None, None);
         let err = context::Error::CredentialSecretMissingKey {
