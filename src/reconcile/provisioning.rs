@@ -21,7 +21,7 @@ use crate::types::v1alpha1::provisioning::{
 use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::provisioning::{
     ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus,
-    ProvisioningUserOwnershipState, ProvisioningUserOwnershipStatus,
+    ProvisioningUserOwnershipState, ProvisioningUserOwnershipStatus, ProvisioningUserStatus,
 };
 use crate::types::v1alpha1::tenant::Tenant;
 use k8s_openapi::ByteString;
@@ -78,7 +78,6 @@ struct ProvisioningRun<'a> {
     now: String,
     status: ProvisioningStatus,
     failures: Vec<(Reason, String)>,
-    status_resource_version: StdMutex<Option<String>>,
     checkpoint_retry: StdMutex<Option<CheckpointRetry>>,
 }
 
@@ -132,7 +131,7 @@ impl ProvisioningRun<'_> {
         self.previous.policies.iter().find(|item| item.name == name)
     }
 
-    fn previous_user(&self, name: &str) -> Option<&ProvisioningItemStatus> {
+    fn previous_user(&self, name: &str) -> Option<&ProvisioningUserStatus> {
         self.previous.users.iter().find(|item| item.name == name)
     }
 
@@ -149,8 +148,12 @@ impl ProvisioningRun<'_> {
         self.status.policies.push(item);
     }
 
-    fn push_user(&mut self, item: ProvisioningItemStatus) {
-        self.log_item_transition("user", self.previous_user(&item.name), &item);
+    fn push_user(&mut self, item: ProvisioningUserStatus) {
+        self.log_item_transition(
+            "user",
+            self.previous_user(&item.name).map(AsRef::as_ref),
+            item.as_ref(),
+        );
         if item.state == ProvisioningItemState::Failed.as_str() {
             self.failures
                 .push((reason_from_str(&item.reason), item_message(&item)));
@@ -211,14 +214,18 @@ impl ProvisioningRun<'_> {
         }
     }
 
-    fn item(
+    fn item<P>(
         &self,
-        previous: Option<&ProvisioningItemStatus>,
+        previous: Option<&P>,
         name: &str,
         state: ProvisioningItemState,
         reason: Reason,
         message: impl Into<String>,
-    ) -> ProvisioningItemStatus {
+    ) -> ProvisioningItemStatus
+    where
+        P: AsRef<ProvisioningItemStatus> + ?Sized,
+    {
+        let previous = previous.map(AsRef::as_ref);
         let message = message.into();
         let mut item = ProvisioningItemStatus::new(name, state, reason.as_str());
         item.message = Some(message.clone());
@@ -249,10 +256,15 @@ impl ProvisioningRun<'_> {
         item.observed_secret_resource_version = previous.observed_secret_resource_version.clone();
         item.observed_secret_name = previous.observed_secret_name.clone();
         item.last_applied_access_key_hash = previous.last_applied_access_key_hash.clone();
-        item.ownership = previous.ownership.clone();
         item.policies = previous.policies.clone();
         item.region = previous.region.clone();
         item.object_lock = previous.object_lock;
+        item
+    }
+
+    fn retained_user(&self, previous: &ProvisioningUserStatus) -> ProvisioningUserStatus {
+        let mut item = ProvisioningUserStatus::new(self.retained_item(previous.as_ref()));
+        item.ownership = previous.ownership.clone();
         item
     }
 
@@ -285,9 +297,12 @@ impl ProvisioningRun<'_> {
                     previous.observed_secret_resource_version.clone();
                 item.observed_secret_name = previous.observed_secret_name.clone();
                 item.last_applied_access_key_hash = previous.last_applied_access_key_hash.clone();
-                item.ownership = previous.ownership.clone();
                 item.policies = previous.policies.clone();
             }
+            let mut item = ProvisioningUserStatus::new(item);
+            item.ownership = self
+                .previous_user(&user.name)
+                .and_then(|previous| previous.ownership.clone());
             self.push_user(item);
         }
         for bucket in &self.tenant.spec.buckets {
@@ -317,7 +332,7 @@ impl ProvisioningRun<'_> {
         let users = desired_names(self.tenant.spec.users.iter().map(|user| &user.name));
         for previous in &self.previous.users {
             if !users.contains(&previous.name) {
-                self.status.users.push(self.retained_item(previous));
+                self.status.users.push(self.retained_user(previous));
             }
         }
 
@@ -411,7 +426,6 @@ pub(super) async fn reconcile_provisioning(
         now,
         status: ProvisioningStatus::default(),
         failures: Vec::new(),
-        status_resource_version: StdMutex::new(tenant.metadata.resource_version.clone()),
         checkpoint_retry: StdMutex::new(None),
     };
 
@@ -933,7 +947,7 @@ async fn reconcile_user(
     failed_spec_policies: &BTreeSet<String>,
     user: &ProvisioningUser,
     credentials: &UserCredentials,
-) -> ProvisioningItemStatus {
+) -> ProvisioningUserStatus {
     let previous = run.previous_user(&user.name);
     if user_access_key_changed(previous, credentials) {
         let item = run.item(
@@ -1024,7 +1038,7 @@ async fn reconcile_user(
                     return annotate_user_item(item, user, previous, None);
                 }
             };
-            let mut checkpoint = run.item(
+            let checkpoint = run.item(
                 previous,
                 &user.name,
                 ProvisioningItemState::Ready,
@@ -1033,7 +1047,7 @@ async fn reconcile_user(
             );
             // Preserve the legacy observed Secret version so a concurrently rotated Secret is
             // still applied after the ownership checkpoint has been persisted.
-            checkpoint = annotate_user_item(checkpoint, user, previous, None);
+            let mut checkpoint = annotate_user_item(checkpoint, user, previous, None);
             checkpoint.ownership = Some(managed_ownership.clone());
             if let Err(error) = persist_user_ownership_checkpoint(run, checkpoint).await {
                 let message = handle_checkpoint_error(run, error);
@@ -1078,14 +1092,14 @@ async fn reconcile_user(
                 return annotate_user_item(item, user, previous, None);
             }
         };
-        let mut checkpoint = run.item(
+        let checkpoint = run.item(
             previous,
             &user.name,
             ProvisioningItemState::Pending,
             Reason::ProvisioningPending,
             "Operator ownership checkpoint was persisted before creating the RustFS user",
         );
-        checkpoint = annotate_user_item(checkpoint, user, previous, Some(credentials));
+        let mut checkpoint = annotate_user_item(checkpoint, user, previous, Some(credentials));
         checkpoint.ownership = Some(pending_ownership.clone());
         if let Err(error) = persist_user_ownership_checkpoint(run, checkpoint).await {
             let message = handle_checkpoint_error(run, error);
@@ -1104,17 +1118,17 @@ async fn reconcile_user(
             ownership.state == ProvisioningUserOwnershipState::PendingCreate
         })
     {
-        // Refresh the persisted intent with a resourceVersion precondition before retrying an
-        // external create after a process crash. This keeps concurrent reconcilers from both
-        // crossing the Kubernetes-to-RustFS side-effect boundary.
-        let mut checkpoint = run.item(
+        // Refresh the persisted intent before retrying an external create after a process crash.
+        // This recovery relies on per-Tenant controller serialization; it does not provide
+        // exactly-once delivery across Kubernetes and independent RustFS actors.
+        let checkpoint = run.item(
             previous,
             &user.name,
             ProvisioningItemState::Pending,
             Reason::ProvisioningPending,
             "Operator is resuming a pending RustFS user creation",
         );
-        checkpoint = annotate_user_item(checkpoint, user, previous, Some(credentials));
+        let mut checkpoint = annotate_user_item(checkpoint, user, previous, Some(credentials));
         checkpoint.ownership = ownership.clone();
         if let Err(error) = persist_user_ownership_checkpoint(run, checkpoint).await {
             let message = handle_checkpoint_error(run, error);
@@ -1204,7 +1218,7 @@ async fn reconcile_user(
 }
 
 fn matching_user_ownership(
-    previous: Option<&ProvisioningItemStatus>,
+    previous: Option<&ProvisioningUserStatus>,
     tenant: &Tenant,
     user: &ProvisioningUser,
     credentials: &UserCredentials,
@@ -1231,7 +1245,7 @@ fn matching_user_ownership(
 }
 
 fn legacy_user_status_can_migrate(
-    previous: Option<&ProvisioningItemStatus>,
+    previous: Option<&ProvisioningUserStatus>,
     user: &ProvisioningUser,
     credentials: &UserCredentials,
 ) -> bool {
@@ -1239,9 +1253,11 @@ fn legacy_user_status_can_migrate(
         return false;
     };
     let current_access_key_hash = access_key_hash(&credentials.access_key);
-    previous.state == ProvisioningItemState::Ready.as_str()
-        && previous.last_applied_access_key_hash.as_deref()
-            == Some(current_access_key_hash.as_str())
+    matches!(
+        previous.state.as_str(),
+        state if state == ProvisioningItemState::Ready.as_str()
+            || state == ProvisioningItemState::Retained.as_str()
+    ) && previous.last_applied_access_key_hash.as_deref() == Some(current_access_key_hash.as_str())
         && previous.observed_secret_name.as_deref() == Some(user.credentials_secret_name())
 }
 
@@ -1266,27 +1282,57 @@ fn user_ownership(
 
 async fn persist_user_ownership_checkpoint(
     run: &ProvisioningRun<'_>,
-    checkpoint: ProvisioningItemStatus,
+    checkpoint: ProvisioningUserStatus,
 ) -> Result<(), CheckpointError> {
-    let resource_version = run
-        .status_resource_version
-        .lock()
-        .map_err(|_| CheckpointError::Permanent {
-            message: "Tenant status checkpoint lock is unavailable".to_string(),
-        })?
-        .clone();
-    let Some(resource_version) = resource_version else {
+    let api: Api<Tenant> = Api::namespaced(run.ctx.client.clone(), run.namespace);
+    let latest = api
+        .get(&run.tenant.name())
+        .await
+        .map_err(classify_checkpoint_kube_error)?;
+    if latest.metadata.uid != run.tenant.metadata.uid
+        || latest.metadata.generation != run.tenant.metadata.generation
+    {
+        return Err(CheckpointError::Retry(CheckpointRetry {
+            message: "Tenant identity or generation changed before persisting the RustFS user ownership checkpoint"
+                .to_string(),
+            retry_after: CHECKPOINT_CONFLICT_RETRY,
+        }));
+    }
+    let previous_user = run
+        .previous
+        .users
+        .iter()
+        .find(|item| item.name == checkpoint.name);
+    let latest_user = latest.status.as_ref().and_then(|status| {
+        status
+            .provisioning
+            .users
+            .iter()
+            .find(|item| item.name == checkpoint.name)
+    });
+    if latest_user != previous_user {
+        return Err(CheckpointError::Retry(CheckpointRetry {
+            message: "Tenant user provisioning status changed before persisting the RustFS user ownership checkpoint"
+                .to_string(),
+            retry_after: CHECKPOINT_CONFLICT_RETRY,
+        }));
+    }
+    let Some(resource_version) = latest.metadata.resource_version.clone() else {
         return Err(CheckpointError::Permanent {
             message: "Tenant resourceVersion is unavailable, so the operator cannot safely persist the RustFS user ownership checkpoint"
                 .to_string(),
         });
     };
 
-    let mut provisioning = run.previous.clone();
+    let mut provisioning = latest
+        .status
+        .as_ref()
+        .map(|status| status.provisioning.clone())
+        .unwrap_or_default();
     merge_provisioning_items(&mut provisioning.policies, &run.status.policies);
-    merge_provisioning_items(&mut provisioning.users, &run.status.users);
+    merge_provisioning_user_items(&mut provisioning.users, &run.status.users);
     merge_provisioning_items(&mut provisioning.buckets, &run.status.buckets);
-    merge_provisioning_items(&mut provisioning.users, std::slice::from_ref(&checkpoint));
+    merge_provisioning_user_items(&mut provisioning.users, std::slice::from_ref(&checkpoint));
     provisioning.observed_generation = run.tenant.metadata.generation;
     provisioning.phase = Some(ProvisioningPhase::Pending);
     provisioning
@@ -1299,13 +1345,12 @@ async fn persist_user_ownership_checkpoint(
         .buckets
         .sort_by(|left, right| left.name.cmp(&right.name));
 
-    let mut status = run.tenant.status.clone().unwrap_or_default();
+    let mut status = latest.status.unwrap_or_default();
     status.provisioning = provisioning;
     let status_patch = serde_json::json!({
         "metadata": { "resourceVersion": resource_version },
         "status": status,
     });
-    let api: Api<Tenant> = Api::namespaced(run.ctx.client.clone(), run.namespace);
     let updated = api
         .patch_status(
             &run.tenant.name(),
@@ -1314,21 +1359,28 @@ async fn persist_user_ownership_checkpoint(
         )
         .await
         .map_err(classify_checkpoint_kube_error)?;
-    let Some(next_resource_version) = updated.metadata.resource_version else {
+    if updated.metadata.resource_version.is_none() {
         return Err(CheckpointError::Retry(CheckpointRetry {
             message: "Kubernetes accepted the RustFS user ownership checkpoint but omitted resourceVersion; retrying from fresh state"
                 .to_string(),
             retry_after: CHECKPOINT_TRANSIENT_RETRY,
         }));
-    };
-    *run.status_resource_version
-        .lock()
-        .map_err(|_| CheckpointError::Retry(CheckpointRetry {
-            message: "RustFS user ownership checkpoint was persisted, but its new resourceVersion could not be retained locally"
+    }
+    let persisted_checkpoint = updated.status.as_ref().and_then(|status| {
+        status
+            .provisioning
+            .users
+            .iter()
+            .find(|item| item.name == checkpoint.name)
+    });
+    if persisted_checkpoint.is_none_or(|persisted| {
+        persisted.state != checkpoint.state || persisted.ownership != checkpoint.ownership
+    }) {
+        return Err(CheckpointError::Permanent {
+            message: "Kubernetes accepted the RustFS user ownership checkpoint request but did not persist the expected state and ownership proof; ensure the Tenant CRD is upgraded before the Operator"
                 .to_string(),
-            retry_after: CHECKPOINT_TRANSIENT_RETRY,
-        }))? =
-        Some(next_resource_version);
+        });
+    }
     Ok(())
 }
 
@@ -1392,12 +1444,25 @@ fn merge_provisioning_items(
     }
 }
 
+fn merge_provisioning_user_items(
+    destination: &mut Vec<ProvisioningUserStatus>,
+    updates: &[ProvisioningUserStatus],
+) {
+    for update in updates {
+        if let Some(item) = destination.iter_mut().find(|item| item.name == update.name) {
+            *item = update.clone();
+        } else {
+            destination.push(update.clone());
+        }
+    }
+}
+
 fn annotate_user_item(
     mut item: ProvisioningItemStatus,
     user: &ProvisioningUser,
-    previous: Option<&ProvisioningItemStatus>,
+    previous: Option<&ProvisioningUserStatus>,
     applied_credentials: Option<&UserCredentials>,
-) -> ProvisioningItemStatus {
+) -> ProvisioningUserStatus {
     match applied_credentials {
         Some(credentials) => {
             item.observed_secret_resource_version = credentials.resource_version.clone();
@@ -1412,13 +1477,14 @@ fn annotate_user_item(
                 previous.and_then(|item| item.last_applied_access_key_hash.clone());
         }
     }
-    item.ownership = previous.and_then(|item| item.ownership.clone());
     item.policies = user.policies.clone();
+    let mut item = ProvisioningUserStatus::new(item);
+    item.ownership = previous.and_then(|item| item.ownership.clone());
     item
 }
 
 fn user_access_key_changed(
-    previous: Option<&ProvisioningItemStatus>,
+    previous: Option<&ProvisioningUserStatus>,
     credentials: &UserCredentials,
 ) -> bool {
     let current_hash = access_key_hash(&credentials.access_key);
@@ -1429,7 +1495,7 @@ fn user_access_key_changed(
 
 async fn sync_user_credentials(
     client: &RustfsAdminClient,
-    previous: Option<&ProvisioningItemStatus>,
+    previous: Option<&ProvisioningUserStatus>,
     credentials: &UserCredentials,
     exists: bool,
 ) -> Result<bool, RustfsClientError> {
@@ -1444,7 +1510,7 @@ async fn sync_user_credentials(
 }
 
 fn user_credentials_need_apply(
-    previous: Option<&ProvisioningItemStatus>,
+    previous: Option<&ProvisioningUserStatus>,
     credentials: &UserCredentials,
     exists: bool,
 ) -> bool {
@@ -2027,7 +2093,6 @@ mod tests {
             now: "2026-07-18T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            status_resource_version: StdMutex::new(tenant.metadata.resource_version.clone()),
             checkpoint_retry: StdMutex::new(None),
         };
 
@@ -2115,7 +2180,6 @@ mod tests {
             now: "2026-07-18T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            status_resource_version: StdMutex::new(tenant.metadata.resource_version.clone()),
             checkpoint_retry: StdMutex::new(None),
         };
 
@@ -2206,12 +2270,13 @@ mod tests {
     fn owned_user_status(
         state: ProvisioningUserOwnershipState,
         secret_resource_version: &str,
-    ) -> ProvisioningItemStatus {
-        let mut item = ProvisioningItemStatus::new(
+    ) -> ProvisioningUserStatus {
+        let item = ProvisioningItemStatus::new(
             "app-user",
             ProvisioningItemState::Ready,
             Reason::ProvisioningConfigured.as_str(),
         );
+        let mut item = ProvisioningUserStatus::new(item);
         item.observed_secret_resource_version = Some(secret_resource_version.to_string());
         item.observed_secret_name = Some("app-user-secret".to_string());
         item.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
@@ -2225,12 +2290,18 @@ mod tests {
     }
 
     #[test]
-    fn legacy_user_migration_requires_complete_matching_ready_status() {
+    fn legacy_user_migration_requires_complete_matching_ready_or_retained_status() {
         let user = provisioning_user("app-user", "app-user-secret", "readwrite");
         let credentials = user_credentials("5");
         let mut previous = owned_user_status(ProvisioningUserOwnershipState::Managed, "4");
         previous.ownership = None;
 
+        assert!(legacy_user_status_can_migrate(
+            Some(&previous),
+            &user,
+            &credentials
+        ));
+        previous.state = ProvisioningItemState::Retained.as_str().to_string();
         assert!(legacy_user_status_can_migrate(
             Some(&previous),
             &user,
@@ -2270,28 +2341,54 @@ mod tests {
         let requests = Arc::new(AtomicUsize::new(0));
         let user = provisioning_user("app-user", "app-user-secret", "readwrite");
         let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
-        let mut updated_tenant = tenant.clone();
-        updated_tenant.metadata.resource_version = Some("18".to_string());
+        let mut checkpoint = owned_user_status(ProvisioningUserOwnershipState::PendingCreate, "5");
+        checkpoint.state = ProvisioningItemState::Pending.as_str().to_string();
+        let mut latest_tenant = tenant.clone();
+        latest_tenant.metadata.resource_version = Some("18".to_string());
+        let mut persisted_tenant = latest_tenant.clone();
+        persisted_tenant.metadata.resource_version = Some("19".to_string());
+        persisted_tenant
+            .status
+            .as_mut()
+            .expect("Tenant should have status")
+            .provisioning
+            .users = vec![checkpoint.clone()];
         let service_requests = requests.clone();
-        let kube_service = service_fn(move |_request: http::Request<KubeBody>| {
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| {
             let service_requests = service_requests.clone();
-            let updated_tenant = updated_tenant.clone();
+            let latest_tenant = latest_tenant.clone();
+            let persisted_tenant = persisted_tenant.clone();
             async move {
                 let attempt = service_requests.fetch_add(1, Ordering::SeqCst);
-                let response = if attempt == 0 {
-                    http::Response::builder()
-                        .header("content-type", "application/json")
-                        .body(KubeBody::from(
-                            serde_json::to_vec(&updated_tenant)
-                                .expect("Tenant response should serialize"),
-                        ))
-                } else {
-                    http::Response::builder()
-                        .status(StatusCode::CONFLICT)
-                        .header("content-type", "application/json")
-                        .body(KubeBody::from(
-                            br#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"resourceVersion conflict","reason":"Conflict","code":409}"#.to_vec(),
-                        ))
+                let response = match attempt {
+                    0 => {
+                        assert_eq!(request.method(), http::Method::GET);
+                        http::Response::builder()
+                            .header("content-type", "application/json")
+                            .body(KubeBody::from(
+                                serde_json::to_vec(&latest_tenant)
+                                    .expect("Tenant response should serialize"),
+                            ))
+                    }
+                    1 => {
+                        assert_eq!(request.method(), http::Method::PATCH);
+                        http::Response::builder()
+                            .header("content-type", "application/json")
+                            .body(KubeBody::from(
+                                serde_json::to_vec(&persisted_tenant)
+                                    .expect("Tenant response should serialize"),
+                            ))
+                    }
+                    2 => {
+                        assert_eq!(request.method(), http::Method::GET);
+                        http::Response::builder()
+                            .header("content-type", "application/json")
+                            .body(KubeBody::from(
+                                serde_json::to_vec(&persisted_tenant)
+                                    .expect("Tenant response should serialize"),
+                            ))
+                    }
+                    _ => panic!("unexpected Kubernetes request {attempt}"),
                 };
                 Ok::<_, Infallible>(response.expect("response should build"))
             }
@@ -2305,13 +2402,10 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            status_resource_version: StdMutex::new(Some("17".to_string())),
             checkpoint_retry: StdMutex::new(None),
         };
         let winner = make_run();
         let loser = make_run();
-        let mut checkpoint = owned_user_status(ProvisioningUserOwnershipState::PendingCreate, "5");
-        checkpoint.state = ProvisioningItemState::Pending.as_str().to_string();
 
         persist_user_ownership_checkpoint(&winner, checkpoint.clone())
             .await
@@ -2327,7 +2421,7 @@ mod tests {
             }
             _ => panic!("stale checkpoint writer should retry"),
         }
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -2388,7 +2482,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            status_resource_version: StdMutex::new(tenant.metadata.resource_version.clone()),
             checkpoint_retry: StdMutex::new(None),
         };
 
@@ -2459,27 +2552,53 @@ mod tests {
         let captured_patch = Arc::new(Mutex::new(Value::Null));
         let user = provisioning_user("app-user", "app-user-secret", "readwrite");
         let tenant = provisioning_test_tenant(user.clone(), ProvisioningStatus::default());
-        let mut response_tenant = tenant.clone();
-        response_tenant.metadata.resource_version = Some("18".to_string());
+        let mut latest_tenant = tenant.clone();
+        latest_tenant.metadata.resource_version = Some("18".to_string());
+        latest_tenant
+            .status
+            .as_mut()
+            .expect("Tenant should have status")
+            .current_state = "latest-controller-state".to_string();
+        let mut persisted_tenant = latest_tenant.clone();
+        persisted_tenant.metadata.resource_version = Some("19".to_string());
+        let mut persisted_checkpoint =
+            owned_user_status(ProvisioningUserOwnershipState::PendingCreate, "5");
+        persisted_checkpoint.state = ProvisioningItemState::Pending.as_str().to_string();
+        persisted_tenant
+            .status
+            .as_mut()
+            .expect("Tenant should have status")
+            .provisioning
+            .users = vec![persisted_checkpoint];
         let kube_sequence = sequence.clone();
         let kube_patch = captured_patch.clone();
         let kube_service = service_fn(move |request: http::Request<KubeBody>| {
             let kube_sequence = kube_sequence.clone();
             let kube_patch = kube_patch.clone();
-            let response_tenant = response_tenant.clone();
+            let latest_tenant = latest_tenant.clone();
+            let persisted_tenant = persisted_tenant.clone();
             async move {
-                assert!(request.uri().path().ends_with("/tenants/tenant-a/status"));
-                assert_eq!(kube_sequence.load(Ordering::SeqCst), 1);
-                let body = request
-                    .into_body()
-                    .collect()
-                    .await
-                    .expect("status patch body should be readable")
-                    .to_bytes();
-                let patch: Value =
-                    serde_json::from_slice(&body).expect("status patch should be JSON");
-                *kube_patch.lock().await = patch;
-                kube_sequence.store(2, Ordering::SeqCst);
+                let response_tenant = if request.method() == http::Method::GET {
+                    assert!(request.uri().path().ends_with("/tenants/tenant-a"));
+                    assert_eq!(kube_sequence.load(Ordering::SeqCst), 1);
+                    kube_sequence.store(2, Ordering::SeqCst);
+                    latest_tenant
+                } else {
+                    assert_eq!(request.method(), http::Method::PATCH);
+                    assert!(request.uri().path().ends_with("/tenants/tenant-a/status"));
+                    assert_eq!(kube_sequence.load(Ordering::SeqCst), 2);
+                    let body = request
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("status patch body should be readable")
+                        .to_bytes();
+                    let patch: Value =
+                        serde_json::from_slice(&body).expect("status patch should be JSON");
+                    *kube_patch.lock().await = patch;
+                    kube_sequence.store(3, Ordering::SeqCst);
+                    persisted_tenant
+                };
                 Ok::<_, Infallible>(
                     http::Response::builder()
                         .header("content-type", "application/json")
@@ -2500,7 +2619,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            status_resource_version: StdMutex::new(tenant.metadata.resource_version.clone()),
             checkpoint_retry: StdMutex::new(None),
         };
 
@@ -2524,8 +2642,8 @@ mod tests {
                 put(move || {
                     let add_sequence = add_sequence.clone();
                     async move {
-                        assert_eq!(add_sequence.load(Ordering::SeqCst), 2);
-                        add_sequence.store(3, Ordering::SeqCst);
+                        assert_eq!(add_sequence.load(Ordering::SeqCst), 3);
+                        add_sequence.store(4, Ordering::SeqCst);
                         StatusCode::OK
                     }
                 }),
@@ -2535,8 +2653,8 @@ mod tests {
                 put(move || {
                     let policy_sequence = policy_sequence.clone();
                     async move {
-                        assert_eq!(policy_sequence.load(Ordering::SeqCst), 3);
-                        policy_sequence.store(4, Ordering::SeqCst);
+                        assert_eq!(policy_sequence.load(Ordering::SeqCst), 4);
+                        policy_sequence.store(5, Ordering::SeqCst);
                         StatusCode::OK
                     }
                 }),
@@ -2564,22 +2682,18 @@ mod tests {
         )
         .await;
 
-        assert_eq!(sequence.load(Ordering::SeqCst), 4);
-        assert_eq!(
-            run.status_resource_version
-                .lock()
-                .expect("status resourceVersion lock should be available")
-                .as_deref(),
-            Some("18")
-        );
+        assert_eq!(sequence.load(Ordering::SeqCst), 5);
         assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
         assert_eq!(
             item.ownership.as_ref().map(|ownership| ownership.state),
             Some(ProvisioningUserOwnershipState::Managed)
         );
         let patch = captured_patch.lock().await;
-        assert_eq!(patch["metadata"]["resourceVersion"], "17");
+        assert_eq!(patch["metadata"]["resourceVersion"], "18");
+        assert_eq!(patch["status"]["currentState"], "latest-controller-state");
         let checkpoint = &patch["status"]["provisioning"]["users"][0];
+        assert_eq!(checkpoint["name"], "app-user");
+        assert_eq!(checkpoint["state"], "Pending");
         assert_eq!(checkpoint["ownership"]["state"], "PendingCreate");
         assert_eq!(checkpoint["ownership"]["tenantUid"], "tenant-uid-a");
         assert_eq!(checkpoint["ownership"]["userName"], "app-user");
@@ -2591,6 +2705,196 @@ mod tests {
         assert!(!serialized_patch.contains(&credentials.access_key));
         assert!(!serialized_patch.contains(&credentials.secret_key));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn pruned_checkpoint_response_fails_before_external_user_writes() {
+        let kube_requests = Arc::new(AtomicUsize::new(0));
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user.clone(), ProvisioningStatus::default());
+        let mut latest_tenant = tenant.clone();
+        latest_tenant.metadata.resource_version = Some("18".to_string());
+        let mut pruned_tenant = latest_tenant.clone();
+        pruned_tenant.metadata.resource_version = Some("19".to_string());
+        pruned_tenant
+            .status
+            .as_mut()
+            .expect("Tenant should have status")
+            .provisioning
+            .users = vec![ProvisioningUserStatus::new(ProvisioningItemStatus::new(
+            "app-user",
+            ProvisioningItemState::Pending,
+            Reason::ProvisioningPending.as_str(),
+        ))];
+        let service_requests = kube_requests.clone();
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| {
+            let service_requests = service_requests.clone();
+            let latest_tenant = latest_tenant.clone();
+            let pruned_tenant = pruned_tenant.clone();
+            async move {
+                let attempt = service_requests.fetch_add(1, Ordering::SeqCst);
+                let response_tenant = match attempt {
+                    0 => {
+                        assert_eq!(request.method(), http::Method::GET);
+                        latest_tenant
+                    }
+                    1 => {
+                        assert_eq!(request.method(), http::Method::PATCH);
+                        pruned_tenant
+                    }
+                    _ => panic!("unexpected Kubernetes request {attempt}"),
+                };
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(KubeBody::from(
+                            serde_json::to_vec(&response_tenant)
+                                .expect("Tenant response should serialize"),
+                        ))
+                        .expect("response should build"),
+                )
+            }
+        });
+        let ctx = Context::new(Client::new(kube_service, "default"));
+        let run = ProvisioningRun {
+            ctx: &ctx,
+            tenant: &tenant,
+            namespace: "storage",
+            previous: ProvisioningStatus::default(),
+            now: "2026-08-02T00:00:00Z".to_string(),
+            status: ProvisioningStatus::default(),
+            failures: Vec::new(),
+            checkpoint_retry: StdMutex::new(None),
+        };
+
+        let write_requests = Arc::new(AtomicUsize::new(0));
+        let add_requests = write_requests.clone();
+        let policy_requests = write_requests.clone();
+        let router = Router::new()
+            .route(
+                "/rustfs/admin/v3/user-info",
+                get(|| async { StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/rustfs/admin/v3/add-user",
+                put(move || {
+                    let add_requests = add_requests.clone();
+                    async move {
+                        add_requests.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/rustfs/admin/v3/set-policy",
+                put(move || {
+                    let policy_requests = policy_requests.clone();
+                    async move {
+                        policy_requests.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+        let item = reconcile_user(
+            &run,
+            &client,
+            &BTreeMap::from([("readwrite".to_string(), "{}".to_string())]),
+            &BTreeSet::new(),
+            &user,
+            &user_credentials("5"),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::UserOwnershipCheckpointFailed.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("CRD"))
+        );
+        assert_eq!(kube_requests.load(Ordering::SeqCst), 2);
+        assert_eq!(write_requests.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_response_with_rewritten_state_is_rejected() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut checkpoint = owned_user_status(ProvisioningUserOwnershipState::PendingCreate, "5");
+        checkpoint.state = ProvisioningItemState::Pending.as_str().to_string();
+        let mut latest_tenant = tenant.clone();
+        latest_tenant.metadata.resource_version = Some("18".to_string());
+        let mut rewritten_tenant = latest_tenant.clone();
+        rewritten_tenant.metadata.resource_version = Some("19".to_string());
+        let mut rewritten_checkpoint = checkpoint.clone();
+        rewritten_checkpoint.state = ProvisioningItemState::Ready.as_str().to_string();
+        rewritten_tenant
+            .status
+            .as_mut()
+            .expect("Tenant should have status")
+            .provisioning
+            .users = vec![rewritten_checkpoint];
+        let service_requests = requests.clone();
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| {
+            let service_requests = service_requests.clone();
+            let latest_tenant = latest_tenant.clone();
+            let rewritten_tenant = rewritten_tenant.clone();
+            async move {
+                let attempt = service_requests.fetch_add(1, Ordering::SeqCst);
+                let response_tenant = match attempt {
+                    0 => {
+                        assert_eq!(request.method(), http::Method::GET);
+                        latest_tenant
+                    }
+                    1 => {
+                        assert_eq!(request.method(), http::Method::PATCH);
+                        rewritten_tenant
+                    }
+                    _ => panic!("unexpected Kubernetes request {attempt}"),
+                };
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(KubeBody::from(
+                            serde_json::to_vec(&response_tenant)
+                                .expect("Tenant response should serialize"),
+                        ))
+                        .expect("response should build"),
+                )
+            }
+        });
+        let ctx = Context::new(Client::new(kube_service, "default"));
+        let run = ProvisioningRun {
+            ctx: &ctx,
+            tenant: &tenant,
+            namespace: "storage",
+            previous: ProvisioningStatus::default(),
+            now: "2026-08-02T00:00:00Z".to_string(),
+            status: ProvisioningStatus::default(),
+            failures: Vec::new(),
+            checkpoint_retry: StdMutex::new(None),
+        };
+
+        let error = persist_user_ownership_checkpoint(&run, checkpoint)
+            .await
+            .expect_err("rewritten checkpoint state must be rejected");
+
+        assert!(matches!(error, CheckpointError::Permanent { .. }));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -2625,7 +2929,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            status_resource_version: StdMutex::new(tenant.metadata.resource_version.clone()),
             checkpoint_retry: StdMutex::new(None),
         };
 
@@ -2691,25 +2994,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_managed_user_is_checkpointed_before_secret_rotation() {
+    async fn retained_legacy_user_is_checkpointed_before_readd_and_secret_rotation() {
         let sequence = Arc::new(AtomicUsize::new(0));
         let user = provisioning_user("app-user", "app-user-secret", "readwrite");
         let mut previous_user = owned_user_status(ProvisioningUserOwnershipState::Managed, "4");
         previous_user.ownership = None;
+        previous_user.state = ProvisioningItemState::Retained.as_str().to_string();
         let previous = ProvisioningStatus {
             users: vec![previous_user],
             ..Default::default()
         };
         let tenant = provisioning_test_tenant(user.clone(), previous.clone());
-        let mut response_tenant = tenant.clone();
-        response_tenant.metadata.resource_version = Some("18".to_string());
+        let mut latest_tenant = tenant.clone();
+        latest_tenant.metadata.resource_version = Some("18".to_string());
+        let mut persisted_tenant = latest_tenant.clone();
+        persisted_tenant.metadata.resource_version = Some("19".to_string());
+        let persisted_checkpoint = owned_user_status(ProvisioningUserOwnershipState::Managed, "4");
+        persisted_tenant
+            .status
+            .as_mut()
+            .expect("Tenant should have status")
+            .provisioning
+            .users = vec![persisted_checkpoint];
         let kube_sequence = sequence.clone();
-        let kube_service = service_fn(move |_request: http::Request<KubeBody>| {
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| {
             let kube_sequence = kube_sequence.clone();
-            let response_tenant = response_tenant.clone();
+            let latest_tenant = latest_tenant.clone();
+            let persisted_tenant = persisted_tenant.clone();
             async move {
-                assert_eq!(kube_sequence.load(Ordering::SeqCst), 1);
-                kube_sequence.store(2, Ordering::SeqCst);
+                let response_tenant = if request.method() == http::Method::GET {
+                    assert_eq!(kube_sequence.load(Ordering::SeqCst), 1);
+                    kube_sequence.store(2, Ordering::SeqCst);
+                    latest_tenant
+                } else {
+                    assert_eq!(request.method(), http::Method::PATCH);
+                    assert_eq!(kube_sequence.load(Ordering::SeqCst), 2);
+                    kube_sequence.store(3, Ordering::SeqCst);
+                    persisted_tenant
+                };
                 Ok::<_, Infallible>(
                     http::Response::builder()
                         .header("content-type", "application/json")
@@ -2730,7 +3052,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            status_resource_version: StdMutex::new(tenant.metadata.resource_version.clone()),
             checkpoint_retry: StdMutex::new(None),
         };
 
@@ -2759,8 +3080,8 @@ mod tests {
                     let add_count = add_count.clone();
                     let add_sequence = add_sequence.clone();
                     async move {
-                        assert_eq!(add_sequence.load(Ordering::SeqCst), 2);
-                        add_sequence.store(3, Ordering::SeqCst);
+                        assert_eq!(add_sequence.load(Ordering::SeqCst), 3);
+                        add_sequence.store(4, Ordering::SeqCst);
                         add_count.fetch_add(1, Ordering::SeqCst);
                         StatusCode::OK
                     }
@@ -2772,8 +3093,8 @@ mod tests {
                     let policy_count = policy_count.clone();
                     let policy_sequence = policy_sequence.clone();
                     async move {
-                        assert_eq!(policy_sequence.load(Ordering::SeqCst), 3);
-                        policy_sequence.store(4, Ordering::SeqCst);
+                        assert_eq!(policy_sequence.load(Ordering::SeqCst), 4);
+                        policy_sequence.store(5, Ordering::SeqCst);
                         policy_count.fetch_add(1, Ordering::SeqCst);
                         StatusCode::OK
                     }
@@ -2803,7 +3124,7 @@ mod tests {
 
         assert_eq!(add_requests.load(Ordering::SeqCst), 1);
         assert_eq!(policy_requests.load(Ordering::SeqCst), 1);
-        assert_eq!(sequence.load(Ordering::SeqCst), 4);
+        assert_eq!(sequence.load(Ordering::SeqCst), 5);
         assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
         assert_eq!(item.observed_secret_resource_version.as_deref(), Some("5"));
         assert_eq!(
@@ -2996,6 +3317,7 @@ mod tests {
         previous.observed_secret_resource_version = Some("1".to_string());
         previous.observed_secret_name = Some("app-user".to_string());
         previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let previous = ProvisioningUserStatus::new(previous);
         let credentials = UserCredentials {
             access_key: "appuser01".to_string(),
             secret_key: "rotated-secret".to_string(),
@@ -3026,6 +3348,7 @@ mod tests {
         previous.observed_secret_resource_version = Some("1".to_string());
         previous.observed_secret_name = Some("app-user".to_string());
         previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let previous = ProvisioningUserStatus::new(previous);
         let credentials = UserCredentials {
             access_key: "appuser01".to_string(),
             secret_key: "unchanged-secret".to_string(),
@@ -3050,6 +3373,7 @@ mod tests {
         previous.observed_secret_resource_version = Some("1".to_string());
         previous.observed_secret_name = Some("app-user".to_string());
         previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let previous = ProvisioningUserStatus::new(previous);
         let credentials = UserCredentials {
             access_key: "appuser01".to_string(),
             secret_key: "rotated-secret".to_string(),
@@ -3073,6 +3397,7 @@ mod tests {
         );
         previous.observed_secret_resource_version = Some("1".to_string());
         previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let previous = ProvisioningUserStatus::new(previous);
         let credentials = UserCredentials {
             access_key: "appuser01".to_string(),
             secret_key: "unchanged-secret".to_string(),
@@ -3095,6 +3420,7 @@ mod tests {
             Reason::ProvisioningConfigured.as_str(),
         );
         previous.last_applied_access_key_hash = Some(access_key_hash("appuser01"));
+        let previous = ProvisioningUserStatus::new(previous);
         let credentials = UserCredentials {
             access_key: "otheruser".to_string(),
             secret_key: "rotated-secret".to_string(),

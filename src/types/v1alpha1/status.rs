@@ -517,6 +517,7 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "UserPolicyInvalid"
             | "UserPolicySetFailed"
             | "UserOwnershipConflict"
+            | "UserOwnershipCheckpointFailed"
             | "BucketCreateFailed"
             | "BucketObjectLockConflict"
     )
@@ -605,6 +606,14 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "UserPolicyNotFound" => vec!["createPolicy", "fixUserPolicyList"],
         "UserPolicyInvalid" => vec!["fixUserPolicyList"],
         "UserPolicySetFailed" => vec!["inspectUserPolicyMapping", "inspectOperatorLogs"],
+        "UserOwnershipConflict" => vec!["inspectRustfsUser", "chooseDifferentAccessKey"],
+        "UserOwnershipCheckpointFailed" => {
+            vec![
+                "upgradeTenantCrd",
+                "inspectOperatorRbac",
+                "inspectOperatorLogs",
+            ]
+        }
         "BucketCreateFailed" => vec!["inspectBucket", "inspectOperatorLogs"],
         "BucketObjectLockConflict" => vec!["createObjectLockBucket", "fixBucketSpec"],
         "KubernetesApiError" => vec!["retry", "inspectOperatorLogs"],
@@ -679,6 +688,24 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("WorkloadSecurityIncompatible"),
             vec!["upgradeRustfsImage", "configureCompatibleSeccompProfile"]
+        );
+    }
+
+    #[test]
+    fn user_ownership_failures_are_blocked_and_actionable() {
+        assert!(is_blocked_reason("UserOwnershipConflict"));
+        assert!(is_blocked_reason("UserOwnershipCheckpointFailed"));
+        assert_eq!(
+            next_actions_for_reason("UserOwnershipConflict"),
+            vec!["inspectRustfsUser", "chooseDifferentAccessKey"]
+        );
+        assert_eq!(
+            next_actions_for_reason("UserOwnershipCheckpointFailed"),
+            vec![
+                "upgradeTenantCrd",
+                "inspectOperatorRbac",
+                "inspectOperatorLogs"
+            ]
         );
     }
 

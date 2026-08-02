@@ -14,6 +14,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 use utoipa::ToSchema;
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub struct ProvisioningStatus {
     pub policies: Vec<ProvisioningItemStatus>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub users: Vec<ProvisioningItemStatus>,
+    pub users: Vec<ProvisioningUserStatus>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buckets: Vec<ProvisioningItemStatus>,
@@ -73,6 +74,47 @@ pub struct ProvisioningUserOwnershipStatus {
     pub tenant_uid: String,
     pub user_name: String,
     pub access_key_hash: String,
+}
+
+/// User-specific provisioning status. The flattened item preserves the existing status wire
+/// format while keeping ownership metadata out of policy and bucket status schemas.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisioningUserStatus {
+    #[serde(flatten)]
+    pub item: ProvisioningItemStatus,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<ProvisioningUserOwnershipStatus>,
+}
+
+impl ProvisioningUserStatus {
+    pub fn new(item: ProvisioningItemStatus) -> Self {
+        Self {
+            item,
+            ownership: None,
+        }
+    }
+}
+
+impl Deref for ProvisioningUserStatus {
+    type Target = ProvisioningItemStatus;
+
+    fn deref(&self) -> &Self::Target {
+        &self.item
+    }
+}
+
+impl DerefMut for ProvisioningUserStatus {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.item
+    }
+}
+
+impl AsRef<ProvisioningItemStatus> for ProvisioningUserStatus {
+    fn as_ref(&self) -> &ProvisioningItemStatus {
+        &self.item
+    }
 }
 
 impl ProvisioningItemState {
@@ -119,9 +161,6 @@ pub struct ProvisioningItemStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_applied_access_key_hash: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ownership: Option<ProvisioningUserOwnershipStatus>,
-
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub policies: Vec<String>,
 
@@ -144,5 +183,11 @@ impl ProvisioningItemStatus {
             reason: reason.into(),
             ..Default::default()
         }
+    }
+}
+
+impl AsRef<ProvisioningItemStatus> for ProvisioningItemStatus {
+    fn as_ref(&self) -> &ProvisioningItemStatus {
+        self
     }
 }

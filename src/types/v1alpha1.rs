@@ -291,6 +291,14 @@ mod tenant_provisioning_crd_tests {
             ownership["properties"]["state"]["enum"],
             json!(["PendingCreate", "Managed"])
         );
+        for kind in ["policies", "buckets"] {
+            assert!(
+                status["properties"]["provisioning"]["properties"][kind]["items"]
+                    ["properties"]["ownership"]
+                    .is_null(),
+                "ownership must only be exposed on provisioning user status"
+            );
+        }
 
         assert!(
             spec["properties"]["policies"]["x-kubernetes-validations"].is_null(),
