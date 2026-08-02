@@ -28,6 +28,7 @@ use crate::types::v1alpha1::tls::{TlsPlan, http_probe};
 use k8s_openapi::DeepMerge;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 
 const LOCAL_KMS_KEY_DIR_ENV: &str = "RUSTFS_KMS_KEY_DIR";
@@ -470,6 +471,146 @@ fn is_kms_operator_managed_env_var(name: &str) -> bool {
 
 fn volume_claim_template_name(shard: i32) -> String {
     format!("{VOLUME_CLAIM_TEMPLATE_PREFIX}-{shard}")
+}
+
+const MAX_QUANTITY_NANOUNITS: i128 = (i64::MAX as i128) * 1_000_000_000;
+
+// Kubernetes compares Quantity values as fixed-point numbers, rounds sub-nanounit
+// precision away from zero, and caps magnitudes at i64::MAX. Keep the comparison
+// exact instead of routing through floating point, which loses precision for large PVCs.
+fn multiply_decimal_digits(digits: &str, multiplier: u64) -> Option<String> {
+    let mut result = Vec::with_capacity(digits.len().saturating_add(19));
+    let mut carry = 0_u128;
+
+    for byte in digits.bytes().rev() {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        let product = u128::from(digit) * u128::from(multiplier) + carry;
+        result.push(b'0' + (product % 10) as u8);
+        carry = product / 10;
+    }
+
+    while carry > 0 {
+        result.push(b'0' + (carry % 10) as u8);
+        carry /= 10;
+    }
+
+    result.reverse();
+    String::from_utf8(result).ok()
+}
+
+fn scale_quantity_to_nanounits(digits: &str, exponent: i32) -> Option<i128> {
+    let max_digits = MAX_QUANTITY_NANOUNITS.to_string().len();
+
+    if exponent >= 0 {
+        let zero_count = usize::try_from(exponent).ok()?;
+        let scaled_len = digits.len().checked_add(zero_count)?;
+        if scaled_len > max_digits {
+            return Some(MAX_QUANTITY_NANOUNITS);
+        }
+
+        let mut scaled = String::with_capacity(scaled_len);
+        scaled.push_str(digits);
+        scaled.extend(std::iter::repeat_n('0', zero_count));
+        return scaled
+            .parse::<i128>()
+            .ok()
+            .map(|value| value.min(MAX_QUANTITY_NANOUNITS));
+    }
+
+    let divisor_digits = usize::try_from(exponent.checked_neg()?).ok()?;
+    let (whole, fraction) = if divisor_digits >= digits.len() {
+        ("0", digits)
+    } else {
+        digits.split_at(digits.len() - divisor_digits)
+    };
+
+    if whole.len() > max_digits {
+        return Some(MAX_QUANTITY_NANOUNITS);
+    }
+
+    let mut rounded = whole.parse::<i128>().ok()?;
+    if fraction.bytes().any(|byte| byte != b'0') {
+        rounded = rounded.checked_add(1)?;
+    }
+    Some(rounded.min(MAX_QUANTITY_NANOUNITS))
+}
+
+fn parse_quantity_nanounits(quantity: &Quantity) -> Option<i128> {
+    let (negative, unsigned) = match quantity.0.as_str() {
+        value if value.starts_with('-') => (true, &value[1..]),
+        value if value.starts_with('+') => (false, &value[1..]),
+        value => (false, value),
+    };
+    let number_end = unsigned
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(unsigned.len());
+    let (number, suffix) = unsigned.split_at(number_end);
+    let (whole, fraction) = match number.split_once('.') {
+        Some((whole, fraction)) if !fraction.contains('.') => (whole, fraction),
+        None => (number, ""),
+        _ => return None,
+    };
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+
+    let mut digits = String::with_capacity(whole.len().saturating_add(fraction.len()));
+    digits.push_str(whole);
+    digits.push_str(fraction);
+    if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let digits = digits.trim_start_matches('0');
+
+    let (multiplier, suffix_exponent) = match suffix {
+        "" => (1, 0),
+        "n" => (1, -9),
+        "u" => (1, -6),
+        "m" => (1, -3),
+        "k" => (1, 3),
+        "M" => (1, 6),
+        "G" => (1, 9),
+        "T" => (1, 12),
+        "P" => (1, 15),
+        "E" => (1, 18),
+        "Ki" => (1 << 10, 0),
+        "Mi" => (1 << 20, 0),
+        "Gi" => (1 << 30, 0),
+        "Ti" => (1 << 40, 0),
+        "Pi" => (1 << 50, 0),
+        "Ei" => (1 << 60, 0),
+        value if value.starts_with('e') || value.starts_with('E') => {
+            (1, value[1..].parse::<i32>().ok()?)
+        }
+        _ => return None,
+    };
+    let fraction_digits = i32::try_from(fraction.len()).ok()?;
+    let exponent = suffix_exponent
+        .checked_add(9)?
+        .checked_sub(fraction_digits)?;
+    if digits.is_empty() {
+        return Some(0);
+    }
+    let digits = multiply_decimal_digits(digits, multiplier)?;
+    let magnitude = scale_quantity_to_nanounits(&digits, exponent)?;
+
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+fn quantities_semantically_equal(existing: Option<&Quantity>, desired: Option<&Quantity>) -> bool {
+    match (existing, desired) {
+        (Some(existing), Some(desired)) => match (
+            parse_quantity_nanounits(existing),
+            parse_quantity_nanounits(desired),
+        ) {
+            (Some(existing), Some(desired)) => existing == desired,
+            _ => existing == desired,
+        },
+        _ => existing == desired,
+    }
 }
 
 fn container_env_values<'a>(container: &'a corev1::Container, name: &str) -> Vec<&'a str> {
@@ -1761,7 +1902,7 @@ impl Tenant {
                     .and_then(|resources| resources.requests.as_ref())
                     .and_then(|requests| requests.get("storage"));
 
-                if existing_storage != desired_storage {
+                if !quantities_semantically_equal(existing_storage, desired_storage) {
                     return Err(types::error::Error::ImmutableFieldModified {
                         name: ss_name.clone(),
                         field: format!(
@@ -1828,8 +1969,8 @@ mod tests {
     use super::{
         DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER,
         MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH, RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION,
-        uses_unpartitioned_rolling_update, validate_declared_app_armor_profile,
-        validate_declared_seccomp_profile,
+        quantities_semantically_equal, uses_unpartitioned_rolling_update,
+        validate_declared_app_armor_profile, validate_declared_seccomp_profile,
     };
     use crate::types::v1alpha1::encryption::{
         EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef,
@@ -1840,6 +1981,7 @@ mod tests {
     use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
     use k8s_openapi::api::apps::v1;
     use k8s_openapi::api::core::v1 as corev1;
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 
     fn image_pull_secret(name: &str) -> corev1::LocalObjectReference {
         corev1::LocalObjectReference {
@@ -4589,6 +4731,73 @@ mod tests {
             }
             _ => panic!("Expected ImmutableFieldModified error"),
         }
+    }
+
+    #[test]
+    fn test_statefulset_semantically_equal_storage_requests_allowed() {
+        for (tenant_storage, persisted_storage) in [("1024Mi", "1Gi"), ("1.5Gi", "1536Mi")] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.pools[0].persistence.volume_claim_template = Some(
+                volume_claim_template_spec(tenant_storage, &["ReadWriteOnce"]),
+            );
+            let pool = &tenant.spec.pools[0];
+            let mut statefulset = tenant
+                .new_statefulset(pool)
+                .expect("Should create StatefulSet");
+
+            statefulset
+                .spec
+                .as_mut()
+                .and_then(|spec| spec.volume_claim_templates.as_mut())
+                .and_then(|templates| templates.first_mut())
+                .and_then(|template| template.spec.as_mut())
+                .and_then(|spec| spec.resources.as_mut())
+                .and_then(|resources| resources.requests.as_mut())
+                .and_then(|requests| requests.get_mut("storage"))
+                .expect("StatefulSet should contain a storage request")
+                .0 = persisted_storage.to_string();
+
+            tenant
+                .validate_statefulset_update(&statefulset, pool)
+                .expect("Semantically equal storage requests should be allowed");
+        }
+    }
+
+    #[test]
+    fn test_quantity_semantic_comparison_preserves_integer_precision() {
+        let existing = Quantity("9223372036854775806".to_string());
+        let desired = Quantity("9223372036854775807".to_string());
+
+        assert!(!quantities_semantically_equal(
+            Some(&existing),
+            Some(&desired)
+        ));
+    }
+
+    #[test]
+    fn test_quantity_semantic_comparison_handles_kubernetes_formats() {
+        for (existing, desired) in [
+            ("1024Mi", "1Gi"),
+            ("1.5Gi", "1536Mi"),
+            ("1000M", "1G"),
+            ("1e3", "1k"),
+            (".5Gi", "512Mi"),
+            ("0.1n", "1n"),
+        ] {
+            assert!(quantities_semantically_equal(
+                Some(&Quantity(existing.to_string())),
+                Some(&Quantity(desired.to_string()))
+            ));
+        }
+
+        assert!(!quantities_semantically_equal(
+            Some(&Quantity("1000Mi".to_string())),
+            Some(&Quantity("1Gi".to_string()))
+        ));
+        assert!(!quantities_semantically_equal(
+            Some(&Quantity("0invalid".to_string())),
+            Some(&Quantity("0".to_string()))
+        ));
     }
 
     #[test]
