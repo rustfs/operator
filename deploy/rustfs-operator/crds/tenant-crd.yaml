@@ -58,8 +58,10 @@ spec:
                 x-kubernetes-list-type: map
               containerSecurityContext:
                 description: |-
-                  Override the default RustFS container SecurityContext for every Pool in this Tenant.
-                  Pool-level values take precedence.
+                  RustFS container SecurityContext overrides for every Pool in this Tenant.
+                  Non-empty values merge by field over operator defaults, with Pool-level values taking
+                  precedence. Setting this and `securityContext` to explicit empty objects resets the
+                  defaults and delegates unspecified values to platform admission.
                 nullable: true
                 properties:
                   allowPrivilegeEscalation:
@@ -1204,7 +1206,9 @@ spec:
                     containerSecurityContext:
                       description: |-
                         RustFS container SecurityContext overrides for this Pool.
-                        Values are merged over Tenant-level container settings and operator defaults.
+                        Non-empty values merge by field over Tenant-level settings and operator defaults. An
+                        explicit empty object paired with an empty `securityContext` resets inherited values and
+                        delegates unspecified values to platform admission.
                       nullable: true
                       properties:
                         allowPrivilegeEscalation:
@@ -1500,7 +1504,9 @@ spec:
                     securityContext:
                       description: |-
                         Pod SecurityContext overrides for this Pool.
-                        Values override Tenant-level Pod SecurityContext settings.
+                        Non-empty values merge by field over Tenant-level settings and operator defaults. An
+                        explicit empty object paired with an empty `containerSecurityContext` resets inherited
+                        values and delegates unspecified values to platform admission.
                       nullable: true
                       properties:
                         fsGroup:
@@ -1700,8 +1706,10 @@ spec:
                 type: string
               securityContext:
                 description: |-
-                  Override the default Pod SecurityContext for every Pool in this Tenant.
-                  Pool-level values take precedence.
+                  Pod SecurityContext overrides for every Pool in this Tenant.
+                  Non-empty values merge by field over operator defaults, with Pool-level values taking
+                  precedence. Setting this and `containerSecurityContext` to explicit empty objects resets
+                  the defaults and delegates unspecified values to platform admission.
                 nullable: true
                 properties:
                   fsGroup:

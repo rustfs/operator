@@ -231,13 +231,17 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encryption: Option<EncryptionConfig>,
 
-    /// Override the default Pod SecurityContext for every Pool in this Tenant.
-    /// Pool-level values take precedence.
+    /// Pod SecurityContext overrides for every Pool in this Tenant.
+    /// Non-empty values merge by field over operator defaults, with Pool-level values taking
+    /// precedence. Setting this and `containerSecurityContext` to explicit empty objects resets
+    /// the defaults and delegates unspecified values to platform admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<PodSecurityContextOverride>,
 
-    /// Override the default RustFS container SecurityContext for every Pool in this Tenant.
-    /// Pool-level values take precedence.
+    /// RustFS container SecurityContext overrides for every Pool in this Tenant.
+    /// Non-empty values merge by field over operator defaults, with Pool-level values taking
+    /// precedence. Setting this and `securityContext` to explicit empty objects resets the
+    /// defaults and delegates unspecified values to platform admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_security_context: Option<corev1::SecurityContext>,
 }

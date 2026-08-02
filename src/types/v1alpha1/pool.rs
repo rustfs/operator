@@ -67,12 +67,16 @@ pub struct Pool {
     pub persistence: PersistenceConfig,
 
     /// Pod SecurityContext overrides for this Pool.
-    /// Values override Tenant-level Pod SecurityContext settings.
+    /// Non-empty values merge by field over Tenant-level settings and operator defaults. An
+    /// explicit empty object paired with an empty `containerSecurityContext` resets inherited
+    /// values and delegates unspecified values to platform admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<PodSecurityContextOverride>,
 
     /// RustFS container SecurityContext overrides for this Pool.
-    /// Values are merged over Tenant-level container settings and operator defaults.
+    /// Non-empty values merge by field over Tenant-level settings and operator defaults. An
+    /// explicit empty object paired with an empty `securityContext` resets inherited values and
+    /// delegates unspecified values to platform admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container_security_context: Option<corev1::SecurityContext>,
 
