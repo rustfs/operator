@@ -18,6 +18,11 @@ rules:
   - apiGroups: ["rustfs.com"]
     resources: ["tenants/status"]
     verbs: ["update", "patch"]
+  # Required when deleting dependents whose ownerReference uses
+  # blockOwnerDeletion=true.
+  - apiGroups: ["rustfs.com"]
+    resources: ["tenants/finalizers"]
+    verbs: ["update"]
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
     verbs: ["get", "list", "watch"]
