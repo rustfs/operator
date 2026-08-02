@@ -29,9 +29,12 @@ pub(crate) fn effective_run_as_non_root(run_as_user: Option<i64>, explicit: Opti
 
 /// Pod SecurityContext overrides for RustFS pods.
 ///
-/// Overrides the operator defaults (`runAsUser` / `runAsGroup` / `fsGroup` = 10001,
-/// `runAsNonRoot` = true, and `seccompProfile.type` = `RuntimeDefault`).
-#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
+/// A non-empty object overrides the operator defaults (`runAsUser` / `runAsGroup` /
+/// `fsGroup` = 10001, `runAsNonRoot` = true, and `seccompProfile.type` =
+/// `RuntimeDefault`). When both the Pod and container security contexts at the same scope are
+/// explicit empty objects, those values are delegated to the platform, for example to an
+/// OpenShift Security Context Constraint.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PodSecurityContextOverride {
     /// UID to run the container process as.
@@ -58,9 +61,28 @@ pub struct PodSecurityContextOverride {
     pub seccomp_profile: Option<corev1::SeccompProfile>,
 }
 
+impl PodSecurityContextOverride {
+    /// Returns whether the API object was explicitly supplied without any override fields.
+    pub(crate) fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::effective_run_as_non_root;
+    use super::{PodSecurityContextOverride, effective_run_as_non_root};
+
+    #[test]
+    fn empty_override_is_distinct_from_a_partial_override() {
+        assert!(PodSecurityContextOverride::default().is_empty());
+        assert!(
+            !PodSecurityContextOverride {
+                run_as_non_root: Some(true),
+                ..Default::default()
+            }
+            .is_empty()
+        );
+    }
 
     #[test]
     fn effective_run_as_non_root_preserves_legacy_uid_zero() {

@@ -342,17 +342,30 @@ fn apply_pod_security_context_override(
 fn explicit_pod_run_as_non_root(
     tenant: Option<&PodSecurityContextOverride>,
     pool: Option<&PodSecurityContextOverride>,
+    tenant_delegates: bool,
+    pool_delegates: bool,
 ) -> Option<bool> {
-    pool.and_then(|overrides| overrides.run_as_non_root)
-        .or_else(|| tenant.and_then(|overrides| overrides.run_as_non_root))
+    let mut explicit = None;
+    for (overrides, delegates) in [(tenant, tenant_delegates), (pool, pool_delegates)] {
+        let Some(overrides) = overrides else {
+            continue;
+        };
+        if delegates {
+            explicit = None;
+        } else if overrides.run_as_non_root.is_some() {
+            explicit = overrides.run_as_non_root;
+        }
+    }
+    explicit
 }
 
-fn effective_pod_security_context(
-    tenant: Option<&PodSecurityContextOverride>,
-    pool: Option<&PodSecurityContextOverride>,
-) -> corev1::PodSecurityContext {
-    let explicit_run_as_non_root = explicit_pod_run_as_non_root(tenant, pool);
-    let mut context = corev1::PodSecurityContext {
+struct EffectivePodSecurityContext {
+    context: corev1::PodSecurityContext,
+    operator_defaults_delegated: bool,
+}
+
+fn default_pod_security_context() -> corev1::PodSecurityContext {
+    corev1::PodSecurityContext {
         run_as_user: Some(DEFAULT_RUN_AS_USER),
         run_as_group: Some(DEFAULT_RUN_AS_GROUP),
         fs_group: Some(DEFAULT_FS_GROUP),
@@ -363,18 +376,56 @@ fn effective_pod_security_context(
             ..Default::default()
         }),
         ..Default::default()
-    };
+    }
+}
 
-    for overrides in [tenant, pool].into_iter().flatten() {
-        apply_pod_security_context_override(&mut context, overrides);
+fn platform_delegated_pod_security_context() -> corev1::PodSecurityContext {
+    corev1::PodSecurityContext {
+        // Match MinIO: retain the volume ownership optimization without constraining
+        // the UID/GID values assigned by an OpenShift SCC.
+        fs_group_change_policy: Some("OnRootMismatch".to_string()),
+        ..Default::default()
+    }
+}
+
+fn effective_pod_security_context(
+    tenant: Option<&PodSecurityContextOverride>,
+    pool: Option<&PodSecurityContextOverride>,
+    tenant_delegates: bool,
+    pool_delegates: bool,
+) -> EffectivePodSecurityContext {
+    let explicit_run_as_non_root =
+        explicit_pod_run_as_non_root(tenant, pool, tenant_delegates, pool_delegates);
+    let mut context = default_pod_security_context();
+    let mut operator_defaults_delegated = false;
+
+    for (overrides, delegates) in [(tenant, tenant_delegates), (pool, pool_delegates)] {
+        let Some(overrides) = overrides else {
+            continue;
+        };
+        if delegates {
+            context = platform_delegated_pod_security_context();
+            operator_defaults_delegated = true;
+        } else {
+            apply_pod_security_context_override(&mut context, overrides);
+        }
     }
 
-    context.run_as_non_root = Some(effective_run_as_non_root(
-        context.run_as_user,
-        explicit_run_as_non_root,
-    ));
+    // An exact empty pair is a platform delegation signal. Do not materialize the secure
+    // default again unless a later non-empty override supplies an identity.
+    if context.run_as_user.is_some() || explicit_run_as_non_root.is_some() {
+        context.run_as_non_root = Some(effective_run_as_non_root(
+            context.run_as_user,
+            explicit_run_as_non_root,
+        ));
+    }
 
-    context
+    EffectivePodSecurityContext {
+        context,
+        // A later partial override only fills its declared fields; every field erased by
+        // the empty-object barrier remains delegated to platform admission.
+        operator_defaults_delegated,
+    }
 }
 
 fn merge_container_security_context(
@@ -401,10 +452,10 @@ fn effective_container_security_context(
     tenant: Option<&corev1::SecurityContext>,
     pool: Option<&corev1::SecurityContext>,
     explicit_pod_run_as_non_root: Option<bool>,
+    tenant_delegates: bool,
+    pool_delegates: bool,
 ) -> corev1::SecurityContext {
-    let explicit_container_run_as_non_root = pool
-        .and_then(|overrides| overrides.run_as_non_root)
-        .or_else(|| tenant.and_then(|overrides| overrides.run_as_non_root));
+    let mut explicit_container_run_as_non_root = None;
     let mut context = corev1::SecurityContext {
         allow_privilege_escalation: Some(false),
         capabilities: Some(corev1::Capabilities {
@@ -414,8 +465,19 @@ fn effective_container_security_context(
         ..Default::default()
     };
 
-    for overrides in [tenant, pool].into_iter().flatten() {
-        merge_container_security_context(&mut context, overrides);
+    for (overrides, delegates) in [(tenant, tenant_delegates), (pool, pool_delegates)] {
+        let Some(overrides) = overrides else {
+            continue;
+        };
+        if delegates {
+            context = corev1::SecurityContext::default();
+            explicit_container_run_as_non_root = None;
+        } else {
+            merge_container_security_context(&mut context, overrides);
+            if overrides.run_as_non_root.is_some() {
+                explicit_container_run_as_non_root = overrides.run_as_non_root;
+            }
+        }
     }
 
     // A container UID overrides the Pod UID. When neither the container nor Pod explicitly
@@ -434,6 +496,7 @@ fn effective_container_security_context(
 struct EffectiveWorkloadSecurityContext {
     pod: corev1::PodSecurityContext,
     container: corev1::SecurityContext,
+    pod_operator_defaults_delegated: bool,
 }
 
 fn effective_workload_security_context(
@@ -442,14 +505,26 @@ fn effective_workload_security_context(
     tenant_container: Option<&corev1::SecurityContext>,
     pool_container: Option<&corev1::SecurityContext>,
 ) -> EffectiveWorkloadSecurityContext {
-    let explicit_pod_run_as_non_root = explicit_pod_run_as_non_root(tenant_pod, pool_pod);
+    // Require the MinIO/OpenShift pair at the same scope. A lone empty object can be left behind
+    // by legacy field-based clients and must retain the historical Operator-default behavior.
+    let tenant_delegates = tenant_pod.is_some_and(PodSecurityContextOverride::is_empty)
+        && tenant_container.is_some_and(|context| context == &corev1::SecurityContext::default());
+    let pool_delegates = pool_pod.is_some_and(PodSecurityContextOverride::is_empty)
+        && pool_container.is_some_and(|context| context == &corev1::SecurityContext::default());
+    let explicit_pod_run_as_non_root =
+        explicit_pod_run_as_non_root(tenant_pod, pool_pod, tenant_delegates, pool_delegates);
+    let effective_pod =
+        effective_pod_security_context(tenant_pod, pool_pod, tenant_delegates, pool_delegates);
     EffectiveWorkloadSecurityContext {
-        pod: effective_pod_security_context(tenant_pod, pool_pod),
+        pod: effective_pod.context,
         container: effective_container_security_context(
             tenant_container,
             pool_container,
             explicit_pod_run_as_non_root,
+            tenant_delegates,
+            pool_delegates,
         ),
+        pod_operator_defaults_delegated: effective_pod.operator_defaults_delegated,
     }
 }
 
@@ -795,7 +870,12 @@ impl Tenant {
                 .or(security.pod.seccomp_profile.as_ref())
                 .map(|profile| profile.type_.as_str());
 
-            if seccomp_type != Some("RuntimeDefault") {
+            // OpenShift restricted SCCs can inject runtime/default after admission. Preserve
+            // the image compatibility gate when an empty Pod securityContext delegates the
+            // profile, even though the pre-admission StatefulSet has no explicit profile.
+            let platform_may_inject_runtime_default =
+                security.pod_operator_defaults_delegated && seccomp_type.is_none();
+            if seccomp_type != Some("RuntimeDefault") && !platform_may_inject_runtime_default {
                 continue;
             }
 
@@ -1338,6 +1418,7 @@ impl Tenant {
         let EffectiveWorkloadSecurityContext {
             pod: pod_security_context,
             container: container_security_context,
+            ..
         } = security;
 
         let container = corev1::Container {
@@ -3155,6 +3236,180 @@ mod tests {
     }
 
     #[test]
+    fn empty_tenant_security_contexts_delegate_defaults_to_the_platform() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("empty contexts should render for platform admission");
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+        let pod_context = pod_spec
+            .security_context
+            .expect("Pod should have a delegated securityContext");
+
+        assert_eq!(pod_context.run_as_user, None);
+        assert_eq!(pod_context.run_as_group, None);
+        assert_eq!(pod_context.fs_group, None);
+        assert_eq!(pod_context.run_as_non_root, None);
+        assert_eq!(pod_context.seccomp_profile, None);
+        assert_eq!(
+            pod_context.fs_group_change_policy.as_deref(),
+            Some("OnRootMismatch")
+        );
+        assert_eq!(
+            pod_spec.containers[0].security_context,
+            Some(corev1::SecurityContext::default())
+        );
+    }
+
+    #[test]
+    fn lone_empty_tenant_pod_context_retains_operator_defaults() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("legacy empty Pod context should retain defaults");
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+        let pod_context = pod_spec
+            .security_context
+            .expect("Pod should have a securityContext");
+
+        assert_eq!(pod_context.run_as_user, Some(DEFAULT_RUN_AS_USER));
+        assert_eq!(pod_context.run_as_group, Some(DEFAULT_RUN_AS_GROUP));
+        assert_eq!(pod_context.fs_group, Some(DEFAULT_FS_GROUP));
+        assert_eq!(pod_context.run_as_non_root, Some(true));
+        assert_eq!(
+            pod_context
+                .seccomp_profile
+                .as_ref()
+                .map(|profile| profile.type_.as_str()),
+            Some("RuntimeDefault")
+        );
+    }
+
+    #[test]
+    fn lone_empty_pool_container_context_retains_operator_defaults() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext::default());
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("legacy empty container context should retain defaults");
+        let container_context = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec")
+            .containers[0]
+            .security_context
+            .clone()
+            .expect("RustFS container should have a securityContext");
+
+        assert_eq!(container_context.allow_privilege_escalation, Some(false));
+        assert_eq!(
+            container_context.capabilities.and_then(|caps| caps.drop),
+            Some(vec!["ALL".to_string()])
+        );
+    }
+
+    #[test]
+    fn empty_pool_security_contexts_block_tenant_and_operator_defaults() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            run_as_user: Some(20_001),
+            run_as_group: Some(20_002),
+            fs_group: Some(20_003),
+            run_as_non_root: Some(true),
+            seccomp_profile: Some(runtime_default_seccomp_profile()),
+        });
+        tenant.spec.container_security_context = Some(corev1::SecurityContext {
+            read_only_root_filesystem: Some(true),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext::default());
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("pool delegation should override tenant defaults");
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+        let pod_context = pod_spec
+            .security_context
+            .expect("Pod should have a delegated securityContext");
+
+        assert_eq!(pod_context.run_as_user, None);
+        assert_eq!(pod_context.run_as_group, None);
+        assert_eq!(pod_context.fs_group, None);
+        assert_eq!(pod_context.run_as_non_root, None);
+        assert_eq!(pod_context.seccomp_profile, None);
+        assert_eq!(
+            pod_spec.containers[0].security_context,
+            Some(corev1::SecurityContext::default())
+        );
+    }
+
+    #[test]
+    fn partial_pool_override_after_tenant_barrier_only_sets_declared_fields() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+        tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride {
+            run_as_user: Some(20_001),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext {
+            run_as_user: Some(0),
+            ..Default::default()
+        });
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("partial pool overrides should merge onto the delegated baseline");
+        let pod_spec = statefulset
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+        let pod_context = pod_spec
+            .security_context
+            .expect("Pod should have a securityContext");
+        let container_context = pod_spec.containers[0]
+            .security_context
+            .as_ref()
+            .expect("Container should have a securityContext");
+
+        assert_eq!(pod_context.run_as_user, Some(20_001));
+        assert_eq!(pod_context.run_as_non_root, Some(true));
+        assert_eq!(pod_context.run_as_group, None);
+        assert_eq!(pod_context.fs_group, None);
+        assert_eq!(pod_context.seccomp_profile, None);
+        assert_eq!(container_context.run_as_user, Some(0));
+        assert_eq!(container_context.run_as_non_root, Some(false));
+        assert_eq!(container_context.allow_privilege_escalation, None);
+        assert_eq!(container_context.capabilities, None);
+    }
+
+    #[test]
     fn known_tokio_io_uring_images_are_blocked_with_runtime_default_seccomp() {
         for image in [
             "rustfs/rustfs:1.0.0-alpha.99",
@@ -3193,6 +3448,78 @@ mod tests {
             crate::types::error::Error::WorkloadSecurityIncompatible { message, .. }
                 if message.contains("rustfs/rustfs#4364")
         ));
+    }
+
+    #[test]
+    fn delegated_seccomp_still_blocks_known_incompatible_images() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some("rustfs/rustfs:1.0.0-beta.8".to_string());
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+
+        let error = tenant
+            .validate_workload_security_compatibility()
+            .expect_err("an SCC may inject RuntimeDefault after admission");
+
+        assert!(matches!(
+            error,
+            crate::types::error::Error::WorkloadSecurityIncompatible { message, .. }
+                if message.contains("rustfs/rustfs#4364")
+                    && message.contains("pool-0")
+        ));
+    }
+
+    #[test]
+    fn pool_barrier_restores_delegated_seccomp_image_gate() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.image = Some("rustfs/rustfs:1.0.0-beta.8".to_string());
+        tenant.spec.security_context = Some(PodSecurityContextOverride {
+            seccomp_profile: Some(corev1::SeccompProfile {
+                type_: "Unconfined".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.pools[0].container_security_context = Some(corev1::SecurityContext::default());
+
+        let error = tenant
+            .validate_workload_security_compatibility()
+            .expect_err("pool delegation should block the inherited Unconfined profile");
+
+        assert!(matches!(
+            error,
+            crate::types::error::Error::WorkloadSecurityIncompatible { message, .. }
+                if message.contains("rustfs/rustfs#4364")
+                    && message.contains("pool-0")
+        ));
+    }
+
+    #[test]
+    fn explicit_pool_seccomp_after_tenant_barrier_overrides_delegated_gate() {
+        for profile in [
+            corev1::SeccompProfile {
+                type_: "Unconfined".to_string(),
+                ..Default::default()
+            },
+            corev1::SeccompProfile {
+                type_: "Localhost".to_string(),
+                localhost_profile: Some("profiles/rustfs-io-uring.json".to_string()),
+            },
+        ] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.image = Some("rustfs/rustfs:1.0.0-beta.8".to_string());
+            tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+            tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+            tenant.spec.pools[0].security_context = Some(PodSecurityContextOverride {
+                seccomp_profile: Some(profile),
+                ..Default::default()
+            });
+
+            tenant
+                .validate_workload_security_compatibility()
+                .expect("an explicit compatible pool profile should override SCC injection risk");
+        }
     }
 
     #[test]
@@ -4359,6 +4686,48 @@ mod tests {
             .expect("Should check update need");
 
         assert!(needs_update, "Container security changes should roll Pods");
+    }
+
+    #[test]
+    fn empty_security_context_delegation_triggers_statefulset_update() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create StatefulSet with defaults");
+
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, &tenant.spec.pools[0])
+            .expect("Should compare delegated security contexts");
+
+        assert!(
+            needs_update,
+            "Delegating UID/GID and container defaults should roll Pods"
+        );
+    }
+
+    #[test]
+    fn removing_empty_delegation_triggers_statefulset_update() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("Should create delegated StatefulSet");
+
+        tenant.spec.security_context = None;
+        tenant.spec.container_security_context = None;
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, &tenant.spec.pools[0])
+            .expect("Should compare restored operator defaults");
+
+        assert!(
+            needs_update,
+            "Removing delegation should restore defaults and roll Pods"
+        );
     }
 
     #[test]
