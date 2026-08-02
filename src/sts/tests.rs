@@ -27,15 +27,20 @@ use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
 
 use super::{
-    ADD_USER_PATH, CreateBucketResult, LIST_CANNED_POLICIES_PATH, MAX_UPSTREAM_ERROR_BODY_BYTES,
-    POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient,
-    RustfsClientError, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
+    ADD_USER_PATH, ADMIN_SIGNING_SERVICE, CreateBucketResult, FORM_CONTENT_TYPE, JSON_CONTENT_TYPE,
+    LIST_CANNED_POLICIES_PATH, MAX_UPSTREAM_ERROR_BODY_BYTES, POOLS_DECOMMISSION_PATH,
+    POOLS_LIST_PATH, POOLS_STATUS_PATH, RustfsAdminClient, RustfsClientError, SERVER_INFO_PATH,
+    SET_POLICY_PATH, STS_SIGNING_SERVICE, USER_INFO_PATH,
     helpers::{
-        build_canonical_query, build_form_body, extract_canned_policy_document,
-        extract_credentials, parse_assume_role_response,
+        build_canonical_query, build_form_body, derive_signing_key, extract_canned_policy_document,
+        extract_credentials, hmac_sha256_hex, parse_assume_role_response, sha256_hex,
     },
     tls_tenant_base_url,
 };
+
+const TEST_ACCESS_KEY: &str = "access";
+const TEST_SECRET_KEY: &str = "secret";
+const TEST_REGION: &str = "us-east-1";
 
 #[test]
 fn canonical_query_uses_sigv4_uri_encoding_and_encoded_sort_order() {
@@ -62,6 +67,35 @@ fn form_body_keeps_html_form_encoding() {
         build_form_body(&[("Policy", "a b~c/雪")]),
         "Policy=a+b%7Ec%2F%E9%9B%AA"
     );
+}
+
+#[test]
+fn duplicate_query_values_match_independent_sigv4_verification() {
+    let query =
+        build_canonical_query(&[("dup", "z z"), ("dup", "a+a"), ("dup", "雪"), ("empty", "")]);
+    assert_eq!(query, "dup=%E9%9B%AA&dup=a%2Ba&dup=z%20z&empty=");
+
+    let client = RustfsAdminClient::new_with_base_url(
+        "https://rustfs.example.test:9000",
+        TEST_ACCESS_KEY,
+        TEST_SECRET_KEY,
+    );
+    let signed = client
+        .sign_request("GET", "/synthetic", &query, "", None, ADMIN_SIGNING_SERVICE)
+        .unwrap();
+    let request = CapturedRequest {
+        method: "GET".to_string(),
+        path: "/synthetic".to_string(),
+        query,
+        body: String::new(),
+        host: "rustfs.example.test:9000".to_string(),
+        content_type: String::new(),
+        amz_date: signed.amz_date,
+        payload_hash: signed.payload_hash,
+        authorization: signed.authorization,
+    };
+
+    assert_sigv4_matches_wire(&request, ADMIN_SIGNING_SERVICE);
 }
 
 fn secret_with_fields(fields: Vec<(&str, &[u8])>) -> corev1::Secret {
@@ -293,11 +327,131 @@ async fn unexpected_response_hides_over_limit_unstructured_response_body() {
 
 #[derive(Clone, Default)]
 struct Capture {
+    method: Arc<Mutex<String>>,
     path: Arc<Mutex<String>>,
     query: Arc<Mutex<String>>,
     body: Arc<Mutex<String>>,
+    host: Arc<Mutex<String>>,
+    content_type: Arc<Mutex<String>>,
+    amz_date: Arc<Mutex<String>>,
+    payload_hash: Arc<Mutex<String>>,
     authorization: Arc<Mutex<String>>,
     object_lock_header: Arc<Mutex<String>>,
+}
+
+#[derive(Debug)]
+struct CapturedRequest {
+    method: String,
+    path: String,
+    query: String,
+    body: String,
+    host: String,
+    content_type: String,
+    amz_date: String,
+    payload_hash: String,
+    authorization: String,
+}
+
+impl Capture {
+    async fn request(&self) -> CapturedRequest {
+        CapturedRequest {
+            method: self.method.lock().await.clone(),
+            path: self.path.lock().await.clone(),
+            query: self.query.lock().await.clone(),
+            body: self.body.lock().await.clone(),
+            host: self.host.lock().await.clone(),
+            content_type: self.content_type.lock().await.clone(),
+            amz_date: self.amz_date.lock().await.clone(),
+            payload_hash: self.payload_hash.lock().await.clone(),
+            authorization: self.authorization.lock().await.clone(),
+        }
+    }
+}
+
+fn request_header(req: &Request<Body>, name: &str) -> String {
+    req.headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+async fn capture_signed_request(capture: &Capture, req: Request<Body>) {
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let host = request_header(&req, "host");
+    let content_type = request_header(&req, "content-type");
+    let amz_date = request_header(&req, "x-amz-date");
+    let payload_hash = request_header(&req, "x-amz-content-sha256");
+    let authorization = request_header(&req, "authorization");
+    let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+
+    *capture.method.lock().await = method;
+    *capture.path.lock().await = path;
+    *capture.query.lock().await = query;
+    *capture.body.lock().await = body;
+    *capture.host.lock().await = host;
+    *capture.content_type.lock().await = content_type;
+    *capture.amz_date.lock().await = amz_date;
+    *capture.payload_hash.lock().await = payload_hash;
+    *capture.authorization.lock().await = authorization;
+}
+
+fn assert_sigv4_matches_wire(request: &CapturedRequest, service: &str) {
+    let calculated_payload_hash = sha256_hex(request.body.as_bytes());
+    assert_eq!(request.payload_hash, calculated_payload_hash);
+
+    let signed_header_names = if request.content_type.is_empty() {
+        "host;x-amz-content-sha256;x-amz-date"
+    } else {
+        "content-type;host;x-amz-content-sha256;x-amz-date"
+    };
+    let mut canonical_headers = String::new();
+    if !request.content_type.is_empty() {
+        canonical_headers.push_str("content-type:");
+        canonical_headers.push_str(request.content_type.trim());
+        canonical_headers.push('\n');
+    }
+    canonical_headers.push_str("host:");
+    canonical_headers.push_str(request.host.trim());
+    canonical_headers.push_str("\nx-amz-content-sha256:");
+    canonical_headers.push_str(request.payload_hash.trim());
+    canonical_headers.push_str("\nx-amz-date:");
+    canonical_headers.push_str(request.amz_date.trim());
+    canonical_headers.push('\n');
+
+    let canonical_request = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        request.method,
+        request.path,
+        request.query,
+        canonical_headers,
+        signed_header_names,
+        request.payload_hash
+    );
+    let date_stamp = request
+        .amz_date
+        .get(..8)
+        .expect("x-amz-date must start with YYYYMMDD");
+    let credential_scope = format!("{date_stamp}/{TEST_REGION}/{service}/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        request.amz_date,
+        credential_scope,
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let signing_key =
+        derive_signing_key(TEST_SECRET_KEY, date_stamp, TEST_REGION, service).unwrap();
+    let signature = hmac_sha256_hex(&signing_key, &string_to_sign).unwrap();
+    let expected_authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={TEST_ACCESS_KEY}/{credential_scope}, SignedHeaders={signed_header_names}, Signature={signature}"
+    );
+
+    assert_eq!(request.authorization, expected_authorization);
 }
 
 #[tokio::test]
@@ -309,23 +463,7 @@ async fn assume_role_request_targets_root_path_and_action_is_assume_role() {
             "/",
             post(
                 move |State(c): State<Capture>, req: Request<Body>| async move {
-                    let path = req.uri().path().to_string();
-                    let query = req.uri().query().unwrap_or("").to_string();
-                    let authorization = req
-                        .headers()
-                        .get("authorization")
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("")
-                        .to_string();
-                    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
-                        .await
-                        .unwrap();
-                    let body = String::from_utf8(body_bytes.to_vec()).unwrap();
-
-                    *c.path.lock().await = path;
-                    *c.query.lock().await = query;
-                    *c.body.lock().await = body;
-                    *c.authorization.lock().await = authorization;
+                    capture_signed_request(&c, req).await;
 
                     let response =
                         "<AssumeRoleResponse><AssumeRoleResult><Credentials><AccessKeyId>AKI</AccessKeyId><SecretAccessKey>SEC</SecretAccessKey><SessionToken>TOKEN</SessionToken><Expiration>2026-01-01T00:00:00Z</Expiration></Credentials></AssumeRoleResult></AssumeRoleResponse>";
@@ -344,23 +482,20 @@ async fn assume_role_request_targets_root_path_and_action_is_assume_role() {
     let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
 
     let creds = client
-        .assume_role(Some("{\"Statement\": []}"), 3600)
+        .assume_role(Some(r#"{"Statement":[{"Resource":"a b~+/雪"}]}"#), 3600)
         .await
         .unwrap();
     assert_eq!(creds.access_key_id, "AKI");
 
-    assert_eq!(&*capture.path.lock().await, "/");
-    assert!(capture.body.lock().await.contains("Action=AssumeRole"));
-    assert!(capture.body.lock().await.contains("Version=2011-06-15"));
-    assert!(capture.body.lock().await.contains("DurationSeconds=3600"));
-    assert!(capture.query.lock().await.is_empty());
-    assert!(
-        capture
-            .authorization
-            .lock()
-            .await
-            .contains("/sts/aws4_request")
+    let request = capture.request().await;
+    assert_eq!(request.path, "/");
+    assert_eq!(
+        request.body,
+        "Action=AssumeRole&DurationSeconds=3600&Policy=%7B%22Statement%22%3A%5B%7B%22Resource%22%3A%22a+b%7E%2B%2F%E9%9B%AA%22%7D%5D%7D&Version=2011-06-15"
     );
+    assert!(request.query.is_empty());
+    assert_eq!(request.content_type, FORM_CONTENT_TYPE);
+    assert_sigv4_matches_wire(&request, STS_SIGNING_SERVICE);
 
     server.abort();
 }
@@ -813,12 +948,7 @@ async fn add_user_uses_expected_path_query_and_body() {
             ADD_USER_PATH,
             put(
                 move |State(c): State<Capture>, req: Request<Body>| async move {
-                    *c.path.lock().await = req.uri().path().to_string();
-                    *c.query.lock().await = req.uri().query().unwrap_or("").to_string();
-                    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
-                        .await
-                        .unwrap();
-                    *c.body.lock().await = String::from_utf8(body_bytes.to_vec()).unwrap();
+                    capture_signed_request(&c, req).await;
                     StatusCode::OK
                 },
             ),
@@ -834,15 +964,15 @@ async fn add_user_uses_expected_path_query_and_body() {
     let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
     client.add_user("app user~+/雪", "secret123").await.unwrap();
 
-    assert_eq!(&*capture.path.lock().await, ADD_USER_PATH);
+    let request = capture.request().await;
+    assert_eq!(request.path, ADD_USER_PATH);
+    assert_eq!(request.query, "accessKey=app%20user~%2B%2F%E9%9B%AA");
     assert_eq!(
-        &*capture.query.lock().await,
-        "accessKey=app%20user~%2B%2F%E9%9B%AA"
-    );
-    assert_eq!(
-        &*capture.body.lock().await,
+        request.body,
         r#"{"secretKey":"secret123","status":"enabled"}"#
     );
+    assert_eq!(request.content_type, JSON_CONTENT_TYPE);
+    assert_sigv4_matches_wire(&request, ADMIN_SIGNING_SERVICE);
 
     server.abort();
 }
