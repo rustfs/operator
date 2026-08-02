@@ -21,6 +21,57 @@ To install in a specific namespace:
 helm install rustfs-operator deploy/rustfs-operator/ --namespace rustfs-system --create-namespace
 ```
 
+### OpenShift Installation
+
+Enable the OpenShift profile so the chart omits the fixed Pod and container
+security contexts from the Operator, Console, and optional Console frontend
+Deployments. OpenShift SecurityContextConstraints (SCC) then assigns values
+valid for the installation namespace, matching the MinIO Operator installation
+contract:
+
+```bash
+helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
+  --namespace rustfs-system \
+  --create-namespace \
+  --set openshift.enabled=true
+```
+
+For Tenant workloads, use explicit empty Pool security contexts as shown in
+`examples/openshift-tenant.yaml`:
+
+```yaml
+spec:
+  pools:
+    - name: pool-0
+      securityContext: {}
+      containerSecurityContext: {}
+```
+
+The empty objects delegate UID, GID, FSGroup, and container security settings
+to the namespace SCC. They are an OpenShift-specific contract; generic
+Kubernetes Pod Security admission validates fields but does not assign an
+allowed runtime identity. Keep `openshift.enabled=false` and omit the Tenant
+fields on generic Kubernetes so the RustFS defaults remain in effect.
+
+This profile provides SCC-compatible manifests but does not by itself imply
+OpenShift certification or OperatorHub distribution. Support is currently
+limited to `restricted-v2`; the `restricted-v3` requirement to set
+`spec.hostUsers: false` is not implemented.
+
+The RustFS server image is an independent prerequisite. It must support an
+arbitrary SCC-assigned UID: writable image-layer directories, including
+`/data` and `/logs`, must be owned by group `0` and grant the group the same
+permissions as the owner. Images that keep those directories as
+`10001:10001` with mode `0750` are not compatible even after fixed IDs are
+removed from the Pod spec. Use a rebuilt or fixed image before applying the
+OpenShift Tenant example; the chart cannot repair image filesystem ownership.
+
+The optional split frontend is disabled by default. Its image must also be
+verified for arbitrary-UID execution, writable nginx runtime paths, and
+unprivileged port binding before setting `console.frontend.enabled=true` on
+OpenShift. Omitting its `securityContext` does not make an incompatible nginx
+image OpenShift-ready.
+
 ## Uninstalling the Chart
 
 To uninstall/delete the `rustfs-operator` deployment:
@@ -176,6 +227,7 @@ The generated ClusterRole grants only `get`, `list`, and `watch` for Secrets and
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
+| `openshift.enabled` | Omit chart-managed Deployment security contexts and delegate runtime identity to OpenShift SCC | `false` |
 | `namespace` | Namespace to deploy to | `""` (uses release namespace) |
 | `commonLabels` | Labels to add to all resources | `{}` |
 | `commonAnnotations` | Annotations to add to all resources | `{}` |
@@ -351,6 +403,37 @@ Helm does not upgrade existing CRDs from a chart's `crds/` directory. Apply the
 cluster-scoped CRDs first so the API server accepts fields introduced by the
 new Operator version. The dedicated field manager deliberately takes ownership
 of the chart-managed CRD fields, including CRDs originally created by Helm.
+
+When adopting OpenShift mode on an existing installation, apply the CRDs first,
+then upgrade the chart with `openshift.enabled=true`, and wait for the Operator
+and Console rollouts before changing Tenant manifests. The chart upgrade rolls
+only those Deployments; it does not rewrite Tenant or PVC API objects. The two
+empty objects form one explicit delegation signal; a lone empty object retains
+the Operator defaults for compatibility with legacy field-based clients.
+
+Inventory existing paired empty objects with the `jq` preflight in the Operator
+user guide before upgrading. This release changes such a pair from inheriting
+Operator defaults to SCC delegation, so every match is a breaking migration
+decision. Changing an existing Pool to `securityContext: {}` and
+`containerSecurityContext: {}` changes its StatefulSet Pod template and causes
+a Tenant Pod rollout. A changed SCC-assigned FSGroup can also trigger volume
+ownership work during first mount; large volumes can start slowly, and CSI or
+root-squash permission incompatibilities can prevent mount or write. Verify the
+namespace SCC, arbitrary-UID image, and StorageClass with existing data, keep a
+recoverable backup, and schedule a maintenance window. A single-replica Tenant
+can be unavailable during restart, while a multi-replica Tenant temporarily
+runs with reduced capacity.
+
+Do not roll back to an Operator version that interprets explicit empty objects
+as a request for the fixed RustFS UID/GID defaults. Such a controller can put
+the fixed identity back into the StatefulSet template and OpenShift may reject
+the resulting Pods. Recover by rolling forward or restore a complete security
+context that is valid for the namespace SCC before downgrading.
+
+Likewise, disabling `openshift.enabled` or rolling the chart back to a version
+without this profile reintroduces the chart's fixed Operator/Console identities
+and rolls those Deployments. Confirm that the namespace SCC permits those
+identities before doing so; otherwise keep the profile enabled and roll forward.
 
 This release adds secure defaults to generated RustFS Pods and containers.
 Existing compatible Tenants whose StatefulSet templates do not already contain

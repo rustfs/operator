@@ -3,6 +3,12 @@
 # Kubernetes cluster DNS domain used for Tenant peer URLs and generated TLS SANs.
 clusterDomain: cluster.local
 
+# OpenShift installation compatibility. When enabled, the chart omits Pod and
+# container securityContext fields from its own Deployments so the namespace
+# SecurityContextConstraints (SCC) can assign an allowed UID and FSGroup.
+openshift:
+  enabled: false
+
 # Operator deployment configuration
 operator:
   # Number of operator replicas

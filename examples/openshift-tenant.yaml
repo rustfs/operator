@@ -1,0 +1,42 @@
+# Copyright 2025 RustFS Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-openshift
+  namespace: rustfs-tenant
+spec:
+  # This must be an arbitrary-UID-compatible image. In particular, writable
+  # image-layer directories such as /data and /logs must be owned by group 0
+  # and grant the group the same permissions as the owner. Do not deploy this
+  # example until such a RustFS image is available in your registry.
+  image: registry.example.com/rustfs/rustfs:openshift-compatible
+  pools:
+    - name: pool-0
+      servers: 4
+      persistence:
+        volumesPerServer: 2
+        volumeClaimTemplate:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+
+      # Match the MinIO Operator OpenShift contract: explicit empty objects
+      # delegate UID, GID, FSGroup, and container security settings to the
+      # namespace SecurityContextConstraints (SCC).
+      securityContext: {}
+      containerSecurityContext: {}

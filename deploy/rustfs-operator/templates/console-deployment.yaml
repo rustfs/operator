@@ -1,4 +1,6 @@
 {{- $consoleLoginAdmission := default dict .Values.console.loginAdmission -}}
+{{- $openShift := default dict .Values.openshift -}}
+{{- $openShiftEnabled := default false $openShift.enabled -}}
 {{- $reservedConsoleEnv := dict
   "CONSOLE_LOGIN_ADMISSION_REQUESTS_PER_SECOND" "console.loginAdmission.requestsPerSecond"
   "CONSOLE_LOGIN_ADMISSION_BURST" "console.loginAdmission.burst"
@@ -44,9 +46,11 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if not $openShiftEnabled }}
       {{- with .Values.console.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- end }}
       containers:
         - name: console
@@ -100,9 +104,11 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if not $openShiftEnabled }}
           {{- with .Values.console.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- end }}
       {{- with .Values.console.nodeSelector }}
       nodeSelector:

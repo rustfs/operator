@@ -79,6 +79,35 @@ helm install rustfs-operator deploy/rustfs-operator/ \
   --create-namespace
 ```
 
+On OpenShift, enable SCC-managed runtime identities for the Operator, Console,
+and optional split frontend:
+
+```bash
+helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
+  --namespace rustfs-system \
+  --create-namespace \
+  --set openshift.enabled=true
+```
+
+This follows the MinIO Operator installation behavior: chart-managed
+Deployments omit their Pod and container `securityContext`, allowing the
+namespace SecurityContextConstraints (SCC) to assign an allowed UID and
+FSGroup. This is manifest compatibility, not an OpenShift certification claim.
+Generic Kubernetes installations must keep the default
+`openshift.enabled=false` behavior. The current target is `restricted-v2`;
+`restricted-v3` also requires `spec.hostUsers: false`, which is not yet covered.
+
+SCC-compatible manifests are insufficient when the server image assumes UID
+`10001`. Before deploying a Tenant, use an arbitrary-UID-compatible image whose
+writable image-layer directories, including `/data` and `/logs`, are owned by
+group `0` and give the group the same permissions as the owner. An image with
+those directories owned by `10001:10001` and mode `0750` remains incompatible;
+the Operator cannot repair image filesystem ownership.
+
+Keep the optional split frontend disabled unless its image is independently
+verified for arbitrary-UID nginx runtime paths and unprivileged port binding.
+SCC-assigned identity alone cannot repair an incompatible frontend image.
+
 Verify the operator and Console pods:
 
 ```bash
@@ -107,6 +136,56 @@ introduced by the new controller version. Review CRD changes carefully; CRDs
 are cluster-scoped and shared by all Tenant namespaces. The dedicated field
 manager deliberately takes ownership of the chart-managed CRD fields so this
 upgrade also works for CRDs originally created by Helm.
+
+When enabling OpenShift support on an existing installation, keep this order:
+apply both CRDs, upgrade the chart with `openshift.enabled=true`, wait for the
+Operator and Console rollouts, and only then update Tenant security contexts.
+Before upgrading the controller, inventory every explicit empty pair at Tenant
+and Pool scope:
+
+```bash
+kubectl get tenants.rustfs.com -A -o json | jq -r '
+  def empty_object: type == "object" and length == 0;
+  .items[] as $tenant |
+  ([
+    (select(($tenant.spec | has("securityContext")) and
+            ($tenant.spec | has("containerSecurityContext")) and
+            ($tenant.spec.securityContext | empty_object) and
+            ($tenant.spec.containerSecurityContext | empty_object)) | "spec"),
+    ($tenant.spec.pools[]? |
+      select((has("securityContext")) and
+             (has("containerSecurityContext")) and
+             (.securityContext | empty_object) and
+             (.containerSecurityContext | empty_object)) |
+      "pool:" + .name)
+  ]) as $locations |
+  select($locations | length > 0) |
+  [$tenant.metadata.namespace, $tenant.metadata.name, ($locations | join(","))] |
+  @tsv'
+```
+
+This release deliberately changes a paired `{}`/`{}` from "inherit Operator
+defaults" to "delegate to platform admission". A lone empty object keeps the
+legacy behavior. Treat every reported pair as a breaking migration decision:
+remove both fields before upgrading when Operator defaults should remain, or
+keep both only after validating the target SCC and image.
+
+The chart upgrade does not rewrite Tenant or PVC API objects. Converting an
+existing Pool to the paired empty security contexts changes its StatefulSet Pod
+template and rolls that Pool. A changed SCC-assigned FSGroup can also make
+kubelet or the CSI driver update volume ownership on first mount; large volumes
+can start slowly, and storage with incompatible `fsGroupPolicy`, root-squash, or
+permission behavior can fail to mount or write. Test the StorageClass with
+existing data, keep a recoverable backup, and schedule a maintenance window. A
+single-replica Tenant can be unavailable during restart and a multi-replica
+Tenant temporarily runs with reduced capacity.
+
+Do not downgrade to a controller that restores fixed UID/GID defaults for the
+empty pair, because OpenShift SCC may reject that rollback. Roll forward, or
+restore an SCC-valid complete security context before downgrading. Disabling
+`openshift.enabled` or rolling back to a chart without the profile also
+reintroduces fixed Operator/Console identities and rolls those Deployments; do
+that only if the namespace SCC allows the fixed IDs.
 
 Existing manifests that omit `users[].credsSecret` remain compatible. Wait for
 the new Operator rollout to complete before relying on an explicit user Secret
@@ -170,6 +249,7 @@ Common chart sections:
 
 | Section | Purpose |
 |---------|---------|
+| `openshift` | SCC-compatible rendering for the Operator, Console, and optional frontend Deployments. Disabled by default. |
 | `operator` | Operator Deployment replicas, image, resources, probes, metrics, scheduling, leader election, and tenant monitoring. |
 | `sts` | Operator STS endpoint, service port, TokenReview audience, and TLS handling. |
 | `serviceAccount` / `rbac` | Operator ServiceAccount and RBAC creation. |
@@ -466,6 +546,27 @@ Security `restricted` controls. Explicit overrides can relax them and may then
 be rejected by cluster admission policy. For legacy compatibility, an explicit
 `runAsUser: 0` without an explicit `runAsNonRoot` derives `runAsNonRoot: false`;
 that configuration cannot run in a `restricted` namespace.
+
+On OpenShift, use explicit empty objects at Pool level to delegate the runtime
+identity and container security settings to the namespace SCC, following the
+MinIO Operator contract:
+
+```yaml
+spec:
+  pools:
+    - name: pool-0
+      securityContext: {}
+      containerSecurityContext: {}
+```
+
+See `examples/openshift-tenant.yaml`. The distinction between omission and an
+explicit empty pair is intentional: omission requests the RustFS defaults;
+the paired `{}`/`{}` requests SCC ownership. A lone empty object retains the
+defaults for compatibility. Do not use the pair on generic Kubernetes unless
+another admission controller supplies equivalent settings. Updating an
+existing Pool to this form rolls its StatefulSet Pods. The example uses a
+placeholder image deliberately; replace it only with a verified
+arbitrary-UID-compatible RustFS image.
 
 `RuntimeDefault` also requires a RustFS image that can run under the runtime's
 default seccomp profile. `rustfs/rustfs:1.0.0-beta.8` is not compatible because
