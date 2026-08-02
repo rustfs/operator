@@ -145,7 +145,7 @@ mod tests {
             });
 
         assert_eq!(counts.get(&Suite::Smoke).copied().unwrap_or_default(), 3);
-        assert_eq!(counts.get(&Suite::Operator).copied().unwrap_or_default(), 1);
+        assert_eq!(counts.get(&Suite::Operator).copied().unwrap_or_default(), 2);
         assert_eq!(counts.get(&Suite::Sts).copied().unwrap_or_default(), 2);
         assert_eq!(counts.get(&Suite::Console).copied().unwrap_or_default(), 1);
         assert_eq!(

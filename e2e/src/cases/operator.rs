@@ -15,13 +15,22 @@
 use super::{CaseSpec, Suite};
 
 pub fn cases() -> Vec<CaseSpec> {
-    vec![CaseSpec::new(
-        Suite::Operator,
-        "operator_live_tenant_is_ready_and_observed",
-        "Assert the live Tenant is Ready, not Degraded, and has observed the current generation.",
-        "operator/status",
-        "operator",
-    )]
+    vec![
+        CaseSpec::new(
+            Suite::Operator,
+            "operator_live_tenant_is_ready_and_observed",
+            "Assert the live Tenant is Ready, not Degraded, and has observed the current generation.",
+            "operator/status",
+            "operator",
+        ),
+        CaseSpec::new(
+            Suite::Operator,
+            "operator_live_status_subresource_enforces_cas_and_pruning",
+            "Verify Kubernetes rejects stale status writes and prunes fields omitted by the CRD schema.",
+            "operator/status",
+            "operator",
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -35,6 +44,12 @@ mod tests {
             .map(|case| case.name)
             .collect::<Vec<_>>();
 
-        assert_eq!(names, vec!["operator_live_tenant_is_ready_and_observed"]);
+        assert_eq!(
+            names,
+            vec![
+                "operator_live_tenant_is_ready_and_observed",
+                "operator_live_status_subresource_enforces_cas_and_pruning",
+            ]
+        );
     }
 }

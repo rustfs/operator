@@ -31,7 +31,6 @@ use kube::api::{Patch, PatchParams};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -78,9 +77,9 @@ struct ProvisioningRun<'a> {
     now: String,
     status: ProvisioningStatus,
     failures: Vec<(Reason, String)>,
-    checkpoint_retry: StdMutex<Option<CheckpointRetry>>,
 }
 
+#[derive(Clone)]
 struct UserCredentials {
     access_key: String,
     secret_key: String,
@@ -99,6 +98,19 @@ enum UserCredentialsCheck {
 struct UserCredentialsPreflight {
     checks: Vec<UserCredentialsCheck>,
     duplicate_access_key_hashes: BTreeSet<String>,
+}
+
+enum UserReconcilePlan {
+    Complete(Box<ProvisioningUserStatus>),
+    Prepared(Box<PreparedUserReconcile>),
+}
+
+struct PreparedUserReconcile {
+    user: ProvisioningUser,
+    credentials: UserCredentials,
+    exists: bool,
+    ownership: ProvisioningUserOwnershipStatus,
+    checkpoint: Option<ProvisioningUserStatus>,
 }
 
 struct PolicyDocument {
@@ -356,15 +368,6 @@ impl ProvisioningRun<'_> {
     }
 
     fn finish(mut self) -> ProvisioningReconcileResult {
-        if let Some(retry) = self.checkpoint_retry() {
-            return ProvisioningReconcileResult {
-                status: self.status,
-                outcome: ProvisioningOutcome::Retry {
-                    message: retry.message,
-                    retry_after: retry.retry_after,
-                },
-            };
-        }
         let outcome = self
             .failures
             .first()
@@ -385,25 +388,6 @@ impl ProvisioningRun<'_> {
             status: self.status,
             outcome,
         }
-    }
-
-    fn request_checkpoint_retry(&self, pending_retry: CheckpointRetry) {
-        if let Ok(mut retry) = self.checkpoint_retry.lock() {
-            *retry = Some(pending_retry);
-        }
-    }
-
-    fn checkpoint_retry(&self) -> Option<CheckpointRetry> {
-        self.checkpoint_retry
-            .lock()
-            .map(|retry| retry.clone())
-            .unwrap_or_else(|_| {
-                Some(CheckpointRetry {
-                    message: "RustFS user ownership checkpoint retry state is unavailable"
-                        .to_string(),
-                    retry_after: CHECKPOINT_TRANSIENT_RETRY,
-                })
-            })
     }
 }
 
@@ -426,7 +410,6 @@ pub(super) async fn reconcile_provisioning(
         now,
         status: ProvisioningStatus::default(),
         failures: Vec::new(),
-        checkpoint_retry: StdMutex::new(None),
     };
 
     if !has_active_spec(tenant) {
@@ -495,9 +478,15 @@ pub(super) async fn reconcile_provisioning(
     };
 
     reconcile_policies(&mut run, &client, &mut live_policies).await;
-    reconcile_users(&mut run, &client, &live_policies, &user_credentials).await;
-    if run.checkpoint_retry().is_some() {
-        return run.finish();
+    if let Some(retry) = reconcile_users(&mut run, &client, &live_policies, &user_credentials).await
+    {
+        return ProvisioningReconcileResult {
+            status: run.status,
+            outcome: ProvisioningOutcome::Retry {
+                message: retry.message,
+                retry_after: retry.retry_after,
+            },
+        };
     }
     reconcile_buckets(&mut run, &client).await;
     run.finish()
@@ -792,7 +781,7 @@ async fn reconcile_users(
     client: &RustfsAdminClient,
     live_policies: &BTreeMap<String, String>,
     credentials_preflight: &UserCredentialsPreflight,
-) {
+) -> Option<CheckpointRetry> {
     let failed_spec_policies = run
         .status
         .policies
@@ -800,6 +789,7 @@ async fn reconcile_users(
         .filter(|item| item.state == ProvisioningItemState::Failed.as_str())
         .map(|item| item.name.clone())
         .collect::<BTreeSet<_>>();
+    let mut plans = Vec::with_capacity(run.tenant.spec.users.len());
 
     for (user, preflight) in run
         .tenant
@@ -822,7 +812,7 @@ async fn reconcile_users(
                     ),
                 );
                 let item = annotate_user_item(item, user, previous, None);
-                run.push_user(item);
+                plans.push(UserReconcilePlan::Complete(Box::new(item)));
                 continue;
             }
             UserCredentialsCheck::Checked {
@@ -847,7 +837,7 @@ async fn reconcile_users(
                 ),
             );
             let item = annotate_user_item(item, user, previous, None);
-            run.push_user(item);
+            plans.push(UserReconcilePlan::Complete(Box::new(item)));
             continue;
         }
         if let Some(message) = policy_error {
@@ -860,7 +850,7 @@ async fn reconcile_users(
                 message,
             );
             let item = annotate_user_item(item, user, previous, None);
-            run.push_user(item);
+            plans.push(UserReconcilePlan::Complete(Box::new(item)));
             continue;
         }
         let credentials = match credentials {
@@ -875,25 +865,75 @@ async fn reconcile_users(
                     message,
                 );
                 let item = annotate_user_item(item, user, previous, None);
-                run.push_user(item);
+                plans.push(UserReconcilePlan::Complete(Box::new(item)));
                 continue;
             }
         };
 
-        let item = reconcile_user(
-            run,
-            client,
-            live_policies,
-            &failed_spec_policies,
-            user,
-            credentials,
-        )
-        .await;
-        run.push_user(item);
-        if run.checkpoint_retry().is_some() {
-            break;
+        plans.push(
+            prepare_user_reconcile(
+                run,
+                client,
+                live_policies,
+                &failed_spec_policies,
+                user,
+                credentials,
+            )
+            .await,
+        );
+    }
+
+    let checkpoints = plans
+        .iter()
+        .filter_map(|plan| match plan {
+            UserReconcilePlan::Prepared(prepared) => prepared.checkpoint.clone(),
+            UserReconcilePlan::Complete(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if !checkpoints.is_empty()
+        && let Err(error) = persist_user_ownership_checkpoints(run, &checkpoints).await
+    {
+        match error {
+            CheckpointError::Retry(retry) => return Some(retry),
+            CheckpointError::Permanent { message } => {
+                for plan in &mut plans {
+                    let replacement = match plan {
+                        UserReconcilePlan::Prepared(prepared) if prepared.checkpoint.is_some() => {
+                            let previous = run.previous_user(&prepared.user.name);
+                            let item = run.item(
+                                previous,
+                                &prepared.user.name,
+                                ProvisioningItemState::Failed,
+                                Reason::UserOwnershipCheckpointFailed,
+                                message.clone(),
+                            );
+                            Some(UserReconcilePlan::Complete(Box::new(annotate_user_item(
+                                item,
+                                &prepared.user,
+                                previous,
+                                None,
+                            ))))
+                        }
+                        UserReconcilePlan::Prepared(_) | UserReconcilePlan::Complete(_) => None,
+                    };
+                    if let Some(replacement) = replacement {
+                        *plan = replacement;
+                    }
+                }
+            }
         }
     }
+
+    for plan in plans {
+        let item = match plan {
+            UserReconcilePlan::Complete(item) => *item,
+            UserReconcilePlan::Prepared(prepared) => {
+                execute_prepared_user(run, client, *prepared).await
+            }
+        };
+        run.push_user(item);
+    }
+    None
 }
 
 async fn preflight_user_credentials(run: &ProvisioningRun<'_>) -> UserCredentialsPreflight {
@@ -940,14 +980,14 @@ fn duplicate_user_access_key_hashes(
         .collect()
 }
 
-async fn reconcile_user(
+async fn prepare_user_reconcile(
     run: &ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     live_policies: &BTreeMap<String, String>,
     failed_spec_policies: &BTreeSet<String>,
     user: &ProvisioningUser,
     credentials: &UserCredentials,
-) -> ProvisioningUserStatus {
+) -> UserReconcilePlan {
     let previous = run.previous_user(&user.name);
     if user_access_key_changed(previous, credentials) {
         let item = run.item(
@@ -957,7 +997,9 @@ async fn reconcile_user(
             Reason::ImmutableFieldModified,
             "user access key is immutable after provisioning; create a new user entry to migrate it",
         );
-        return annotate_user_item(item, user, previous, None);
+        return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+            item, user, previous, None,
+        )));
     }
 
     if let Some(policy_name) = user
@@ -972,7 +1014,9 @@ async fn reconcile_user(
             Reason::UserPolicySetFailed,
             format!("referenced policy '{policy_name}' is not ready"),
         );
-        return annotate_user_item(item, user, previous, None);
+        return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+            item, user, previous, None,
+        )));
     }
 
     if let Some(policy_name) = user
@@ -987,7 +1031,9 @@ async fn reconcile_user(
             Reason::UserPolicyNotFound,
             format!("referenced policy '{policy_name}' does not exist"),
         );
-        return annotate_user_item(item, user, previous, None);
+        return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+            item, user, previous, None,
+        )));
     }
 
     let exists = match client.user_exists(&credentials.access_key).await {
@@ -1000,7 +1046,9 @@ async fn reconcile_user(
                 Reason::UserSecretInvalid,
                 format!("failed to query RustFS user: {error}"),
             );
-            return annotate_user_item(item, user, previous, None);
+            return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+                item, user, previous, None,
+            )));
         }
     };
 
@@ -1014,9 +1062,12 @@ async fn reconcile_user(
                 Reason::UserOwnershipConflict,
                 message,
             );
-            return annotate_user_item(item, user, previous, None);
+            return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+                item, user, previous, None,
+            )));
         }
     };
+    let mut checkpoint_update = None;
 
     if exists && ownership.is_none() {
         if legacy_user_status_can_migrate(previous, user, credentials) {
@@ -1035,10 +1086,12 @@ async fn reconcile_user(
                         Reason::UserOwnershipCheckpointFailed,
                         message,
                     );
-                    return annotate_user_item(item, user, previous, None);
+                    return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+                        item, user, previous, None,
+                    )));
                 }
             };
-            let checkpoint = run.item(
+            let managed_checkpoint = run.item(
                 previous,
                 &user.name,
                 ProvisioningItemState::Ready,
@@ -1047,19 +1100,10 @@ async fn reconcile_user(
             );
             // Preserve the legacy observed Secret version so a concurrently rotated Secret is
             // still applied after the ownership checkpoint has been persisted.
-            let mut checkpoint = annotate_user_item(checkpoint, user, previous, None);
-            checkpoint.ownership = Some(managed_ownership.clone());
-            if let Err(error) = persist_user_ownership_checkpoint(run, checkpoint).await {
-                let message = handle_checkpoint_error(run, error);
-                let item = run.item(
-                    previous,
-                    &user.name,
-                    ProvisioningItemState::Failed,
-                    Reason::UserOwnershipCheckpointFailed,
-                    message,
-                );
-                return annotate_user_item(item, user, previous, None);
-            }
+            let mut managed_checkpoint =
+                annotate_user_item(managed_checkpoint, user, previous, None);
+            managed_checkpoint.ownership = Some(managed_ownership.clone());
+            checkpoint_update = Some(managed_checkpoint);
             ownership = Some(managed_ownership);
         } else {
             let item = run.item(
@@ -1069,7 +1113,9 @@ async fn reconcile_user(
                 Reason::UserOwnershipConflict,
                 "RustFS user already exists without a matching operator ownership checkpoint; choose a different access key or remove the unmanaged user",
             );
-            return annotate_user_item(item, user, previous, None);
+            return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+                item, user, previous, None,
+            )));
         }
     }
 
@@ -1089,29 +1135,22 @@ async fn reconcile_user(
                     Reason::UserOwnershipCheckpointFailed,
                     message,
                 );
-                return annotate_user_item(item, user, previous, None);
+                return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+                    item, user, previous, None,
+                )));
             }
         };
-        let checkpoint = run.item(
+        let pending_checkpoint = run.item(
             previous,
             &user.name,
             ProvisioningItemState::Pending,
             Reason::ProvisioningPending,
             "Operator ownership checkpoint was persisted before creating the RustFS user",
         );
-        let mut checkpoint = annotate_user_item(checkpoint, user, previous, Some(credentials));
-        checkpoint.ownership = Some(pending_ownership.clone());
-        if let Err(error) = persist_user_ownership_checkpoint(run, checkpoint).await {
-            let message = handle_checkpoint_error(run, error);
-            let item = run.item(
-                previous,
-                &user.name,
-                ProvisioningItemState::Failed,
-                Reason::UserOwnershipCheckpointFailed,
-                message,
-            );
-            return annotate_user_item(item, user, previous, None);
-        }
+        let mut pending_checkpoint =
+            annotate_user_item(pending_checkpoint, user, previous, Some(credentials));
+        pending_checkpoint.ownership = Some(pending_ownership.clone());
+        checkpoint_update = Some(pending_checkpoint);
         ownership = Some(pending_ownership);
     } else if !exists
         && ownership.as_ref().is_some_and(|ownership| {
@@ -1121,29 +1160,20 @@ async fn reconcile_user(
         // Refresh the persisted intent before retrying an external create after a process crash.
         // This recovery relies on per-Tenant controller serialization; it does not provide
         // exactly-once delivery across Kubernetes and independent RustFS actors.
-        let checkpoint = run.item(
+        let pending_checkpoint = run.item(
             previous,
             &user.name,
             ProvisioningItemState::Pending,
             Reason::ProvisioningPending,
             "Operator is resuming a pending RustFS user creation",
         );
-        let mut checkpoint = annotate_user_item(checkpoint, user, previous, Some(credentials));
-        checkpoint.ownership = ownership.clone();
-        if let Err(error) = persist_user_ownership_checkpoint(run, checkpoint).await {
-            let message = handle_checkpoint_error(run, error);
-            let item = run.item(
-                previous,
-                &user.name,
-                ProvisioningItemState::Failed,
-                Reason::UserOwnershipCheckpointFailed,
-                message,
-            );
-            return annotate_user_item(item, user, previous, None);
-        }
+        let mut pending_checkpoint =
+            annotate_user_item(pending_checkpoint, user, previous, Some(credentials));
+        pending_checkpoint.ownership = ownership.clone();
+        checkpoint_update = Some(pending_checkpoint);
     }
 
-    let Some(mut ownership) = ownership else {
+    let Some(ownership) = ownership else {
         let item = run.item(
             previous,
             &user.name,
@@ -1151,11 +1181,36 @@ async fn reconcile_user(
             Reason::UserOwnershipCheckpointFailed,
             "Operator ownership checkpoint is required before synchronizing RustFS user credentials",
         );
-        return annotate_user_item(item, user, previous, None);
+        return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+            item, user, previous, None,
+        )));
     };
 
+    UserReconcilePlan::Prepared(Box::new(PreparedUserReconcile {
+        user: user.clone(),
+        credentials: credentials.clone(),
+        exists,
+        ownership,
+        checkpoint: checkpoint_update,
+    }))
+}
+
+async fn execute_prepared_user(
+    run: &ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    prepared: PreparedUserReconcile,
+) -> ProvisioningUserStatus {
+    let PreparedUserReconcile {
+        user,
+        credentials,
+        exists,
+        mut ownership,
+        ..
+    } = prepared;
+    let previous = run.previous_user(&user.name);
+
     let credentials_applied =
-        match sync_user_credentials(client, previous, credentials, exists).await {
+        match sync_user_credentials(client, previous, &credentials, exists).await {
             Ok(applied) => applied,
             Err(error) => {
                 let item = run.item(
@@ -1165,7 +1220,7 @@ async fn reconcile_user(
                     Reason::UserSecretInvalid,
                     format!("failed to update RustFS user credentials: {error}"),
                 );
-                let mut item = annotate_user_item(item, user, previous, None);
+                let mut item = annotate_user_item(item, &user, previous, None);
                 item.ownership = Some(ownership);
                 return item;
             }
@@ -1184,7 +1239,7 @@ async fn reconcile_user(
             Reason::UserPolicySetFailed,
             format!("failed to set RustFS user policy mapping: {error}"),
         );
-        let mut item = annotate_user_item(item, user, previous, Some(credentials));
+        let mut item = annotate_user_item(item, &user, previous, Some(&credentials));
         item.ownership = Some(ownership);
         return item;
     }
@@ -1212,9 +1267,49 @@ async fn reconcile_user(
         }
         _ => Some(run.now.clone()),
     };
-    let mut item = annotate_user_item(item, user, previous, Some(credentials));
+    let mut item = annotate_user_item(item, &user, previous, Some(&credentials));
     item.ownership = Some(ownership);
     item
+}
+
+#[cfg(test)]
+async fn reconcile_user(
+    run: &ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    live_policies: &BTreeMap<String, String>,
+    failed_spec_policies: &BTreeSet<String>,
+    user: &ProvisioningUser,
+    credentials: &UserCredentials,
+) -> ProvisioningUserStatus {
+    match prepare_user_reconcile(
+        run,
+        client,
+        live_policies,
+        failed_spec_policies,
+        user,
+        credentials,
+    )
+    .await
+    {
+        UserReconcilePlan::Complete(item) => *item,
+        UserReconcilePlan::Prepared(prepared) => {
+            if let Some(checkpoint) = prepared.checkpoint.as_ref()
+                && let Err(error) =
+                    persist_user_ownership_checkpoints(run, std::slice::from_ref(checkpoint)).await
+            {
+                let previous = run.previous_user(&prepared.user.name);
+                let item = run.item(
+                    previous,
+                    &prepared.user.name,
+                    ProvisioningItemState::Failed,
+                    Reason::UserOwnershipCheckpointFailed,
+                    checkpoint_error_message(error),
+                );
+                return annotate_user_item(item, &prepared.user, previous, None);
+            }
+            execute_prepared_user(run, client, *prepared).await
+        }
+    }
 }
 
 fn matching_user_ownership(
@@ -1280,10 +1375,13 @@ fn user_ownership(
     })
 }
 
-async fn persist_user_ownership_checkpoint(
+async fn persist_user_ownership_checkpoints(
     run: &ProvisioningRun<'_>,
-    checkpoint: ProvisioningUserStatus,
+    checkpoints: &[ProvisioningUserStatus],
 ) -> Result<(), CheckpointError> {
+    if checkpoints.is_empty() {
+        return Ok(());
+    }
     let api: Api<Tenant> = Api::namespaced(run.ctx.client.clone(), run.namespace);
     let latest = api
         .get(&run.tenant.name())
@@ -1298,24 +1396,28 @@ async fn persist_user_ownership_checkpoint(
             retry_after: CHECKPOINT_CONFLICT_RETRY,
         }));
     }
-    let previous_user = run
-        .previous
-        .users
-        .iter()
-        .find(|item| item.name == checkpoint.name);
-    let latest_user = latest.status.as_ref().and_then(|status| {
-        status
-            .provisioning
+    for checkpoint in checkpoints {
+        let previous_user = run
+            .previous
             .users
             .iter()
-            .find(|item| item.name == checkpoint.name)
-    });
-    if latest_user != previous_user {
-        return Err(CheckpointError::Retry(CheckpointRetry {
-            message: "Tenant user provisioning status changed before persisting the RustFS user ownership checkpoint"
-                .to_string(),
-            retry_after: CHECKPOINT_CONFLICT_RETRY,
-        }));
+            .find(|item| item.name == checkpoint.name);
+        let latest_user = latest.status.as_ref().and_then(|status| {
+            status
+                .provisioning
+                .users
+                .iter()
+                .find(|item| item.name == checkpoint.name)
+        });
+        if latest_user != previous_user {
+            return Err(CheckpointError::Retry(CheckpointRetry {
+                message: format!(
+                    "Tenant user '{}' provisioning status changed before persisting the RustFS user ownership checkpoint",
+                    checkpoint.name
+                ),
+                retry_after: CHECKPOINT_CONFLICT_RETRY,
+            }));
+        }
     }
     let Some(resource_version) = latest.metadata.resource_version.clone() else {
         return Err(CheckpointError::Permanent {
@@ -1332,7 +1434,7 @@ async fn persist_user_ownership_checkpoint(
     merge_provisioning_items(&mut provisioning.policies, &run.status.policies);
     merge_provisioning_user_items(&mut provisioning.users, &run.status.users);
     merge_provisioning_items(&mut provisioning.buckets, &run.status.buckets);
-    merge_provisioning_user_items(&mut provisioning.users, std::slice::from_ref(&checkpoint));
+    merge_provisioning_user_items(&mut provisioning.users, checkpoints);
     provisioning.observed_generation = run.tenant.metadata.generation;
     provisioning.phase = Some(ProvisioningPhase::Pending);
     provisioning
@@ -1366,20 +1468,24 @@ async fn persist_user_ownership_checkpoint(
             retry_after: CHECKPOINT_TRANSIENT_RETRY,
         }));
     }
-    let persisted_checkpoint = updated.status.as_ref().and_then(|status| {
-        status
-            .provisioning
-            .users
-            .iter()
-            .find(|item| item.name == checkpoint.name)
-    });
-    if persisted_checkpoint.is_none_or(|persisted| {
-        persisted.state != checkpoint.state || persisted.ownership != checkpoint.ownership
-    }) {
-        return Err(CheckpointError::Permanent {
-            message: "Kubernetes accepted the RustFS user ownership checkpoint request but did not persist the expected state and ownership proof; ensure the Tenant CRD is upgraded before the Operator"
-                .to_string(),
+    for checkpoint in checkpoints {
+        let persisted_checkpoint = updated.status.as_ref().and_then(|status| {
+            status
+                .provisioning
+                .users
+                .iter()
+                .find(|item| item.name == checkpoint.name)
         });
+        if persisted_checkpoint.is_none_or(|persisted| {
+            persisted.state != checkpoint.state || persisted.ownership != checkpoint.ownership
+        }) {
+            return Err(CheckpointError::Permanent {
+                message: format!(
+                    "Kubernetes accepted the RustFS user ownership checkpoint request but did not persist the expected state and ownership proof for user '{}'; ensure the Tenant CRD is upgraded before the Operator",
+                    checkpoint.name
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -1420,14 +1526,11 @@ fn classify_checkpoint_kube_error(error: kube::Error) -> CheckpointError {
     }
 }
 
-fn handle_checkpoint_error(run: &ProvisioningRun<'_>, error: CheckpointError) -> String {
+#[cfg(test)]
+fn checkpoint_error_message(error: CheckpointError) -> String {
     match error {
         CheckpointError::Permanent { message } => message,
-        CheckpointError::Retry(retry) => {
-            let message = retry.message.clone();
-            run.request_checkpoint_retry(retry);
-            message
-        }
+        CheckpointError::Retry(retry) => retry.message,
     }
 }
 
@@ -2093,7 +2196,6 @@ mod tests {
             now: "2026-07-18T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
         let request_count = Arc::new(AtomicUsize::new(0));
@@ -2180,7 +2282,6 @@ mod tests {
             now: "2026-07-18T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
         let client = RustfsAdminClient::new_with_base_url(
@@ -2402,26 +2503,123 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
         let winner = make_run();
         let loser = make_run();
 
-        persist_user_ownership_checkpoint(&winner, checkpoint.clone())
+        persist_user_ownership_checkpoints(&winner, std::slice::from_ref(&checkpoint))
             .await
             .expect("first reconciler should persist its checkpoint");
-        let error = persist_user_ownership_checkpoint(&loser, checkpoint)
+        let error = persist_user_ownership_checkpoints(&loser, std::slice::from_ref(&checkpoint))
             .await
             .expect_err("stale reconciler should lose the CAS");
-        handle_checkpoint_error(&loser, error);
 
-        match loser.finish().outcome {
-            ProvisioningOutcome::Retry { retry_after, .. } => {
+        match error {
+            CheckpointError::Retry(CheckpointRetry { retry_after, .. }) => {
                 assert_eq!(retry_after, CHECKPOINT_CONFLICT_RETRY);
             }
             _ => panic!("stale checkpoint writer should retry"),
         }
         assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn multiple_user_ownership_checkpoints_use_one_cas_patch() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let captured_patch = Arc::new(Mutex::new(Value::Null));
+        let user = provisioning_user("app-user-a", "app-user-secret-a", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut first = owned_user_status(ProvisioningUserOwnershipState::PendingCreate, "5");
+        first.name = "app-user-a".to_string();
+        first.state = ProvisioningItemState::Pending.as_str().to_string();
+        first
+            .ownership
+            .as_mut()
+            .expect("ownership should exist")
+            .user_name = first.name.clone();
+        let mut second = first.clone();
+        second.name = "app-user-b".to_string();
+        second
+            .ownership
+            .as_mut()
+            .expect("ownership should exist")
+            .user_name = second.name.clone();
+
+        let mut latest_tenant = tenant.clone();
+        latest_tenant.metadata.resource_version = Some("18".to_string());
+        let mut persisted_tenant = latest_tenant.clone();
+        persisted_tenant.metadata.resource_version = Some("19".to_string());
+        persisted_tenant
+            .status
+            .as_mut()
+            .expect("Tenant should have status")
+            .provisioning
+            .users = vec![first.clone(), second.clone()];
+
+        let service_requests = requests.clone();
+        let service_patch = captured_patch.clone();
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| {
+            let service_requests = service_requests.clone();
+            let service_patch = service_patch.clone();
+            let latest_tenant = latest_tenant.clone();
+            let persisted_tenant = persisted_tenant.clone();
+            async move {
+                let attempt = service_requests.fetch_add(1, Ordering::SeqCst);
+                let response_tenant = match attempt {
+                    0 => {
+                        assert_eq!(request.method(), http::Method::GET);
+                        latest_tenant
+                    }
+                    1 => {
+                        assert_eq!(request.method(), http::Method::PATCH);
+                        let body = request
+                            .into_body()
+                            .collect()
+                            .await
+                            .expect("status patch body should be readable")
+                            .to_bytes();
+                        *service_patch.lock().await =
+                            serde_json::from_slice(&body).expect("status patch should be JSON");
+                        persisted_tenant
+                    }
+                    _ => panic!("unexpected Kubernetes request {attempt}"),
+                };
+                Ok::<_, Infallible>(
+                    http::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(KubeBody::from(
+                            serde_json::to_vec(&response_tenant)
+                                .expect("Tenant response should serialize"),
+                        ))
+                        .expect("response should build"),
+                )
+            }
+        });
+        let ctx = Context::new(Client::new(kube_service, "default"));
+        let run = ProvisioningRun {
+            ctx: &ctx,
+            tenant: &tenant,
+            namespace: "storage",
+            previous: ProvisioningStatus::default(),
+            now: "2026-08-02T00:00:00Z".to_string(),
+            status: ProvisioningStatus::default(),
+            failures: Vec::new(),
+        };
+
+        persist_user_ownership_checkpoints(&run, &[first, second])
+            .await
+            .expect("all checkpoints should be persisted together");
+
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        let patch = captured_patch.lock().await;
+        assert_eq!(patch["metadata"]["resourceVersion"], "18");
+        assert_eq!(
+            patch["status"]["provisioning"]["users"]
+                .as_array()
+                .expect("users should be an array")
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -2482,7 +2680,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
         let write_requests = Arc::new(AtomicUsize::new(0));
@@ -2619,7 +2816,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
         let get_sequence = sequence.clone();
@@ -2764,7 +2960,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
         let write_requests = Arc::new(AtomicUsize::new(0));
@@ -2886,10 +3081,9 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
-        let error = persist_user_ownership_checkpoint(&run, checkpoint)
+        let error = persist_user_ownership_checkpoints(&run, std::slice::from_ref(&checkpoint))
             .await
             .expect_err("rewritten checkpoint state must be rejected");
 
@@ -2929,7 +3123,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
         let add_requests = Arc::new(AtomicUsize::new(0));
@@ -3052,7 +3245,6 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
-            checkpoint_retry: StdMutex::new(None),
         };
 
         let add_requests = Arc::new(AtomicUsize::new(0));
