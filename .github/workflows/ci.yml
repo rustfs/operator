@@ -101,14 +101,14 @@ jobs:
 
       - name: Run tests
         run: |
-          cargo nextest run --all --no-tests pass
-          cargo test --all --doc
+          cargo nextest run --workspace --no-tests pass
+          cargo test --workspace --doc
 
       - name: Check code formatting
         run: cargo fmt --all --check
 
       - name: Run clippy lints
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --workspace --all-features -- -D warnings
 
       - name: Check Rust-native e2e harness
         run: make e2e-check

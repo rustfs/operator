@@ -48,4 +48,15 @@ To open the Operator Console locally:
 {{ end }}
 
 {{ end }}
+
+{{- if .Values.cosi.enabled }}
+COSI driver is enabled (experimental, v1alpha1). Driver name: {{ .Values.cosi.driverName }}
+
+Ensure the COSI controller is installed:
+
+  kubectl apply -k 'github.com/kubernetes-sigs/container-object-storage-interface//?ref=release-0.2'
+
+Example manifests: examples/cosi/
+
+{{- end }}
 For more information, visit: {{ .Chart.Home }}

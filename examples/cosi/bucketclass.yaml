@@ -1,0 +1,21 @@
+# Example BucketClass for a RustFS Tenant.
+#
+# Prerequisites:
+# 1. COSI controller: kubectl apply -k 'github.com/kubernetes-sigs/container-object-storage-interface//?ref=release-0.2'
+# 2. Operator chart with cosi.enabled=true
+# 3. A ready Tenant whose admin Secret matches objectStoreUserSecretName/Namespace
+# 4. endpoint points at the Tenant S3 Service (port 9000)
+#
+# Replace secret name/namespace and endpoint for your Tenant.
+
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketClass
+metadata:
+  name: rustfs-bucketclass
+driverName: rustfs.objectstorage.k8s.io
+deletionPolicy: Delete
+parameters:
+  objectStoreUserSecretName: provisioning-admin-creds
+  objectStoreUserSecretNamespace: default
+  endpoint: http://provisioning-demo-io.default.svc:9000
+  region: us-east-1

@@ -14,7 +14,10 @@
 
 use crate::{
     metrics::{self, TenantStorageMetrics},
-    sts::rustfs_client::{RustfsAdminClient, RustfsServerInfo},
+    sts::rustfs_client::{
+        RustfsServerInfo, client_from_tenant, client_from_tls_tenant_for_sts,
+        load_tenant_credentials,
+    },
     types::v1alpha1::tenant::Tenant,
 };
 use futures::{StreamExt, stream};
@@ -167,12 +170,11 @@ async fn poll_tenant_storage(
     tenant: &Tenant,
     cluster_domain: &str,
 ) -> Result<TenantStorageMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    let credentials = RustfsAdminClient::load_tenant_credentials(client, tenant).await?;
+    let credentials = load_tenant_credentials(client, tenant).await?;
     let rustfs_client = if tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled()) {
-        RustfsAdminClient::from_tls_tenant_for_sts(client, tenant, credentials, cluster_domain)
-            .await?
+        client_from_tls_tenant_for_sts(client, tenant, credentials, cluster_domain).await?
     } else {
-        RustfsAdminClient::from_tenant(tenant, credentials)?
+        client_from_tenant(tenant, credentials)?
     };
     let info = rustfs_client.server_info().await?;
 

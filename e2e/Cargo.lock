@@ -2526,7 +2526,6 @@ dependencies = [
  "const-str",
  "futures",
  "hex",
- "hmac 0.12.1",
  "hostname",
  "http 1.4.0",
  "http-body-util",
@@ -2536,8 +2535,8 @@ dependencies = [
  "kube",
  "kube-leader-election",
  "rcgen",
- "reqwest",
  "ring",
+ "rustfs-admin",
  "rustls 0.23.40",
  "rustls-pemfile",
  "rustls-webpki 0.103.13",
@@ -2558,7 +2557,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "url",
  "utoipa",
  "utoipa-swagger-ui",
 ]
@@ -3108,6 +3106,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustfs-admin"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "url",
 ]
 
 [[package]]

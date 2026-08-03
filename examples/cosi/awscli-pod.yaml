@@ -1,0 +1,20 @@
+# Sample app that mounts the COSI BucketAccess Secret and prints BucketInfo.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cosi-awscli
+  namespace: default
+spec:
+  containers:
+    - name: awscli
+      image: amazon/aws-cli:2.15.0
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: cosi-secrets
+          mountPath: /data/cosi
+          readOnly: true
+  volumes:
+    - name: cosi-secrets
+      secret:
+        secretName: sample-bucket-access-secret
+  restartPolicy: Never

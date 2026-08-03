@@ -18,16 +18,18 @@
 
 use std::collections::BTreeMap;
 
-use super::helpers::{
-    body_mentions_not_found, build_canonical_query, extract_canned_policy_document,
-};
-use super::{
-    ADD_CANNED_POLICY_PATH, ADD_USER_PATH, ADMIN_SIGNING_SERVICE, INFO_CANNED_POLICY_PATH,
-    JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, RustfsAdminClient, RustfsClientError,
-    RustfsServerInfo, RustfsServerInfoResponse, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
-};
 use reqwest::StatusCode;
 use serde_json::Value;
+
+use crate::client::{
+    ADD_CANNED_POLICY_PATH, ADD_USER_PATH, ADMIN_SIGNING_SERVICE, INFO_CANNED_POLICY_PATH,
+    JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, REMOVE_CANNED_POLICY_PATH, REMOVE_USER_PATH,
+    RustfsAdminClient, RustfsClientError, RustfsServerInfo, RustfsServerInfoResponse,
+    SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
+};
+use crate::helpers::{
+    body_mentions_not_found, build_canonical_query, extract_canned_policy_document,
+};
 
 impl RustfsAdminClient {
     // Admin duties: user and policy management APIs.
@@ -118,6 +120,45 @@ impl RustfsAdminClient {
         }
 
         Ok(())
+    }
+
+    /// Remove a RustFS canned policy. Succeeds if the policy is already gone.
+    pub async fn remove_canned_policy(&self, policy_name: &str) -> Result<(), RustfsClientError> {
+        if policy_name.trim().is_empty() {
+            return Err(RustfsClientError::InvalidPolicyName);
+        }
+
+        let query = build_canonical_query(&[("name", policy_name)]);
+        let path = REMOVE_CANNED_POLICY_PATH;
+        let url = format!("{}{}?{query}", self.base_url.trim_end_matches('/'), path);
+
+        let signed = self.sign_request("DELETE", path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .delete(url)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+            return Ok(());
+        }
+
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
     }
 
     pub async fn list_canned_policies(
@@ -214,6 +255,45 @@ impl RustfsAdminClient {
         self.send_admin_request("PUT", ADD_USER_PATH, &query, &body, Some(JSON_CONTENT_TYPE))
             .await
             .map(|_| ())
+    }
+
+    /// Remove a RustFS user. Succeeds if the user is already gone.
+    pub async fn remove_user(&self, access_key: &str) -> Result<(), RustfsClientError> {
+        if access_key.trim().is_empty() {
+            return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
+        }
+
+        let query = build_canonical_query(&[("accessKey", access_key)]);
+        let path = REMOVE_USER_PATH;
+        let url = format!("{}{}?{query}", self.base_url.trim_end_matches('/'), path);
+
+        let signed = self.sign_request("DELETE", path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .delete(url)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+            return Ok(());
+        }
+
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
     }
 
     pub async fn set_user_policy(

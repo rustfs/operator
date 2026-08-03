@@ -32,7 +32,9 @@ use crate::http_admission::{
 use crate::metrics::UnauthenticatedRequestOutcome;
 use crate::sts::binding;
 use crate::sts::error::{StsError, StsErrorType, render_sts_error_xml_with_type};
-use crate::sts::rustfs_client::{RustfsAdminClient, RustfsClientError};
+use crate::sts::rustfs_client::{
+    RustfsAdminClient, RustfsClientError, client_from_tls_tenant_for_sts, load_tenant_credentials,
+};
 use crate::sts::session_policy;
 use crate::sts::token_review::{self, TokenReviewError};
 use crate::sts::types::{
@@ -642,11 +644,11 @@ async fn create_rustfs_admin_client(
         });
     }
 
-    let credentials = RustfsAdminClient::load_tenant_credentials(client, tenant)
+    let credentials = load_tenant_credentials(client, tenant)
         .await
         .map_err(|_| StsError::InternalError)?;
 
-    RustfsAdminClient::from_tls_tenant_for_sts(client, tenant, credentials, cluster_domain)
+    client_from_tls_tenant_for_sts(client, tenant, credentials, cluster_domain)
         .await
         .map_err(map_rustfs_client_creation_error)
 }

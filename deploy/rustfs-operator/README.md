@@ -76,6 +76,27 @@ manifests remain consistent.
 | `sts.service.type` | Kubernetes Service type for STS | `ClusterIP` |
 | `sts.service.port` | Kubernetes Service port for STS | `4223` |
 
+### COSI Driver Configuration (experimental)
+
+Install the COSI controller first (`release-0.2`), then enable the chart-managed driver:
+
+```bash
+kubectl apply -k 'github.com/kubernetes-sigs/container-object-storage-interface//?ref=release-0.2'
+helm upgrade --install rustfs-operator deploy/rustfs-operator/ --set cosi.enabled=true
+```
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `cosi.enabled` | Deploy the RustFS COSI driver + sidecar | `false` |
+| `cosi.driverName` | Driver name used in BucketClass / BucketAccessClass | `rustfs.objectstorage.k8s.io` |
+| `cosi.replicas` | Driver Deployment replicas | `1` |
+| `cosi.image.repository` | Driver image (empty = operator image) | `""` |
+| `cosi.image.tag` | Driver image tag (empty = operator tag) | `""` |
+| `cosi.sidecar.image.repository` | Official COSI provisioner sidecar image | `gcr.io/k8s-staging-sig-storage/objectstorage-sidecar` |
+| `cosi.sidecar.image.tag` | Sidecar image tag | `v20230130-v0.1.0-24-gc0cf995` |
+
+Example manifests: `examples/cosi/`. See the operator user guide section on COSI.
+
 The RustFS operator STS endpoint intentionally uses an explicit Tenant route:
 
 ```text

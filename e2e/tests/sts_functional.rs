@@ -21,7 +21,10 @@ use k8s_openapi::api::core::v1 as corev1;
 use kube::Api;
 use operator::{
     console::state::AppState,
-    sts::{rustfs_client::RustfsAdminClient, server::routes},
+    sts::{
+        rustfs_client::{RustfsAdminClient, load_tenant_credentials, load_tenant_tls_ca},
+        server::routes,
+    },
     types::v1alpha1::tenant::Tenant,
 };
 use rustfs_operator_e2e::framework::{
@@ -273,7 +276,7 @@ async fn ensure_rustfs_canned_policy(
     let rustfs_url = local_https_base_url(&rustfs_host, &rustfs_port_forward_spec);
     let mut rustfs_port_forward =
         PortForwardSpec::start_tenant_io(config).context("start RustFS tenant IO port-forward")?;
-    let tenant_ca = RustfsAdminClient::load_tenant_tls_ca(kube_client, tenant)
+    let tenant_ca = load_tenant_tls_ca(kube_client, tenant)
         .await
         .context("load TLS Tenant CA")?
         .context("TLS Tenant should publish a CA Secret reference")?;
@@ -284,7 +287,7 @@ async fn ensure_rustfs_canned_policy(
     )?;
     wait_for_port_forward(&mut rustfs_port_forward, &rustfs_url, &rustfs_probe_client).await?;
 
-    let credentials = RustfsAdminClient::load_tenant_credentials(kube_client, tenant)
+    let credentials = load_tenant_credentials(kube_client, tenant)
         .await
         .context("load RustFS tenant credentials")?;
     let rustfs_admin = RustfsAdminClient::new_with_base_url_and_http_client(

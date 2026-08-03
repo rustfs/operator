@@ -1,0 +1,9 @@
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketClaim
+metadata:
+  name: sample-bucket-claim
+  namespace: default
+spec:
+  bucketClassName: rustfs-bucketclass
+  protocols:
+    - s3

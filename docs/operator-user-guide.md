@@ -930,7 +930,49 @@ Current STS constraints:
 - Caller-supplied `Policy` request parameters are rejected; issued credentials use the matched `PolicyBinding` policies.
 - Tenants requiring client certificates for upstream Tenant calls are rejected by Operator STS.
 
-## 10. Monitoring and Status
+## 10. COSI (Experimental)
+
+The operator ships an optional [Container Object Storage Interface](https://github.com/kubernetes-sigs/container-object-storage-interface) (COSI) **v1alpha1** driver (`rustfs.objectstorage.k8s.io`). Applications request buckets with `BucketClaim` / `BucketAccess` instead of embedding bucket lists on the Tenant CR. Tenant bootstrap provisioning (`spec.buckets`) and COSI can coexist.
+
+### 10.1 Prerequisites
+
+1. Install the COSI controller and CRDs (`release-0.2`):
+
+```bash
+kubectl apply -k 'github.com/kubernetes-sigs/container-object-storage-interface//?ref=release-0.2'
+```
+
+2. Enable the driver in the Helm chart:
+
+```bash
+helm upgrade --install rustfs-operator ./deploy/rustfs-operator \
+  --set cosi.enabled=true
+```
+
+The chart deploys a pod with two containers: `rustfs-cosi-driver` and the official `objectstorage-sidecar`, sharing `unix:///var/lib/cosi/cosi.sock`.
+
+### 10.2 Point a BucketClass at a Tenant
+
+`BucketClass` / `BucketAccessClass` parameters (Rook-style) identify the Tenant admin credentials and S3 endpoint:
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `objectStoreUserSecretName` | yes | Secret with `accesskey` / `secretkey` (Tenant `spec.credsSecret`) |
+| `objectStoreUserSecretNamespace` | yes | Namespace of that Secret |
+| `endpoint` | yes | S3 URL, e.g. `http://{tenant}-io.{ns}.svc:9000` |
+| `region` | no | Defaults to `us-east-1` |
+| `policy` | no | On `BucketAccessClass`: `readonly` or `readwrite` (default) |
+| `tlsCAConfigMapName` / `tlsCAConfigMapNamespace` | no | PEM CA for HTTPS Tenants |
+
+See `examples/cosi/` for full manifests.
+
+### 10.3 Limitations
+
+- Experimental; protocol **S3** and authentication **KEY** only.
+- Does not replace Operator STS / `PolicyBinding` for temporary credentials.
+- Driver name is fixed: `rustfs.objectstorage.k8s.io`.
+
+## 11. Monitoring and Status
 
 Check Tenant status:
 
@@ -988,7 +1030,7 @@ operator:
     enabled: true
 ```
 
-## 11. Operations
+## 12. Operations
 
 ### Change RustFS Image
 
@@ -1026,7 +1068,7 @@ kubectl create secret generic rustfs-admin-creds \
 kubectl rollout restart statefulset -n <namespace> -l rustfs.tenant=<tenant>
 ```
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 ### Tenant is Blocked
 
@@ -1084,7 +1126,7 @@ kubectl logs -n rustfs-system \
 
 For the RustFS Tenant Console, use the Tenant admin credentials from `spec.credsSecret` or configured RustFS environment variables.
 
-## 13. Best Practices
+## 14. Best Practices
 
 - Use `spec.credsSecret` or an external secret manager for production credentials.
 - Enable Kubernetes Secret encryption at rest.
@@ -1097,7 +1139,7 @@ For the RustFS Tenant Console, use the Tenant admin credentials from `spec.creds
 - Keep Tenant examples under version control, but never commit raw Secret values.
 - Check `status.conditions` before debugging lower-level StatefulSets.
 
-## 14. Related Documentation
+## 15. Related Documentation
 
 - [Project README](../README.md)
 - [Deployment guide](../deploy/README.md)

@@ -53,7 +53,7 @@ WORKDIR /app
 COPY . .
 COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
-RUN cargo build --release
+RUN cargo build --release -p operator -p cosi-driver
 
 # Stage 4: Build the static Console frontend
 FROM ${NODE_BUILD_IMAGE} AS console-web-builder
@@ -72,5 +72,6 @@ FROM ${BASE_IMAGE}
 
 WORKDIR /app
 COPY --from=builder /app/target/release/operator .
+COPY --from=builder /app/target/release/rustfs-cosi-driver .
 COPY --from=console-web-builder /app/console-web/out ./console-web
 ENTRYPOINT ["./operator"]

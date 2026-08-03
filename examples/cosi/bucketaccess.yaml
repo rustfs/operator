@@ -1,0 +1,10 @@
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketAccess
+metadata:
+  name: sample-bucket-access
+  namespace: default
+spec:
+  bucketClaimName: sample-bucket-claim
+  bucketAccessClassName: rustfs-bucket-access-class
+  credentialsSecretName: sample-bucket-access-secret
+  protocol: s3

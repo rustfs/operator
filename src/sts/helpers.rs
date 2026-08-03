@@ -12,20 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Internal helper duties: shared credential parsing, signature/hash utilities, and parsers.
+//! Internal helper duties: Tenant/kube credential and TLS status parsing.
+//! Wire-protocol helpers (signing, hashing, response parsing) live in the
+//! kube-agnostic `rustfs-admin` crate.
 use std::collections::BTreeMap;
 
-use hmac::{Hmac, Mac};
 use k8s_openapi::ByteString;
-use reqwest::StatusCode;
-use serde_json::Value;
-use sha2::{Digest, Sha256};
-use url::form_urlencoded;
 
 use crate::Tenant;
-use crate::sts::types::StsAssumeRoleCredentials;
-
-use super::{RustfsClientError, RustfsCredentials};
+use crate::sts::rustfs_client::{RustfsClientError, RustfsCredentials};
 
 pub(super) fn extract_credentials(
     data: Option<&BTreeMap<String, ByteString>>,
@@ -69,158 +64,82 @@ pub(super) fn get_secret_value(
     Ok(value)
 }
 
-/// Encode an `application/x-www-form-urlencoded` request body.
-pub(super) fn build_form_body(params: &[(&str, &str)]) -> String {
-    let mut pairs: Vec<(String, String)> = params
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-        .collect();
-    pairs.sort_by(|(k1, v1), (k2, v2)| k1.cmp(k2).then(v1.cmp(v2)));
+#[cfg(test)]
+mod tests {
+    use k8s_openapi::{ByteString, api::core::v1 as corev1};
+    use std::collections::BTreeMap;
 
-    let mut serializer = form_urlencoded::Serializer::new(String::new());
-    for (key, value) in pairs {
-        serializer.append_pair(&key, &value);
-    }
+    use super::extract_credentials;
+    use crate::sts::rustfs_client::RustfsClientError;
 
-    serializer.finish()
-}
+    fn secret_with_fields(fields: Vec<(&str, &[u8])>) -> corev1::Secret {
+        let mut data = BTreeMap::new();
+        for (key, value) in fields {
+            data.insert(key.to_string(), ByteString(value.to_vec()));
+        }
 
-/// Encode and sort query parameters according to the AWS SigV4 rules.
-pub(super) fn build_canonical_query(params: &[(&str, &str)]) -> String {
-    let mut pairs: Vec<(String, String)> = params
-        .iter()
-        .map(|(key, value)| (uri_encode(key), uri_encode(value)))
-        .collect();
-    pairs.sort_unstable();
-
-    pairs
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn uri_encode(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        corev1::Secret {
+            data: Some(data),
+            ..Default::default()
         }
     }
-    encoded
-}
 
-pub(super) fn create_bucket_body(region: Option<&str>) -> String {
-    let Some(region) = region.map(str::trim).filter(|region| !region.is_empty()) else {
-        return String::new();
-    };
+    #[test]
+    fn extract_credentials_reports_missing_access_key() {
+        let secret = secret_with_fields(vec![("secretkey", b"sekret")]);
 
-    if region == "us-east-1" {
-        return String::new();
+        let err =
+            extract_credentials(secret.data.as_ref()).expect_err("expected missing access key");
+        assert!(matches!(
+            err,
+            RustfsClientError::MissingCredentialKey { key: "accesskey" }
+        ));
     }
 
-    format!(
-        "<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LocationConstraint>{}</LocationConstraint></CreateBucketConfiguration>",
-        escape_xml(region)
-    )
-}
+    #[test]
+    fn extract_credentials_reports_non_utf8_access_key() {
+        let secret =
+            secret_with_fields(vec![("accesskey", &[0xff, 0xfe]), ("secretkey", b"sekret")]);
 
-pub(super) fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-pub(super) fn body_mentions_not_found(body: &str) -> bool {
-    let body = body.to_ascii_lowercase();
-    body.contains("nosuchuser")
-        || body.contains("no such user")
-        || body.contains("user not exist")
-        || body.contains("nosuchpolicy")
-        || body.contains("no such policy")
-        || body.contains("objectlockconfigurationnotfound")
-        || body.contains("not found")
-}
-
-pub(super) fn bucket_already_exists(status: StatusCode, body: &str) -> bool {
-    if status == StatusCode::CONFLICT {
-        let body = body.to_ascii_lowercase();
-        return body.contains("bucketalreadyexists") || body.contains("bucketalreadyownedbyyou");
+        let err = extract_credentials(secret.data.as_ref()).expect_err("expected invalid utf8");
+        assert!(matches!(
+            err,
+            RustfsClientError::InvalidCredentialValue { key: "accesskey" }
+        ));
     }
 
-    false
-}
+    #[test]
+    fn extract_credentials_reports_missing_secret_key() {
+        let secret = secret_with_fields(vec![("accesskey", b"access")]);
 
-pub(super) fn extract_canned_policy_document(body: &str) -> Result<String, RustfsClientError> {
-    let value = serde_json::from_str::<Value>(body)
-        .map_err(|_| RustfsClientError::InvalidPolicyDocument)?;
-    let policy = value.get("policy").unwrap_or(&value);
+        let err =
+            extract_credentials(secret.data.as_ref()).expect_err("expected missing secret key");
+        assert!(matches!(
+            err,
+            RustfsClientError::MissingCredentialKey { key: "secretkey" }
+        ));
+    }
 
-    serde_json::to_string(policy).map_err(|_| RustfsClientError::InvalidPolicyDocument)
-}
+    #[test]
+    fn extract_credentials_reports_non_utf8_secret_key() {
+        let secret =
+            secret_with_fields(vec![("accesskey", b"access"), ("secretkey", &[0xff, 0xfe])]);
 
-pub(super) fn sha256_hex(payload: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(payload);
-    hex::encode(hasher.finalize())
-}
+        let err = extract_credentials(secret.data.as_ref()).expect_err("expected invalid utf8");
+        assert!(matches!(
+            err,
+            RustfsClientError::InvalidCredentialValue { key: "secretkey" }
+        ));
+    }
 
-pub(super) fn hmac_sha256(key: &[u8], message: &str) -> Result<Vec<u8>, RustfsClientError> {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(key).map_err(|_| RustfsClientError::SigningFailed)?;
-    mac.update(message.as_bytes());
-    Ok(mac.finalize().into_bytes().to_vec())
-}
+    #[test]
+    fn extract_credentials_reports_empty_secret_key() {
+        let secret = secret_with_fields(vec![("accesskey", b"abc"), ("secretkey", b"")]);
 
-pub(super) fn hmac_sha256_hex(key: &[u8], message: &str) -> Result<String, RustfsClientError> {
-    let bytes = hmac_sha256(key, message)?;
-    Ok(hex::encode(bytes))
-}
-
-pub(super) fn derive_signing_key(
-    secret_key: &str,
-    date_stamp: &str,
-    region: &str,
-    service: &str,
-) -> Result<Vec<u8>, RustfsClientError> {
-    let k_secret = format!("AWS4{secret_key}").into_bytes();
-    let k_date = hmac_sha256(&k_secret, date_stamp)?;
-    let k_region = hmac_sha256(&k_date, region)?;
-    let k_service = hmac_sha256(&k_region, service)?;
-    hmac_sha256(&k_service, "aws4_request")
-}
-
-pub(super) fn parse_assume_role_response(body: &str) -> Option<StsAssumeRoleCredentials> {
-    let access_key_id = extract_xml_tag(body, "AccessKeyId")?;
-    let secret_access_key = extract_xml_tag(body, "SecretAccessKey")?;
-    let session_token = extract_xml_tag(body, "SessionToken")?;
-    let expiration = extract_xml_tag(body, "Expiration")?;
-
-    Some(StsAssumeRoleCredentials {
-        access_key_id,
-        secret_access_key,
-        session_token,
-        expiration,
-    })
-}
-
-pub(super) fn extract_xml_tag(document: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-
-    let open_idx = document.find(&open)?;
-    let start = open_idx + open.len();
-    let rest = &document[start..];
-    let end = rest.find(&close)?;
-
-    Some(rest[..end].trim().to_string())
+        let err = extract_credentials(secret.data.as_ref()).expect_err("expected empty secret key");
+        assert!(matches!(
+            err,
+            RustfsClientError::EmptyCredentialValue { key: "secretkey" }
+        ));
+    }
 }
