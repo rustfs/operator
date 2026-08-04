@@ -33,4 +33,4 @@ docs/*
 .claude/
 .cursor/
 .gemini/
-.kubeconfig
+kubeconfig
