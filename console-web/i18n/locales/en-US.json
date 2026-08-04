@@ -254,6 +254,9 @@
   "Override Pod SecurityContext UID/GID fields. Use Raw YAML for seccomp, container, and Pool-level settings. Changes apply after Pods are recreated.": "Override Pod SecurityContext UID/GID fields. Use Raw YAML for seccomp, container, and Pool-level settings. Changes apply after Pods are recreated.",
   "SecurityContext updated": "SecurityContext updated",
   "Failed to load security context": "Failed to load security context",
+  "Security defaults are delegated to platform admission. Effective UID/GID and runAsNonRoot values are platform-owned.": "Security defaults are delegated to platform admission. Effective UID/GID and runAsNonRoot values are platform-owned.",
+  "Platform-delegated security contexts can only be changed in Raw YAML.": "Platform-delegated security contexts can only be changed in Raw YAML.",
+  "Open Raw YAML": "Open Raw YAML",
   "Do not run as Root": "Do not run as Root",
   "Default": "Default",
   "Loading...": "Loading..."

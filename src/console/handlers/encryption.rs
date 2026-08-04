@@ -21,7 +21,6 @@ use crate::console::{
 use crate::types::v1alpha1::encryption::{
     EncryptionConfig, KmsBackendType, LocalKmsConfig, LocalKmsMasterKeySecretRef, VaultKmsConfig,
 };
-use crate::types::v1alpha1::security_context::effective_run_as_non_root;
 use crate::types::v1alpha1::tenant::Tenant;
 use axum::{Extension, Json, extract::Path};
 use k8s_openapi::api::core::v1 as corev1;
@@ -136,63 +135,46 @@ pub async fn get_encryption(
         .get(&name)
         .await
         .map_err(|e| error::map_kube_error(e, format!("Tenant '{}'", name)))?;
+    let security_context = tenant.spec.security_context.as_ref().map(|_| {
+        SecurityContextInfo::from_contexts(
+            tenant.spec.security_context.as_ref(),
+            tenant.spec.container_security_context.as_ref(),
+        )
+    });
 
-    let enc_resp =
-        match tenant.spec.encryption {
-            Some(ref enc) => EncryptionInfoResponse {
-                enabled: enc.enabled,
-                backend: enc.backend.to_string(),
-                vault: enc.vault.as_ref().map(|v| VaultInfo {
-                    endpoint: v.endpoint.clone(),
-                }),
-                local: enc.local.as_ref().map(|l| LocalInfo {
-                    key_directory: l.key_directory.clone(),
-                    master_key_secret_ref: l.master_key_secret_ref.as_ref().map(|s| {
-                        LocalMasterKeySecretRefInfo {
-                            name: s.name.clone(),
-                            key: s.key.clone(),
-                        }
-                    }),
-                    allow_insecure_dev_defaults: l.allow_insecure_dev_defaults,
-                }),
-                kms_secret_name: (enc.backend == KmsBackendType::Vault)
-                    .then(|| enc.kms_secret.as_ref().map(|s| s.name.clone()))
-                    .flatten(),
-                default_key_id: enc.default_key_id.clone(),
-                security_context: tenant.spec.security_context.as_ref().map(|sc| {
-                    SecurityContextInfo {
-                        run_as_user: sc.run_as_user,
-                        run_as_group: sc.run_as_group,
-                        fs_group: sc.fs_group,
-                        run_as_non_root: sc.run_as_non_root,
-                        effective_run_as_non_root: effective_run_as_non_root(
-                            sc.run_as_user,
-                            sc.run_as_non_root,
-                        ),
+    let enc_resp = match tenant.spec.encryption {
+        Some(ref enc) => EncryptionInfoResponse {
+            enabled: enc.enabled,
+            backend: enc.backend.to_string(),
+            vault: enc.vault.as_ref().map(|v| VaultInfo {
+                endpoint: v.endpoint.clone(),
+            }),
+            local: enc.local.as_ref().map(|l| LocalInfo {
+                key_directory: l.key_directory.clone(),
+                master_key_secret_ref: l.master_key_secret_ref.as_ref().map(|s| {
+                    LocalMasterKeySecretRefInfo {
+                        name: s.name.clone(),
+                        key: s.key.clone(),
                     }
                 }),
-            },
-            None => EncryptionInfoResponse {
-                enabled: false,
-                backend: "local".to_string(),
-                vault: None,
-                local: None,
-                kms_secret_name: None,
-                default_key_id: None,
-                security_context: tenant.spec.security_context.as_ref().map(|sc| {
-                    SecurityContextInfo {
-                        run_as_user: sc.run_as_user,
-                        run_as_group: sc.run_as_group,
-                        fs_group: sc.fs_group,
-                        run_as_non_root: sc.run_as_non_root,
-                        effective_run_as_non_root: effective_run_as_non_root(
-                            sc.run_as_user,
-                            sc.run_as_non_root,
-                        ),
-                    }
-                }),
-            },
-        };
+                allow_insecure_dev_defaults: l.allow_insecure_dev_defaults,
+            }),
+            kms_secret_name: (enc.backend == KmsBackendType::Vault)
+                .then(|| enc.kms_secret.as_ref().map(|s| s.name.clone()))
+                .flatten(),
+            default_key_id: enc.default_key_id.clone(),
+            security_context,
+        },
+        None => EncryptionInfoResponse {
+            enabled: false,
+            backend: "local".to_string(),
+            vault: None,
+            local: None,
+            kms_secret_name: None,
+            default_key_id: None,
+            security_context,
+        },
+    };
 
     Ok(Json(enc_resp))
 }

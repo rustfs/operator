@@ -17,7 +17,9 @@ use utoipa::ToSchema;
 
 use crate::types::v1alpha1::security_context::{
     PodSecurityContextOverride, effective_run_as_non_root,
+    security_context_pair_delegates_to_platform,
 };
+use k8s_openapi::api::core::v1 as corev1;
 
 /// GET response – current encryption configuration for a Tenant.
 #[derive(Debug, Serialize, ToSchema)]
@@ -64,21 +66,31 @@ pub struct SecurityContextInfo {
     pub run_as_group: Option<i64>,
     pub fs_group: Option<i64>,
     pub run_as_non_root: Option<bool>,
-    /// Effective value after applying the Operator default while preserving the raw override.
-    pub effective_run_as_non_root: bool,
+    /// Effective value after applying Operator defaults, or unknown when platform admission owns it.
+    #[schema(value_type = Option<bool>, nullable, required = false)]
+    pub effective_run_as_non_root: Option<bool>,
+    /// Whether an exact empty pair delegates unspecified values to platform admission.
+    pub operator_defaults_delegated: bool,
 }
 
 impl SecurityContextInfo {
-    pub(crate) fn from_override(context: Option<&PodSecurityContextOverride>) -> Self {
-        let run_as_user = context.and_then(|context| context.run_as_user);
-        let run_as_non_root = context.and_then(|context| context.run_as_non_root);
+    pub(crate) fn from_contexts(
+        pod: Option<&PodSecurityContextOverride>,
+        container: Option<&corev1::SecurityContext>,
+    ) -> Self {
+        let run_as_user = pod.and_then(|context| context.run_as_user);
+        let run_as_non_root = pod.and_then(|context| context.run_as_non_root);
+        let operator_defaults_delegated =
+            security_context_pair_delegates_to_platform(pod, container);
 
         Self {
             run_as_user,
-            run_as_group: context.and_then(|context| context.run_as_group),
-            fs_group: context.and_then(|context| context.fs_group),
+            run_as_group: pod.and_then(|context| context.run_as_group),
+            fs_group: pod.and_then(|context| context.fs_group),
             run_as_non_root,
-            effective_run_as_non_root: effective_run_as_non_root(run_as_user, run_as_non_root),
+            effective_run_as_non_root: (!operator_defaults_delegated)
+                .then(|| effective_run_as_non_root(run_as_user, run_as_non_root)),
+            operator_defaults_delegated,
         }
     }
 }
@@ -183,6 +195,7 @@ mod tests {
         PatchField, SecurityContextInfo, UpdateEncryptionRequest, UpdateSecurityContextRequest,
     };
     use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
+    use k8s_openapi::api::core::v1 as corev1;
 
     #[test]
     fn security_context_info_keeps_raw_value_and_serializes_effective_value() {
@@ -192,13 +205,29 @@ mod tests {
             ..Default::default()
         };
 
-        let info = SecurityContextInfo::from_override(Some(&context));
+        let info = SecurityContextInfo::from_contexts(Some(&context), None);
         let json = serde_json::to_value(&info).expect("SecurityContextInfo should serialize");
 
         assert_eq!(info.run_as_non_root, None);
-        assert!(!info.effective_run_as_non_root);
+        assert_eq!(info.effective_run_as_non_root, Some(false));
+        assert!(!info.operator_defaults_delegated);
         assert!(json["runAsNonRoot"].is_null());
         assert_eq!(json["effectiveRunAsNonRoot"], serde_json::json!(false));
+        assert_eq!(json["operatorDefaultsDelegated"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn delegated_security_context_serializes_an_unknown_effective_value() {
+        let pod = PodSecurityContextOverride::default();
+        let container = corev1::SecurityContext::default();
+
+        let info = SecurityContextInfo::from_contexts(Some(&pod), Some(&container));
+        let json = serde_json::to_value(&info).expect("SecurityContextInfo should serialize");
+
+        assert_eq!(info.effective_run_as_non_root, None);
+        assert!(info.operator_defaults_delegated);
+        assert!(json["effectiveRunAsNonRoot"].is_null());
+        assert_eq!(json["operatorDefaultsDelegated"], serde_json::json!(true));
     }
 
     #[test]

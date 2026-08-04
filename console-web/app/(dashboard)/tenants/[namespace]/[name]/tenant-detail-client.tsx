@@ -210,6 +210,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
   const [secCtxLoaded, setSecCtxLoaded] = useState(false)
   const [secCtxLoading, setSecCtxLoading] = useState(false)
   const [secCtxSaving, setSecCtxSaving] = useState(false)
+  const [secCtxDelegated, setSecCtxDelegated] = useState(false)
   const [secCtx, setSecCtx] = useState<SecurityContextFormState>({
     runAsUser: "",
     runAsGroup: "",
@@ -337,6 +338,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
 
   useEffect(() => {
     setSecCtxLoaded(false)
+    setSecCtxDelegated(false)
     setSecCtxDirty(cleanSecurityContextDirtyFields())
   }, [namespace, name])
 
@@ -350,6 +352,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
         fsGroup: data.fsGroup?.toString() ?? "",
         runAsNonRoot: data.runAsNonRoot === null ? "default" : data.runAsNonRoot ? "true" : "false",
       })
+      setSecCtxDelegated(data.operatorDefaultsDelegated)
       setSecCtxDirty(cleanSecurityContextDirtyFields())
     } catch (e) {
       const err = e as ApiError
@@ -362,6 +365,10 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
 
   const handleSaveSecurityContext = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (secCtxDelegated) {
+      toast.error(t("Platform-delegated security contexts can only be changed in Raw YAML."))
+      return
+    }
     setSecCtxSaving(true)
     try {
       await api.updateSecurityContext(namespace, name, buildSecurityContextUpdate(secCtx, secCtxDirty))
@@ -1300,6 +1307,18 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
               </div>
             ) : (
               <form onSubmit={handleSaveSecurityContext} className="space-y-6">
+                {secCtxDelegated && (
+                  <div className="rounded-md border border-border bg-muted/50 px-4 py-3 text-sm">
+                    <p>
+                      {t(
+                        "Security defaults are delegated to platform admission. Effective UID/GID and runAsNonRoot values are platform-owned.",
+                      )}
+                    </p>
+                    <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => setTab("edit")}>
+                      {t("Open Raw YAML")}
+                    </Button>
+                  </div>
+                )}
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   <div className="space-y-2">
                     <Label>{t("Run As User")}</Label>
@@ -1307,6 +1326,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       type="number"
                       placeholder="10001"
                       value={secCtx.runAsUser}
+                      disabled={secCtxDelegated}
                       onChange={(e) => {
                         setSecCtx((s) => ({ ...s, runAsUser: e.target.value }))
                         setSecCtxDirty((dirty) => ({ ...dirty, runAsUser: true }))
@@ -1319,6 +1339,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       type="number"
                       placeholder="10001"
                       value={secCtx.runAsGroup}
+                      disabled={secCtxDelegated}
                       onChange={(e) => {
                         setSecCtx((s) => ({ ...s, runAsGroup: e.target.value }))
                         setSecCtxDirty((dirty) => ({ ...dirty, runAsGroup: true }))
@@ -1331,6 +1352,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                       type="number"
                       placeholder="10001"
                       value={secCtx.fsGroup}
+                      disabled={secCtxDelegated}
                       onChange={(e) => {
                         setSecCtx((s) => ({ ...s, fsGroup: e.target.value }))
                         setSecCtxDirty((dirty) => ({ ...dirty, fsGroup: true }))
@@ -1344,6 +1366,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                     <select
                       id="sec-nonroot"
                       value={secCtx.runAsNonRoot}
+                      disabled={secCtxDelegated}
                       onChange={(e) => {
                         setSecCtx((s) => ({ ...s, runAsNonRoot: e.target.value as RunAsNonRootMode }))
                         setSecCtxDirty((dirty) => ({ ...dirty, runAsNonRoot: true }))
@@ -1357,7 +1380,7 @@ export function TenantDetailClient({ namespace, name, initialTab, initialYamlEdi
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <Button type="submit" disabled={secCtxSaving}>
+                  <Button type="submit" disabled={secCtxSaving || secCtxDelegated}>
                     {secCtxSaving && <Spinner className="mr-2 size-4" />}
                     {secCtxSaving ? t("Saving...") : t("Save")}
                   </Button>

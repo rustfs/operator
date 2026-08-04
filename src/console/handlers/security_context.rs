@@ -22,9 +22,12 @@ use crate::console::{
     },
     state::Claims,
 };
-use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
+use crate::types::v1alpha1::security_context::{
+    PodSecurityContextOverride, security_context_pair_delegates_to_platform,
+};
 use crate::types::v1alpha1::tenant::Tenant;
 use axum::{Extension, Json, extract::Path};
+use k8s_openapi::api::core::v1 as corev1;
 use kube::{Api, Client};
 
 /// GET /namespaces/:namespace/tenants/:name/security-context
@@ -44,13 +47,15 @@ pub async fn get_security_context(
 
     Ok(Json(security_context_info(
         tenant.spec.security_context.as_ref(),
+        tenant.spec.container_security_context.as_ref(),
     )))
 }
 
 fn security_context_info(
-    security_context: Option<&PodSecurityContextOverride>,
+    pod: Option<&PodSecurityContextOverride>,
+    container: Option<&corev1::SecurityContext>,
 ) -> SecurityContextInfo {
-    SecurityContextInfo::from_override(security_context)
+    SecurityContextInfo::from_contexts(pod, container)
 }
 
 fn apply_patch_field<T: Copy>(target: &mut Option<T>, field: &PatchField<T>) {
@@ -70,6 +75,24 @@ fn apply_validated_security_context_update(
         || !matches!(body.fs_group, PatchField::Missing)
         || !matches!(body.run_as_non_root, PatchField::Missing);
     if !has_updates {
+        return Ok(false);
+    }
+
+    let operator_defaults_delegated = security_context_pair_delegates_to_platform(
+        tenant.spec.security_context.as_ref(),
+        tenant.spec.container_security_context.as_ref(),
+    );
+    if operator_defaults_delegated {
+        let sets_value = matches!(&body.run_as_user, PatchField::Value(_))
+            || matches!(&body.run_as_group, PatchField::Value(_))
+            || matches!(&body.fs_group, PatchField::Value(_))
+            || matches!(&body.run_as_non_root, PatchField::Value(_));
+        if sets_value {
+            return Err(Error::BadRequest {
+                message: "Tenant security contexts delegate Operator defaults to platform admission; use the raw YAML editor to change or remove the paired empty objects"
+                    .to_string(),
+            });
+        }
         return Ok(false);
     }
 
@@ -154,6 +177,7 @@ mod tests {
     use crate::console::error::Error;
     use crate::console::models::encryption::{PatchField, UpdateSecurityContextRequest};
     use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
+    use k8s_openapi::api::core::v1 as corev1;
 
     #[test]
     fn legacy_root_context_reports_effective_non_root_false() {
@@ -163,11 +187,12 @@ mod tests {
             ..Default::default()
         };
 
-        let info = security_context_info(Some(&context));
+        let info = security_context_info(Some(&context), None);
 
         assert_eq!(info.run_as_user, Some(0));
         assert_eq!(info.run_as_non_root, None);
-        assert!(!info.effective_run_as_non_root);
+        assert_eq!(info.effective_run_as_non_root, Some(false));
+        assert!(!info.operator_defaults_delegated);
     }
 
     #[test]
@@ -178,19 +203,32 @@ mod tests {
             ..Default::default()
         };
 
-        let info = security_context_info(Some(&context));
+        let info = security_context_info(Some(&context), None);
 
         assert_eq!(info.run_as_non_root, Some(true));
-        assert!(info.effective_run_as_non_root);
+        assert_eq!(info.effective_run_as_non_root, Some(true));
+        assert!(!info.operator_defaults_delegated);
     }
 
     #[test]
     fn absent_context_reports_default_without_inventing_raw_values() {
-        let info = security_context_info(None);
+        let info = security_context_info(None, None);
 
         assert_eq!(info.run_as_user, None);
         assert_eq!(info.run_as_non_root, None);
-        assert!(info.effective_run_as_non_root);
+        assert_eq!(info.effective_run_as_non_root, Some(true));
+        assert!(!info.operator_defaults_delegated);
+    }
+
+    #[test]
+    fn delegated_context_reports_platform_owned_effective_values() {
+        let pod = PodSecurityContextOverride::default();
+        let container = corev1::SecurityContext::default();
+
+        let info = security_context_info(Some(&pod), Some(&container));
+
+        assert_eq!(info.effective_run_as_non_root, None);
+        assert!(info.operator_defaults_delegated);
     }
 
     #[test]
@@ -265,5 +303,64 @@ mod tests {
             Error::BadRequest { message }
                 if message.contains("UID 0") && message.contains("explicitly true")
         ));
+    }
+
+    #[test]
+    fn delegated_context_rejects_lossy_console_updates() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+
+        let error = apply_validated_security_context_update(
+            &mut tenant,
+            &UpdateSecurityContextRequest {
+                run_as_user: PatchField::Missing,
+                run_as_group: PatchField::Missing,
+                fs_group: PatchField::Missing,
+                run_as_non_root: PatchField::Value(true),
+            },
+        )
+        .expect_err("the legacy form must not disable platform delegation");
+
+        assert!(matches!(
+            error,
+            Error::BadRequest { message }
+                if message.contains("platform admission")
+                    && message.contains("raw YAML")
+        ));
+        assert!(
+            tenant
+                .spec
+                .security_context
+                .as_ref()
+                .is_some_and(PodSecurityContextOverride::is_empty)
+        );
+    }
+
+    #[test]
+    fn delegated_context_treats_null_only_updates_as_noops() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+
+        let changed = apply_validated_security_context_update(
+            &mut tenant,
+            &UpdateSecurityContextRequest {
+                run_as_user: PatchField::Null,
+                run_as_group: PatchField::Null,
+                fs_group: PatchField::Null,
+                run_as_non_root: PatchField::Null,
+            },
+        )
+        .expect("null fields preserve the delegated pair");
+
+        assert!(!changed);
+        assert!(
+            tenant
+                .spec
+                .security_context
+                .as_ref()
+                .is_some_and(PodSecurityContextOverride::is_empty)
+        );
     }
 }
