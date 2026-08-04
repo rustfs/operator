@@ -86,23 +86,3 @@ Create the name of the console service account to use
 {{- default "default" .Values.console.serviceAccount.name }}
 {{- end }}
 {{- end }}
-
-{{/*
-COSI driver service account name
-*/}}
-{{- define "rustfs-operator.cosiServiceAccountName" -}}
-{{- if .Values.cosi.serviceAccount.create }}
-{{- default (printf "%s-cosi" (include "rustfs-operator.fullname" .)) .Values.cosi.serviceAccount.name }}
-{{- else }}
-{{- default "default" .Values.cosi.serviceAccount.name }}
-{{- end }}
-{{- end }}
-
-{{/*
-COSI driver image (falls back to operator image)
-*/}}
-{{- define "rustfs-operator.cosiImage" -}}
-{{- $repo := default .Values.operator.image.repository .Values.cosi.image.repository -}}
-{{- $tag := default .Values.operator.image.tag .Values.cosi.image.tag -}}
-{{- printf "%s:%s" $repo $tag -}}
-{{- end }}

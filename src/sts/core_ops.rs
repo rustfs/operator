@@ -16,11 +16,11 @@
 use chrono::Utc;
 use url::Url;
 
-use crate::client::{ADMIN_SIGNING_SERVICE, RustfsAdminClient, RustfsClientError, SignedRequest};
-use crate::helpers::{derive_signing_key, hmac_sha256_hex, sha256_hex};
+use super::helpers::{derive_signing_key, hmac_sha256_hex, sha256_hex};
+use super::{ADMIN_SIGNING_SERVICE, RustfsAdminClient, RustfsClientError, SignedRequest};
 
 impl RustfsAdminClient {
-    pub(crate) async fn send_admin_request(
+    pub(super) async fn send_admin_request(
         &self,
         method: &str,
         path: &str,
@@ -49,7 +49,6 @@ impl RustfsAdminClient {
             "GET" => self.http_client.get(url),
             "POST" => self.http_client.post(url),
             "PUT" => self.http_client.put(url),
-            "DELETE" => self.http_client.delete(url),
             _ => return Err(RustfsClientError::RequestBuildFailed),
         }
         .header("x-amz-date", &signed.amz_date)
@@ -83,7 +82,7 @@ impl RustfsAdminClient {
             .map_err(|_| RustfsClientError::RequestFailed)
     }
 
-    pub(crate) fn sign_request(
+    pub(super) fn sign_request(
         &self,
         method: &str,
         path: &str,
@@ -105,7 +104,7 @@ impl RustfsAdminClient {
         )
     }
 
-    pub(crate) fn sign_request_with_extra_headers(
+    pub(super) fn sign_request_with_extra_headers(
         &self,
         method: &str,
         path: &str,
@@ -165,7 +164,7 @@ impl RustfsAdminClient {
         })
     }
 
-    pub(crate) fn host(&self) -> Result<String, RustfsClientError> {
+    pub(super) fn host(&self) -> Result<String, RustfsClientError> {
         let parsed =
             Url::parse(&self.base_url).map_err(|_| RustfsClientError::RequestBuildFailed)?;
         let mut host = parsed

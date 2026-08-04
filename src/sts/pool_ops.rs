@@ -15,11 +15,11 @@
 //! Pool boundary:
 //!   - list/status and decommission lifecycle operations for tenant pools.
 
-use crate::client::{
+use super::helpers::build_canonical_query;
+use super::{
     POOLS_CANCEL_PATH, POOLS_DECOMMISSION_PATH, POOLS_LIST_PATH, POOLS_STATUS_PATH,
     RustfsAdminClient, RustfsClientError, RustfsPoolListItem, RustfsPoolStatus,
 };
-use crate::helpers::build_canonical_query;
 
 impl RustfsAdminClient {
     // Pool duties: list/status and decommission lifecycle operations.

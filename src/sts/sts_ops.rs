@@ -14,12 +14,11 @@
 
 //! STS boundary:
 //!   - temporary credentials and AssumeRole request composition/response parsing.
-
-use crate::client::{
+use super::helpers::{build_form_body, parse_assume_role_response};
+use super::{
     ASSUME_ROLE_PATH, FORM_CONTENT_TYPE, RustfsAdminClient, RustfsClientError, STS_SIGNING_SERVICE,
 };
-use crate::credentials::StsAssumeRoleCredentials;
-use crate::helpers::{build_form_body, parse_assume_role_response};
+use crate::sts::types::StsAssumeRoleCredentials;
 
 impl RustfsAdminClient {
     // STS duties: temporary credentials and AssumeRole API call path.

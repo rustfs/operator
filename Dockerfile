@@ -17,6 +17,9 @@ ARG PNPM_VERSION=10.28.1
 
 # Shared Cargo settings for slow / flaky networks (applies to all Rust stages)
 FROM ${RUST_BUILD_IMAGE} AS rust-base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /usr/local/cargo && \
     printf '%s\n' \
       '[http]' \
@@ -45,15 +48,15 @@ FROM rust-base AS cacher
 COPY --from=cargo-chef-installer /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
 WORKDIR /app
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --workspace --recipe-path recipe.json
 
-# Stage 3: Build the binary
+# Stage 3: Build the binaries (operator + COSI driver)
 FROM rust-base AS builder
 WORKDIR /app
 COPY . .
 COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
-RUN cargo build --release -p operator -p cosi-driver
+RUN cargo build --release -p operator -p rustfs-cosi-driver
 
 # Stage 4: Build the static Console frontend
 FROM ${NODE_BUILD_IMAGE} AS console-web-builder

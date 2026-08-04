@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use crate::context::{self, Context};
-use crate::sts::rustfs_client::{
-    CreateBucketResult, RustfsAdminClient, RustfsClientError, client_from_tenant,
-    client_from_tls_tenant_for_sts, load_tenant_credentials,
-};
+use crate::sts::rustfs_client::{CreateBucketResult, RustfsAdminClient, RustfsClientError};
 use crate::types::v1alpha1::provisioning::{
     ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
     duplicate_user_credentials_secret_names,
@@ -499,11 +496,17 @@ async fn rustfs_admin_client(
     ctx: &Context,
     tenant: &Tenant,
 ) -> Result<RustfsAdminClient, RustfsClientError> {
-    let credentials = load_tenant_credentials(&ctx.client, tenant).await?;
+    let credentials = RustfsAdminClient::load_tenant_credentials(&ctx.client, tenant).await?;
     if tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled()) {
-        client_from_tls_tenant_for_sts(&ctx.client, tenant, credentials, ctx.cluster_domain()).await
+        RustfsAdminClient::from_tls_tenant_for_sts(
+            &ctx.client,
+            tenant,
+            credentials,
+            ctx.cluster_domain(),
+        )
+        .await
     } else {
-        client_from_tenant(tenant, credentials)
+        RustfsAdminClient::from_tenant(tenant, credentials)
     }
 }
 

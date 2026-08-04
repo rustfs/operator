@@ -31,13 +31,15 @@ rustls-pemfile = "2.2.0"
 webpki = { package = "rustls-webpki", version = "0.103" }
 rcgen = "0.13"
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
 ring = "0.17"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2.5"
 shadow-rs = "1.5.0"
 snafu = { version = "0.8.9", features = ["futures"] }
 kube-leader-election = { path = "crates/leader-election" }
-rustfs-admin = { path = "crates/rustfs-admin" }
 hostname = "0.4"
 
 # Console dependencies
@@ -61,7 +63,7 @@ shadow-rs = { version = "1.5.0", features = ["build"] }
 unused_variables = "allow"
 
 [workspace]
-members = ["crates/leader-election", "crates/rustfs-admin", "crates/cosi-driver"]
+members = ["crates/leader-election", "crates/cosi-driver"]
 
 [lints.clippy]
 unwrap_used = "deny"

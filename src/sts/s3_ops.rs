@@ -13,18 +13,15 @@
 // limitations under the License.
 
 //! S3 boundary:
-//!   - bucket lifecycle methods (create/lookup/delete)
+//!   - bucket lifecycle methods (create/lookup features)
 //!   - request semantics for S3-style object storage operations.
 
 use reqwest::StatusCode;
 
-use crate::client::{
-    ADMIN_SIGNING_SERVICE, CreateBucketResult, RustfsAdminClient, RustfsClientError,
+use super::helpers::{
+    body_mentions_not_found, bucket_already_exists, build_canonical_query, create_bucket_body,
 };
-use crate::helpers::{
-    body_mentions_not_found, bucket_already_exists, bucket_not_found, build_canonical_query,
-    create_bucket_body,
-};
+use super::{ADMIN_SIGNING_SERVICE, CreateBucketResult, RustfsAdminClient, RustfsClientError};
 
 impl RustfsAdminClient {
     // S3 duties: bucket operations exposed by the RustFS/S3-compatible endpoint.
@@ -94,7 +91,7 @@ impl RustfsAdminClient {
         ))
     }
 
-    /// Delete a bucket. Succeeds if the bucket is already gone.
+    /// Delete a bucket. Missing buckets are treated as success (idempotent).
     pub async fn delete_bucket(&self, bucket: &str) -> Result<(), RustfsClientError> {
         if bucket.trim().is_empty() {
             return Err(RustfsClientError::RequestBuildFailed);
@@ -121,7 +118,7 @@ impl RustfsAdminClient {
 
         let status = response.status();
         let (body, truncated) = RustfsClientError::limited_response_body(response).await;
-        if status == StatusCode::NOT_FOUND || bucket_not_found(&body) {
+        if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
             return Ok(());
         }
 

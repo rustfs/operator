@@ -60,11 +60,11 @@ fmt-check:
 
 # Run clippy checks.
 clippy:
-	cargo clippy --workspace --all-features -- -D warnings
+	cargo clippy --all-features -- -D warnings
 
 # Run Rust tests.
 test:
-	cargo test --workspace
+	cargo test --all
 
 # Run frontend ESLint checks. Run pnpm install in console-web first.
 console-lint:
@@ -84,7 +84,7 @@ console-fmt-check:
 
 # Build the project.
 build:
-	cargo build --release --workspace
+	cargo build --release
 
 # Rust-native e2e harness (live-first, dedicated Kind)
 E2E_MANIFEST ?= e2e/Cargo.toml

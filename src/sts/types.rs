@@ -113,7 +113,13 @@ pub fn parse_sts_form(
     })
 }
 
-pub use rustfs_admin::StsAssumeRoleCredentials;
+#[derive(Debug, Clone)]
+pub struct StsAssumeRoleCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expiration: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct StsWebIdentityResponseContext {

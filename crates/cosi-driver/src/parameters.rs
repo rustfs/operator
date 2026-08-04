@@ -1,119 +1,196 @@
-// Copyright 2025 RustFS Team
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-//! BucketClass / BucketAccessClass parameter parsing (Rook-style).
+//! RustFS COSI driver parameters (BucketClass / BucketAccessClass).
 
 use std::collections::HashMap;
 
-use snafu::Snafu;
+use thiserror::Error;
 
-use crate::policy::AccessPolicy;
+pub const DRIVER_NAME: &str = "rustfs.objectstorage.k8s.io";
 
-pub const PARAM_SECRET_NAME: &str = "objectStoreUserSecretName";
-pub const PARAM_SECRET_NAMESPACE: &str = "objectStoreUserSecretNamespace";
-pub const PARAM_ENDPOINT: &str = "endpoint";
-pub const PARAM_REGION: &str = "region";
-pub const PARAM_TLS_CA_CM_NAME: &str = "tlsCAConfigMapName";
-pub const PARAM_TLS_CA_CM_NAMESPACE: &str = "tlsCAConfigMapNamespace";
-pub const PARAM_POLICY: &str = "policy";
-
-#[derive(Debug, Snafu)]
-pub enum ParameterError {
-    #[snafu(display("missing required parameter `{name}`"))]
-    Missing { name: &'static str },
-    #[snafu(display("parameter `{name}` must not be empty"))]
-    Empty { name: &'static str },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct BackendParameters {
-    pub secret_name: String,
-    pub secret_namespace: String,
     pub endpoint: String,
-    pub region: Option<String>,
+    pub object_store_user_secret_name: String,
+    pub object_store_user_secret_namespace: String,
+    pub region: String,
+    pub policy: Option<String>,
     pub tls_ca_configmap_name: Option<String>,
     pub tls_ca_configmap_namespace: Option<String>,
-    pub access_policy: AccessPolicy,
+    /// Preferred S3 bucket name (overrides COSI-generated CreateBucket name).
+    pub bucket_name: Option<String>,
+    /// Comma-separated bucket list to create / authorize (`*` = full access).
+    pub buckets: Option<String>,
+    /// Preferred access-key / account name for GrantBucketAccess.
+    ///
+    /// Must be unique per BucketAccess. Reusing the same value across claims is
+    /// rejected by the driver (Ceph-style isolation). Prefer omitting this so the
+    /// COSI grant name (`ba-<UID>`) is used as the account id.
+    pub preferred_access_key: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum ParameterError {
+    #[error("missing required parameter `{0}`")]
+    MissingRequired(&'static str),
+    #[error("parameter `{0}` is empty")]
+    Empty(&'static str),
+}
+
+fn required(map: &HashMap<String, String>, key: &'static str) -> Result<String, ParameterError> {
+    let value = map
+        .get(key)
+        .cloned()
+        .ok_or(ParameterError::MissingRequired(key))?;
+    if value.trim().is_empty() {
+        return Err(ParameterError::Empty(key));
+    }
+    Ok(value)
+}
+
+fn optional(map: &HashMap<String, String>, key: &str) -> Option<String> {
+    map.get(key)
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
 }
 
 impl BackendParameters {
-    pub fn from_map(params: &HashMap<String, String>) -> Result<Self, ParameterError> {
+    pub fn from_map(map: &HashMap<String, String>) -> Result<Self, ParameterError> {
         Ok(Self {
-            secret_name: required(params, PARAM_SECRET_NAME)?,
-            secret_namespace: required(params, PARAM_SECRET_NAMESPACE)?,
-            endpoint: required(params, PARAM_ENDPOINT)?,
-            region: optional(params, PARAM_REGION),
-            tls_ca_configmap_name: optional(params, PARAM_TLS_CA_CM_NAME),
-            tls_ca_configmap_namespace: optional(params, PARAM_TLS_CA_CM_NAMESPACE),
-            access_policy: AccessPolicy::parse(params.get(PARAM_POLICY).map(String::as_str)),
+            endpoint: required(map, "endpoint")?,
+            object_store_user_secret_name: required(map, "objectStoreUserSecretName")?,
+            object_store_user_secret_namespace: required(map, "objectStoreUserSecretNamespace")?,
+            region: optional(map, "region").unwrap_or_else(|| "us-east-1".to_string()),
+            policy: optional(map, "policy"),
+            tls_ca_configmap_name: optional(map, "tlsCAConfigMapName"),
+            tls_ca_configmap_namespace: optional(map, "tlsCAConfigMapNamespace"),
+            bucket_name: optional(map, "bucketName"),
+            buckets: optional(map, "buckets"),
+            preferred_access_key: optional(map, "preferredAccessKey")
+                .or_else(|| optional(map, "accessKey")),
         })
     }
-}
 
-fn required(
-    params: &HashMap<String, String>,
-    name: &'static str,
-) -> Result<String, ParameterError> {
-    let value = params
-        .get(name)
-        .ok_or(ParameterError::Missing { name })?
-        .trim();
-    if value.is_empty() {
-        return Err(ParameterError::Empty { name });
+    /// Buckets to create (excludes `*`). Primary bucket_id is the first entry.
+    pub fn buckets_to_create(&self, fallback_name: &str) -> Vec<String> {
+        let raw = self
+            .buckets
+            .as_deref()
+            .or(self.bucket_name.as_deref())
+            .unwrap_or(fallback_name);
+        raw.split(',')
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && *b != "*")
+            .map(ToOwned::to_owned)
+            .collect()
     }
-    Ok(value.to_string())
+
+    /// Full bucket list for IAM policy (may include `*`).
+    pub fn buckets_for_policy(&self, fallback_name: &str) -> Vec<String> {
+        let raw = self
+            .buckets
+            .as_deref()
+            .or(self.bucket_name.as_deref())
+            .unwrap_or(fallback_name);
+        let list: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        if list.is_empty() {
+            vec![fallback_name.to_string()]
+        } else {
+            list
+        }
+    }
+
+    pub fn primary_bucket_id(&self, cosi_name: &str) -> String {
+        self.bucket_name
+            .clone()
+            .or_else(|| self.buckets_to_create(cosi_name).into_iter().next())
+            .unwrap_or_else(|| cosi_name.to_string())
+    }
 }
 
-fn optional(params: &HashMap<String, String>, name: &str) -> Option<String> {
-    params
-        .get(name)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+pub fn bucket_policy_document_for(buckets: &[String]) -> String {
+    let has_wildcard = buckets.iter().any(|b| b == "*");
+    let resources: Vec<String> = if has_wildcard {
+        vec!["arn:aws:s3:::*".to_string(), "arn:aws:s3:::*/*".to_string()]
+    } else {
+        buckets
+            .iter()
+            .flat_map(|b| [format!("arn:aws:s3:::{b}"), format!("arn:aws:s3:::{b}/*")])
+            .collect()
+    };
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": ["s3:*"],
+            "Resource": resources
+        }]
+    })
+    .to_string()
+}
+
+pub fn sanitize_policy_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+pub fn policy_name_for(bucket: &str) -> String {
+    format!("cosi-{}", sanitize_policy_fragment(bucket))
+}
+
+/// Owner marker policy bound to a specific COSI grant `name` (`ba-<UID>`).
+pub fn grant_owner_policy_name(grant_name: &str) -> String {
+    format!("cosi-grant-{}", sanitize_policy_fragment(grant_name))
+}
+
+/// Minimal canned policy used only as an ownership marker for a BucketAccess grant.
+pub fn grant_owner_policy_document() -> String {
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "CosiGrantOwner",
+            "Effect": "Allow",
+            "Action": ["s3:ListAllMyBuckets"],
+            "Resource": ["arn:aws:s3:::*"]
+        }]
+    })
+    .to_string()
+}
+
+/// Deterministic secret so DriverGrantBucketAccess is idempotent across sidecar retries.
+pub fn credentials_for_account(account_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("rustfs-cosi-v1:{account_id}").as_bytes());
+    hex::encode(digest)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{credentials_for_account, grant_owner_policy_name};
 
     #[test]
-    fn parses_required_parameters() {
-        let mut map = HashMap::new();
-        map.insert(PARAM_SECRET_NAME.to_string(), "creds".into());
-        map.insert(PARAM_SECRET_NAMESPACE.to_string(), "ns".into());
-        map.insert(
-            PARAM_ENDPOINT.to_string(),
-            "http://tenant-io.ns.svc:9000".into(),
-        );
-        map.insert(PARAM_POLICY.to_string(), "readonly".into());
-
-        let parsed = BackendParameters::from_map(&map).expect("parse");
-        assert_eq!(parsed.secret_name, "creds");
-        assert_eq!(parsed.access_policy, AccessPolicy::Readonly);
-        assert_eq!(parsed.endpoint, "http://tenant-io.ns.svc:9000");
+    fn credentials_are_deterministic_and_long_enough() {
+        let a = credentials_for_account("ba-test-uid");
+        let b = credentials_for_account("ba-test-uid");
+        assert_eq!(a, b);
+        assert!(a.len() >= 8);
+        assert_ne!(a, credentials_for_account("other-account"));
     }
 
     #[test]
-    fn rejects_missing_endpoint() {
-        let mut map = HashMap::new();
-        map.insert(PARAM_SECRET_NAME.to_string(), "creds".into());
-        map.insert(PARAM_SECRET_NAMESPACE.to_string(), "ns".into());
-        let err = BackendParameters::from_map(&map).expect_err("missing endpoint");
-        assert!(matches!(
-            err,
-            ParameterError::Missing {
-                name: PARAM_ENDPOINT
-            }
-        ));
+    fn grant_owner_policy_name_sanitizes() {
+        assert_eq!(
+            grant_owner_policy_name("ba-81733d1a-ac7a-4759-96f3-fbcc07c0cee9"),
+            "cosi-grant-ba-81733d1a-ac7a-4759-96f3-fbcc07c0cee9"
+        );
+        assert_eq!(
+            grant_owner_policy_name("ba/weird.name"),
+            "cosi-grant-ba-weird-name"
+        );
     }
 }
