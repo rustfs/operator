@@ -898,6 +898,30 @@ mod tests {
                 .and_then(Value::as_str),
             Some("#/components/schemas/SecurityContextUpdateResponse")
         );
+        let effective_types = spec
+            .pointer(
+                "/components/schemas/SecurityContextInfo/properties/effectiveRunAsNonRoot/type",
+            )
+            .and_then(Value::as_array)
+            .expect("effective runAsNonRoot should use OpenAPI nullable types");
+        assert!(
+            effective_types
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|value| value == "boolean")
+                && effective_types
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|value| value == "null"),
+            "platform delegation makes the effective runAsNonRoot value unknown"
+        );
+        assert_eq!(
+            spec.pointer(
+                "/components/schemas/SecurityContextInfo/properties/operatorDefaultsDelegated/type"
+            )
+            .and_then(Value::as_str),
+            Some("boolean")
+        );
         assert_eq!(
             operation.pointer("/put/tags/0").and_then(Value::as_str),
             Some("security-context")

@@ -23,6 +23,7 @@ use crate::types::v1alpha1::persistence::{
 use crate::types::v1alpha1::pool::Pool;
 use crate::types::v1alpha1::security_context::{
     MAX_KUBERNETES_ID, PodSecurityContextOverride, effective_run_as_non_root,
+    security_context_pair_delegates_to_platform,
 };
 use crate::types::v1alpha1::tls::{TlsPlan, http_probe};
 use k8s_openapi::DeepMerge;
@@ -507,10 +508,9 @@ fn effective_workload_security_context(
 ) -> EffectiveWorkloadSecurityContext {
     // Require the MinIO/OpenShift pair at the same scope. A lone empty object can be left behind
     // by legacy field-based clients and must retain the historical Operator-default behavior.
-    let tenant_delegates = tenant_pod.is_some_and(PodSecurityContextOverride::is_empty)
-        && tenant_container.is_some_and(|context| context == &corev1::SecurityContext::default());
-    let pool_delegates = pool_pod.is_some_and(PodSecurityContextOverride::is_empty)
-        && pool_container.is_some_and(|context| context == &corev1::SecurityContext::default());
+    let tenant_delegates =
+        security_context_pair_delegates_to_platform(tenant_pod, tenant_container);
+    let pool_delegates = security_context_pair_delegates_to_platform(pool_pod, pool_container);
     let explicit_pod_run_as_non_root =
         explicit_pod_run_as_non_root(tenant_pod, pool_pod, tenant_delegates, pool_delegates);
     let effective_pod =

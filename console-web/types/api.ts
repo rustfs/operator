@@ -413,7 +413,8 @@ export interface SecurityContextInfo {
   runAsGroup: number | null
   fsGroup: number | null
   runAsNonRoot: boolean | null
-  effectiveRunAsNonRoot: boolean
+  effectiveRunAsNonRoot: boolean | null
+  operatorDefaultsDelegated: boolean
 }
 
 export interface EncryptionInfoResponse {

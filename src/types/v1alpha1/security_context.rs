@@ -27,6 +27,15 @@ pub(crate) fn effective_run_as_non_root(run_as_user: Option<i64>, explicit: Opti
     explicit.unwrap_or(run_as_user != Some(0))
 }
 
+/// Returns whether an exact Pod/container empty-object pair delegates Operator defaults.
+pub(crate) fn security_context_pair_delegates_to_platform(
+    pod: Option<&PodSecurityContextOverride>,
+    container: Option<&corev1::SecurityContext>,
+) -> bool {
+    pod.is_some_and(PodSecurityContextOverride::is_empty)
+        && container.is_some_and(|context| context == &corev1::SecurityContext::default())
+}
+
 /// Pod SecurityContext overrides for RustFS pods.
 ///
 /// A non-empty object overrides the operator defaults (`runAsUser` / `runAsGroup` /
@@ -70,7 +79,11 @@ impl PodSecurityContextOverride {
 
 #[cfg(test)]
 mod tests {
-    use super::{PodSecurityContextOverride, effective_run_as_non_root};
+    use super::{
+        PodSecurityContextOverride, effective_run_as_non_root,
+        security_context_pair_delegates_to_platform,
+    };
+    use k8s_openapi::api::core::v1 as corev1;
 
     #[test]
     fn empty_override_is_distinct_from_a_partial_override() {
@@ -82,6 +95,32 @@ mod tests {
             }
             .is_empty()
         );
+    }
+
+    #[test]
+    fn only_an_exact_empty_pair_delegates_to_the_platform() {
+        let empty_pod = PodSecurityContextOverride::default();
+        let empty_container = corev1::SecurityContext::default();
+
+        assert!(security_context_pair_delegates_to_platform(
+            Some(&empty_pod),
+            Some(&empty_container)
+        ));
+        assert!(!security_context_pair_delegates_to_platform(
+            Some(&empty_pod),
+            None
+        ));
+        assert!(!security_context_pair_delegates_to_platform(
+            None,
+            Some(&empty_container)
+        ));
+        assert!(!security_context_pair_delegates_to_platform(
+            Some(&PodSecurityContextOverride {
+                run_as_non_root: Some(true),
+                ..Default::default()
+            }),
+            Some(&empty_container)
+        ));
     }
 
     #[test]
