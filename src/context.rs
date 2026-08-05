@@ -297,6 +297,38 @@ fn validate_secret_utf8_non_blank(
 
 const RUSTFS_DEFAULT_CREDENTIAL_VALUE: &str = "rustfsadmin";
 
+const CREDENTIAL_SECRET_KEYS: [&str; 2] = ["accesskey", "secretkey"];
+const MIN_CREDENTIAL_LENGTH: usize = 8;
+
+fn validate_credential_secret_data(secret: &Secret, secret_name: &str) -> Result<(), Error> {
+    for key in CREDENTIAL_SECRET_KEYS {
+        let Some(value) = secret.data.as_ref().and_then(|data| data.get(key)) else {
+            return CredentialSecretMissingKeySnafu {
+                secret_name: secret_name.to_string(),
+                key: key.to_string(),
+            }
+            .fail();
+        };
+
+        let value =
+            std::str::from_utf8(&value.0).map_err(|_| Error::CredentialSecretInvalidEncoding {
+                secret_name: secret_name.to_string(),
+                key: key.to_string(),
+            })?;
+        let length = value.len();
+        if length < MIN_CREDENTIAL_LENGTH {
+            return CredentialSecretTooShortSnafu {
+                secret_name: secret_name.to_string(),
+                key: key.to_string(),
+                length,
+            }
+            .fail();
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_rpc_secret_ref(secret_ref: &RpcSecretRef) -> Result<(), Error> {
     for (field, value) in [("name", &secret_ref.name), ("key", &secret_ref.key)] {
         if value.trim().is_empty() {
@@ -638,61 +670,7 @@ impl Context {
                 }
             };
 
-            // Validate Secret has required keys
-            if let Some(data) = secret.data {
-                let access_key = "accesskey".to_string();
-                let secret_key = "secretkey".to_string();
-
-                // Validate accesskey exists, is valid UTF-8, and meets minimum length
-                if let Some(accesskey_bytes) = data.get(&access_key) {
-                    let accesskey = String::from_utf8(accesskey_bytes.0.clone()).map_err(|_| {
-                        Error::CredentialSecretInvalidEncoding {
-                            secret_name: cfg.name.clone(),
-                            key: access_key.clone(),
-                        }
-                    })?;
-
-                    if accesskey.len() < 8 {
-                        return CredentialSecretTooShortSnafu {
-                            secret_name: cfg.name.clone(),
-                            key: access_key.clone(),
-                            length: accesskey.len(),
-                        }
-                        .fail();
-                    }
-                } else {
-                    return CredentialSecretMissingKeySnafu {
-                        secret_name: cfg.name.clone(),
-                        key: access_key,
-                    }
-                    .fail();
-                }
-
-                // Validate secretkey exists, is valid UTF-8, and meets minimum length
-                if let Some(secretkey_bytes) = data.get(&secret_key) {
-                    let secretkey = String::from_utf8(secretkey_bytes.0.clone()).map_err(|_| {
-                        Error::CredentialSecretInvalidEncoding {
-                            secret_name: cfg.name.clone(),
-                            key: secret_key.clone(),
-                        }
-                    })?;
-
-                    if secretkey.len() < 8 {
-                        return CredentialSecretTooShortSnafu {
-                            secret_name: cfg.name.clone(),
-                            key: secret_key.clone(),
-                            length: secretkey.len(),
-                        }
-                        .fail();
-                    }
-                } else {
-                    return CredentialSecretMissingKeySnafu {
-                        secret_name: cfg.name.clone(),
-                        key: secret_key,
-                    }
-                    .fail();
-                }
-            }
+            validate_credential_secret_data(&secret, &cfg.name)?;
         }
 
         Ok(())
@@ -898,6 +876,127 @@ impl Context {
         let status = self.get_statefulset_status(name, namespace).await?;
 
         Ok((status.current_revision, status.update_revision))
+    }
+}
+
+#[cfg(test)]
+mod credential_secret_validation_tests {
+    use super::{Error, validate_credential_secret_data};
+    use k8s_openapi::ByteString;
+    use k8s_openapi::api::core::v1::Secret;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn credential_secret_accepts_valid_values() {
+        let secret = Secret {
+            data: Some(BTreeMap::from([
+                ("accesskey".to_string(), ByteString(b"access01".to_vec())),
+                ("secretkey".to_string(), ByteString(b"secret01".to_vec())),
+            ])),
+            ..Default::default()
+        };
+
+        assert!(validate_credential_secret_data(&secret, "creds").is_ok());
+    }
+
+    #[test]
+    fn credential_secret_requires_data() {
+        for data in [None, Some(BTreeMap::new())] {
+            let secret = Secret {
+                data,
+                ..Default::default()
+            };
+
+            let err = validate_credential_secret_data(&secret, "creds").unwrap_err();
+            assert!(matches!(
+                err,
+                Error::CredentialSecretMissingKey { secret_name, key }
+                    if secret_name == "creds" && key == "accesskey"
+            ));
+        }
+    }
+
+    #[test]
+    fn credential_secret_requires_both_keys() {
+        let valid_value = ByteString(b"valid-key".to_vec());
+        for (data, missing_key) in [
+            (
+                BTreeMap::from([("secretkey".to_string(), valid_value.clone())]),
+                "accesskey",
+            ),
+            (
+                BTreeMap::from([("accesskey".to_string(), valid_value.clone())]),
+                "secretkey",
+            ),
+        ] {
+            let secret = Secret {
+                data: Some(data),
+                ..Default::default()
+            };
+
+            let err = validate_credential_secret_data(&secret, "creds").unwrap_err();
+            assert!(matches!(
+                err,
+                Error::CredentialSecretMissingKey { secret_name, key }
+                    if secret_name == "creds" && key == missing_key
+            ));
+        }
+    }
+
+    #[test]
+    fn credential_secret_values_must_be_valid_utf8() {
+        let valid_value = ByteString(b"valid-key".to_vec());
+        for (access_key, secret_key, invalid_key) in [
+            (ByteString(vec![0xff]), valid_value.clone(), "accesskey"),
+            (valid_value.clone(), ByteString(vec![0xff]), "secretkey"),
+        ] {
+            let secret = Secret {
+                data: Some(BTreeMap::from([
+                    ("accesskey".to_string(), access_key),
+                    ("secretkey".to_string(), secret_key),
+                ])),
+                ..Default::default()
+            };
+
+            let err = validate_credential_secret_data(&secret, "creds").unwrap_err();
+            assert!(matches!(
+                err,
+                Error::CredentialSecretInvalidEncoding { secret_name, key }
+                    if secret_name == "creds" && key == invalid_key
+            ));
+        }
+    }
+
+    #[test]
+    fn credential_secret_values_must_be_at_least_eight_bytes() {
+        let valid_value = ByteString(b"valid-key".to_vec());
+        for (access_key, secret_key, invalid_key) in [
+            (ByteString(Vec::new()), valid_value.clone(), "accesskey"),
+            (valid_value.clone(), ByteString(Vec::new()), "secretkey"),
+            (
+                ByteString(b"short".to_vec()),
+                valid_value.clone(),
+                "accesskey",
+            ),
+        ] {
+            let secret = Secret {
+                data: Some(BTreeMap::from([
+                    ("accesskey".to_string(), access_key),
+                    ("secretkey".to_string(), secret_key),
+                ])),
+                ..Default::default()
+            };
+
+            let err = validate_credential_secret_data(&secret, "creds").unwrap_err();
+            assert!(matches!(
+                err,
+                Error::CredentialSecretTooShort {
+                    secret_name,
+                    key,
+                    ..
+                } if secret_name == "creds" && key == invalid_key
+            ));
+        }
     }
 }
 
