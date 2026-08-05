@@ -294,7 +294,7 @@ where
 pub fn record_http_request(component: &str, method: &str, status: StatusCode, duration: Duration) {
     let key = HttpKey {
         component: component.to_string(),
-        method: method.to_string(),
+        method: http_method_label(method).to_string(),
         status: status_class(status).to_string(),
     };
 
@@ -771,6 +771,21 @@ fn status_class(status: StatusCode) -> &'static str {
     }
 }
 
+fn http_method_label(method: &str) -> &'static str {
+    match method {
+        "CONNECT" => "CONNECT",
+        "DELETE" => "DELETE",
+        "GET" => "GET",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        "PATCH" => "PATCH",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "TRACE" => "TRACE",
+        _ => "OTHER",
+    }
+}
+
 fn result_label(success: bool) -> &'static str {
     if success { "success" } else { "error" }
 }
@@ -785,6 +800,8 @@ fn unix_timestamp_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, body::Body, middleware};
+    use tower::ServiceExt;
 
     #[test]
     fn labels_escape_prometheus_special_characters() {
@@ -799,6 +816,59 @@ mod tests {
         assert_eq!(status_class(StatusCode::OK), "2xx");
         assert_eq!(status_class(StatusCode::NOT_FOUND), "4xx");
         assert_eq!(status_class(StatusCode::INTERNAL_SERVER_ERROR), "5xx");
+    }
+
+    #[test]
+    fn http_method_labels_are_bounded() {
+        for method in [
+            "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
+        ] {
+            assert_eq!(http_method_label(method), method);
+        }
+        assert_eq!(http_method_label("CUSTOM-A"), "OTHER");
+        assert_eq!(http_method_label("CUSTOM-B"), "OTHER");
+    }
+
+    #[tokio::test]
+    async fn component_http_metrics_group_custom_methods_as_other() {
+        let console_method = "CONSOLE-CUSTOM-METHOD";
+        let console = Router::new()
+            .fallback(|| async { StatusCode::NO_CONTENT })
+            .layer(middleware::from_fn(record_console_http));
+        let console_response = match console.oneshot(request_with_method(console_method)).await {
+            Ok(response) => response,
+            Err(error) => match error {},
+        };
+
+        let operator_method = "OPERATOR-CUSTOM-METHOD";
+        let operator = Router::new()
+            .fallback(|| async { StatusCode::NO_CONTENT })
+            .layer(middleware::from_fn(record_operator_http));
+        let operator_response = match operator.oneshot(request_with_method(operator_method)).await {
+            Ok(response) => response,
+            Err(error) => match error {},
+        };
+
+        assert_eq!(console_response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(operator_response.status(), StatusCode::NO_CONTENT);
+
+        let rendered = render();
+        assert!(rendered.contains(
+            "rustfs_operator_http_requests_total{component=\"console\",method=\"OTHER\",status=\"2xx\"}"
+        ));
+        assert!(rendered.contains(
+            "rustfs_operator_http_requests_total{component=\"operator\",method=\"OTHER\",status=\"2xx\"}"
+        ));
+        assert!(!rendered.contains(console_method));
+        assert!(!rendered.contains(operator_method));
+    }
+
+    fn request_with_method(method: &str) -> Request {
+        Request::builder()
+            .method(method)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("custom HTTP method should build a request: {error}"))
     }
 
     #[test]
