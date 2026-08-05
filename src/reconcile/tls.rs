@@ -520,14 +520,13 @@ async fn reconcile_cert_manager_tls(
         let secret_resource_version = secret.metadata.resource_version.clone();
 
         let san_dns_names = san_validation_dns_names(&san_budget, config, &entry);
-        if config.require_san_match
-            && let Err(failure) = validate_tls_secret_san_match_with_budget(
-                &secret_name,
-                &cert_bytes,
-                &san_dns_names,
-                &mut runtime_budget,
-            )
-        {
+        if let Err(failure) = validate_configured_tls_secret_san_match(
+            config,
+            &secret_name,
+            &cert_bytes,
+            &san_dns_names,
+            &mut runtime_budget,
+        ) {
             return tls_validation_blocked(ctx, tenant, config, failure).await;
         }
 
@@ -2452,6 +2451,25 @@ fn validate_tls_secret_san_match_with_budget(
     }
 }
 
+fn validate_configured_tls_secret_san_match(
+    config: &TlsConfig,
+    secret_name: &str,
+    cert_bytes: &[u8],
+    expected_dns_names: &[String],
+    runtime_budget: &mut TlsCertificateRuntimeBudget,
+) -> Result<(), TlsValidationFailure> {
+    if !config.require_san_match {
+        return Ok(());
+    }
+
+    validate_tls_secret_san_match_with_budget(
+        secret_name,
+        cert_bytes,
+        expected_dns_names,
+        runtime_budget,
+    )
+}
+
 #[cfg(test)]
 fn validate_tls_secret_san_match(
     secret_name: &str,
@@ -3427,6 +3445,31 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             "SAN mismatch message must not expose certificate material: {}",
             failure.message
         );
+    }
+
+    #[test]
+    fn require_san_match_validates_public_tls_when_internode_https_is_disabled() {
+        let config = TlsConfig {
+            enable_internode_https: false,
+            require_san_match: true,
+            ..Default::default()
+        };
+        let mut runtime_budget = TlsCertificateRuntimeBudget::default();
+        runtime_budget
+            .charge_secret_material(CERT_WITH_PEER_SANS_PEM.len())
+            .expect("test certificate should fit the runtime budget");
+
+        let failure = validate_configured_tls_secret_san_match(
+            &config,
+            "server-tls",
+            CERT_WITH_PEER_SANS_PEM,
+            &["s3.example.com".to_string()],
+            &mut runtime_budget,
+        )
+        .expect_err("public TLS SAN mismatch must be rejected without internode HTTPS");
+
+        assert_eq!(failure.reason, Reason::CertificateSanMismatch);
+        assert!(failure.message.contains("s3.example.com"));
     }
 
     #[test]
