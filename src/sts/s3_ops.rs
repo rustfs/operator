@@ -91,6 +91,42 @@ impl RustfsAdminClient {
         ))
     }
 
+    /// Delete a bucket. Missing buckets are treated as success (idempotent).
+    pub async fn delete_bucket(&self, bucket: &str) -> Result<(), RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let signed = self.sign_request("DELETE", &path, "", "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .delete(format!("{}{}", self.base_url.trim_end_matches('/'), path))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+            return Ok(());
+        }
+
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
+    }
+
     pub async fn bucket_object_lock_enabled(
         &self,
         bucket: &str,

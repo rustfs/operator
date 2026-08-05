@@ -45,6 +45,7 @@ const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const JSON_CONTENT_TYPE: &str = "application/json";
 const ASSUME_ROLE_PATH: &str = "/";
 const ADD_USER_PATH: &str = "/rustfs/admin/v3/add-user";
+const REMOVE_USER_PATH: &str = "/rustfs/admin/v3/remove-user";
 const USER_INFO_PATH: &str = "/rustfs/admin/v3/user-info";
 const SET_POLICY_PATH: &str = "/rustfs/admin/v3/set-policy";
 const LIST_CANNED_POLICIES_PATH: &str = "/rustfs/admin/v3/list-canned-policies";
@@ -103,6 +104,12 @@ pub struct RustfsPoolStatus {
 pub enum CreateBucketResult {
     Created,
     AlreadyExists,
+}
+
+/// Subset of `/rustfs/admin/v3/user-info` used by COSI grant ownership checks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RustfsUserInfo {
+    pub policy_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]

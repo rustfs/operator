@@ -1,0 +1,97 @@
+syntax = "proto3";
+package cosi.v1alpha1;
+
+option go_package = "sigs.k8s.io/container-object-storage-interface/proto;cosi";
+
+service Identity {
+    rpc DriverGetInfo (DriverGetInfoRequest) returns (DriverGetInfoResponse) {}
+}
+
+service Provisioner {
+    rpc DriverCreateBucket (DriverCreateBucketRequest) returns (DriverCreateBucketResponse) {}
+    rpc DriverDeleteBucket (DriverDeleteBucketRequest) returns (DriverDeleteBucketResponse) {}
+    rpc DriverGrantBucketAccess (DriverGrantBucketAccessRequest) returns (DriverGrantBucketAccessResponse);
+    rpc DriverRevokeBucketAccess (DriverRevokeBucketAccessRequest) returns (DriverRevokeBucketAccessResponse);
+}
+
+enum S3SignatureVersion {
+    UnknownSignature = 0;
+    S3V2 = 1;
+    S3V4 = 2;
+}
+
+enum AuthenticationType {
+    UnknownAuthenticationType = 0;
+    Key = 1;
+    IAM = 2;
+}
+
+message S3 {
+    string region = 1;
+    S3SignatureVersion signature_version = 2;
+}
+
+message AzureBlob {
+    string storage_account = 1;
+}
+
+message GCS {
+    string private_key_name = 1;
+    string project_id = 2;
+    string service_account = 3;
+}
+
+message Protocol {
+    oneof type {
+        S3 s3 = 1;
+        AzureBlob azureBlob = 2;
+        GCS gcs = 3;
+    }
+}
+
+message CredentialDetails {
+    map<string, string> secrets = 1;
+}
+
+message DriverGetInfoRequest {}
+
+message DriverGetInfoResponse {
+    string name = 1;
+}
+
+message DriverCreateBucketRequest {
+    string name = 1;
+    map<string,string> parameters = 2;
+}
+
+message DriverCreateBucketResponse {
+    string bucket_id = 1;
+    Protocol bucket_info = 2;
+}
+
+message DriverDeleteBucketRequest {
+    string bucket_id = 1;
+    map<string,string> delete_context = 2;
+}
+
+message DriverDeleteBucketResponse {}
+
+message DriverGrantBucketAccessRequest {
+    string bucket_id = 1;
+    string name = 2;
+    AuthenticationType authentication_type = 3;
+    map<string,string> parameters = 4;
+}
+
+message DriverGrantBucketAccessResponse {
+    string account_id = 1;
+    map<string, CredentialDetails> credentials = 2;
+}
+
+message DriverRevokeBucketAccessRequest {
+    string bucket_id = 1;
+    string account_id = 2;
+    map<string,string> revoke_access_context = 3;
+}
+
+message DriverRevokeBucketAccessResponse {}

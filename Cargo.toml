@@ -63,7 +63,7 @@ shadow-rs = { version = "1.5.0", features = ["build"] }
 unused_variables = "allow"
 
 [workspace]
-members = ["crates/leader-election"]
+members = ["crates/leader-election", "crates/cosi-driver"]
 
 [lints.clippy]
 unwrap_used = "deny"
