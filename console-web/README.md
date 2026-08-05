@@ -21,7 +21,7 @@ Run the operator console HTTP API (e.g. `CONSOLE_COOKIE_SECURE=false cargo run -
 Login uses a Kubernetes ServiceAccount bearer token. For a local e2e cluster,
 generate one with `kubectl -n rustfs-system create token rustfs-operator-console --duration=24h`
 and paste the printed token into the login form. After login, the backend stores
-it in an encrypted `session` cookie.
+the encrypted token in process and puts only a random session ID in the cookie.
 
 ## Build
 

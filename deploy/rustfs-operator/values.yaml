@@ -168,7 +168,7 @@ console:
   # Enable console deployment
   enabled: true
 
-  # Number of console replicas
+  # Console sessions are stored in process, so this must remain 1.
   replicas: 1
 
   # Console server port

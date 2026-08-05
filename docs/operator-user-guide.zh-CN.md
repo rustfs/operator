@@ -232,7 +232,7 @@ helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
 | `operator` | Operator Deployment 副本数、镜像、资源、探针、metrics、调度、leader election 和 Tenant monitor。 |
 | `sts` | Operator STS 端点、Service 端口、TokenReview audience 和 TLS。 |
 | `serviceAccount` / `rbac` | Operator ServiceAccount 和 RBAC 创建策略。 |
-| `console` | Operator Console 后端/UI Deployment、Service、session cookie 密钥、Ingress、资源和可选独立前端。 |
+| `console` | Operator Console 后端/UI Deployment、Service、session 加密密钥、Ingress、资源和可选独立前端。 |
 | `clusterDomain` | Kubernetes 集群 DNS 域，用于 Tenant peer URL、自动生成的 TLS SAN 和 operator STS 自动 TLS。默认 `cluster.local`。 |
 | `namespace` | Chart 资源命名空间覆盖；默认使用 Helm release namespace。 |
 | `commonLabels` / `commonAnnotations` | 添加到 Chart 管理资源上的统一 label 和 annotation。 |
@@ -271,7 +271,7 @@ operator:
 
 console:
   enabled: true
-  replicas: 2
+  replicas: 1
   jwtSecret: "<stable-base64-or-random-secret>"
   loginAdmission:
     requestsPerSecond: 5
@@ -302,7 +302,8 @@ sts:
 配置说明：
 
 - `operator.leaderElect` 可以不配置；当 `operator.replicas > 1` 时 Chart 会自动启用 leader election。
-- 多副本 Console 部署需要保持 `console.jwtSecret` 稳定；不设置时 Chart 会生成或复用已有 Secret。
+- 保持 `console.replicas=1`。Console 会话保存在进程内，Chart 使用 Recreate 升级策略，避免新旧 cookie 格式混跑；升级时现有会话会失效。自定义 Deployment 也必须保持这两个约束。
+- 从多 Console 副本的旧版本升级前，先把 `console.replicas` 调整为 `1`；升级会有短暂 Console 不可用，用户需要重新登录。回滚到不支持服务端会话的旧版本前，先把 Console Deployment 缩容到零，完成回滚后再恢复一个副本，避免两种 cookie 格式同时在线。
 - 生产环境应使用 HTTPS 并保持 `CONSOLE_COOKIE_SECURE` 启用。仅本地 HTTP 调试时才关闭。
 - `sts.tls.auto=true` 时，Operator 会创建或修复 `sts-tls`；当 `rbac.create=true` 时，Chart 通过命名空间级 Role 隔离写权限，全集群 Secret 和 ConfigMap 权限保持只读。当 `rbac.create=false` 时，必须为 Operator ServiceAccount 自行提供等效的 Role 和 RoleBinding：允许在 Operator namespace 内 `create` Secret，并将 `get`、`update` 限定到名为 `sts-tls` 的资源。
 
@@ -907,7 +908,7 @@ console:
       - host: console.example.com
 ```
 
-统一 Operator 镜像会通过同一个 Console Service 提供 `/` 和 `/api/v1`。该模式不需要后端 CORS 配置。
+统一 Operator 镜像会通过同一个 Console Service 提供 `/` 和 `/api/v1`。该模式不需要后端 CORS 配置。反向代理必须保留公网 Host/authority；如果代理会改写 Host，请把公网 Console origin 加入 `CORS_ALLOWED_ORIGINS`，确保登出请求的 origin 校验通过。
 
 Console 登录需要 Kubernetes ServiceAccount bearer token。Chart 管理的 Console ServiceAccount 可以这样生成短期 token：
 
@@ -915,7 +916,7 @@ Console 登录需要 Kubernetes ServiceAccount bearer token。Chart 管理的 Co
 kubectl -n rustfs-system create token rustfs-operator-console --duration=24h
 ```
 
-将 token 粘贴到 Console 登录页。Console 会把验证后的 token 存入加密 session cookie。
+将 token 粘贴到 Console 登录页。Console 会把验证后的 token 加密保存在进程内，浏览器 cookie 仅保存随机 session ID。登出会立即删除该会话；Console 重启或升级会使全部现有会话失效。
 如果 Helm release 使用了自定义 namespace 或 `console.serviceAccount.name`，请以 Helm 安装提示中输出的命令为准。
 
 本地 port-forward 调试：
@@ -1151,7 +1152,7 @@ RustFS Tenant Console 登录失败时，应使用 `spec.credsSecret` 或 RustFS 
 - 不要把一个 Tenant 内的多个 pool 当作冷热分层。
 - 独立集群、独立管理边界或独立性能隔离应使用多个 Tenant。
 - 生产环境 Operator Console 使用 HTTPS。
-- 多副本 Console 部署保持 `console.jwtSecret` 稳定。
+- 保持 `console.replicas=1`；Console 重启或升级后，用户需要重新登录。
 - 仅在安装 Prometheus Operator 后启用 `ServiceMonitor` 和 `PrometheusRule`。
 - Tenant YAML 可以进入版本控制，但不要提交明文 Secret 值。
 - 优先查看 `status.conditions`，再进一步排查 StatefulSet 和 Pod。
