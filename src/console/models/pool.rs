@@ -21,7 +21,7 @@ pub struct PoolDetails {
     pub name: String,
     pub servers: i32,
     pub volumes_per_server: i32,
-    pub total_volumes: i32,
+    pub total_volumes: i64,
     pub storage_class: Option<String>,
     pub volume_size: Option<String>,
     pub replicas: i32,
@@ -41,6 +41,17 @@ pub struct PoolDetails {
     pub decommission_last_error: Option<String>,
     pub decommission_last_poll_time: Option<String>,
     pub created_at: Option<String>,
+}
+
+impl PoolDetails {
+    /// Return the exact volume count derived from the CRD's `i32` pool dimensions.
+    ///
+    /// Widening both operands before multiplication is lossless because every `i32 * i32`
+    /// product fits in an `i64`. This preserves the real count instead of rejecting or clamping a
+    /// valid CRD value.
+    pub(crate) fn total_volumes(servers: i32, volumes_per_server: i32) -> i64 {
+        i64::from(servers) * i64::from(volumes_per_server)
+    }
 }
 
 /// Response listing pools for a tenant
@@ -119,4 +130,18 @@ pub struct PoolDecommissionRequestResponse {
     pub pool_name: String,
     pub request_id: String,
     pub action: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PoolDetails;
+
+    #[test]
+    fn total_volumes_widens_before_multiplication() {
+        assert_eq!(PoolDetails::total_volumes(i32::MAX, 2), 4_294_967_294);
+        assert_eq!(
+            PoolDetails::total_volumes(i32::MAX, i32::MAX),
+            4_611_686_014_132_420_609
+        );
+    }
 }

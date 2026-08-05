@@ -511,7 +511,10 @@ pub async fn list_pools(
             name: pool.name.clone(),
             servers: pool.servers,
             volumes_per_server: pool.persistence.volumes_per_server,
-            total_volumes: pool.servers * pool.persistence.volumes_per_server,
+            total_volumes: PoolDetails::total_volumes(
+                pool.servers,
+                pool.persistence.volumes_per_server,
+            ),
             storage_class,
             volume_size,
             replicas,
@@ -575,7 +578,7 @@ pub async fn add_pool(
             ),
         });
     }
-    let total_volumes = req.servers.saturating_mul(req.volumes_per_server);
+    let total_volumes = PoolDetails::total_volumes(req.servers, req.volumes_per_server);
 
     // Build Pool spec
     let new_pool = Pool {
