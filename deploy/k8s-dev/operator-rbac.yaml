@@ -92,8 +92,8 @@ subjects:
     name: rustfs-operator
     namespace: rustfs-system
 ---
-# STS auto TLS needs to create one Secret and replace it only when a previously generated
-# Secret becomes invalid. Keep write access in the operator namespace.
+# STS auto TLS needs to create one Secret and replace it when a previously generated Secret
+# becomes invalid, uses the legacy policy, or approaches expiry. Keep write access namespaced.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

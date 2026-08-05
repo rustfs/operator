@@ -128,9 +128,9 @@ sts:
     # Operator STS listens with TLS by default and uses this Secret for server certs.
     enabled: true
     # When true, the chart grants namespaced create access plus update access to the fixed
-    # sts-tls Secret. The operator creates a missing Secret and replaces an invalid Secret only
-    # when it is marked as Operator-managed. If rbac.create=false, provide an equivalent Role and
-    # RoleBinding in the operator namespace.
+    # sts-tls Secret. The operator creates a missing Secret and replaces an invalid, legacy, or
+    # soon-to-expire Secret only when it is marked as Operator-managed. If rbac.create=false,
+    # provide an equivalent Role and RoleBinding in the operator namespace.
     auto: true
   service:
     type: ClusterIP

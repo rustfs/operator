@@ -123,7 +123,7 @@ manifests remain consistent.
 | `sts.audience` | Kubernetes TokenReview audience expected by the operator STS endpoint | `sts.rustfs.com` |
 | `sts.port` | Operator container port for STS | `4223` |
 | `sts.tls.enabled` | Serve the operator STS endpoint over TLS | `true` |
-| `sts.tls.auto` | Create and replace an invalid Operator-managed STS TLS Secret with namespaced write RBAC | `true` |
+| `sts.tls.auto` | Create and rotate an invalid, legacy, or soon-to-expire Operator-managed STS TLS Secret with namespaced write RBAC | `true` |
 | `sts.service.type` | Kubernetes Service type for STS | `ClusterIP` |
 | `sts.service.port` | Kubernetes Service port for STS | `4223` |
 
@@ -135,7 +135,9 @@ POST /sts/{tenantNamespace}/{tenantName}
 
 This differs from MinIO Operator's namespace-only route. A `PolicyBinding` still lives in the Tenant namespace, but the workload must call STS with both the Tenant namespace and the Tenant name.
 
-The STS service is HTTPS by default. When `sts.tls.auto=true`, the operator creates the fixed `sts-tls` Secret in the operator namespace with `tls.crt`, `tls.key`, and `ca.crt`. With `rbac.create=true`, the chart creates a namespaced Role that can create Secrets and update only `sts-tls`; the ClusterRole keeps all Secret and ConfigMap access read-only. If `rbac.create=false`, you must provide an equivalent Role and RoleBinding for the operator ServiceAccount: namespaced Secret `create`, plus `get` and `update` restricted to the `sts-tls` resource name. Workloads must trust that CA. To use an externally issued certificate, pre-create `sts-tls` with a certificate signed by a CA already trusted by the workload and set `sts.tls.auto=false`; the chart then omits the namespaced Secret write Role.
+The STS service is HTTPS by default. When `sts.tls.auto=true`, the operator creates the fixed `sts-tls` Secret in the operator namespace with `tls.crt`, `tls.key`, and `ca.crt`. Generated certificates are valid for one year and are replaced 30 days before expiry. The operator checks the Secret every five minutes and hot-loads a valid replacement for new TLS connections while retaining the last valid configuration on refresh failures. Existing Operator-managed Secrets created with the legacy long-lived policy are replaced once after upgrade; refresh every STS client's trusted `ca.crt` as part of that upgrade. With `rbac.create=true`, the chart creates a namespaced Role that can create Secrets and update only `sts-tls`; the ClusterRole keeps all Secret and ConfigMap access read-only. If `rbac.create=false`, you must provide an equivalent Role and RoleBinding for the operator ServiceAccount: namespaced Secret `create`, plus `get` and `update` restricted to the `sts-tls` resource name. Workloads must trust that CA. To use an externally issued certificate, pre-create `sts-tls` with a certificate signed by a CA already trusted by the workload and set `sts.tls.auto=false`; update that Secret to rotate it manually, and the operator hot-loads the valid replacement within five minutes. The chart then omits the namespaced Secret write Role.
+
+Monitor `rustfs_operator_sts_tls_certificate_expiry_timestamp_seconds` and `rustfs_operator_sts_tls_ca_expiry_timestamp_seconds` and alert before either timestamp is reached.
 
 STS only issues credentials for TLS-enabled Tenants. For Tenant upstream calls, the operator selects the Tenant HTTPS service endpoint and trusts the CA recorded in `status.certificates.tls.caSecretRef`.
 

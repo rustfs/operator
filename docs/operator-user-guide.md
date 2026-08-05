@@ -327,7 +327,8 @@ Notes:
 - `operator.leaderElect` can be unset. The chart enables leader election automatically when `operator.replicas > 1`.
 - Keep `console.jwtSecret` stable when running multiple Console replicas. If unset, the chart generates or reuses a Secret.
 - Keep `CONSOLE_COOKIE_SECURE` enabled for production HTTPS. Only disable it for local HTTP testing.
-- `sts.tls.auto=true` lets the operator create or repair `sts-tls`; with `rbac.create=true`, the chart isolates write access in a namespaced Role while keeping cluster-wide Secret and ConfigMap access read-only. With `rbac.create=false`, provide an equivalent Role and RoleBinding for the operator ServiceAccount: namespaced Secret `create`, plus `get` and `update` restricted to the `sts-tls` resource name.
+- `sts.tls.auto=true` lets the operator create or repair `sts-tls`. Generated certificates are valid for one year and rotate 30 days before expiry. The operator checks every five minutes and hot-loads valid changes for new connections while retaining the last valid configuration on errors. A legacy Operator-managed Secret is replaced once after upgrade, so refresh clients that trust its `ca.crt`. With `rbac.create=true`, the chart isolates write access in a namespaced Role while keeping cluster-wide Secret and ConfigMap access read-only. With `rbac.create=false`, provide an equivalent Role and RoleBinding for the operator ServiceAccount: namespaced Secret `create`, plus `get` and `update` restricted to the `sts-tls` resource name.
+- With `sts.tls.auto=false`, replace `sts-tls` to rotate an externally issued certificate manually; a valid replacement is hot-loaded within five minutes. Monitor `rustfs_operator_sts_tls_certificate_expiry_timestamp_seconds` and `rustfs_operator_sts_tls_ca_expiry_timestamp_seconds`.
 
 ## 6. Create a Tenant
 
