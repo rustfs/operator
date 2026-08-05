@@ -737,6 +737,23 @@ mod tests {
     }
 
     #[test]
+    fn pool_total_volumes_documents_widened_integer() {
+        let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
+        let total_volumes = spec
+            .pointer("/components/schemas/PoolDetails/properties/total_volumes")
+            .expect("PoolDetails.total_volumes schema exists");
+
+        assert_eq!(
+            total_volumes.get("type").and_then(Value::as_str),
+            Some("integer")
+        );
+        assert_eq!(
+            total_volumes.get("format").and_then(Value::as_str),
+            Some("int64")
+        );
+    }
+
+    #[test]
     fn tenant_api_documents_provisioning_fields() {
         let spec = serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI spec serializes");
         let schemas = spec
