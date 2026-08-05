@@ -12,18 +12,22 @@ pub struct BackendParameters {
     pub object_store_user_secret_name: String,
     pub object_store_user_secret_namespace: String,
     pub region: String,
+    /// Optional existing canned policy name. Referenced only — never replaced.
     pub policy: Option<String>,
     pub tls_ca_configmap_name: Option<String>,
     pub tls_ca_configmap_namespace: Option<String>,
-    /// Preferred S3 bucket name (overrides COSI-generated CreateBucket name).
+    /// Static/adoption preview: preferred S3 bucket name (overrides COSI name).
+    ///
+    /// Buckets created via this override are not deleted by DriverDeleteBucket
+    /// without ownership proof (PR A safe default).
     pub bucket_name: Option<String>,
-    /// Comma-separated bucket list to create / authorize (`*` = full access).
+    /// Static/adoption preview: comma-separated bucket list (`*` = full access).
     pub buckets: Option<String>,
-    /// Preferred access-key / account name for GrantBucketAccess.
+    /// Preferred S3 access-key / account name for GrantBucketAccess.
     ///
     /// Must be unique per BucketAccess. Reusing the same value across claims is
-    /// rejected by the driver (Ceph-style isolation). Prefer omitting this so the
-    /// COSI grant name (`ba-<UID>`) is used as the account id.
+    /// rejected (ownership conflict). Prefer omitting this so the COSI grant
+    /// name (`ba-<UID>`) is used as the account id.
     pub preferred_access_key: Option<String>,
 }
 
@@ -139,58 +143,21 @@ pub fn sanitize_policy_fragment(value: &str) -> String {
         .collect()
 }
 
-pub fn policy_name_for(bucket: &str) -> String {
-    format!("cosi-{}", sanitize_policy_fragment(bucket))
-}
-
-/// Owner marker policy bound to a specific COSI grant `name` (`ba-<UID>`).
-pub fn grant_owner_policy_name(grant_name: &str) -> String {
-    format!("cosi-grant-{}", sanitize_policy_fragment(grant_name))
-}
-
-/// Minimal canned policy used only as an ownership marker for a BucketAccess grant.
-pub fn grant_owner_policy_document() -> String {
-    serde_json::json!({
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": "CosiGrantOwner",
-            "Effect": "Allow",
-            "Action": ["s3:ListAllMyBuckets"],
-            "Resource": ["arn:aws:s3:::*"]
-        }]
-    })
-    .to_string()
-}
-
-/// Deterministic secret so DriverGrantBucketAccess is idempotent across sidecar retries.
-pub fn credentials_for_account(account_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("rustfs-cosi-v1:{account_id}").as_bytes());
-    hex::encode(digest)
+/// Unique generated policy name per COSI grant (never shared across grants).
+pub fn grant_policy_name(grant_name: &str) -> String {
+    format!("cosi-pol-{}", sanitize_policy_fragment(grant_name))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{credentials_for_account, grant_owner_policy_name};
+    use super::grant_policy_name;
 
     #[test]
-    fn credentials_are_deterministic_and_long_enough() {
-        let a = credentials_for_account("ba-test-uid");
-        let b = credentials_for_account("ba-test-uid");
-        assert_eq!(a, b);
-        assert!(a.len() >= 8);
-        assert_ne!(a, credentials_for_account("other-account"));
-    }
-
-    #[test]
-    fn grant_owner_policy_name_sanitizes() {
+    fn grant_policy_name_sanitizes() {
         assert_eq!(
-            grant_owner_policy_name("ba-81733d1a-ac7a-4759-96f3-fbcc07c0cee9"),
-            "cosi-grant-ba-81733d1a-ac7a-4759-96f3-fbcc07c0cee9"
+            grant_policy_name("ba-81733d1a-ac7a-4759-96f3-fbcc07c0cee9"),
+            "cosi-pol-ba-81733d1a-ac7a-4759-96f3-fbcc07c0cee9"
         );
-        assert_eq!(
-            grant_owner_policy_name("ba/weird.name"),
-            "cosi-grant-ba-weird-name"
-        );
+        assert_eq!(grant_policy_name("ba/weird.name"), "cosi-pol-ba-weird-name");
     }
 }

@@ -1,7 +1,11 @@
 //! RustFS COSI driver — serves Identity + Provisioner on a Unix socket.
 
 mod backend;
+mod bucket;
+mod credentials;
 mod driver;
+mod grant;
+mod ownership;
 mod parameters;
 
 pub mod proto {

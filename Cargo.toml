@@ -40,6 +40,7 @@ url = "2.5"
 shadow-rs = "1.5.0"
 snafu = { version = "0.8.9", features = ["futures"] }
 kube-leader-election = { path = "crates/leader-election" }
+rustfs-admin = { path = "crates/rustfs-admin" }
 hostname = "0.4"
 
 # Console dependencies
@@ -63,7 +64,7 @@ shadow-rs = { version = "1.5.0", features = ["build"] }
 unused_variables = "allow"
 
 [workspace]
-members = ["crates/leader-election", "crates/cosi-driver"]
+members = ["crates/leader-election", "crates/cosi-driver", "crates/rustfs-admin"]
 
 [lints.clippy]
 unwrap_used = "deny"

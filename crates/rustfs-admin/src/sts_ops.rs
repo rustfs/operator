@@ -14,11 +14,11 @@
 
 //! STS boundary:
 //!   - temporary credentials and AssumeRole request composition/response parsing.
-use super::helpers::{build_form_body, parse_assume_role_response};
+use super::helpers::{build_form_body, extract_xml_tag};
 use super::{
-    ASSUME_ROLE_PATH, FORM_CONTENT_TYPE, RustfsAdminClient, RustfsClientError, STS_SIGNING_SERVICE,
+    ASSUME_ROLE_PATH, FORM_CONTENT_TYPE, RustfsAdminClient, RustfsClientError,
+    RustfsStsCredentials, STS_SIGNING_SERVICE,
 };
-use crate::sts::types::StsAssumeRoleCredentials;
 
 impl RustfsAdminClient {
     // STS duties: temporary credentials and AssumeRole API call path.
@@ -28,7 +28,7 @@ impl RustfsAdminClient {
         &self,
         policy: Option<&str>,
         duration_seconds: u64,
-    ) -> Result<StsAssumeRoleCredentials, RustfsClientError> {
+    ) -> Result<RustfsStsCredentials, RustfsClientError> {
         let mut params = vec![
             ("Version", Self::STS_VERSION.to_string()),
             ("Action", Self::STS_ACTION.to_string()),
@@ -79,6 +79,19 @@ impl RustfsAdminClient {
             .await
             .map_err(|_| RustfsClientError::RequestFailed)?;
 
-        parse_assume_role_response(&body).ok_or(RustfsClientError::ParseResponseFailed)
+        let access_key_id =
+            extract_xml_tag(&body, "AccessKeyId").ok_or(RustfsClientError::ParseResponseFailed)?;
+        let secret_access_key = extract_xml_tag(&body, "SecretAccessKey")
+            .ok_or(RustfsClientError::ParseResponseFailed)?;
+        let session_token =
+            extract_xml_tag(&body, "SessionToken").ok_or(RustfsClientError::ParseResponseFailed)?;
+        let expiration =
+            extract_xml_tag(&body, "Expiration").ok_or(RustfsClientError::ParseResponseFailed)?;
+        Ok(RustfsStsCredentials {
+            access_key_id,
+            secret_access_key,
+            session_token,
+            expiration,
+        })
     }
 }

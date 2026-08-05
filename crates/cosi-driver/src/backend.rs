@@ -2,7 +2,7 @@
 
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::{Api, Client};
-use operator::sts::rustfs_client::RustfsAdminClient;
+use rustfs_admin::RustfsAdminClient;
 use thiserror::Error;
 use tracing::info;
 
@@ -33,7 +33,7 @@ pub enum BackendError {
     #[error("configmap key missing: {0}")]
     MissingCaData(&'static str),
     #[error(transparent)]
-    ClientBuild(#[from] operator::sts::rustfs_client::RustfsClientError),
+    ClientBuild(#[from] rustfs_admin::RustfsClientError),
 }
 
 #[allow(clippy::result_large_err)]
