@@ -1006,6 +1006,59 @@ async fn user_exists_limits_unexpected_error_response_body() {
 }
 
 #[tokio::test]
+async fn get_user_info_parses_comma_separated_policy_names() {
+    let router = Router::new().route(
+        USER_INFO_PATH,
+        get(|| async {
+            (
+                StatusCode::OK,
+                r#"{"status":"enabled","policyName":"cosi-mlflow,cosi-grant-ba-1"}"#,
+            )
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let info = client
+        .get_user_info("mlflow")
+        .await
+        .unwrap()
+        .expect("user should exist");
+    assert_eq!(
+        info.policy_names,
+        vec!["cosi-mlflow".to_string(), "cosi-grant-ba-1".to_string()]
+    );
+    assert!(client.user_exists("mlflow").await.unwrap());
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn get_user_info_returns_none_for_missing_user() {
+    let router = Router::new().route(
+        USER_INFO_PATH,
+        get(|| async { (StatusCode::NOT_FOUND, "NoSuchUser") }),
+    );
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    assert!(client.get_user_info("missing").await.unwrap().is_none());
+    assert!(!client.user_exists("missing").await.unwrap());
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn set_user_policy_uses_single_authoritative_mapping_call() {
     let capture = Capture::default();
     let route_capture = capture.clone();

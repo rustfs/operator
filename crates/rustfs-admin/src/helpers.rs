@@ -13,61 +13,13 @@
 // limitations under the License.
 
 //! Internal helper duties: shared credential parsing, signature/hash utilities, and parsers.
-use std::collections::BTreeMap;
-
 use hmac::{Hmac, Mac};
-use k8s_openapi::ByteString;
 use reqwest::StatusCode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::form_urlencoded;
 
-use crate::Tenant;
-use crate::sts::types::StsAssumeRoleCredentials;
-
-use super::{RustfsClientError, RustfsCredentials};
-
-pub(super) fn extract_credentials(
-    data: Option<&BTreeMap<String, ByteString>>,
-) -> Result<RustfsCredentials, RustfsClientError> {
-    let secret_data = data.ok_or(RustfsClientError::TenantSecretLookupFailed)?;
-
-    Ok(RustfsCredentials {
-        access_key: get_secret_value(secret_data, "accesskey")?,
-        secret_key: get_secret_value(secret_data, "secretkey")?,
-    })
-}
-
-pub(super) fn tenant_tls_enabled(tenant: &Tenant) -> bool {
-    tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled())
-}
-
-pub(super) fn tenant_tls_client_certificate_required(tenant: &Tenant) -> bool {
-    tenant
-        .status
-        .as_ref()
-        .and_then(|status| status.certificates.tls.as_ref())
-        .and_then(|tls| tls.client_ca_secret_ref.as_ref())
-        .is_some()
-}
-
-pub(super) fn get_secret_value(
-    data: &BTreeMap<String, ByteString>,
-    field: &'static str,
-) -> Result<String, RustfsClientError> {
-    let raw = data
-        .get(field)
-        .ok_or(RustfsClientError::MissingCredentialKey { key: field })?;
-
-    let value = String::from_utf8(raw.0.clone())
-        .map_err(|_| RustfsClientError::InvalidCredentialValue { key: field })?;
-
-    if value.is_empty() {
-        return Err(RustfsClientError::EmptyCredentialValue { key: field });
-    }
-
-    Ok(value)
-}
+use super::RustfsClientError;
 
 /// Encode an `application/x-www-form-urlencoded` request body.
 pub(super) fn build_form_body(params: &[(&str, &str)]) -> String {
@@ -197,20 +149,6 @@ pub(super) fn derive_signing_key(
     let k_region = hmac_sha256(&k_date, region)?;
     let k_service = hmac_sha256(&k_region, service)?;
     hmac_sha256(&k_service, "aws4_request")
-}
-
-pub(super) fn parse_assume_role_response(body: &str) -> Option<StsAssumeRoleCredentials> {
-    let access_key_id = extract_xml_tag(body, "AccessKeyId")?;
-    let secret_access_key = extract_xml_tag(body, "SecretAccessKey")?;
-    let session_token = extract_xml_tag(body, "SessionToken")?;
-    let expiration = extract_xml_tag(body, "Expiration")?;
-
-    Some(StsAssumeRoleCredentials {
-        access_key_id,
-        secret_access_key,
-        session_token,
-        expiration,
-    })
 }
 
 pub(super) fn extract_xml_tag(document: &str, tag: &str) -> Option<String> {

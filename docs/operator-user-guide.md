@@ -1097,6 +1097,14 @@ For the RustFS Tenant Console, use the Tenant admin credentials from `spec.creds
 - Keep Tenant examples under version control, but never commit raw Secret values.
 - Check `status.conditions` before debugging lower-level StatefulSets.
 
+## 13.1 COSI `preferredAccessKey`
+
+When using the RustFS COSI driver (`rustfs.objectstorage.k8s.io`):
+
+- Prefer omitting `preferredAccessKey` so each `BucketAccess` gets a unique account id derived from the COSI grant name (`ba-<UID>`), matching Ceph COSI isolation.
+- If you set `preferredAccessKey` (or `accessKey`), the value must be unique per `BucketAccess`. Reusing the same key across claims is rejected with `AlreadyExists` so credentials are never rotated out from under another workload.
+- Grant retries for the same `BucketAccess` are idempotent and return the same secret; the driver does not overwrite an existing user's secret key.
+
 ## 14. Related Documentation
 
 - [Project README](../README.md)
