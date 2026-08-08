@@ -11,6 +11,7 @@ metadata:
 spec:
   strategy:
     type: Recreate
+    rollingUpdate: null
   replicas: 1
   selector:
     matchLabels:

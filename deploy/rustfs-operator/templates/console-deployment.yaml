@@ -32,6 +32,7 @@ metadata:
 spec:
   strategy:
     type: Recreate
+    rollingUpdate: null
   replicas: {{ .Values.console.replicas }}
   selector:
     matchLabels:

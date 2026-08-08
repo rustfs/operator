@@ -458,6 +458,7 @@ fn console_session_deployments_enforce_single_recreate_process() {
         dev_deployment["spec"]["strategy"]["type"].as_str(),
         Some("Recreate")
     );
+    assert_explicit_null_rolling_update(&dev_deployment);
 
     let Some(default_render) = helm_template(&[]) else {
         return;
@@ -475,6 +476,7 @@ fn console_session_deployments_enforce_single_recreate_process() {
         deployment["spec"]["strategy"]["type"].as_str(),
         Some("Recreate")
     );
+    assert_explicit_null_rolling_update(&deployment);
 
     for replicas in ["2", "true"] {
         let render = helm_template(&["--set", &format!("console.replicas={replicas}")])
@@ -677,4 +679,13 @@ fn find_yaml_document(yaml: &str, kind: &str, name: &str) -> Option<Value> {
             document["kind"].as_str() == Some(kind)
                 && document["metadata"]["name"].as_str() == Some(name)
         })
+}
+
+fn assert_explicit_null_rolling_update(deployment: &Value) {
+    let strategy = deployment["spec"]["strategy"]
+        .as_mapping()
+        .expect("Deployment strategy is a mapping");
+    let rolling_update = Value::String("rollingUpdate".to_string());
+    assert!(strategy.contains_key(&rolling_update));
+    assert!(strategy[&rolling_update].is_null());
 }

@@ -102,16 +102,26 @@ impl AppState {
         let sealed_claims = seal_session_token(&self.jwt_secret, &claims)?;
         let mut sessions = self.sessions.lock().map_err(|_| SessionError::StoreLock)?;
         sessions.retain(|_, session| session.expires_at > iat);
-        if sessions.len() >= MAX_ACTIVE_SESSIONS {
-            return Err(SessionError::Capacity);
-        }
-        if sessions
+        let same_token_session_count = sessions
             .values()
             .filter(|session| session.token_fingerprint == token_fingerprint)
-            .count()
-            >= MAX_SESSIONS_PER_TOKEN
-        {
-            return Err(SessionError::PerTokenCapacity);
+            .count();
+        if same_token_session_count >= MAX_SESSIONS_PER_TOKEN {
+            let oldest_session_id = sessions
+                .iter()
+                .filter(|(_, session)| session.token_fingerprint == token_fingerprint)
+                .min_by(|(left_id, left), (right_id, right)| {
+                    left.expires_at
+                        .cmp(&right.expires_at)
+                        .then_with(|| left_id.cmp(right_id))
+                })
+                .map(|(session_id, _)| session_id.clone());
+            if let Some(oldest_session_id) = oldest_session_id {
+                sessions.remove(&oldest_session_id);
+            }
+        }
+        if sessions.len() >= MAX_ACTIVE_SESSIONS {
+            return Err(SessionError::Capacity);
         }
         match sessions.entry(session_id.clone()) {
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -228,9 +238,6 @@ pub enum SessionError {
 
     #[snafu(display("maximum active Console sessions reached"))]
     Capacity,
-
-    #[snafu(display("maximum active Console sessions for this token reached"))]
-    PerTokenCapacity,
 
     #[snafu(display("Kubernetes bearer token exceeds the session size limit"))]
     TokenTooLarge,
@@ -626,19 +633,40 @@ mod tests {
     }
 
     #[test]
-    fn sessions_per_token_are_bounded() {
+    fn new_session_evicts_oldest_session_for_same_token() {
         let state = AppState::new("test-secret".to_string());
-        for _ in 0..MAX_SESSIONS_PER_TOKEN {
+        let oldest_session_id = state
+            .create_session("shared-token".to_string())
+            .expect("oldest session is created");
+        let mut sessions = state
+            .sessions
+            .lock()
+            .expect("session store lock is available");
+        Arc::make_mut(
+            sessions
+                .get_mut(&oldest_session_id)
+                .expect("oldest session is stored"),
+        )
+        .expires_at = current_timestamp().saturating_add(60);
+        drop(sessions);
+        for _ in 1..MAX_SESSIONS_PER_TOKEN {
             state
                 .create_session("shared-token".to_string())
                 .expect("session is created within the per-token limit");
         }
 
-        assert!(matches!(
-            state.create_session("shared-token".to_string()),
-            Err(SessionError::PerTokenCapacity)
-        ));
+        let newest_session_id = state
+            .create_session("shared-token".to_string())
+            .expect("oldest same-token session is evicted");
 
+        let sessions = state
+            .sessions
+            .lock()
+            .expect("session store lock is available");
+        assert_eq!(sessions.len(), MAX_SESSIONS_PER_TOKEN);
+        assert!(!sessions.contains_key(&oldest_session_id));
+        assert!(sessions.contains_key(&newest_session_id));
+        drop(sessions);
         state
             .create_session("different-token".to_string())
             .expect("one token cannot consume another token's session allowance");

@@ -212,10 +212,15 @@ mod tests {
     #[test]
     fn console_session_deployments_are_single_replica_and_recreate() {
         assert!(CONSOLE_DEPLOYMENT.contains("replicas: 1"));
-        assert!(CONSOLE_DEPLOYMENT.contains("strategy:\n    type: Recreate"));
+        assert!(
+            CONSOLE_DEPLOYMENT.contains("strategy:\n    type: Recreate\n    rollingUpdate: null")
+        );
         assert!(
             CONSOLE_DEPLOYMENT_TEMPLATE.contains("ne (toString .Values.console.replicas) \"1\"")
         );
-        assert!(CONSOLE_DEPLOYMENT_TEMPLATE.contains("strategy:\n    type: Recreate"));
+        assert!(
+            CONSOLE_DEPLOYMENT_TEMPLATE
+                .contains("strategy:\n    type: Recreate\n    rollingUpdate: null")
+        );
     }
 }

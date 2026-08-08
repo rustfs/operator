@@ -74,7 +74,7 @@ fn complete_validated_login(state: &AppState, k8s_token: String) -> Result<Login
     let session_id = state
         .create_session(k8s_token)
         .map_err(|source| match source {
-            SessionError::Capacity | SessionError::PerTokenCapacity => Error::TooManyRequests {
+            SessionError::Capacity => Error::TooManyRequests {
                 message: "Too many active Console sessions".to_string(),
             },
             source => Error::Session { source },
@@ -205,19 +205,15 @@ mod tests {
     }
 
     #[test]
-    fn per_token_session_capacity_maps_to_too_many_requests() {
+    fn repeated_logins_with_same_token_replace_an_old_session() {
         let state = AppState::new("test-secret".to_string());
         for _ in 0..MAX_SESSIONS_PER_TOKEN {
-            state
-                .create_session("shared-token".to_string())
-                .expect("session is within the per-token limit");
+            let _ = complete_validated_login(&state, "shared-token".to_string())
+                .expect("login is within the per-token limit");
         }
 
-        let response = complete_validated_login(&state, "shared-token".to_string())
-            .expect_err("per-token capacity is enforced")
-            .into_response();
-
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let _ = complete_validated_login(&state, "shared-token".to_string())
+            .expect("oldest same-token session is replaced");
     }
 
     #[test]
