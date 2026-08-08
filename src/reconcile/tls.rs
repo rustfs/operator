@@ -2908,10 +2908,17 @@ mod tests {
     use crate::types::v1alpha1::tls::{
         CaTrustConfig, CertManagerPrivateKeyConfig, CertManagerTlsConfig, TlsCertificateConfig,
     };
+    use http::{Method, Request, Response, StatusCode};
     use k8s_openapi::ByteString;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use kube::CustomResourceExt;
+    use kube::{Client, CustomResourceExt, client::Body};
     use std::collections::BTreeMap;
+    use std::convert::Infallible;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tower::service_fn;
 
     const PUBLIC_CERT_PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUD4D7ObFcJ5PEZwq2t/cmrTbzcU0wDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI1MTExMDA3NDQwNVoXDTI2MTEx\nMDA3NDQwNVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAsnrreaQGztdaTppY7p1ExoDU7FpYjk8MalWs9xIioHTe\ndpDlZmEWak0Q80qTvc+x6GT8VD/pLYqg6B2mot8I+Uv44GUmpPD/+WDxVbjvwL2b\nfvcNGEniqKJUOy2za98WcmI8EoILwbmYy7cZslf6b3D0xuDsmovYJgtjNeziV6ie\nLQfbWWXhAipYhUwaBAdUSQS+BWPPdYFG4LEE/8+BqmYdGU7ujIFlqSU89ZMfpZS4\npVRoEy16fs5O0UkbP1l63Q0qBLrLXjWw874dV8wC2p9iuVwofpDZRGhfYFaviZHb\nMHdUBRUughU4vvTknAGwMzbrIH+eTp7aKrGKWb7ozQIDAQABo1MwUTAdBgNVHQ4E\nFgQUGSE2L3XLbuxlA1Q0iX65aVGKzl4wHwYDVR0jBBgwFoAUGSE2L3XLbuxlA1Q0\niX65aVGKzl4wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAGHwM\nSYFN1/9ZlriVaJEpSvGlfeDvN5ipXqf0s1Ykux9rsTYchn7tcA6zhWqZUimwy/jO\nI7jLfBNa3r5HT1uX3/RlMs6dMIO4h3vkSWjQ3QaGiuXh6U+erbkaeETtrw9b40ta\nDsj2rruE3Z11JV0y5fGcvXjXMFV7XsFQjNXF5TlXu4OUvfMeo9h4IbPmNQtq+g+t\nnx0ZBloqo+punQVjHjovoQUWlrOOL5ZRZl1vLqqhHfw54a9weCXY8XJNnxWN0l0C\nKzht0TgbidDlWKBsk/CMTY8zpYrfVyPhnjNCeFGFG0DzrsehCgpEiEZ6vlylei7c\nRfKUdp4DXmUZBDzeQw==\n-----END CERTIFICATE-----\n";
     const CERT_WITH_PEER_SANS_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
@@ -2937,6 +2944,15 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
 84SYe6DQkgSslVKrEZIaVd/q8t8=
 -----END CERTIFICATE-----
 "#;
+
+    fn kube_response(status: StatusCode, body: Value) -> Response<Body> {
+        Response::builder()
+            .status(status)
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("response should serialize"),
+            ))
+            .expect("response should build")
+    }
 
     #[test]
     fn tenant_crd_schema_types_cert_manager_private_key() {
@@ -3447,29 +3463,125 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
         );
     }
 
-    #[test]
-    fn require_san_match_validates_public_tls_when_internode_https_is_disabled() {
-        let config = TlsConfig {
+    #[tokio::test]
+    async fn require_san_match_blocks_public_tls_during_reconcile_without_internode_https() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.tls = Some(TlsConfig {
+            mode: TlsMode::CertManager,
             enable_internode_https: false,
             require_san_match: true,
+            cert_manager: Some(CertManagerTlsConfig {
+                secret_name: Some("server-tls".to_string()),
+                dns_names: vec!["s3.example.com".to_string()],
+                include_generated_dns_names: Some(false),
+                ..Default::default()
+            }),
             ..Default::default()
-        };
-        let mut runtime_budget = TlsCertificateRuntimeBudget::default();
-        runtime_budget
-            .charge_secret_material(CERT_WITH_PEER_SANS_PEM.len())
-            .expect("test certificate should fit the runtime budget");
+        });
 
-        let failure = validate_configured_tls_secret_san_match(
-            &config,
+        let mut server_secret = tls_secret(
             "server-tls",
-            CERT_WITH_PEER_SANS_PEM,
-            &["s3.example.com".to_string()],
-            &mut runtime_budget,
-        )
-        .expect_err("public TLS SAN mismatch must be rejected without internode HTTPS");
+            "7",
+            Some(KUBERNETES_TLS_SECRET_TYPE),
+            true,
+            true,
+            None,
+        );
+        server_secret.metadata.namespace = Some("default".to_string());
+        server_secret
+            .data
+            .as_mut()
+            .expect("test TLS Secret should contain data")
+            .insert(
+                TLS_CERT_KEY.to_string(),
+                ByteString(CERT_WITH_PEER_SANS_PEM.to_vec()),
+            );
 
-        assert_eq!(failure.reason, Reason::CertificateSanMismatch);
-        assert!(failure.message.contains("s3.example.com"));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let request_count = Arc::clone(&request_count);
+            let server_secret = server_secret.clone();
+            let tenant = tenant.clone();
+            move |request: Request<Body>| {
+                let request_number = request_count.fetch_add(1, Ordering::SeqCst);
+                let server_secret = server_secret.clone();
+                let tenant = tenant.clone();
+                async move {
+                    let response = match request_number {
+                        0 => {
+                            assert_eq!(request.method(), Method::GET);
+                            assert_eq!(
+                                request.uri().path(),
+                                "/api/v1/namespaces/default/secrets/server-tls"
+                            );
+                            kube_response(
+                                StatusCode::OK,
+                                serde_json::to_value(server_secret)
+                                    .expect("Secret should serialize"),
+                            )
+                        }
+                        1 => {
+                            assert_eq!(request.method(), Method::PATCH);
+                            assert_eq!(
+                                request.uri().path(),
+                                "/apis/rustfs.com/v1alpha1/namespaces/default/tenants/test-tenant/status"
+                            );
+                            let patch: Value = serde_json::from_slice(
+                                &request
+                                    .into_body()
+                                    .collect_bytes()
+                                    .await
+                                    .expect("status patch body should be readable"),
+                            )
+                            .expect("status patch should be JSON");
+                            assert_eq!(patch["status"]["currentState"], "Blocked");
+                            assert_eq!(
+                                patch["status"]["certificates"]["tls"]["lastErrorReason"],
+                                Reason::CertificateSanMismatch.as_str()
+                            );
+                            assert!(
+                                patch["status"]["certificates"]["tls"]["lastErrorMessage"]
+                                    .as_str()
+                                    .is_some_and(|message| message.contains("s3.example.com"))
+                            );
+                            kube_response(
+                                StatusCode::OK,
+                                serde_json::to_value(tenant).expect("Tenant should serialize"),
+                            )
+                        }
+                        2 => {
+                            assert_eq!(request.method(), Method::POST);
+                            assert!(request.uri().path().contains("/events"));
+                            kube_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                serde_json::json!({
+                                    "apiVersion": "v1",
+                                    "kind": "Status",
+                                    "status": "Failure",
+                                    "reason": "InternalError",
+                                    "code": 500
+                                }),
+                            )
+                        }
+                        _ => panic!("unexpected Kubernetes request: {request:?}"),
+                    };
+                    Ok::<_, Infallible>(response)
+                }
+            }
+        });
+        let ctx = Context::new(Client::new(service, "default"));
+
+        let error = reconcile_tls(&ctx, &tenant, "default")
+            .await
+            .expect_err("public TLS SAN mismatch must block reconcile without internode HTTPS");
+
+        assert!(matches!(
+            error,
+            Error::TlsBlocked { reason, message }
+                if reason == Reason::CertificateSanMismatch.as_str()
+                    && message.contains("s3.example.com")
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 3);
     }
 
     #[test]
