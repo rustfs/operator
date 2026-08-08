@@ -9,6 +9,9 @@ metadata:
   labels:
     app.kubernetes.io/name: rustfs-operator-console
 spec:
+  strategy:
+    type: Recreate
+    rollingUpdate: null
   replicas: 1
   selector:
     matchLabels:

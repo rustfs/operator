@@ -71,6 +71,9 @@ pub enum Error {
     #[snafu(display("Conflict: {}", message))]
     Conflict { message: String },
 
+    #[snafu(display("Too many requests: {}", message))]
+    TooManyRequests { message: String },
+
     #[snafu(display("Action required: {}", message))]
     ActionRequired {
         status: StatusCode,
@@ -281,6 +284,14 @@ impl Error {
                 Vec::new(),
                 None,
             ),
+            Error::TooManyRequests { message } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "TooManyRequests".to_string(),
+                "RateLimitExceeded".to_string(),
+                message,
+                Vec::new(),
+                None,
+            ),
             Error::ActionRequired {
                 status,
                 code,
@@ -423,6 +434,21 @@ mod tests {
         );
         assert!(value.get("nextActions").is_none());
         Ok(())
+    }
+
+    #[test]
+    fn too_many_requests_maps_to_stable_error_contract() {
+        let (status, response) = Error::TooManyRequests {
+            message: "Too many active Console sessions".to_string(),
+        }
+        .into_response_parts();
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.code, "TooManyRequests");
+        assert_eq!(response.reason, "RateLimitExceeded");
+        assert_eq!(response.message, "Too many active Console sessions");
+        assert!(response.next_actions.is_empty());
+        assert!(response.details.is_none());
     }
 
     #[test]

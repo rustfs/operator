@@ -168,7 +168,7 @@ console:
   # Enable console deployment
   enabled: true
 
-  # Number of console replicas
+  # Console sessions are stored in process, so this must remain 1.
   replicas: 1
 
   # Console server port
@@ -185,8 +185,8 @@ console:
     bodyLimitBytes: 65536
     timeoutSeconds: 30
 
-  # Secret used to encrypt Console session cookies.
-  # All Console replicas must use the same secret.
+  # Secret used to encrypt in-process Console session data.
+  # Console must run as a single process; changing this secret invalidates all sessions.
   # If not set, an existing chart Secret is reused.
   # On first install, a random secret is generated.
   # Generate with: openssl rand -base64 32

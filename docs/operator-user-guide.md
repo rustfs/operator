@@ -253,7 +253,7 @@ Common chart sections:
 | `operator` | Operator Deployment replicas, image, resources, probes, metrics, scheduling, leader election, and tenant monitoring. |
 | `sts` | Operator STS endpoint, service port, TokenReview audience, and TLS handling. |
 | `serviceAccount` / `rbac` | Operator ServiceAccount and RBAC creation. |
-| `console` | Operator Console backend/UI Deployment, service, session cookie secret, ingress, resources, and optional split frontend. |
+| `console` | Operator Console backend/UI Deployment, service, session encryption secret, ingress, resources, and optional split frontend. |
 | `clusterDomain` | Kubernetes cluster DNS domain used for Tenant peer URLs, generated TLS SANs, and operator STS auto TLS. Defaults to `cluster.local`. |
 | `namespace` | Namespace override for chart resources; defaults to the Helm release namespace. |
 | `commonLabels` / `commonAnnotations` | Labels and annotations added to chart-managed resources. |
@@ -294,7 +294,7 @@ operator:
 
 console:
   enabled: true
-  replicas: 2
+  replicas: 1
   jwtSecret: "<stable-base64-or-random-secret>"
   loginAdmission:
     requestsPerSecond: 5
@@ -325,7 +325,8 @@ sts:
 Notes:
 
 - `operator.leaderElect` can be unset. The chart enables leader election automatically when `operator.replicas > 1`.
-- Keep `console.jwtSecret` stable when running multiple Console replicas. If unset, the chart generates or reuses a Secret.
+- Keep `console.replicas=1`. Console sessions are stored in process, and the chart uses a Recreate rollout so upgrades invalidate existing sessions without mixing incompatible cookie formats. Custom deployments must preserve both constraints.
+- When upgrading from a release configured with multiple Console replicas, set `console.replicas=1` first; expect brief Console downtime and require users to sign in again. Before rolling back to a release without server-side sessions, scale the Console Deployment to zero, perform the rollback, then restore one replica so incompatible cookie formats never overlap.
 - Keep `CONSOLE_COOKIE_SECURE` enabled for production HTTPS. Only disable it for local HTTP testing.
 - `sts.tls.auto=true` lets the operator create or repair `sts-tls`; with `rbac.create=true`, the chart isolates write access in a namespaced Role while keeping cluster-wide Secret and ConfigMap access read-only. With `rbac.create=false`, provide an equivalent Role and RoleBinding for the operator ServiceAccount: namespaced Secret `create`, plus `get` and `update` restricted to the `sts-tls` resource name.
 
@@ -948,7 +949,7 @@ console:
       - host: console.example.com
 ```
 
-The unified operator image serves both `/` and `/api/v1` from the Console service. No backend CORS configuration is needed for this mode.
+The unified operator image serves both `/` and `/api/v1` from the Console service. No backend CORS configuration is needed for this mode. The reverse proxy must preserve the public Host/authority; if it rewrites the Host, add the public Console origin to `CORS_ALLOWED_ORIGINS` so logout origin checks succeed.
 
 Console login uses a Kubernetes ServiceAccount bearer token. For the chart-managed Console ServiceAccount:
 
@@ -956,7 +957,7 @@ Console login uses a Kubernetes ServiceAccount bearer token. For the chart-manag
 kubectl -n rustfs-system create token rustfs-operator-console --duration=24h
 ```
 
-Paste the token into the login form. The Console stores the validated token in an encrypted session cookie.
+Paste the token into the login form. The Console keeps the encrypted token in process and places only a random session ID in the browser cookie. Logging out removes that session immediately; restarting or upgrading the Console invalidates all existing sessions.
 If your Helm release uses a custom namespace or `console.serviceAccount.name`,
 use the command printed in the Helm install notes.
 
@@ -1193,7 +1194,7 @@ For the RustFS Tenant Console, use the Tenant admin credentials from `spec.creds
 - Do not model hot/warm/cold tiers as pools inside one Tenant.
 - Use separate Tenants for separate clusters, administrative boundaries, or performance isolation.
 - Keep the Operator Console on HTTPS in production.
-- Keep `console.jwtSecret` stable for multi-replica Console deployments.
+- Keep `console.replicas=1`; Console restarts and upgrades intentionally require users to sign in again.
 - Use `ServiceMonitor` and `PrometheusRule` only when Prometheus Operator is installed.
 - Keep Tenant examples under version control, but never commit raw Secret values.
 - Check `status.conditions` before debugging lower-level StatefulSets.
