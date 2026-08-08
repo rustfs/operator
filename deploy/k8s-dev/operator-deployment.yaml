@@ -81,5 +81,6 @@ spec:
               value: rustfs-operator-sts
             - name: OPERATOR_STS_TLS_ENABLED
               value: "true"
+            # Kind/E2E development explicitly opts in to Operator-generated certificates.
             - name: OPERATOR_STS_TLS_AUTO
               value: "true"

@@ -37,6 +37,7 @@ use x509_parser::parse_x509_certificate;
 const STS_TLS_SECRET_NAME: &str = "sts-tls";
 const DEFAULT_STS_SERVICE_NAME: &str = "rustfs-operator-sts";
 const DEFAULT_OPERATOR_NAMESPACE: &str = "rustfs-system";
+const DEFAULT_STS_TLS_AUTO: bool = false;
 const SERVICE_ACCOUNT_NAMESPACE_PATH: &str =
     "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 const TLS_CERT_KEY: &str = "tls.crt";
@@ -59,7 +60,7 @@ pub type TlsResult<T> = Result<T, Error>;
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
     #[snafu(display(
-        "operator STS TLS Secret {namespace}/{secret} was not found and OPERATOR_STS_TLS_AUTO=false"
+        "operator STS TLS is enabled, but Secret {namespace}/{secret} was not found and OPERATOR_STS_TLS_AUTO=false; pre-create the Secret with tls.crt, tls.key, and ca.crt, or explicitly enable automatic generation"
     ))]
     SecretNotFound { namespace: String, secret: String },
 
@@ -130,7 +131,7 @@ impl OperatorStsTlsConfig {
     pub fn from_env() -> Self {
         Self {
             enabled: env_bool("OPERATOR_STS_TLS_ENABLED", true),
-            auto_generate: env_bool("OPERATOR_STS_TLS_AUTO", true),
+            auto_generate: env_bool("OPERATOR_STS_TLS_AUTO", DEFAULT_STS_TLS_AUTO),
             namespace: operator_namespace(),
             service_name: env_string("OPERATOR_STS_SERVICE_NAME", DEFAULT_STS_SERVICE_NAME),
             cluster_domain: cluster_dns::DEFAULT_CLUSTER_DOMAIN.to_string(),
@@ -730,6 +731,19 @@ mod tests {
         .unwrap();
 
         assert!(validate_material_at(&material, now).is_err());
+    }
+
+    #[test]
+    fn missing_external_secret_error_explains_how_to_start() {
+        let error = Error::SecretNotFound {
+            namespace: "rustfs-system".to_string(),
+            secret: STS_TLS_SECRET_NAME.to_string(),
+        }
+        .to_string();
+
+        assert!(error.contains("operator STS TLS is enabled"));
+        assert!(error.contains("tls.crt, tls.key, and ca.crt"));
+        assert!(error.contains("explicitly enable automatic generation"));
     }
 
     #[test]
