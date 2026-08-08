@@ -93,6 +93,7 @@ fn k8s_dev_manifests_expose_sts_service_and_rbac_permissions() {
     assert!(k8s_deploy.contains("value: rustfs-operator-sts"));
     assert!(k8s_deploy.contains("name: OPERATOR_STS_TLS_ENABLED"));
     assert!(k8s_deploy.contains("name: OPERATOR_STS_TLS_AUTO"));
+    assert!(k8s_deploy.contains("name: OPERATOR_STS_TLS_AUTO\n              value: \"true\""));
     assert!(!k8s_deploy.contains("name: OPERATOR_STS_TLS_SECRET_NAME"));
     assert!(k8s_sts_svc.contains("name: rustfs-operator-sts"));
     assert!(k8s_sts_svc.contains("targetPort: sts"));
@@ -136,6 +137,7 @@ fn helm_sts_template_and_values_are_consistent() {
     assert!(sts_values.contains("audience: sts.rustfs.com"));
     assert!(sts_values.contains("port: 4223"));
     assert!(sts_values.contains("tls:"));
+    assert!(sts_values.contains("auto: false"));
     assert!(!sts_values.contains("secretName:"));
     assert!(!sts_values.contains("nodePort:"));
     assert!(!sts_values.contains("loadBalancerIP:"));
@@ -214,6 +216,7 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
     assert!(default_stdout.contains("name: OPERATOR_STS_TLS_ENABLED"));
     assert!(default_stdout.contains("value: \"true\""));
     assert!(default_stdout.contains("name: OPERATOR_STS_TLS_AUTO"));
+    assert!(default_stdout.contains("name: OPERATOR_STS_TLS_AUTO\n              value: \"false\""));
     assert!(!default_stdout.contains("name: OPERATOR_STS_TLS_SECRET_NAME"));
     for name in admission_env_names() {
         assert!(
@@ -223,8 +226,24 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
     }
     let default_documents = yaml_documents(&default_stdout, "helm-default-render");
     assert_reference_cluster_role_is_read_only(&default_documents, "rustfs-operator");
+    assert!(
+        find_document(&default_documents, "Role", "rustfs-operator-sts-tls").is_none(),
+        "default external STS TLS must not grant Secret write access"
+    );
+
+    let Some(auto_tls_render) = helm_template(&["--set", "sts.tls.auto=true"]) else {
+        return;
+    };
+    assert!(
+        auto_tls_render.status.success(),
+        "Operator-managed STS TLS should render successfully: {}",
+        String::from_utf8_lossy(&auto_tls_render.stderr)
+    );
+    let auto_tls_stdout =
+        String::from_utf8(auto_tls_render.stdout).expect("auto TLS stdout is utf8");
+    assert!(auto_tls_stdout.contains("name: OPERATOR_STS_TLS_AUTO\n              value: \"true\""));
     assert_sts_tls_role_is_minimal(
-        &default_documents,
+        &yaml_documents(&auto_tls_stdout, "helm-auto-tls-render"),
         "rustfs-operator-sts-tls",
         "default",
         "rustfs-operator",
@@ -256,29 +275,14 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
         "disabling STS must omit its namespaced Secret write role"
     );
 
-    let Some(external_tls_render) = helm_template(&["--set", "sts.tls.auto=false"]) else {
-        return;
-    };
-    assert!(
-        external_tls_render.status.success(),
-        "externally managed STS TLS should render successfully: {}",
-        String::from_utf8_lossy(&external_tls_render.stderr)
-    );
-    let external_tls_stdout =
-        String::from_utf8(external_tls_render.stdout).expect("external TLS stdout is utf8");
-    let external_tls_documents = yaml_documents(&external_tls_stdout, "helm-external-tls-render");
-    assert!(
-        find_document(&external_tls_documents, "Role", "rustfs-operator-sts-tls",).is_none(),
-        "externally managed STS TLS must not grant Secret write access"
-    );
-    assert_reference_cluster_role_is_read_only(&external_tls_documents, "rustfs-operator");
-
-    for (setting, description) in [
-        ("sts.tls.enabled=false", "disabled STS TLS"),
-        ("rbac.create=false", "externally managed RBAC"),
+    for (settings, description) in [
+        (&["--set", "sts.tls.enabled=false"][..], "disabled STS TLS"),
+        (
+            &["--set", "sts.tls.auto=true", "--set", "rbac.create=false"][..],
+            "externally managed RBAC",
+        ),
     ] {
-        let render = helm_template(&["--set", setting])
-            .expect("helm was available for the preceding render");
+        let render = helm_template(settings).expect("helm was available for the preceding render");
         assert!(
             render.status.success(),
             "{description} should render successfully: {}",
@@ -303,6 +307,8 @@ fn helm_template_renders_sts_enabled_disabled_and_rejects_external_plaintext() {
         "serviceAccount.create=false",
         "--set",
         "serviceAccount.name=custom-operator",
+        "--set",
+        "sts.tls.auto=true",
     ])
     .expect("helm was available for the preceding render");
     assert!(

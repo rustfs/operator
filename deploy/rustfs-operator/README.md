@@ -21,6 +21,11 @@ To install in a specific namespace:
 helm install rustfs-operator deploy/rustfs-operator/ --namespace rustfs-system --create-namespace
 ```
 
+Operator STS TLS is enabled while automatic certificate generation is disabled by default.
+Before installing, pre-create `sts-tls` in the release namespace with `tls.crt`, `tls.key`, and
+`ca.crt`. For development environments only, opt in to Operator-generated certificates with
+`--set sts.tls.auto=true`.
+
 ### OpenShift Installation
 
 Enable the OpenShift profile so the chart omits the fixed Pod and container
@@ -123,7 +128,7 @@ manifests remain consistent.
 | `sts.audience` | Kubernetes TokenReview audience expected by the operator STS endpoint | `sts.rustfs.com` |
 | `sts.port` | Operator container port for STS | `4223` |
 | `sts.tls.enabled` | Serve the operator STS endpoint over TLS | `true` |
-| `sts.tls.auto` | Create and replace an invalid Operator-managed STS TLS Secret with namespaced write RBAC | `true` |
+| `sts.tls.auto` | Create and rotate an invalid, legacy, or soon-to-expire Operator-managed STS TLS Secret with namespaced write RBAC | `false` |
 | `sts.service.type` | Kubernetes Service type for STS | `ClusterIP` |
 | `sts.service.port` | Kubernetes Service port for STS | `4223` |
 
@@ -135,7 +140,11 @@ POST /sts/{tenantNamespace}/{tenantName}
 
 This differs from MinIO Operator's namespace-only route. A `PolicyBinding` still lives in the Tenant namespace, but the workload must call STS with both the Tenant namespace and the Tenant name.
 
-The STS service is HTTPS by default. When `sts.tls.auto=true`, the operator creates the fixed `sts-tls` Secret in the operator namespace with `tls.crt`, `tls.key`, and `ca.crt`. With `rbac.create=true`, the chart creates a namespaced Role that can create Secrets and update only `sts-tls`; the ClusterRole keeps all Secret and ConfigMap access read-only. If `rbac.create=false`, you must provide an equivalent Role and RoleBinding for the operator ServiceAccount: namespaced Secret `create`, plus `get` and `update` restricted to the `sts-tls` resource name. Workloads must trust that CA. To use an externally issued certificate, pre-create `sts-tls` with a certificate signed by a CA already trusted by the workload and set `sts.tls.auto=false`; the chart then omits the namespaced Secret write Role.
+The STS service is HTTPS by default, and `sts.tls.auto=false` makes externally issued certificates the default ownership model. Pre-create the fixed `sts-tls` Secret in the operator namespace with `tls.crt`, `tls.key`, and `ca.crt`; startup fails with an actionable error when TLS is enabled and that Secret is absent. Update the Secret to rotate the certificate manually, and the operator hot-loads valid replacement material within five minutes while retaining the last valid configuration on refresh failures. The chart does not grant namespaced Secret write access in this mode.
+
+Set `sts.tls.auto=true` explicitly for development or other deployments that accept an Operator-managed self-signed CA. The operator then creates `sts-tls` when missing and rotates invalid, legacy, or soon-to-expire managed material. Generated certificates are valid for one year and are replaced 30 days before expiry. Existing Operator-managed Secrets created with the legacy long-lived policy are replaced once after upgrade; refresh every STS client's trusted `ca.crt` as part of that upgrade. With `rbac.create=true`, the chart creates a namespaced Role that can create Secrets and update only `sts-tls`; the ClusterRole keeps all Secret and ConfigMap access read-only. If `rbac.create=false`, provide an equivalent Role and RoleBinding for the operator ServiceAccount: namespaced Secret `create`, plus `get` and `update` restricted to the `sts-tls` resource name.
+
+Monitor `rustfs_operator_sts_tls_certificate_expiry_timestamp_seconds` and `rustfs_operator_sts_tls_ca_expiry_timestamp_seconds` and alert before either timestamp is reached.
 
 STS only issues credentials for TLS-enabled Tenants. For Tenant upstream calls, the operator selects the Tenant HTTPS service endpoint and trusts the CA recorded in `status.certificates.tls.caSecretRef`.
 

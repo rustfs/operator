@@ -151,9 +151,15 @@ pub async fn run(options: ServerOptions) -> Result<(), Box<dyn std::error::Error
         let tls_server_config = if sts_tls_config.enabled {
             let material =
                 crate::sts::tls::load_or_create_sts_tls_material(&client, &sts_tls_config).await?;
-            Some(Arc::new(crate::sts::tls::build_tls_server_config(
-                &material,
-            )?))
+            let server_config = Arc::new(crate::sts::tls::build_tls_server_config(&material)?);
+            let (sender, receiver) = tokio::sync::watch::channel(server_config);
+            tokio::spawn(crate::sts::tls::reload_sts_tls_config(
+                client.clone(),
+                sts_tls_config,
+                material,
+                sender,
+            ));
+            Some(receiver)
         } else {
             warn!("Operator STS TLS disabled by OPERATOR_STS_TLS_ENABLED=false");
             None
@@ -788,7 +794,7 @@ async fn bind_sts_listener(
 async fn run_sts_server(
     listener: tokio::net::TcpListener,
     state: crate::console::state::AppState,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
+    tls_config: Option<tokio::sync::watch::Receiver<Arc<rustls::ServerConfig>>>,
     admission_config: http_admission::AdmissionConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
@@ -806,13 +812,11 @@ async fn run_sts_server(
 async fn serve_tls_sts_server(
     listener: tokio::net::TcpListener,
     app: Router,
-    tls_config: Arc<rustls::ServerConfig>,
+    tls_config: tokio::sync::watch::Receiver<Arc<rustls::ServerConfig>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let acceptor = TlsAcceptor::from(tls_config);
-
     loop {
         let (tcp_stream, remote_addr) = listener.accept().await?;
-        let acceptor = acceptor.clone();
+        let acceptor = TlsAcceptor::from(tls_config.borrow().clone());
         let service = app.clone();
 
         tokio::spawn(async move {

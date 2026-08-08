@@ -39,6 +39,8 @@ struct Metrics {
     operator_leader: AtomicU64,
     sts_requests_total: Mutex<BTreeMap<String, u64>>,
     sts_request_duration: Mutex<BTreeMap<String, DurationSummary>>,
+    sts_tls_certificate_expiry_timestamp_seconds: AtomicU64,
+    sts_tls_ca_expiry_timestamp_seconds: AtomicU64,
     unauthenticated_admission_rejections_total: Mutex<BTreeMap<AdmissionKey, u64>>,
     unauthenticated_requests_total: Mutex<BTreeMap<UnauthenticatedRequestKey, u64>>,
     http_requests_total: Mutex<BTreeMap<HttpKey, u64>>,
@@ -224,6 +226,15 @@ pub fn record_sts_request(success: bool, duration: Duration) {
     let _ = TEST_REQUEST_METRICS.try_with(|captured| {
         captured.borrow_mut().sts_request_results.push(success);
     });
+}
+
+pub fn set_sts_tls_expiry_timestamps(certificate: i64, ca: i64) {
+    metrics()
+        .sts_tls_certificate_expiry_timestamp_seconds
+        .store(certificate.max(0) as u64, Ordering::Relaxed);
+    metrics()
+        .sts_tls_ca_expiry_timestamp_seconds
+        .store(ca.max(0) as u64, Ordering::Relaxed);
 }
 
 pub(crate) fn record_unauthenticated_request(
@@ -455,6 +466,22 @@ pub fn render() -> String {
         "Operator STS request duration by result.",
         "result",
         &metrics().sts_request_duration,
+    );
+    render_gauge(
+        &mut output,
+        "rustfs_operator_sts_tls_certificate_expiry_timestamp_seconds",
+        "Unix timestamp when the active operator STS TLS server certificate expires.",
+        metrics()
+            .sts_tls_certificate_expiry_timestamp_seconds
+            .load(Ordering::Relaxed) as f64,
+    );
+    render_gauge(
+        &mut output,
+        "rustfs_operator_sts_tls_ca_expiry_timestamp_seconds",
+        "Unix timestamp when the active operator STS TLS CA certificate expires.",
+        metrics()
+            .sts_tls_ca_expiry_timestamp_seconds
+            .load(Ordering::Relaxed) as f64,
     );
     render_admission_rejection_counter(&mut output);
     render_unauthenticated_request_counter(&mut output);
@@ -846,6 +873,20 @@ mod tests {
         assert_eq!(
             UnauthenticatedRequestOutcome::from_status(StatusCode::INTERNAL_SERVER_ERROR),
             UnauthenticatedRequestOutcome::Error
+        );
+    }
+
+    #[test]
+    fn sts_tls_expiry_metrics_are_rendered() {
+        set_sts_tls_expiry_timestamps(1_800_000_000, 1_800_000_001);
+
+        let rendered = render();
+        assert!(rendered.contains(
+            "rustfs_operator_sts_tls_certificate_expiry_timestamp_seconds 1800000000.000000"
+        ));
+        assert!(
+            rendered
+                .contains("rustfs_operator_sts_tls_ca_expiry_timestamp_seconds 1800000001.000000")
         );
     }
 
