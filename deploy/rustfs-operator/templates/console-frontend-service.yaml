@@ -9,6 +9,7 @@ metadata:
     app.kubernetes.io/component: console-frontend
 spec:
   type: ClusterIP
+  {{- include "rustfs-operator.serviceNetwork" . | nindent 2 }}
   ports:
     - port: {{ .Values.console.frontend.service.port }}
       targetPort: http

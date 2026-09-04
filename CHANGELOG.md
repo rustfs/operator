@@ -22,6 +22,23 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ## [Unreleased]
 
+### Added
+
+- Tenant `spec.network` for Service IP families and IPv6 listen addresses, plus dual-stack binds
+  for operator observability, STS, and Console sockets.
+- Tenant `spec.hostUsers` and OpenShift `hostUsers: false` defaults for `restricted-v3`.
+- Tenant bucket canned anonymous access and ConfigMap-sourced bucket policies.
+
+### Fixed
+
+- Provisioning now requeues transient RustFS admin/S3 and Kubernetes failures instead of leaving
+  policies, users, and buckets failed until an unrelated object change.
+
+### Changed
+
+- Documented that distinct-physical-disk erasure failures and a separate data-plane operator are
+  outside this controller's scope.
+
 ## [0.0.6] - 2026-08-22
 
 ### Added

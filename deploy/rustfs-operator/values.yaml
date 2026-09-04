@@ -5,9 +5,21 @@ clusterDomain: cluster.local
 
 # OpenShift installation compatibility. When enabled, the chart omits Pod and
 # container securityContext fields from its own Deployments so the namespace
-# SecurityContextConstraints (SCC) can assign an allowed UID and FSGroup.
+# SecurityContextConstraints (SCC) can assign an allowed UID and FSGroup, and
+# sets hostUsers: false for restricted-v3.
 openshift:
   enabled: false
+
+# Optional IP family policy for chart-managed Services. Empty inherits the
+# cluster default. Example dual-stack:
+# network:
+#   ipFamilyPolicy: PreferDualStack
+#   ipFamilies:
+#     - IPv4
+#     - IPv6
+network:
+  ipFamilyPolicy: ""
+  ipFamilies: []
 
 # Operator deployment configuration
 operator:
@@ -60,6 +72,10 @@ operator:
   tenantMonitor:
     enabled: true
     intervalSeconds: 300
+
+  # Empty binds the IPv6 unspecified address (::) then falls back to 0.0.0.0.
+  # Set to a literal IPv4 or IPv6 address to pin the listen address.
+  bindAddress: ""
 
   # Basic process probes. Override these for stricter platform-specific checks.
   livenessProbe:
@@ -174,6 +190,9 @@ console:
 
   # Console server port
   port: 9090
+
+  # Empty binds the IPv6 unspecified address (::) then falls back to 0.0.0.0.
+  bindAddress: ""
 
   # Log level for console (trace, debug, info, warn, error)
   logLevel: info

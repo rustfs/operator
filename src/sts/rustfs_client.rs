@@ -262,6 +262,38 @@ impl std::fmt::Display for RustfsClientError {
 impl std::error::Error for RustfsClientError {}
 
 impl RustfsClientError {
+    /// Network, timeout, and retryable upstream failures. Permanent configuration and
+    /// 4xx semantic errors are not transient.
+    pub(crate) fn is_transient(&self) -> bool {
+        match self {
+            Self::RequestFailed
+            | Self::TenantTlsNotReady
+            | Self::TenantSecretLookupFailed
+            | Self::TenantTlsCaSecretLookupFailed { .. }
+            | Self::ParseResponseFailed => true,
+            Self::UnexpectedStatus { status, .. } => {
+                *status == StatusCode::REQUEST_TIMEOUT
+                    || *status == StatusCode::TOO_MANY_REQUESTS
+                    || *status == StatusCode::TOO_EARLY
+                    || status.is_server_error()
+            }
+            Self::MissingTenantNamespace
+            | Self::MissingCredsSecret
+            | Self::MissingCredentialKey { .. }
+            | Self::EmptyCredentialValue { .. }
+            | Self::InvalidCredentialValue { .. }
+            | Self::InvalidPolicyName
+            | Self::InvalidPolicyDocument
+            | Self::TenantTlsRequired
+            | Self::TenantTlsClientCertificateRequired
+            | Self::MissingTenantTlsCaKey { .. }
+            | Self::InvalidTenantTlsCa
+            | Self::TlsClientBuildFailed
+            | Self::RequestBuildFailed
+            | Self::SigningFailed => false,
+        }
+    }
+
     pub(super) async fn unexpected_response(response: Response) -> Self {
         let status = response.status();
         let (body, truncated) = read_limited_response_body(response).await;

@@ -15,8 +15,8 @@
 use crate::context::{self, Context};
 use crate::sts::rustfs_client::{CreateBucketResult, RustfsAdminClient, RustfsClientError};
 use crate::types::v1alpha1::provisioning::{
-    ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
-    duplicate_user_credentials_secret_names,
+    BucketAnonymousAccess, PolicyDocumentSource, ProvisioningBucket, ProvisioningPolicy,
+    ProvisioningUser, duplicate_user_credentials_secret_names,
 };
 use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::provisioning::{
@@ -44,9 +44,6 @@ pub(super) struct ProvisioningReconcileResult {
 
 pub(super) enum ProvisioningOutcome {
     Ready,
-    Pending {
-        message: String,
-    },
     Failed {
         reason: Reason,
         message: String,
@@ -54,6 +51,7 @@ pub(super) enum ProvisioningOutcome {
     Retry {
         message: String,
         retry_after: Duration,
+        persist_status: bool,
     },
 }
 
@@ -69,6 +67,13 @@ enum CheckpointError {
     Retry(CheckpointRetry),
 }
 
+#[derive(Clone, Debug)]
+struct SpecLoadError {
+    reason: Reason,
+    message: String,
+    transient: bool,
+}
+
 struct ProvisioningRun<'a> {
     ctx: &'a Context,
     tenant: &'a Tenant,
@@ -77,6 +82,7 @@ struct ProvisioningRun<'a> {
     now: String,
     status: ProvisioningStatus,
     failures: Vec<(Reason, String)>,
+    retry: Option<CheckpointRetry>,
 }
 
 #[derive(Clone)]
@@ -91,7 +97,7 @@ enum UserCredentialsCheck {
     DuplicateSecret,
     Checked {
         policy_error: Option<String>,
-        credentials: Result<UserCredentials, String>,
+        credentials: Result<UserCredentials, SpecLoadError>,
     },
 }
 
@@ -254,6 +260,99 @@ impl ProvisioningRun<'_> {
         item
     }
 
+    fn request_retry(&mut self, message: impl Into<String>) {
+        if self.retry.is_none() {
+            self.retry = Some(CheckpointRetry {
+                message: message.into(),
+                retry_after: CHECKPOINT_TRANSIENT_RETRY,
+            });
+        }
+    }
+
+    fn item_from_spec_error<P>(
+        &mut self,
+        previous: Option<&P>,
+        name: &str,
+        error: SpecLoadError,
+    ) -> ProvisioningItemStatus
+    where
+        P: AsRef<ProvisioningItemStatus> + ?Sized,
+    {
+        if error.transient {
+            self.request_retry(error.message.clone());
+            self.item(
+                previous,
+                name,
+                ProvisioningItemState::Pending,
+                Reason::ProvisioningPending,
+                error.message,
+            )
+        } else {
+            self.item(
+                previous,
+                name,
+                ProvisioningItemState::Failed,
+                error.reason,
+                error.message,
+            )
+        }
+    }
+
+    fn item_from_admin_error<P>(
+        &mut self,
+        previous: Option<&P>,
+        name: &str,
+        permanent_reason: Reason,
+        error: RustfsClientError,
+        context: impl Into<String>,
+    ) -> ProvisioningItemStatus
+    where
+        P: AsRef<ProvisioningItemStatus> + ?Sized,
+    {
+        let context = context.into();
+        self.item_from_spec_error(
+            previous,
+            name,
+            SpecLoadError {
+                reason: permanent_reason,
+                message: format!("{context}: {error}"),
+                transient: error.is_transient(),
+            },
+        )
+    }
+
+    fn has_pending_items(&self) -> bool {
+        let is_pending = |state: &str| state == ProvisioningItemState::Pending.as_str();
+        self.status
+            .policies
+            .iter()
+            .any(|item| is_pending(&item.state))
+            || self.status.users.iter().any(|item| is_pending(&item.state))
+            || self
+                .status
+                .buckets
+                .iter()
+                .any(|item| is_pending(&item.state))
+    }
+
+    fn first_pending_message(&self) -> String {
+        self.status
+            .policies
+            .iter()
+            .chain(self.status.buckets.iter())
+            .find(|item| item.state == ProvisioningItemState::Pending.as_str())
+            .map(item_message)
+            .or_else(|| {
+                self.status.users.iter().find_map(|item| {
+                    (item.state == ProvisioningItemState::Pending.as_str())
+                        .then(|| item_message(item))
+                })
+            })
+            .unwrap_or_else(|| {
+                "provisioning is waiting for a transient RustFS or Kubernetes failure".to_string()
+            })
+    }
+
     fn retained_item(&self, previous: &ProvisioningItemStatus) -> ProvisioningItemStatus {
         let mut item = self.item(
             Some(previous),
@@ -368,6 +467,22 @@ impl ProvisioningRun<'_> {
     }
 
     fn finish(mut self) -> ProvisioningReconcileResult {
+        let pending_items = self.has_pending_items();
+        if self.retry.is_some() || pending_items {
+            let retry = self.retry.take().unwrap_or_else(|| CheckpointRetry {
+                message: self.first_pending_message(),
+                retry_after: CHECKPOINT_TRANSIENT_RETRY,
+            });
+            self.prepare_status(ProvisioningPhase::Pending);
+            return ProvisioningReconcileResult {
+                status: self.status,
+                outcome: ProvisioningOutcome::Retry {
+                    message: retry.message,
+                    retry_after: retry.retry_after,
+                    persist_status: true,
+                },
+            };
+        }
         let outcome = self
             .failures
             .first()
@@ -378,7 +493,6 @@ impl ProvisioningRun<'_> {
             .unwrap_or(ProvisioningOutcome::Ready);
         let phase = match &outcome {
             ProvisioningOutcome::Ready => ProvisioningPhase::Ready,
-            ProvisioningOutcome::Pending { .. } => ProvisioningPhase::Pending,
             ProvisioningOutcome::Failed { .. } => ProvisioningPhase::Failed,
             ProvisioningOutcome::Retry { .. } => ProvisioningPhase::Pending,
         };
@@ -410,6 +524,7 @@ pub(super) async fn reconcile_provisioning(
         now,
         status: ProvisioningStatus::default(),
         failures: Vec::new(),
+        retry: None,
     };
 
     if !has_active_spec(tenant) {
@@ -434,46 +549,38 @@ pub(super) async fn reconcile_provisioning(
             );
             if pending {
                 run.mark_all_active(ProvisioningItemState::Pending, reason, &message);
+                run.request_retry(message);
             } else {
                 run.fail_all_active(reason, &message);
             }
-            let phase = if pending {
-                ProvisioningPhase::Pending
-            } else {
-                ProvisioningPhase::Failed
-            };
-            run.prepare_status(phase);
-            return ProvisioningReconcileResult {
-                status: run.status,
-                outcome: if pending {
-                    ProvisioningOutcome::Pending { message }
-                } else {
-                    ProvisioningOutcome::Failed { reason, message }
-                },
-            };
+            return run.finish();
         }
     };
     let user_credentials = preflight_user_credentials(&run).await;
 
     let mut live_policies = match load_live_policies(&client, tenant).await {
         Ok(policies) => policies,
-        Err(message) => {
+        Err(error) => {
+            let message = error.message.clone();
             warn!(
                 tenant = %tenant.name(),
                 namespace = %namespace,
-                reason = Reason::PolicyApplyFailed.as_str(),
+                reason = error.reason.as_str(),
+                transient = error.transient,
                 message = %message,
                 "RustFS provisioning failed to load live policies"
             );
-            run.fail_all_active(Reason::PolicyApplyFailed, &message);
-            run.prepare_status(ProvisioningPhase::Failed);
-            return ProvisioningReconcileResult {
-                status: run.status,
-                outcome: ProvisioningOutcome::Failed {
-                    reason: Reason::PolicyApplyFailed,
-                    message,
-                },
-            };
+            if error.transient {
+                run.mark_all_active(
+                    ProvisioningItemState::Pending,
+                    Reason::ProvisioningPending,
+                    &message,
+                );
+                run.request_retry(message);
+            } else {
+                run.fail_all_active(error.reason, &message);
+            }
+            return run.finish();
         }
     };
 
@@ -485,6 +592,7 @@ pub(super) async fn reconcile_provisioning(
             outcome: ProvisioningOutcome::Retry {
                 message: retry.message,
                 retry_after: retry.retry_after,
+                persist_status: false,
             },
         };
     }
@@ -528,6 +636,11 @@ fn client_error_outcome(error: RustfsClientError) -> (Reason, String, bool) {
             "tenant TLS is not ready for provisioning".to_string(),
             true,
         ),
+        error if error.is_transient() => (
+            Reason::ProvisioningPending,
+            format!("failed to create RustFS admin client: {error}"),
+            true,
+        ),
         error => (
             Reason::ProvisioningFailed,
             format!("failed to create RustFS admin client: {error}"),
@@ -539,7 +652,7 @@ fn client_error_outcome(error: RustfsClientError) -> (Reason, String, bool) {
 async fn load_live_policies(
     client: &RustfsAdminClient,
     tenant: &Tenant,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<BTreeMap<String, String>, SpecLoadError> {
     if tenant.spec.policies.is_empty()
         && tenant
             .spec
@@ -553,11 +666,18 @@ async fn load_live_policies(
     let mut policies = client
         .list_canned_policies()
         .await
-        .map_err(|error| format!("failed to list RustFS canned policies: {error}"))?;
+        .map_err(|error| SpecLoadError {
+            reason: Reason::PolicyApplyFailed,
+            message: format!("failed to list RustFS canned policies: {error}"),
+            transient: error.is_transient(),
+        })?;
 
     for (name, document) in &mut policies {
-        *document = normalize_policy_document(document)
-            .map_err(|error| format!("failed to normalize live RustFS policy '{name}': {error}"))?;
+        *document = normalize_policy_document(document).map_err(|error| SpecLoadError {
+            reason: Reason::PolicyApplyFailed,
+            message: format!("failed to normalize live RustFS policy '{name}': {error}"),
+            transient: false,
+        })?;
     }
 
     Ok(policies)
@@ -568,29 +688,31 @@ async fn reconcile_policies(
     client: &RustfsAdminClient,
     live_policies: &mut BTreeMap<String, String>,
 ) {
-    for policy in &run.tenant.spec.policies {
+    let policies = run.tenant.spec.policies.clone();
+    for policy in &policies {
         let item = reconcile_policy(run, client, live_policies, policy).await;
         run.push_policy(item);
     }
 }
 
 async fn reconcile_policy(
-    run: &ProvisioningRun<'_>,
+    run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     live_policies: &mut BTreeMap<String, String>,
     policy: &ProvisioningPolicy,
 ) -> ProvisioningItemStatus {
-    let previous = run.previous_policy(&policy.name);
-    let document = match load_policy_document(run, policy).await {
+    let previous = run.previous_policy(&policy.name).cloned();
+    let document = match load_policy_source(
+        run,
+        &policy.document,
+        Reason::PolicyApplyFailed,
+        "policy",
+    )
+    .await
+    {
         Ok(document) => document,
-        Err((reason, message)) => {
-            return run.item(
-                previous,
-                &policy.name,
-                ProvisioningItemState::Failed,
-                reason,
-                message,
-            );
+        Err(error) => {
+            return run.item_from_spec_error(previous.as_ref(), &policy.name, error);
         }
     };
 
@@ -598,9 +720,14 @@ async fn reconcile_policy(
     let live_hash = live_policies
         .get(&policy.name)
         .map(|live_document| hash_document(live_document));
-    let item = match policy_reconcile_action(previous, live_hash.as_deref(), &desired_hash) {
+    let item = match policy_reconcile_action(
+        previous.as_ref(),
+        live_hash.as_deref(),
+        &desired_hash,
+        Reason::PolicyConflict,
+    ) {
         PolicyReconcileAction::Ready(message) => run.item(
-            previous,
+            previous.as_ref(),
             &policy.name,
             ProvisioningItemState::Ready,
             Reason::ProvisioningConfigured,
@@ -610,7 +737,7 @@ async fn reconcile_policy(
             match apply_policy(client, live_policies, &policy.name, &document.raw).await {
                 Ok(applied_hash) => {
                     let mut item = run.item(
-                        previous,
+                        previous.as_ref(),
                         &policy.name,
                         ProvisioningItemState::Ready,
                         Reason::ProvisioningConfigured,
@@ -619,17 +746,17 @@ async fn reconcile_policy(
                     item.last_applied_hash = Some(applied_hash);
                     item
                 }
-                Err(message) => run.item(
-                    previous,
+                Err(error) => run.item_from_admin_error(
+                    previous.as_ref(),
                     &policy.name,
-                    ProvisioningItemState::Failed,
                     Reason::PolicyApplyFailed,
-                    message,
+                    error,
+                    format!("failed to apply RustFS policy '{}'", policy.name),
                 ),
             }
         }
         PolicyReconcileAction::Failed(reason, message) => run.item(
-            previous,
+            previous.as_ref(),
             &policy.name,
             ProvisioningItemState::Failed,
             reason,
@@ -639,7 +766,7 @@ async fn reconcile_policy(
 
     finalize_policy_item_status(
         item,
-        previous,
+        previous.as_ref(),
         &policy.name,
         desired_hash,
         live_policies,
@@ -651,6 +778,7 @@ fn policy_reconcile_action(
     previous: Option<&ProvisioningItemStatus>,
     live_hash: Option<&str>,
     desired_hash: &str,
+    conflict: Reason,
 ) -> PolicyReconcileAction {
     let Some(live_hash) = live_hash else {
         return PolicyReconcileAction::Apply("RustFS policy was created");
@@ -661,7 +789,7 @@ fn policy_reconcile_action(
             PolicyReconcileAction::Ready("Existing RustFS policy matches spec and was adopted")
         }
         None => PolicyReconcileAction::Failed(
-            Reason::PolicyConflict,
+            conflict,
             "Live RustFS policy differs from spec and is not owned by this status",
         ),
         Some(last_applied_hash) if last_applied_hash == live_hash => {
@@ -675,7 +803,7 @@ fn policy_reconcile_action(
             PolicyReconcileAction::Ready("RustFS policy matches spec")
         }
         Some(_) => PolicyReconcileAction::Failed(
-            Reason::PolicyConflict,
+            conflict,
             "Live RustFS policy changed since the operator last applied it",
         ),
     }
@@ -712,29 +840,33 @@ fn finalize_policy_item_status(
     item
 }
 
-async fn load_policy_document(
+async fn load_policy_source(
     run: &ProvisioningRun<'_>,
-    policy: &ProvisioningPolicy,
-) -> Result<PolicyDocument, (Reason, String)> {
-    let reference = &policy.document.config_map_key_ref;
+    source: &PolicyDocumentSource,
+    apply_failed: Reason,
+    kind: &str,
+) -> Result<PolicyDocument, SpecLoadError> {
+    let reference = &source.config_map_key_ref;
     let config_map: ConfigMap =
         run.ctx
             .get(&reference.name, run.namespace)
             .await
             .map_err(|error| {
                 if context::is_kube_not_found(&error) {
-                    (
-                        Reason::PolicyDocumentConfigMapNotFound,
-                        format!("policy ConfigMap '{}' was not found", reference.name),
-                    )
+                    SpecLoadError {
+                        reason: Reason::PolicyDocumentConfigMapNotFound,
+                        message: format!("{kind} ConfigMap '{}' was not found", reference.name),
+                        transient: false,
+                    }
                 } else {
-                    (
-                        Reason::PolicyApplyFailed,
-                        format!(
-                            "failed to read policy ConfigMap '{}': {error}",
+                    SpecLoadError {
+                        reason: apply_failed,
+                        message: format!(
+                            "failed to read {kind} ConfigMap '{}': {error}",
                             reference.name
                         ),
-                    )
+                        transient: context::is_transient_kube_error(&error),
+                    }
                 }
             })?;
 
@@ -742,17 +874,20 @@ async fn load_policy_document(
         .data
         .as_ref()
         .and_then(|data| data.get(&reference.key))
-        .ok_or_else(|| {
-            (
-                Reason::PolicyDocumentKeyNotFound,
-                format!(
-                    "policy ConfigMap '{}' is missing key '{}'",
-                    reference.name, reference.key
-                ),
-            )
+        .ok_or_else(|| SpecLoadError {
+            reason: Reason::PolicyDocumentKeyNotFound,
+            message: format!(
+                "{kind} ConfigMap '{}' is missing key '{}'",
+                reference.name, reference.key
+            ),
+            transient: false,
         })?;
 
-    PolicyDocument::parse(raw).map_err(|message| (Reason::PolicyApplyFailed, message))
+    PolicyDocument::parse(raw).map_err(|message| SpecLoadError {
+        reason: apply_failed,
+        message,
+        transient: false,
+    })
 }
 
 async fn apply_policy(
@@ -760,17 +895,12 @@ async fn apply_policy(
     live_policies: &mut BTreeMap<String, String>,
     name: &str,
     document: &str,
-) -> Result<String, String> {
-    client
-        .add_canned_policy(name, document)
-        .await
-        .map_err(|error| format!("failed to apply RustFS policy '{name}': {error}"))?;
+) -> Result<String, RustfsClientError> {
+    client.add_canned_policy(name, document).await?;
 
-    let live_document = client
-        .get_canned_policy(name)
-        .await
-        .map_err(|error| format!("failed to read RustFS policy '{name}' after apply: {error}"))?;
-    let live_document = normalize_policy_document(&live_document)?;
+    let live_document = client.get_canned_policy(name).await?;
+    let live_document = normalize_policy_document(&live_document)
+        .map_err(|_| RustfsClientError::InvalidPolicyDocument)?;
     let live_hash = hash_document(&live_document);
     live_policies.insert(name.to_string(), live_document);
     Ok(live_hash)
@@ -789,15 +919,17 @@ async fn reconcile_users(
         .filter(|item| item.state == ProvisioningItemState::Failed.as_str())
         .map(|item| item.name.clone())
         .collect::<BTreeSet<_>>();
-    let mut plans = Vec::with_capacity(run.tenant.spec.users.len());
-
-    for (user, preflight) in run
-        .tenant
-        .spec
-        .users
+    let pending_spec_policies = run
+        .status
+        .policies
         .iter()
-        .zip(credentials_preflight.checks.iter())
-    {
+        .filter(|item| item.state == ProvisioningItemState::Pending.as_str())
+        .map(|item| item.name.clone())
+        .collect::<BTreeSet<_>>();
+    let users = run.tenant.spec.users.clone();
+    let mut plans = Vec::with_capacity(users.len());
+
+    for (user, preflight) in users.iter().zip(credentials_preflight.checks.iter()) {
         let (policy_error, credentials) = match preflight {
             UserCredentialsCheck::DuplicateSecret => {
                 let previous = run.previous_user(&user.name);
@@ -855,16 +987,10 @@ async fn reconcile_users(
         }
         let credentials = match credentials {
             Ok(credentials) => credentials,
-            Err(message) => {
-                let previous = run.previous_user(&user.name);
-                let item = run.item(
-                    previous,
-                    &user.name,
-                    ProvisioningItemState::Failed,
-                    Reason::UserSecretInvalid,
-                    message,
-                );
-                let item = annotate_user_item(item, user, previous, None);
+            Err(error) => {
+                let previous = run.previous_user(&user.name).cloned();
+                let item = run.item_from_spec_error(previous.as_ref(), &user.name, error.clone());
+                let item = annotate_user_item(item, user, previous.as_ref(), None);
                 plans.push(UserReconcilePlan::Complete(Box::new(item)));
                 continue;
             }
@@ -876,6 +1002,7 @@ async fn reconcile_users(
                 client,
                 live_policies,
                 &failed_spec_policies,
+                &pending_spec_policies,
                 user,
                 credentials,
             )
@@ -981,24 +1108,28 @@ fn duplicate_user_access_key_hashes(
 }
 
 async fn prepare_user_reconcile(
-    run: &ProvisioningRun<'_>,
+    run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     live_policies: &BTreeMap<String, String>,
     failed_spec_policies: &BTreeSet<String>,
+    pending_spec_policies: &BTreeSet<String>,
     user: &ProvisioningUser,
     credentials: &UserCredentials,
 ) -> UserReconcilePlan {
-    let previous = run.previous_user(&user.name);
-    if user_access_key_changed(previous, credentials) {
+    let previous = run.previous_user(&user.name).cloned();
+    if user_access_key_changed(previous.as_ref(), credentials) {
         let item = run.item(
-            previous,
+            previous.as_ref(),
             &user.name,
             ProvisioningItemState::Failed,
             Reason::ImmutableFieldModified,
             "user access key is immutable after provisioning; create a new user entry to migrate it",
         );
         return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-            item, user, previous, None,
+            item,
+            user,
+            previous.as_ref(),
+            None,
         )));
     }
 
@@ -1008,14 +1139,39 @@ async fn prepare_user_reconcile(
         .find(|policy_name| failed_spec_policies.contains(*policy_name))
     {
         let item = run.item(
-            previous,
+            previous.as_ref(),
             &user.name,
             ProvisioningItemState::Failed,
             Reason::UserPolicySetFailed,
             format!("referenced policy '{policy_name}' is not ready"),
         );
         return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-            item, user, previous, None,
+            item,
+            user,
+            previous.as_ref(),
+            None,
+        )));
+    }
+
+    if let Some(policy_name) = user
+        .policies
+        .iter()
+        .find(|policy_name| pending_spec_policies.contains(*policy_name))
+    {
+        let message = format!("referenced policy '{policy_name}' is not ready");
+        run.request_retry(message.clone());
+        let item = run.item(
+            previous.as_ref(),
+            &user.name,
+            ProvisioningItemState::Pending,
+            Reason::ProvisioningPending,
+            message,
+        );
+        return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+            item,
+            user,
+            previous.as_ref(),
+            None,
         )));
     }
 
@@ -1025,52 +1181,62 @@ async fn prepare_user_reconcile(
         .find(|policy_name| !live_policies.contains_key(*policy_name))
     {
         let item = run.item(
-            previous,
+            previous.as_ref(),
             &user.name,
             ProvisioningItemState::Failed,
             Reason::UserPolicyNotFound,
             format!("referenced policy '{policy_name}' does not exist"),
         );
         return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-            item, user, previous, None,
+            item,
+            user,
+            previous.as_ref(),
+            None,
         )));
     }
 
     let exists = match client.user_exists(&credentials.access_key).await {
         Ok(exists) => exists,
         Err(error) => {
-            let item = run.item(
-                previous,
+            let item = run.item_from_admin_error(
+                previous.as_ref(),
                 &user.name,
-                ProvisioningItemState::Failed,
                 Reason::UserSecretInvalid,
-                format!("failed to query RustFS user: {error}"),
+                error,
+                "failed to query RustFS user",
             );
             return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-                item, user, previous, None,
+                item,
+                user,
+                previous.as_ref(),
+                None,
             )));
         }
     };
 
-    let mut ownership = match matching_user_ownership(previous, run.tenant, user, credentials) {
-        Ok(ownership) => ownership,
-        Err(message) => {
-            let item = run.item(
-                previous,
-                &user.name,
-                ProvisioningItemState::Failed,
-                Reason::UserOwnershipConflict,
-                message,
-            );
-            return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-                item, user, previous, None,
-            )));
-        }
-    };
+    let mut ownership =
+        match matching_user_ownership(previous.as_ref(), run.tenant, user, credentials) {
+            Ok(ownership) => ownership,
+            Err(message) => {
+                let item = run.item(
+                    previous.as_ref(),
+                    &user.name,
+                    ProvisioningItemState::Failed,
+                    Reason::UserOwnershipConflict,
+                    message,
+                );
+                return UserReconcilePlan::Complete(Box::new(annotate_user_item(
+                    item,
+                    user,
+                    previous.as_ref(),
+                    None,
+                )));
+            }
+        };
     let mut checkpoint_update = None;
 
     if exists && ownership.is_none() {
-        if legacy_user_status_can_migrate(previous, user, credentials) {
+        if legacy_user_status_can_migrate(previous.as_ref(), user, credentials) {
             let managed_ownership = match user_ownership(
                 run.tenant,
                 user,
@@ -1080,19 +1246,22 @@ async fn prepare_user_reconcile(
                 Ok(ownership) => ownership,
                 Err(message) => {
                     let item = run.item(
-                        previous,
+                        previous.as_ref(),
                         &user.name,
                         ProvisioningItemState::Failed,
                         Reason::UserOwnershipCheckpointFailed,
                         message,
                     );
                     return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-                        item, user, previous, None,
+                        item,
+                        user,
+                        previous.as_ref(),
+                        None,
                     )));
                 }
             };
             let managed_checkpoint = run.item(
-                previous,
+                previous.as_ref(),
                 &user.name,
                 ProvisioningItemState::Ready,
                 Reason::ProvisioningConfigured,
@@ -1101,20 +1270,23 @@ async fn prepare_user_reconcile(
             // Preserve the legacy observed Secret version so a concurrently rotated Secret is
             // still applied after the ownership checkpoint has been persisted.
             let mut managed_checkpoint =
-                annotate_user_item(managed_checkpoint, user, previous, None);
+                annotate_user_item(managed_checkpoint, user, previous.as_ref(), None);
             managed_checkpoint.ownership = Some(managed_ownership.clone());
             checkpoint_update = Some(managed_checkpoint);
             ownership = Some(managed_ownership);
         } else {
             let item = run.item(
-                previous,
+                previous.as_ref(),
                 &user.name,
                 ProvisioningItemState::Failed,
                 Reason::UserOwnershipConflict,
                 "RustFS user already exists without a matching operator ownership checkpoint; choose a different access key or remove the unmanaged user",
             );
             return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-                item, user, previous, None,
+                item,
+                user,
+                previous.as_ref(),
+                None,
             )));
         }
     }
@@ -1129,26 +1301,33 @@ async fn prepare_user_reconcile(
             Ok(ownership) => ownership,
             Err(message) => {
                 let item = run.item(
-                    previous,
+                    previous.as_ref(),
                     &user.name,
                     ProvisioningItemState::Failed,
                     Reason::UserOwnershipCheckpointFailed,
                     message,
                 );
                 return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-                    item, user, previous, None,
+                    item,
+                    user,
+                    previous.as_ref(),
+                    None,
                 )));
             }
         };
         let pending_checkpoint = run.item(
-            previous,
+            previous.as_ref(),
             &user.name,
             ProvisioningItemState::Pending,
             Reason::ProvisioningPending,
             "Operator ownership checkpoint was persisted before creating the RustFS user",
         );
-        let mut pending_checkpoint =
-            annotate_user_item(pending_checkpoint, user, previous, Some(credentials));
+        let mut pending_checkpoint = annotate_user_item(
+            pending_checkpoint,
+            user,
+            previous.as_ref(),
+            Some(credentials),
+        );
         pending_checkpoint.ownership = Some(pending_ownership.clone());
         checkpoint_update = Some(pending_checkpoint);
         ownership = Some(pending_ownership);
@@ -1161,28 +1340,35 @@ async fn prepare_user_reconcile(
         // This recovery relies on per-Tenant controller serialization; it does not provide
         // exactly-once delivery across Kubernetes and independent RustFS actors.
         let pending_checkpoint = run.item(
-            previous,
+            previous.as_ref(),
             &user.name,
             ProvisioningItemState::Pending,
             Reason::ProvisioningPending,
             "Operator is resuming a pending RustFS user creation",
         );
-        let mut pending_checkpoint =
-            annotate_user_item(pending_checkpoint, user, previous, Some(credentials));
+        let mut pending_checkpoint = annotate_user_item(
+            pending_checkpoint,
+            user,
+            previous.as_ref(),
+            Some(credentials),
+        );
         pending_checkpoint.ownership = ownership.clone();
         checkpoint_update = Some(pending_checkpoint);
     }
 
     let Some(ownership) = ownership else {
         let item = run.item(
-            previous,
+            previous.as_ref(),
             &user.name,
             ProvisioningItemState::Failed,
             Reason::UserOwnershipCheckpointFailed,
             "Operator ownership checkpoint is required before synchronizing RustFS user credentials",
         );
         return UserReconcilePlan::Complete(Box::new(annotate_user_item(
-            item, user, previous, None,
+            item,
+            user,
+            previous.as_ref(),
+            None,
         )));
     };
 
@@ -1196,7 +1382,7 @@ async fn prepare_user_reconcile(
 }
 
 async fn execute_prepared_user(
-    run: &ProvisioningRun<'_>,
+    run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     prepared: PreparedUserReconcile,
 ) -> ProvisioningUserStatus {
@@ -1207,20 +1393,20 @@ async fn execute_prepared_user(
         mut ownership,
         ..
     } = prepared;
-    let previous = run.previous_user(&user.name);
+    let previous = run.previous_user(&user.name).cloned();
 
     let credentials_applied =
-        match sync_user_credentials(client, previous, &credentials, exists).await {
+        match sync_user_credentials(client, previous.as_ref(), &credentials, exists).await {
             Ok(applied) => applied,
             Err(error) => {
-                let item = run.item(
-                    previous,
+                let item = run.item_from_admin_error(
+                    previous.as_ref(),
                     &user.name,
-                    ProvisioningItemState::Failed,
                     Reason::UserSecretInvalid,
-                    format!("failed to update RustFS user credentials: {error}"),
+                    error,
+                    "failed to update RustFS user credentials",
                 );
-                let mut item = annotate_user_item(item, &user, previous, None);
+                let mut item = annotate_user_item(item, &user, previous.as_ref(), None);
                 item.ownership = Some(ownership);
                 return item;
             }
@@ -1232,14 +1418,14 @@ async fn execute_prepared_user(
         .set_user_policy(&credentials.access_key, &user.policies)
         .await
     {
-        let item = run.item(
-            previous,
+        let item = run.item_from_admin_error(
+            previous.as_ref(),
             &user.name,
-            ProvisioningItemState::Failed,
             Reason::UserPolicySetFailed,
-            format!("failed to set RustFS user policy mapping: {error}"),
+            error,
+            "failed to set RustFS user policy mapping",
         );
-        let mut item = annotate_user_item(item, &user, previous, Some(&credentials));
+        let mut item = annotate_user_item(item, &user, previous.as_ref(), Some(&credentials));
         item.ownership = Some(ownership);
         return item;
     }
@@ -1257,7 +1443,7 @@ async fn execute_prepared_user(
         Reason::ProvisioningConfigured.as_str(),
     );
     item.message = Some(message.to_string());
-    item.last_transition_time = match previous {
+    item.last_transition_time = match previous.as_ref() {
         Some(previous)
             if previous.state == item.state
                 && previous.reason == item.reason
@@ -1267,14 +1453,14 @@ async fn execute_prepared_user(
         }
         _ => Some(run.now.clone()),
     };
-    let mut item = annotate_user_item(item, &user, previous, Some(&credentials));
+    let mut item = annotate_user_item(item, &user, previous.as_ref(), Some(&credentials));
     item.ownership = Some(ownership);
     item
 }
 
 #[cfg(test)]
 async fn reconcile_user(
-    run: &ProvisioningRun<'_>,
+    run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     live_policies: &BTreeMap<String, String>,
     failed_spec_policies: &BTreeSet<String>,
@@ -1286,6 +1472,7 @@ async fn reconcile_user(
         client,
         live_policies,
         failed_spec_policies,
+        &BTreeSet::new(),
         user,
         credentials,
     )
@@ -1297,15 +1484,15 @@ async fn reconcile_user(
                 && let Err(error) =
                     persist_user_ownership_checkpoints(run, std::slice::from_ref(checkpoint)).await
             {
-                let previous = run.previous_user(&prepared.user.name);
+                let previous = run.previous_user(&prepared.user.name).cloned();
                 let item = run.item(
-                    previous,
+                    previous.as_ref(),
                     &prepared.user.name,
                     ProvisioningItemState::Failed,
                     Reason::UserOwnershipCheckpointFailed,
                     checkpoint_error_message(error),
                 );
-                return annotate_user_item(item, &prepared.user, previous, None);
+                return annotate_user_item(item, &prepared.user, previous.as_ref(), None);
             }
             execute_prepared_user(run, client, *prepared).await
         }
@@ -1641,7 +1828,7 @@ fn access_key_hash(access_key: &str) -> String {
 async fn load_user_secret(
     run: &ProvisioningRun<'_>,
     user: &ProvisioningUser,
-) -> Result<UserCredentials, String> {
+) -> Result<UserCredentials, SpecLoadError> {
     let secret_name = user.credentials_secret_name();
     let secret: Secret = run
         .ctx
@@ -1649,15 +1836,24 @@ async fn load_user_secret(
         .await
         .map_err(|error| {
             if context::is_kube_not_found(&error) {
-                format!("user Secret '{secret_name}' was not found")
+                SpecLoadError {
+                    reason: Reason::UserSecretInvalid,
+                    message: format!("user Secret '{secret_name}' was not found"),
+                    transient: false,
+                }
             } else {
-                format!("failed to read user Secret '{secret_name}': {error}")
+                SpecLoadError {
+                    reason: Reason::UserSecretInvalid,
+                    message: format!("failed to read user Secret '{secret_name}': {error}"),
+                    transient: context::is_transient_kube_error(&error),
+                }
             }
         })?;
-    let data = secret
-        .data
-        .as_ref()
-        .ok_or_else(|| format!("user Secret '{secret_name}' has no data"))?;
+    let data = secret.data.as_ref().ok_or_else(|| SpecLoadError {
+        reason: Reason::UserSecretInvalid,
+        message: format!("user Secret '{secret_name}' has no data"),
+        transient: false,
+    })?;
 
     let access_key = read_compatible_secret_value(
         data,
@@ -1665,17 +1861,35 @@ async fn load_user_secret(
         "CONSOLE_ACCESS_KEY",
         secret_name,
         "access key",
-    )?;
+    )
+    .map_err(|message| SpecLoadError {
+        reason: Reason::UserSecretInvalid,
+        message,
+        transient: false,
+    })?;
     let secret_key = read_compatible_secret_value(
         data,
         "secretkey",
         "CONSOLE_SECRET_KEY",
         secret_name,
         "secret key",
-    )?;
+    )
+    .map_err(|message| SpecLoadError {
+        reason: Reason::UserSecretInvalid,
+        message,
+        transient: false,
+    })?;
 
-    validate_user_access_key(&access_key)?;
-    validate_user_secret_key(&secret_key)?;
+    validate_user_access_key(&access_key).map_err(|message| SpecLoadError {
+        reason: Reason::UserSecretInvalid,
+        message,
+        transient: false,
+    })?;
+    validate_user_secret_key(&secret_key).map_err(|message| SpecLoadError {
+        reason: Reason::UserSecretInvalid,
+        message,
+        transient: false,
+    })?;
 
     Ok(UserCredentials {
         access_key,
@@ -1748,25 +1962,37 @@ fn validate_user_secret_key(secret_key: &str) -> Result<(), String> {
 }
 
 async fn reconcile_buckets(run: &mut ProvisioningRun<'_>, client: &RustfsAdminClient) {
-    for bucket in &run.tenant.spec.buckets {
+    let buckets = run.tenant.spec.buckets.clone();
+    for bucket in &buckets {
         let item = reconcile_bucket(run, client, bucket).await;
         run.push_bucket(item);
     }
 }
 
 async fn reconcile_bucket(
-    run: &ProvisioningRun<'_>,
+    run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     bucket: &ProvisioningBucket,
 ) -> ProvisioningItemStatus {
-    let previous = run.previous_bucket(&bucket.name);
+    let previous = run.previous_bucket(&bucket.name).cloned();
     if let Err(message) = validate_bucket_name(&bucket.name) {
         let item = run.item(
-            previous,
+            previous.as_ref(),
             &bucket.name,
             ProvisioningItemState::Failed,
             Reason::BucketCreateFailed,
             message,
+        );
+        return annotate_bucket_item(item, bucket);
+    }
+
+    if bucket.has_custom_policy() && bucket.has_anonymous_access() {
+        let item = run.item(
+            previous.as_ref(),
+            &bucket.name,
+            ProvisioningItemState::Failed,
+            Reason::BucketPolicyConflict,
+            "bucket policy and anonymous access are mutually exclusive",
         );
         return annotate_bucket_item(item, bucket);
     }
@@ -1781,12 +2007,12 @@ async fn reconcile_bucket(
     {
         Ok(result) => result,
         Err(error) => {
-            let item = run.item(
-                previous,
+            let item = run.item_from_admin_error(
+                previous.as_ref(),
                 &bucket.name,
-                ProvisioningItemState::Failed,
                 Reason::BucketCreateFailed,
-                format!("failed to create RustFS bucket: {error}"),
+                error,
+                "failed to create RustFS bucket",
             );
             return annotate_bucket_item(item, bucket);
         }
@@ -1794,24 +2020,7 @@ async fn reconcile_bucket(
 
     if bucket.object_lock_enabled() {
         match client.bucket_object_lock_enabled(&bucket.name).await {
-            Ok(true) => {
-                let message = match create_result {
-                    CreateBucketResult::Created => {
-                        "RustFS bucket was created with object lock enabled"
-                    }
-                    CreateBucketResult::AlreadyExists => {
-                        "Bucket already existed with object lock enabled"
-                    }
-                };
-                let item = run.item(
-                    previous,
-                    &bucket.name,
-                    ProvisioningItemState::Ready,
-                    Reason::ProvisioningConfigured,
-                    message,
-                );
-                return annotate_bucket_item(item, bucket);
-            }
+            Ok(true) => {}
             Ok(false) => {
                 let message = match create_result {
                     CreateBucketResult::Created => {
@@ -1822,7 +2031,7 @@ async fn reconcile_bucket(
                     }
                 };
                 let item = run.item(
-                    previous,
+                    previous.as_ref(),
                     &bucket.name,
                     ProvisioningItemState::Failed,
                     Reason::BucketObjectLockConflict,
@@ -1831,38 +2040,242 @@ async fn reconcile_bucket(
                 return annotate_bucket_item(item, bucket);
             }
             Err(error) => {
-                let message = match create_result {
-                    CreateBucketResult::Created => {
-                        format!("failed to verify created bucket object lock: {error}")
-                    }
+                let context = match create_result {
+                    CreateBucketResult::Created => "failed to verify created bucket object lock",
                     CreateBucketResult::AlreadyExists => {
-                        format!("failed to verify existing bucket object lock: {error}")
+                        "failed to verify existing bucket object lock"
                     }
                 };
-                let item = run.item(
-                    previous,
+                let item = run.item_from_admin_error(
+                    previous.as_ref(),
                     &bucket.name,
-                    ProvisioningItemState::Failed,
                     Reason::BucketObjectLockConflict,
-                    message,
+                    error,
+                    context,
                 );
                 return annotate_bucket_item(item, bucket);
             }
         }
     }
 
-    let message = match create_result {
-        CreateBucketResult::Created => "RustFS bucket was created",
-        CreateBucketResult::AlreadyExists => "RustFS bucket already exists",
+    let created_message = match create_result {
+        CreateBucketResult::Created => {
+            if bucket.object_lock_enabled() {
+                "RustFS bucket was created with object lock enabled"
+            } else {
+                "RustFS bucket was created"
+            }
+        }
+        CreateBucketResult::AlreadyExists => {
+            if bucket.object_lock_enabled() {
+                "Bucket already existed with object lock enabled"
+            } else {
+                "RustFS bucket already exists"
+            }
+        }
     };
-    let item = run.item(
+
+    let Some(desired) = desired_bucket_policy(run, bucket).await else {
+        let item = run.item(
+            previous.as_ref(),
+            &bucket.name,
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured,
+            created_message,
+        );
+        return annotate_bucket_item(item, bucket);
+    };
+    let desired = match desired {
+        Ok(document) => document,
+        Err(error) => {
+            return annotate_bucket_item(
+                run.item_from_spec_error(previous.as_ref(), &bucket.name, error),
+                bucket,
+            );
+        }
+    };
+
+    sync_bucket_policy(
+        run,
+        client,
+        bucket,
+        previous.as_ref(),
+        &desired,
+        created_message,
+    )
+    .await
+}
+
+async fn desired_bucket_policy(
+    run: &ProvisioningRun<'_>,
+    bucket: &ProvisioningBucket,
+) -> Option<Result<PolicyDocument, SpecLoadError>> {
+    if let Some(source) = bucket.policy.as_ref() {
+        return Some(
+            load_policy_source(
+                run,
+                source,
+                Reason::BucketPolicyApplyFailed,
+                "bucket policy",
+            )
+            .await,
+        );
+    }
+    canned_anonymous_bucket_policy(bucket.anonymous, &bucket.name)
+        .map(|raw| PolicyDocument::parse(&raw))
+        .map(|result| {
+            result.map_err(|message| SpecLoadError {
+                reason: Reason::BucketPolicyApplyFailed,
+                message,
+                transient: false,
+            })
+        })
+}
+
+async fn sync_bucket_policy(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    previous: Option<&ProvisioningItemStatus>,
+    desired: &PolicyDocument,
+    created_message: &str,
+) -> ProvisioningItemStatus {
+    let desired_hash = desired.hash();
+    let live_document = match client.get_bucket_policy(&bucket.name).await {
+        Ok(document) => document,
+        Err(error) => {
+            return finalize_bucket_policy_item(
+                run.item_from_admin_error(
+                    previous,
+                    &bucket.name,
+                    Reason::BucketPolicyApplyFailed,
+                    error,
+                    "failed to read RustFS bucket policy",
+                ),
+                bucket,
+                Some(desired_hash),
+            );
+        }
+    };
+    let live_hash = match live_document.as_deref() {
+        None => None,
+        Some(document) => match normalize_policy_document(document) {
+            Ok(normalized) => Some(hash_document(&normalized)),
+            Err(message) => {
+                return finalize_bucket_policy_item(
+                    run.item(
+                        previous,
+                        &bucket.name,
+                        ProvisioningItemState::Failed,
+                        Reason::BucketPolicyApplyFailed,
+                        format!("failed to normalize live RustFS bucket policy: {message}"),
+                    ),
+                    bucket,
+                    Some(desired_hash),
+                );
+            }
+        },
+    };
+
+    let item = match policy_reconcile_action(
         previous,
-        &bucket.name,
-        ProvisioningItemState::Ready,
-        Reason::ProvisioningConfigured,
-        message,
-    );
-    annotate_bucket_item(item, bucket)
+        live_hash.as_deref(),
+        &desired_hash,
+        Reason::BucketPolicyConflict,
+    ) {
+        PolicyReconcileAction::Ready(message) => run.item(
+            previous,
+            &bucket.name,
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured,
+            format!("{created_message}; {message}"),
+        ),
+        PolicyReconcileAction::Apply(_) => {
+            match client.put_bucket_policy(&bucket.name, &desired.raw).await {
+                Ok(()) => {
+                    let mut item = run.item(
+                        previous,
+                        &bucket.name,
+                        ProvisioningItemState::Ready,
+                        Reason::ProvisioningConfigured,
+                        format!("{created_message}; RustFS bucket policy was applied"),
+                    );
+                    item.last_applied_hash = Some(desired_hash.clone());
+                    item
+                }
+                Err(error) => run.item_from_admin_error(
+                    previous,
+                    &bucket.name,
+                    Reason::BucketPolicyApplyFailed,
+                    error,
+                    "failed to apply RustFS bucket policy",
+                ),
+            }
+        }
+        PolicyReconcileAction::Failed(reason, message) => run.item(
+            previous,
+            &bucket.name,
+            ProvisioningItemState::Failed,
+            reason,
+            message,
+        ),
+    };
+
+    finalize_bucket_policy_item(item, bucket, Some(desired_hash))
+}
+
+fn canned_anonymous_bucket_policy(access: BucketAnonymousAccess, bucket: &str) -> Option<String> {
+    let bucket_arn = format!("arn:aws:s3:::{bucket}");
+    let object_arn = format!("arn:aws:s3:::{bucket}/*");
+    let (bucket_actions, object_actions): (&[&str], &[&str]) = match access {
+        BucketAnonymousAccess::Private => return None,
+        BucketAnonymousAccess::Download => (
+            &["s3:GetBucketLocation", "s3:ListBucket"],
+            &["s3:GetObject"],
+        ),
+        BucketAnonymousAccess::Upload => (
+            &["s3:ListBucketMultipartUploads"],
+            &[
+                "s3:AbortMultipartUpload",
+                "s3:ListMultipartUploadParts",
+                "s3:PutObject",
+            ],
+        ),
+        BucketAnonymousAccess::Public => (
+            &[
+                "s3:GetBucketLocation",
+                "s3:ListBucket",
+                "s3:ListBucketMultipartUploads",
+            ],
+            &[
+                "s3:AbortMultipartUpload",
+                "s3:DeleteObject",
+                "s3:GetObject",
+                "s3:ListMultipartUploadParts",
+                "s3:PutObject",
+            ],
+        ),
+    };
+    Some(
+        serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"AWS": ["*"]},
+                    "Action": bucket_actions,
+                    "Resource": [bucket_arn]
+                },
+                {
+                    "Effect": "Allow",
+                    "Principal": {"AWS": ["*"]},
+                    "Action": object_actions,
+                    "Resource": [object_arn]
+                }
+            ]
+        })
+        .to_string(),
+    )
 }
 
 fn annotate_bucket_item(
@@ -1871,6 +2284,19 @@ fn annotate_bucket_item(
 ) -> ProvisioningItemStatus {
     item.region = bucket.region.clone();
     item.object_lock = Some(bucket.object_lock_enabled());
+    item
+}
+
+fn finalize_bucket_policy_item(
+    mut item: ProvisioningItemStatus,
+    bucket: &ProvisioningBucket,
+    desired_hash: Option<String>,
+) -> ProvisioningItemStatus {
+    item = annotate_bucket_item(item, bucket);
+    item.desired_hash = desired_hash.clone();
+    if item.last_applied_hash.is_none() && item.state == ProvisioningItemState::Ready.as_str() {
+        item.last_applied_hash = desired_hash;
+    }
     item
 }
 
@@ -2062,6 +2488,8 @@ fn reason_from_str(reason: &str) -> Reason {
         "UserOwnershipCheckpointFailed" => Reason::UserOwnershipCheckpointFailed,
         "BucketCreateFailed" => Reason::BucketCreateFailed,
         "BucketObjectLockConflict" => Reason::BucketObjectLockConflict,
+        "BucketPolicyApplyFailed" => Reason::BucketPolicyApplyFailed,
+        "BucketPolicyConflict" => Reason::BucketPolicyConflict,
         _ => Reason::ProvisioningFailed,
     }
 }
@@ -2069,6 +2497,7 @@ fn reason_from_str(reason: &str) -> Reason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::v1alpha1::provisioning::ConfigMapKeyReference;
     use axum::{
         Router,
         body::Body,
@@ -2196,6 +2625,7 @@ mod tests {
             now: "2026-07-18T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let request_count = Arc::new(AtomicUsize::new(0));
@@ -2282,6 +2712,7 @@ mod tests {
             now: "2026-07-18T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let client = RustfsAdminClient::new_with_base_url(
@@ -2503,6 +2934,7 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
         let winner = make_run();
         let loser = make_run();
@@ -2604,8 +3036,8 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
-
         persist_user_ownership_checkpoints(&run, &[first, second])
             .await
             .expect("all checkpoints should be persisted together");
@@ -2672,7 +3104,7 @@ mod tests {
         let ctx = Context::new(Client::new(kube_service, "default"));
         let user = provisioning_user("app-user", "app-user-secret", "readwrite");
         let tenant = provisioning_test_tenant(user.clone(), ProvisioningStatus::default());
-        let run = ProvisioningRun {
+        let mut run = ProvisioningRun {
             ctx: &ctx,
             tenant: &tenant,
             namespace: "storage",
@@ -2680,6 +3112,7 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let write_requests = Arc::new(AtomicUsize::new(0));
@@ -2724,7 +3157,7 @@ mod tests {
         let credentials = user_credentials("1");
 
         let item = reconcile_user(
-            &run,
+            &mut run,
             &client,
             &BTreeMap::from([("readwrite".to_string(), "{}".to_string())]),
             &BTreeSet::new(),
@@ -2808,7 +3241,7 @@ mod tests {
             }
         });
         let ctx = Context::new(Client::new(kube_service, "default"));
-        let run = ProvisioningRun {
+        let mut run = ProvisioningRun {
             ctx: &ctx,
             tenant: &tenant,
             namespace: "storage",
@@ -2816,6 +3249,7 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let get_sequence = sequence.clone();
@@ -2869,7 +3303,7 @@ mod tests {
         let credentials = user_credentials("5");
 
         let item = reconcile_user(
-            &run,
+            &mut run,
             &client,
             &BTreeMap::from([("readwrite".to_string(), "{}".to_string())]),
             &BTreeSet::new(),
@@ -2952,7 +3386,7 @@ mod tests {
             }
         });
         let ctx = Context::new(Client::new(kube_service, "default"));
-        let run = ProvisioningRun {
+        let mut run = ProvisioningRun {
             ctx: &ctx,
             tenant: &tenant,
             namespace: "storage",
@@ -2960,6 +3394,7 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let write_requests = Arc::new(AtomicUsize::new(0));
@@ -3003,7 +3438,7 @@ mod tests {
             RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
 
         let item = reconcile_user(
-            &run,
+            &mut run,
             &client,
             &BTreeMap::from([("readwrite".to_string(), "{}".to_string())]),
             &BTreeSet::new(),
@@ -3081,6 +3516,7 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let error = persist_user_ownership_checkpoints(&run, std::slice::from_ref(&checkpoint))
@@ -3115,7 +3551,7 @@ mod tests {
             ..Default::default()
         };
         let tenant = provisioning_test_tenant(user.clone(), previous.clone());
-        let run = ProvisioningRun {
+        let mut run = ProvisioningRun {
             ctx: &ctx,
             tenant: &tenant,
             namespace: "storage",
@@ -3123,6 +3559,7 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let add_requests = Arc::new(AtomicUsize::new(0));
@@ -3167,7 +3604,7 @@ mod tests {
             RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
 
         let item = reconcile_user(
-            &run,
+            &mut run,
             &client,
             &BTreeMap::from([("readwrite".to_string(), "{}".to_string())]),
             &BTreeSet::new(),
@@ -3237,7 +3674,7 @@ mod tests {
             }
         });
         let ctx = Context::new(Client::new(kube_service, "default"));
-        let run = ProvisioningRun {
+        let mut run = ProvisioningRun {
             ctx: &ctx,
             tenant: &tenant,
             namespace: "storage",
@@ -3245,6 +3682,7 @@ mod tests {
             now: "2026-08-02T00:00:00Z".to_string(),
             status: ProvisioningStatus::default(),
             failures: Vec::new(),
+            retry: None,
         };
 
         let add_requests = Arc::new(AtomicUsize::new(0));
@@ -3305,7 +3743,7 @@ mod tests {
             RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
 
         let item = reconcile_user(
-            &run,
+            &mut run,
             &client,
             &BTreeMap::from([("readwrite".to_string(), "{}".to_string())]),
             &BTreeSet::new(),
@@ -3464,7 +3902,7 @@ mod tests {
             .expect_err("RustFS policy parse error should fail provisioning");
 
         assert_eq!(
-            error,
+            format!("failed to apply RustFS policy 'tenant-policy': {error}"),
             r#"failed to apply RustFS policy 'tenant-policy': upstream returned 400 Bad Request: InvalidRequest: invalid resource: unknown "*""#
         );
         server.abort();
@@ -3679,7 +4117,12 @@ mod tests {
         );
         previous.last_applied_hash = Some("sha256:old".to_string());
 
-        let action = policy_reconcile_action(Some(&previous), Some("sha256:new"), "sha256:new");
+        let action = policy_reconcile_action(
+            Some(&previous),
+            Some("sha256:new"),
+            "sha256:new",
+            Reason::PolicyConflict,
+        );
 
         assert_eq!(
             action,
@@ -3799,6 +4242,379 @@ mod tests {
                 validate_bucket_name(invalid).is_err(),
                 "{invalid} should be rejected"
             );
+        }
+    }
+
+    fn empty_kube_context() -> Context {
+        let kube_service = service_fn(|_request: http::Request<KubeBody>| async {
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(KubeBody::empty())
+                    .expect("response should build"),
+            )
+        });
+        Context::new(Client::new(kube_service, "default"))
+    }
+
+    fn empty_run<'a>(ctx: &'a Context, tenant: &'a Tenant) -> ProvisioningRun<'a> {
+        ProvisioningRun {
+            ctx,
+            tenant,
+            namespace: "storage",
+            previous: ProvisioningStatus::default(),
+            now: "2026-09-04T00:00:00Z".to_string(),
+            status: ProvisioningStatus::default(),
+            failures: Vec::new(),
+            retry: None,
+        }
+    }
+
+    #[test]
+    fn canned_anonymous_policies_cover_download_upload_and_public() {
+        assert!(
+            canned_anonymous_bucket_policy(BucketAnonymousAccess::Private, "app-data").is_none()
+        );
+
+        let download = canned_anonymous_bucket_policy(BucketAnonymousAccess::Download, "app-data")
+            .expect("download policy");
+        assert!(download.contains("s3:GetObject"));
+        assert!(download.contains("s3:ListBucket"));
+        assert!(!download.contains("s3:PutObject"));
+        PolicyDocument::parse(&download).expect("download policy should parse");
+
+        let upload = canned_anonymous_bucket_policy(BucketAnonymousAccess::Upload, "app-data")
+            .expect("upload policy");
+        assert!(upload.contains("s3:PutObject"));
+        assert!(!upload.contains("s3:GetObject"));
+        PolicyDocument::parse(&upload).expect("upload policy should parse");
+
+        let public = canned_anonymous_bucket_policy(BucketAnonymousAccess::Public, "logs")
+            .expect("public policy");
+        assert!(public.contains("s3:GetObject"));
+        assert!(public.contains("s3:PutObject"));
+        assert!(public.contains("arn:aws:s3:::logs/*"));
+        PolicyDocument::parse(&public).expect("public policy should parse");
+    }
+
+    #[tokio::test]
+    async fn finish_prefers_retry_over_existing_failures() {
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        run.failures.push((
+            Reason::BucketCreateFailed,
+            "bucket name is invalid".to_string(),
+        ));
+        run.request_retry("upstream returned 503");
+
+        match run.finish().outcome {
+            ProvisioningOutcome::Retry {
+                message,
+                persist_status,
+                retry_after,
+            } => {
+                assert!(message.contains("503"));
+                assert!(persist_status);
+                assert_eq!(retry_after, CHECKPOINT_TRANSIENT_RETRY);
+            }
+            _ => panic!("expected retry, got a different outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_retries_pending_items_even_without_request_retry() {
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        run.status.buckets.push(run.item(
+            None::<&ProvisioningItemStatus>,
+            "app-data",
+            ProvisioningItemState::Pending,
+            Reason::ProvisioningPending,
+            "failed to create RustFS bucket: upstream returned 503",
+        ));
+
+        match run.finish().outcome {
+            ProvisioningOutcome::Retry { persist_status, .. } => {
+                assert!(persist_status);
+            }
+            _ => panic!("pending items must requeue even if request_retry was skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn client_error_outcome_retries_transient_admin_failures() {
+        let (_, _, pending) = client_error_outcome(RustfsClientError::RequestFailed);
+        assert!(pending);
+        let (_, _, pending) = client_error_outcome(RustfsClientError::TenantTlsNotReady);
+        assert!(pending);
+        let (reason, _, pending) = client_error_outcome(RustfsClientError::MissingCredsSecret);
+        assert!(!pending);
+        assert_eq!(reason, Reason::ProvisioningUnsupported);
+        let (_, _, pending) = client_error_outcome(RustfsClientError::UnexpectedStatus {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            detail: None,
+        });
+        assert!(!pending);
+        let (_, _, pending) = client_error_outcome(RustfsClientError::UnexpectedStatus {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            detail: None,
+        });
+        assert!(pending);
+    }
+
+    #[tokio::test]
+    async fn create_bucket_503_marks_pending_and_retries() {
+        let router = Router::new().route(
+            "/app-data",
+            put(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        };
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+        assert_eq!(item.state, ProvisioningItemState::Pending.as_str());
+        assert_eq!(item.reason, Reason::ProvisioningPending.as_str());
+        run.push_bucket(item);
+
+        match run.finish().outcome {
+            ProvisioningOutcome::Retry { persist_status, .. } => assert!(persist_status),
+            _ => panic!("transient bucket create must retry"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn create_bucket_400_fails_without_retry() {
+        let router = Router::new().route("/app-data", put(|| async { StatusCode::BAD_REQUEST }));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        };
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketCreateFailed.as_str());
+        run.push_bucket(item);
+
+        match run.finish().outcome {
+            ProvisioningOutcome::Failed { reason, .. } => {
+                assert_eq!(reason, Reason::BucketCreateFailed);
+            }
+            _ => panic!("permanent bucket create errors must not retry"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn anonymous_download_policy_is_applied_when_live_policy_is_missing() {
+        let capture = PolicyApplyCapture::default();
+        let route_capture = capture.clone();
+        let router = Router::new().route(
+            "/app-data",
+            put({
+                let capture = route_capture.clone();
+                move |req: Request<Body>| {
+                    let capture = capture.clone();
+                    async move {
+                        if req.uri().query().unwrap_or("").contains("policy") {
+                            let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                                .await
+                                .expect("policy body");
+                            *capture.body.lock().await =
+                                String::from_utf8(body_bytes.to_vec()).expect("utf8");
+                        }
+                        StatusCode::OK
+                    }
+                }
+            })
+            .get(|req: Request<Body>| async move {
+                if req.uri().query().unwrap_or("").contains("policy") {
+                    (
+                        StatusCode::NOT_FOUND,
+                        r#"<Error><Code>NoSuchBucketPolicy</Code></Error>"#,
+                    )
+                } else {
+                    (StatusCode::OK, "")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            anonymous: BucketAnonymousAccess::Download,
+            ..Default::default()
+        };
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert!(item.last_applied_hash.is_some());
+        let applied = capture.body.lock().await;
+        assert!(applied.contains("s3:GetObject"));
+        assert!(!applied.contains("s3:PutObject"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mixed_anonymous_and_custom_policy_fails_before_rustfs_calls() {
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            anonymous: BucketAnonymousAccess::Public,
+            policy: Some(PolicyDocumentSource {
+                config_map_key_ref: ConfigMapKeyReference {
+                    name: "bucket-policy".to_string(),
+                    key: "policy.json".to_string(),
+                },
+            }),
+            ..Default::default()
+        };
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketPolicyConflict.as_str());
+    }
+
+    #[tokio::test]
+    async fn list_canned_policies_503_is_transient() {
+        let router = Router::new().route(
+            "/rustfs/admin/v3/list-canned-policies",
+            get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let tenant = Tenant {
+            metadata: ObjectMeta {
+                name: Some("tenant-a".to_string()),
+                namespace: Some("storage".to_string()),
+                ..Default::default()
+            },
+            spec: crate::types::v1alpha1::tenant::TenantSpec {
+                policies: vec![ProvisioningPolicy {
+                    name: "app-readwrite".to_string(),
+                    document: PolicyDocumentSource {
+                        config_map_key_ref: ConfigMapKeyReference {
+                            name: "app-policy".to_string(),
+                            key: "policy.json".to_string(),
+                        },
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            status: None,
+        };
+
+        let error = load_live_policies(&client, &tenant)
+            .await
+            .expect_err("503 should fail the live policy load");
+        assert!(error.transient);
+        assert!(
+            error.message.contains("503")
+                || error.message.contains("unavailable")
+                || error.message.contains("failed to list")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn user_stays_pending_when_referenced_policy_is_pending() {
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user.clone(), ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
+        let pending = BTreeSet::from(["readwrite".to_string()]);
+        let credentials = user_credentials("1");
+
+        let plan = prepare_user_reconcile(
+            &mut run,
+            &client,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &pending,
+            &user,
+            &credentials,
+        )
+        .await;
+
+        let UserReconcilePlan::Complete(item) = plan else {
+            panic!("pending referenced policy must not call RustFS");
+        };
+        assert_eq!(item.state, ProvisioningItemState::Pending.as_str());
+        assert_eq!(item.reason, Reason::ProvisioningPending.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("readwrite"))
+        );
+        run.push_user(*item);
+
+        match run.finish().outcome {
+            ProvisioningOutcome::Retry { persist_status, .. } => assert!(persist_status),
+            _ => panic!("pending referenced policy must requeue instead of failing the user"),
         }
     }
 }

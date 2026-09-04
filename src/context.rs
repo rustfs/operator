@@ -411,6 +411,18 @@ pub(crate) fn is_kube_not_found(error: &Error) -> bool {
     )
 }
 
+pub(crate) fn is_transient_kube_error(error: &Error) -> bool {
+    match error {
+        Error::Kube { source } => match source {
+            kube::Error::Api(response) => {
+                response.code == 408 || response.code == 429 || response.code >= 500
+            }
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
 pub(crate) fn map_secret_get_error(
     error: Error,
     name: String,
@@ -1415,5 +1427,40 @@ mod validate_local_kms_tests {
         let err = validate_no_reserved_kms_env(&tenant).unwrap_err();
         assert!(matches!(err, Error::KmsConfigInvalid { message }
                 if message.contains("RUSTFS_KMS_LOCAL_MASTER_KEY")));
+    }
+}
+
+#[cfg(test)]
+mod transient_kube_error_tests {
+    use super::{Error, is_transient_kube_error};
+
+    fn api_error(code: u16) -> Error {
+        Error::Kube {
+            source: kube::Error::Api(kube::error::ErrorResponse {
+                status: "Failure".to_string(),
+                message: format!("code {code}"),
+                reason: "Error".to_string(),
+                code,
+            }),
+        }
+    }
+
+    #[test]
+    fn kube_api_5xx_429_and_408_are_transient() {
+        assert!(is_transient_kube_error(&api_error(408)));
+        assert!(is_transient_kube_error(&api_error(429)));
+        assert!(is_transient_kube_error(&api_error(500)));
+        assert!(is_transient_kube_error(&api_error(503)));
+    }
+
+    #[test]
+    fn kube_api_404_and_4xx_semantic_errors_are_permanent() {
+        assert!(!is_transient_kube_error(&api_error(400)));
+        assert!(!is_transient_kube_error(&api_error(403)));
+        assert!(!is_transient_kube_error(&api_error(404)));
+        assert!(!is_transient_kube_error(&api_error(409)));
+        assert!(!is_transient_kube_error(&Error::CredentialSecretNotFound {
+            name: "creds".to_string(),
+        }));
     }
 }

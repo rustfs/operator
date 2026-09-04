@@ -672,8 +672,12 @@ async fn run_operator_observability_server(
         .with_state(state)
         .layer(middleware::from_fn(metrics::record_operator_http));
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = crate::utils::listen::bind_unspecified_listener(
+        port,
+        crate::utils::listen::OPERATOR_BIND_ADDRESS_ENV,
+    )
+    .await?;
+    let addr = listener.local_addr()?;
     info!(%addr, "operator observability server listening");
     axum::serve(listener, app).await?;
     Ok(())
@@ -784,8 +788,12 @@ async fn bind_sts_listener(
     port: u16,
     tls_enabled: bool,
 ) -> Result<tokio::net::TcpListener, Box<dyn std::error::Error>> {
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = crate::utils::listen::bind_unspecified_listener(
+        port,
+        crate::utils::listen::OPERATOR_BIND_ADDRESS_ENV,
+    )
+    .await?;
+    let addr = listener.local_addr()?;
     let scheme = if tls_enabled { "https" } else { "http" };
     tracing::info!(%scheme, %addr, "Operator STS server listening");
     Ok(listener)

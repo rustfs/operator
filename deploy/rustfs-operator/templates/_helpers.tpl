@@ -77,6 +77,22 @@ Name of the namespaced Role used by STS auto TLS.
 {{- end }}
 
 {{/*
+Optional Service ipFamilyPolicy / ipFamilies from values.network.
+*/}}
+{{- define "rustfs-operator.serviceNetwork" -}}
+{{- $network := default dict .Values.network -}}
+{{- if $network.ipFamilyPolicy }}
+ipFamilyPolicy: {{ $network.ipFamilyPolicy }}
+{{- end }}
+{{- if $network.ipFamilies }}
+ipFamilies:
+{{- range $network.ipFamilies }}
+- {{ . }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 Create the name of the console service account to use
 */}}
 {{- define "rustfs-operator.consoleServiceAccountName" -}}

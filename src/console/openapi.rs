@@ -55,8 +55,8 @@ use crate::console::models::topology::{
     TopologyOverviewResponse, TopologyPod, TopologyPool, TopologyTenant, TopologyTenantSummary,
 };
 use crate::types::v1alpha1::provisioning::{
-    ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy,
-    ProvisioningPolicy, ProvisioningUser, UserCredentialsSecretRef,
+    BucketAnonymousAccess, ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket,
+    ProvisioningDeletionPolicy, ProvisioningPolicy, ProvisioningUser, UserCredentialsSecretRef,
 };
 use crate::types::v1alpha1::status::provisioning::{
     ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus,
@@ -125,6 +125,7 @@ use crate::types::v1alpha1::status::provisioning::{
         ProvisioningDeletionPolicy,
         PolicyDocumentSource,
         ConfigMapKeyReference,
+        BucketAnonymousAccess,
         CreateTenantRequest,
         CreatePoolRequest,
         PoolInfo,

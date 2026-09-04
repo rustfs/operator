@@ -15,6 +15,7 @@
 use crate::types::v1alpha1::encryption::EncryptionConfig;
 use crate::types::v1alpha1::k8s;
 use crate::types::v1alpha1::logging::LoggingConfig;
+use crate::types::v1alpha1::network::NetworkConfig;
 use crate::types::v1alpha1::pool::{Pool, validate_pool_collection};
 use crate::types::v1alpha1::pool_lifecycle::PoolLifecycleSpec;
 use crate::types::v1alpha1::provisioning::{
@@ -122,6 +123,18 @@ pub struct TenantSpec {
     /// `RUSTFS_KMS_*` is reserved; configure KMS through `spec.encryption`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
+
+    /// Tenant Service IP family policy and RustFS listen addresses.
+    /// When omitted, generated Services inherit the cluster default and RustFS listens on IPv4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkConfig>,
+
+    /// Pod `hostUsers` for generated RustFS workloads.
+    ///
+    /// `false` isolates the user namespace and satisfies OpenShift `restricted-v3`.
+    /// When omitted, an OpenShift-style empty security-context pair also renders `hostUsers: false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_users: Option<bool>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsConfig>,

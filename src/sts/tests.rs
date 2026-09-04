@@ -1208,3 +1208,112 @@ fn extract_canned_policy_document_accepts_raw_policy_document() {
     assert_eq!(policy_value["Version"], "2012-10-17");
     assert_eq!(policy_value["Statement"][0]["Sid"], "raw");
 }
+
+#[test]
+fn rustfs_client_error_classifies_transient_failures() {
+    assert!(RustfsClientError::RequestFailed.is_transient());
+    assert!(RustfsClientError::TenantTlsNotReady.is_transient());
+    assert!(RustfsClientError::ParseResponseFailed.is_transient());
+    assert!(RustfsClientError::TenantSecretLookupFailed.is_transient());
+    assert!(
+        RustfsClientError::UnexpectedStatus {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            detail: None,
+        }
+        .is_transient()
+    );
+    assert!(
+        RustfsClientError::UnexpectedStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            detail: None,
+        }
+        .is_transient()
+    );
+    assert!(
+        !RustfsClientError::UnexpectedStatus {
+            status: StatusCode::BAD_REQUEST,
+            detail: None,
+        }
+        .is_transient()
+    );
+    assert!(!RustfsClientError::MissingCredsSecret.is_transient());
+    assert!(!RustfsClientError::InvalidPolicyDocument.is_transient());
+    assert!(!RustfsClientError::InvalidPolicyName.is_transient());
+}
+
+#[tokio::test]
+async fn get_bucket_policy_treats_nosuchbucketpolicy_as_absent() {
+    let router = Router::new().route(
+        "/app-data",
+        get(|req: Request<Body>| async move {
+            assert_eq!(req.uri().query().unwrap_or(""), "policy=");
+            (
+                StatusCode::NOT_FOUND,
+                r#"<Error><Code>NoSuchBucketPolicy</Code><Message>The bucket policy does not exist</Message></Error>"#,
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+    assert_eq!(client.get_bucket_policy("app-data").await.unwrap(), None);
+    server.abort();
+}
+
+#[tokio::test]
+async fn get_bucket_policy_treats_503_as_transient_even_with_not_found_body() {
+    let router = Router::new().route(
+        "/app-data",
+        get(|req: Request<Body>| async move {
+            assert_eq!(req.uri().query().unwrap_or(""), "policy=");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "<html><title>Not Found</title>upstream unavailable</html>",
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+    let error = client.get_bucket_policy("app-data").await.unwrap_err();
+    assert!(error.is_transient());
+    server.abort();
+}
+
+#[tokio::test]
+async fn put_bucket_policy_sends_json_document() {
+    let capture = Arc::new(Mutex::new(String::new()));
+    let route_capture = capture.clone();
+    let router = Router::new().route(
+        "/app-data",
+        put(move |req: Request<Body>| {
+            let capture = route_capture.clone();
+            async move {
+                assert_eq!(req.uri().query().unwrap_or(""), "policy=");
+                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *capture.lock().await = String::from_utf8(body.to_vec()).unwrap();
+                StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+    let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
+    client.put_bucket_policy("app-data", policy).await.unwrap();
+    assert_eq!(&*capture.lock().await, policy);
+    server.abort();
+}

@@ -148,7 +148,24 @@ pub(super) fn body_mentions_not_found(body: &str) -> bool {
         || body.contains("nosuchpolicy")
         || body.contains("no such policy")
         || body.contains("objectlockconfigurationnotfound")
+        || body.contains("nosuchbucketpolicy")
+        || body.contains("no such bucket policy")
         || body.contains("not found")
+}
+
+/// True when an upstream status means the queried object is absent.
+///
+/// 5xx, 408, 429, and 425 must not be treated as absence even if a proxy error page contains
+/// "Not Found"; those are transient and should retry.
+pub(super) fn is_absent_resource(status: StatusCode, body: &str) -> bool {
+    if status.is_server_error()
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::TOO_EARLY
+    {
+        return false;
+    }
+    status == StatusCode::NOT_FOUND || body_mentions_not_found(body)
 }
 
 pub(super) fn bucket_already_exists(status: StatusCode, body: &str) -> bool {
@@ -223,4 +240,39 @@ pub(super) fn extract_xml_tag(document: &str, tag: &str) -> Option<String> {
     let end = rest.find(&close)?;
 
     Some(rest[..end].trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_absent_resource;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn absent_resource_accepts_not_found_and_semantic_4xx() {
+        assert!(is_absent_resource(StatusCode::NOT_FOUND, ""));
+        assert!(is_absent_resource(
+            StatusCode::NOT_FOUND,
+            "<Error><Code>NoSuchBucketPolicy</Code></Error>"
+        ));
+        assert!(is_absent_resource(
+            StatusCode::BAD_REQUEST,
+            "<Error><Code>NoSuchUser</Code></Error>"
+        ));
+    }
+
+    #[test]
+    fn absent_resource_rejects_transient_status_even_with_not_found_body() {
+        let proxy_page = "<html><title>Not Found</title></html>";
+        assert!(!is_absent_resource(
+            StatusCode::SERVICE_UNAVAILABLE,
+            proxy_page
+        ));
+        assert!(!is_absent_resource(StatusCode::BAD_GATEWAY, proxy_page));
+        assert!(!is_absent_resource(
+            StatusCode::TOO_MANY_REQUESTS,
+            proxy_page
+        ));
+        assert!(!is_absent_resource(StatusCode::REQUEST_TIMEOUT, proxy_page));
+        assert!(!is_absent_resource(StatusCode::TOO_EARLY, proxy_page));
+    }
 }

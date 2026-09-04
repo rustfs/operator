@@ -26,6 +26,19 @@ fn console_service_name(tenant: &Tenant) -> String {
     format!("{}-console", tenant.name())
 }
 
+fn tenant_service_network(tenant: &Tenant) -> (Option<String>, Option<Vec<String>>) {
+    tenant
+        .spec
+        .network
+        .as_ref()
+        .map_or((None, None), |network| {
+            (
+                network.service_ip_family_policy(),
+                network.service_ip_families(),
+            )
+        })
+}
+
 impl Tenant {
     /// a new io Service for tenant
     pub fn new_io_service(&self) -> corev1::Service {
@@ -41,16 +54,21 @@ impl Tenant {
                 labels: Some(self.common_labels()),
                 ..Default::default()
             },
-            spec: Some(corev1::ServiceSpec {
-                type_: Some("ClusterIP".to_owned()),
-                selector: Some(self.selector_labels()),
-                ports: Some(vec![corev1::ServicePort {
-                    port: 9000,
-                    target_port: Some(intstr::IntOrString::Int(9000)),
-                    name: Some(rustfs_service_port_name(tls_plan).to_owned()),
+            spec: Some({
+                let (ip_family_policy, ip_families) = tenant_service_network(self);
+                corev1::ServiceSpec {
+                    type_: Some("ClusterIP".to_owned()),
+                    selector: Some(self.selector_labels()),
+                    ip_family_policy,
+                    ip_families,
+                    ports: Some(vec![corev1::ServicePort {
+                        port: 9000,
+                        target_port: Some(intstr::IntOrString::Int(9000)),
+                        name: Some(rustfs_service_port_name(tls_plan).to_owned()),
+                        ..Default::default()
+                    }]),
                     ..Default::default()
-                }]),
-                ..Default::default()
+                }
             }),
             ..Default::default()
         }
@@ -66,16 +84,21 @@ impl Tenant {
                 labels: Some(self.common_labels()),
                 ..Default::default()
             },
-            spec: Some(corev1::ServiceSpec {
-                type_: Some("ClusterIP".to_owned()),
-                selector: Some(self.selector_labels()),
-                ports: Some(vec![corev1::ServicePort {
-                    port: 9001,
-                    target_port: Some(intstr::IntOrString::Int(9001)),
-                    name: Some("http-console".to_owned()),
+            spec: Some({
+                let (ip_family_policy, ip_families) = tenant_service_network(self);
+                corev1::ServiceSpec {
+                    type_: Some("ClusterIP".to_owned()),
+                    selector: Some(self.selector_labels()),
+                    ip_family_policy,
+                    ip_families,
+                    ports: Some(vec![corev1::ServicePort {
+                        port: 9001,
+                        target_port: Some(intstr::IntOrString::Int(9001)),
+                        name: Some("http-console".to_owned()),
+                        ..Default::default()
+                    }]),
                     ..Default::default()
-                }]),
-                ..Default::default()
+                }
             }),
             ..Default::default()
         }
@@ -95,17 +118,22 @@ impl Tenant {
                 labels: Some(self.common_labels()),
                 ..Default::default()
             },
-            spec: Some(corev1::ServiceSpec {
-                type_: Some("ClusterIP".to_owned()),
-                cluster_ip: Some("None".to_owned()),
-                publish_not_ready_addresses: Some(true),
-                selector: Some(self.selector_labels()),
-                ports: Some(vec![corev1::ServicePort {
-                    port: 9000,
-                    name: Some(rustfs_service_port_name(tls_plan).to_owned()),
+            spec: Some({
+                let (ip_family_policy, ip_families) = tenant_service_network(self);
+                corev1::ServiceSpec {
+                    type_: Some("ClusterIP".to_owned()),
+                    cluster_ip: Some("None".to_owned()),
+                    publish_not_ready_addresses: Some(true),
+                    selector: Some(self.selector_labels()),
+                    ip_family_policy,
+                    ip_families,
+                    ports: Some(vec![corev1::ServicePort {
+                        port: 9000,
+                        name: Some(rustfs_service_port_name(tls_plan).to_owned()),
+                        ..Default::default()
+                    }]),
                     ..Default::default()
-                }]),
-                ..Default::default()
+                }
             }),
             ..Default::default()
         }
@@ -163,5 +191,29 @@ mod tests {
             first_port_name(&tenant.new_headless_service_with_tls_plan(&tls_plan)),
             Some("https-rustfs")
         );
+    }
+
+    #[test]
+    fn ipv6_network_config_is_copied_onto_tenant_services() {
+        use crate::types::v1alpha1::network::{IpFamily, IpFamilyPolicy, NetworkConfig};
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.network = Some(NetworkConfig {
+            ip_family_policy: Some(IpFamilyPolicy::SingleStack),
+            ip_families: vec![IpFamily::IPv6],
+        });
+
+        for service in [
+            tenant.new_io_service(),
+            tenant.new_console_service(),
+            tenant.new_headless_service(),
+        ] {
+            let spec = service.spec.expect("Service should have spec");
+            assert_eq!(spec.ip_family_policy.as_deref(), Some("SingleStack"));
+            assert_eq!(
+                spec.ip_families.as_deref(),
+                Some(["IPv6".to_string()].as_slice())
+            );
+        }
     }
 }

@@ -15,6 +15,7 @@
 pub mod encryption;
 pub mod k8s;
 pub mod logging;
+pub mod network;
 pub mod persistence;
 pub mod policy_binding;
 pub mod pool;
@@ -337,6 +338,23 @@ mod tenant_provisioning_crd_tests {
             spec["properties"]["buckets"]["items"]["properties"]["name"]["x-kubernetes-validations"]
                 [0]["message"],
             json!("bucket name must be a valid RustFS/S3 bucket name")
+        );
+        assert_eq!(spec["properties"]["hostUsers"]["type"], json!("boolean"));
+        assert_eq!(
+            spec["properties"]["network"]["properties"]["ipFamilyPolicy"]["enum"],
+            json!(["SingleStack", "PreferDualStack", "RequireDualStack", null])
+        );
+        assert_eq!(
+            spec["properties"]["network"]["properties"]["ipFamilies"]["items"]["enum"],
+            json!(["IPv4", "IPv6"])
+        );
+        assert_eq!(
+            spec["properties"]["buckets"]["items"]["properties"]["anonymous"]["enum"],
+            json!(["Private", "Download", "Upload", "Public"])
+        );
+        assert_eq!(
+            spec["properties"]["buckets"]["items"]["x-kubernetes-validations"][0]["message"],
+            json!("bucket policy and anonymous access are mutually exclusive")
         );
     }
 }

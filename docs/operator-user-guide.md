@@ -100,7 +100,10 @@ namespace SecurityContextConstraints (SCC) to assign an allowed UID and
 FSGroup. This is manifest compatibility, not an OpenShift certification claim.
 Generic Kubernetes installations must keep the default
 `openshift.enabled=false` behavior. The current target is `restricted-v2`;
-`restricted-v3` also requires `spec.hostUsers: false`, which is not yet covered.
+`restricted-v3` also requires `spec.hostUsers: false`. The Operator sets that
+field on chart-managed Deployments when `openshift.enabled=true`, and on Tenant
+StatefulSets when `spec.hostUsers` is set or when an OpenShift-style empty
+security-context pair delegates identity to SCC.
 
 SCC-compatible manifests are insufficient when the server image assumes UID
 `10001`. Before deploying a Tenant, use an arbitrary-UID-compatible image whose
@@ -544,6 +547,8 @@ Useful Tenant-level fields:
 | `podDeletionPolicyWhenNodeIsDown` | Node-down pod deletion behavior. |
 | `securityContext` | Pod SecurityContext overrides for all RustFS Pools. |
 | `containerSecurityContext` | RustFS container SecurityContext overrides for all Pools. |
+| `hostUsers` | Optional Pod `hostUsers`. `false` isolates the user namespace (`restricted-v3`). An OpenShift empty security-context pair also defaults this to `false`. |
+| `network` | Optional Service `ipFamilyPolicy`/`ipFamilies` and RustFS listen addresses. Omitted Tenants keep IPv4 `0.0.0.0` listen addresses. IPv6 or dual-stack clusters should set `ipFamilies: [IPv6]` or `ipFamilyPolicy: PreferDualStack` so Services and `RUSTFS_ADDRESS` use `[::]`. |
 
 Both fields are also available on each `spec.pools[]` entry. Pool values are
 merged over Tenant values, which are merged over the Operator's defaults. By
@@ -563,6 +568,7 @@ MinIO Operator contract:
 
 ```yaml
 spec:
+  hostUsers: false
   pools:
     - name: pool-0
       securityContext: {}
@@ -850,7 +856,9 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 - `spec.credsSecret` for RustFS admin credentials.
 - `spec.policies` for canned policies sourced from ConfigMaps.
 - `spec.users` for regular users. Each user must have at least one direct policy mapping.
-- `spec.buckets` for buckets and optional object lock.
+- `spec.buckets` for buckets, optional object lock, canned anonymous access (`Private`, `Download`, `Upload`, `Public`), or a custom bucket policy ConfigMap. `anonymous` and `policy` are mutually exclusive. When both are omitted, the operator does not change a live bucket policy.
+
+Transient Kubernetes and RustFS admin/S3 failures (timeouts, 429, 5xx, connection errors, TLS not ready) leave provisioning items `Pending` and requeue instead of marking the Tenant `Failed`. Permanent 4xx configuration errors still fail and wait for a spec or object change.
 
 ConfigMaps and user Secrets must live in the Tenant namespace. The Operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object.
 
@@ -919,9 +927,12 @@ spec:
   buckets:
     - name: app-data
       objectLock: true
+      anonymous: Download
 ```
 
 Deletion behavior is conservative: provisioned resources are retained when removed from the Tenant spec.
+
+This operator provisions those objects onto the Tenant's RustFS cluster. A separate data-plane operator is out of scope.
 
 ### 7.9 Pool Lifecycle
 
@@ -1174,6 +1185,15 @@ kubectl logs -n <namespace> -l rustfs.tenant=<tenant>
 ```
 
 Check PVC binding, StorageClass availability, image pull errors, node selectors, tolerations, and resource requests.
+
+### Distinct physical disks
+
+RustFS requires each local erasure endpoint to map to a distinct physical disk. The Operator only
+creates one PVC per `volumesPerServer` entry; if several PVCs land on the same node disk, the
+server exits with `local erasure endpoints must use distinct physical disks`. That is a storage
+topology / StorageClass issue, not an Operator provisioning bug. Fix the volume placement, or use
+a StorageClass that provisions independent disks. `RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true` is a
+RustFS data-plane escape hatch and is not applied by the Operator.
 
 ### S3 API is not reachable
 

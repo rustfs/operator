@@ -125,8 +125,12 @@ pub async fn run(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .layer(middleware::from_fn(crate::metrics::record_console_http));
 
     // Bind and serve
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = crate::utils::listen::bind_unspecified_listener(
+        port,
+        crate::utils::listen::CONSOLE_BIND_ADDRESS_ENV,
+    )
+    .await?;
+    let addr = listener.local_addr()?;
 
     tracing::info!(%addr, "Console server listening");
     tracing::info!("API endpoints:");

@@ -13,6 +13,7 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.console.service.type }}
+  {{- include "rustfs-operator.serviceNetwork" . | nindent 2 }}
   {{- if and (eq .Values.console.service.type "LoadBalancer") .Values.console.service.loadBalancerIP }}
   loadBalancerIP: {{ .Values.console.service.loadBalancerIP }}
   {{- end }}

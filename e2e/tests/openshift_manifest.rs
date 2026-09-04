@@ -66,6 +66,16 @@ fn openshift_chart_mode_delegates_deployment_security_contexts_to_scc() {
             .as_i64(),
         Some(101)
     );
+    for name in [
+        "rustfs-operator",
+        "rustfs-operator-console",
+        "rustfs-operator-console-frontend",
+    ] {
+        assert!(
+            deployment(&default_documents, name)["spec"]["template"]["spec"]["hostUsers"].is_null(),
+            "default chart must not pin hostUsers on {name}"
+        );
+    }
 
     let openshift_render = helm_template(&[
         "--set",
@@ -93,6 +103,11 @@ fn openshift_chart_mode_delegates_deployment_security_contexts_to_scc() {
             deployment["spec"]["template"]["spec"]["securityContext"].is_null(),
             "OpenShift mode must omit the {name} Pod securityContext"
         );
+        assert_eq!(
+            deployment["spec"]["template"]["spec"]["hostUsers"].as_bool(),
+            Some(false),
+            "OpenShift mode must set hostUsers: false on {name}"
+        );
         for container in deployment["spec"]["template"]["spec"]["containers"]
             .as_sequence()
             .expect("Deployment containers are a sequence")
@@ -116,12 +131,60 @@ fn openshift_tenant_example_uses_explicit_empty_pool_security_contexts() {
         .find(|document| document["kind"].as_str() == Some("Tenant"))
         .expect("example contains a Tenant");
     let pool = &tenant["spec"]["pools"][0];
+    assert_eq!(tenant["spec"]["hostUsers"].as_bool(), Some(false));
 
     for field in ["securityContext", "containerSecurityContext"] {
         let value = pool[field]
             .as_mapping()
             .unwrap_or_else(|| panic!("{field} must be an object"));
         assert!(value.is_empty(), "{field} must be an explicit empty object");
+    }
+}
+
+#[test]
+fn chart_network_values_are_copied_to_operator_services() {
+    let Some(render) = helm_template(&[
+        "--set",
+        "network.ipFamilyPolicy=PreferDualStack",
+        "--set",
+        "network.ipFamilies={IPv4,IPv6}",
+    ]) else {
+        return;
+    };
+    assert!(
+        render.status.success(),
+        "network chart render failed: {}",
+        String::from_utf8_lossy(&render.stderr)
+    );
+    let output = String::from_utf8(render.stdout).expect("helm output is UTF-8");
+    let documents = yaml_documents(&output, "network chart");
+    for name in [
+        "rustfs-operator-metrics",
+        "rustfs-operator-sts",
+        "rustfs-operator-console",
+    ] {
+        let service = documents
+            .iter()
+            .find(|document| {
+                document["kind"].as_str() == Some("Service")
+                    && document["metadata"]["name"].as_str() == Some(name)
+            })
+            .unwrap_or_else(|| panic!("missing Service {name}"));
+        assert_eq!(
+            service["spec"]["ipFamilyPolicy"].as_str(),
+            Some("PreferDualStack"),
+            "{name} should copy ipFamilyPolicy"
+        );
+        let families = service["spec"]["ipFamilies"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("{name} ipFamilies"));
+        assert_eq!(
+            families
+                .iter()
+                .map(|item| item.as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["IPv4", "IPv6"]
+        );
     }
 }
 

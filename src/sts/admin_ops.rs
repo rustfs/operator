@@ -18,15 +18,12 @@
 
 use std::collections::BTreeMap;
 
-use super::helpers::{
-    body_mentions_not_found, build_canonical_query, extract_canned_policy_document,
-};
+use super::helpers::{build_canonical_query, extract_canned_policy_document, is_absent_resource};
 use super::{
     ADD_CANNED_POLICY_PATH, ADD_USER_PATH, ADMIN_SIGNING_SERVICE, INFO_CANNED_POLICY_PATH,
     JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, RustfsAdminClient, RustfsClientError,
     RustfsServerInfo, RustfsServerInfoResponse, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
 };
-use reqwest::StatusCode;
 use serde_json::Value;
 
 impl RustfsAdminClient {
@@ -183,7 +180,7 @@ impl RustfsAdminClient {
 
         let status = response.status();
         let (body, truncated) = RustfsClientError::limited_response_body(response).await;
-        if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+        if is_absent_resource(status, &body) {
             return Ok(false);
         }
 

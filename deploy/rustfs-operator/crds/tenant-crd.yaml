@@ -30,6 +30,14 @@ spec:
                 description: Buckets that should exist in the RustFS tenant.
                 items:
                   properties:
+                    anonymous:
+                      description: Canned anonymous access for this bucket. Mutually exclusive with `policy`.
+                      enum:
+                      - Private
+                      - Download
+                      - Upload
+                      - Public
+                      type: string
                     deletionPolicy:
                       enum:
                       - Retain
@@ -45,12 +53,36 @@ spec:
                     objectLock:
                       nullable: true
                       type: boolean
+                    policy:
+                      description: Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with `anonymous`.
+                      nullable: true
+                      properties:
+                        configMapKeyRef:
+                          properties:
+                            key:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            name:
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                          required:
+                          - key
+                          - name
+                          type: object
+                      required:
+                      - configMapKeyRef
+                      type: object
                     region:
                       nullable: true
                       type: string
                   required:
                   - name
                   type: object
+                  x-kubernetes-validations:
+                  - message: bucket policy and anonymous access are mutually exclusive
+                    rule: '!(has(self.policy) && has(self.anonymous) && self.anonymous != ''Private'')'
                 maxItems: 1024
                 type: array
                 x-kubernetes-list-map-keys:
@@ -357,6 +389,14 @@ spec:
                   - name
                   type: object
                 type: array
+              hostUsers:
+                description: |-
+                  Pod `hostUsers` for generated RustFS workloads.
+
+                  `false` isolates the user namespace and satisfies OpenShift `restricted-v3`.
+                  When omitted, an OpenShift-style empty security-context pair also renders `hostUsers: false`.
+                nullable: true
+                type: boolean
               image:
                 nullable: true
                 type: string
@@ -572,6 +612,32 @@ spec:
                 default: /data
                 nullable: true
                 type: string
+              network:
+                description: |-
+                  Tenant Service IP family policy and RustFS listen addresses.
+                  When omitted, generated Services inherit the cluster default and RustFS listens on IPv4.
+                nullable: true
+                properties:
+                  ipFamilies:
+                    items:
+                      description: Kubernetes Service IP family values.
+                      enum:
+                      - IPv4
+                      - IPv6
+                      type: string
+                    maxItems: 2
+                    type: array
+                    x-kubernetes-list-type: set
+                  ipFamilyPolicy:
+                    description: Kubernetes Service IP family policy values.
+                    enum:
+                    - SingleStack
+                    - PreferDualStack
+                    - RequireDualStack
+                    - null
+                    nullable: true
+                    type: string
+                type: object
               podDeletionPolicyWhenNodeIsDown:
                 description: |-
                   Controls how the operator handles Pods when the node hosting them is down (NotReady/Unknown).

@@ -21,6 +21,9 @@ spec:
         {{- include "rustfs-operator.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: console-frontend
     spec:
+      {{- if $openShiftEnabled }}
+      hostUsers: false
+      {{- end }}
       {{- with .Values.console.frontend.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

@@ -16,6 +16,7 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.sts.service.type }}
+  {{- include "rustfs-operator.serviceNetwork" . | nindent 2 }}
   {{- if and (eq .Values.sts.service.type "ClusterIP") .Values.sts.service.clusterIP }}
   clusterIP: {{ .Values.sts.service.clusterIP }}
   {{- end }}

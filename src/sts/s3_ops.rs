@@ -16,10 +16,8 @@
 //!   - bucket lifecycle methods (create/lookup features)
 //!   - request semantics for S3-style object storage operations.
 
-use reqwest::StatusCode;
-
 use super::helpers::{
-    body_mentions_not_found, bucket_already_exists, build_canonical_query, create_bucket_body,
+    bucket_already_exists, build_canonical_query, create_bucket_body, is_absent_resource,
 };
 use super::{ADMIN_SIGNING_SERVICE, CreateBucketResult, RustfsAdminClient, RustfsClientError};
 
@@ -122,7 +120,7 @@ impl RustfsAdminClient {
         if !response.status().is_success() {
             let status = response.status();
             let (body, truncated) = RustfsClientError::limited_response_body(response).await;
-            if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+            if is_absent_resource(status, &body) {
                 return Ok(false);
             }
             return Err(RustfsClientError::unexpected_status_with_limited_body(
@@ -135,5 +133,100 @@ impl RustfsAdminClient {
             .await
             .map_err(|_| RustfsClientError::RequestFailed)?;
         Ok(body.contains("<ObjectLockEnabled>Enabled</ObjectLockEnabled>"))
+    }
+
+    pub async fn put_bucket_policy(
+        &self,
+        bucket: &str,
+        policy: &str,
+    ) -> Result<(), RustfsClientError> {
+        if bucket.trim().is_empty() || policy.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let query = build_canonical_query(&[("policy", "")]);
+        let signed = self.sign_request(
+            "PUT",
+            &path,
+            &query,
+            policy,
+            Some("application/json"),
+            ADMIN_SIGNING_SERVICE,
+        )?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .put(format!(
+                "{}{}?{query}",
+                self.base_url.trim_end_matches('/'),
+                path
+            ))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .header("content-type", "application/json")
+            .body(policy.to_string())
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        Err(RustfsClientError::unexpected_response(response).await)
+    }
+
+    pub async fn get_bucket_policy(
+        &self,
+        bucket: &str,
+    ) -> Result<Option<String>, RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let query = build_canonical_query(&[("policy", "")]);
+        let signed = self.sign_request("GET", &path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .get(format!(
+                "{}{}?{query}",
+                self.base_url.trim_end_matches('/'),
+                path
+            ))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|_| RustfsClientError::RequestFailed)?;
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(body));
+        }
+
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if is_absent_resource(status, &body) {
+            return Ok(None);
+        }
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
     }
 }

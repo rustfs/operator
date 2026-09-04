@@ -24,6 +24,7 @@
   "OPERATOR_STS_TLS_AUTO" "sts.tls.auto"
   "OPERATOR_TENANT_MONITOR_ENABLED" "operator.tenantMonitor.enabled"
   "OPERATOR_TENANT_MONITOR_INTERVAL_SECONDS" "operator.tenantMonitor.intervalSeconds"
+  "OPERATOR_BIND_ADDRESS" "operator.bindAddress"
   "POD_NAME" "the Pod metadata.name field"
 -}}
 {{- range $env := .Values.operator.env }}
@@ -56,6 +57,9 @@ spec:
         app.kubernetes.io/component: operator
     spec:
       serviceAccountName: {{ include "rustfs-operator.serviceAccountName" . }}
+      {{- if $openShiftEnabled }}
+      hostUsers: false
+      {{- end }}
       {{- with .Values.operator.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -137,6 +141,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          {{- with .Values.operator.bindAddress }}
+            - name: OPERATOR_BIND_ADDRESS
+              value: {{ . | quote }}
+          {{- end }}
           {{- if .Values.sts.enabled }}
             - name: OPERATOR_STS_PORT
               value: {{ .Values.sts.port | quote }}

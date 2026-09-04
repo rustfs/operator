@@ -23,6 +23,7 @@ spec:
   # and grant the group the same permissions as the owner. Do not deploy this
   # example until such a RustFS image is available in your registry.
   image: registry.example.com/rustfs/rustfs:openshift-compatible
+  hostUsers: false
   pools:
     - name: pool-0
       servers: 4

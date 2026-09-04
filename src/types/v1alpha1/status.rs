@@ -175,6 +175,8 @@ pub enum Reason {
     UserOwnershipCheckpointFailed,
     BucketCreateFailed,
     BucketObjectLockConflict,
+    BucketPolicyApplyFailed,
+    BucketPolicyConflict,
     KubernetesApiError,
     StatusPatchFailed,
     ObservedGenerationStale,
@@ -246,6 +248,8 @@ impl Reason {
             Self::UserOwnershipCheckpointFailed => "UserOwnershipCheckpointFailed",
             Self::BucketCreateFailed => "BucketCreateFailed",
             Self::BucketObjectLockConflict => "BucketObjectLockConflict",
+            Self::BucketPolicyApplyFailed => "BucketPolicyApplyFailed",
+            Self::BucketPolicyConflict => "BucketPolicyConflict",
             Self::KubernetesApiError => "KubernetesApiError",
             Self::StatusPatchFailed => "StatusPatchFailed",
             Self::ObservedGenerationStale => "ObservedGenerationStale",
@@ -520,6 +524,8 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "UserOwnershipCheckpointFailed"
             | "BucketCreateFailed"
             | "BucketObjectLockConflict"
+            | "BucketPolicyApplyFailed"
+            | "BucketPolicyConflict"
     )
 }
 
@@ -616,6 +622,8 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         }
         "BucketCreateFailed" => vec!["inspectBucket", "inspectOperatorLogs"],
         "BucketObjectLockConflict" => vec!["createObjectLockBucket", "fixBucketSpec"],
+        "BucketPolicyApplyFailed" => vec!["fixBucketPolicy", "inspectOperatorLogs"],
+        "BucketPolicyConflict" => vec!["inspectLiveBucketPolicy", "updateBucketSpec"],
         "KubernetesApiError" => vec!["retry", "inspectOperatorLogs"],
         "ObservedGenerationStale" => vec!["waitForReconcile"],
         _ => Vec::new(),
@@ -706,6 +714,14 @@ mod tests {
                 "inspectOperatorRbac",
                 "inspectOperatorLogs"
             ]
+        );
+        assert_eq!(
+            next_actions_for_reason("BucketPolicyApplyFailed"),
+            vec!["fixBucketPolicy", "inspectOperatorLogs"]
+        );
+        assert_eq!(
+            next_actions_for_reason("BucketPolicyConflict"),
+            vec!["inspectLiveBucketPolicy", "updateBucketSpec"]
         );
     }
 

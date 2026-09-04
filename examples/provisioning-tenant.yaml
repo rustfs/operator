@@ -85,3 +85,4 @@ spec:
   buckets:
     - name: provisioning-demo-data
       objectLock: true
+      anonymous: Download

@@ -1168,7 +1168,7 @@ pub(super) async fn finalize_tenant_status(
 ) -> Result<Action, Error> {
     let mut builder = StatusBuilder::from_tenant(tenant);
     let pool_count = summary.pool_statuses.len();
-    let requeue_after = reconcile_requeue_after(tenant, &summary, pod_cleanup_outcome);
+    let mut requeue_after = reconcile_requeue_after(tenant, &summary, pod_cleanup_outcome);
     builder.set_pool_statuses(summary.pool_statuses);
     if let Some(tls_status) = tls_plan.status {
         builder.set_tls_status(tls_status);
@@ -1272,15 +1272,6 @@ pub(super) async fn finalize_tenant_status(
                     ),
                 )
             }
-            ProvisioningOutcome::Pending { message } => {
-                builder.finish_provisioning_pending(message.clone());
-                (
-                    ConditionType::ProvisioningReady,
-                    Reason::ProvisioningPending,
-                    EventType::Normal,
-                    message,
-                )
-            }
             ProvisioningOutcome::Failed { reason, message } => {
                 builder.finish_provisioning_failed(reason, message.clone());
                 (
@@ -1293,15 +1284,37 @@ pub(super) async fn finalize_tenant_status(
             ProvisioningOutcome::Retry {
                 message,
                 retry_after,
+                persist_status: false,
             } => {
                 warn!(
                     tenant = %tenant.name(),
                     namespace = %namespace,
                     message = %message,
                     retry_after_seconds = retry_after.as_secs(),
-                    "retrying after RustFS user ownership checkpoint contention or transient failure"
+                    "retrying after RustFS user ownership checkpoint contention"
                 );
                 return Ok(Action::requeue(retry_after));
+            }
+            ProvisioningOutcome::Retry {
+                message,
+                retry_after,
+                persist_status: true,
+            } => {
+                warn!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    message = %message,
+                    retry_after_seconds = retry_after.as_secs(),
+                    "retrying after a transient RustFS or Kubernetes provisioning failure"
+                );
+                builder.finish_provisioning_pending(message.clone());
+                requeue_after = earliest_requeue_after(requeue_after, Some(retry_after));
+                (
+                    ConditionType::ProvisioningReady,
+                    Reason::ProvisioningPending,
+                    EventType::Normal,
+                    message,
+                )
             }
         }
     } else {

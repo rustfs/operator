@@ -97,8 +97,10 @@ helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
 该行为与 MinIO Operator 的安装方式一致：Chart 管理的 Deployment 不渲染 Pod
 和容器 `securityContext`，由安装 namespace 的 SecurityContextConstraints（SCC）
 分配合法 UID 和 FSGroup。这仅表示 manifest 与 SCC 兼容，不代表已获得 OpenShift
-认证。普通 Kubernetes 安装必须保留默认的 `openshift.enabled=false`。当前支持目标
-限定为 `restricted-v2`；`restricted-v3` 还要求 `spec.hostUsers: false`，目前尚未覆盖。
+认证。普通 Kubernetes 安装必须保留默认的 `openshift.enabled=false`。当
+`openshift.enabled=true` 时，Chart 会为 Operator/Console Deployment 设置
+`hostUsers: false`；Tenant 在 `spec.hostUsers` 或 OpenShift 空 securityContext
+对下同样会渲染该字段，以满足 `restricted-v3` 对用户命名空间的要求。
 
 仅有 SCC 兼容 manifest 还不够，RustFS server 镜像也必须支持 SCC 分配的任意 UID。
 部署 Tenant 前，应确认 `/data`、`/logs` 等镜像层可写目录属于 group `0`，并且 group
@@ -517,6 +519,8 @@ spec:
 | `podDeletionPolicyWhenNodeIsDown` | 节点 NotReady/Unknown 时的 Pod 删除策略。 |
 | `securityContext` | 所有 RustFS Pool 的 Pod SecurityContext 覆盖。 |
 | `containerSecurityContext` | 所有 Pool 的 RustFS 容器 SecurityContext 覆盖。 |
+| `hostUsers` | 可选的 Pod `hostUsers`。`false` 会隔离用户命名空间（`restricted-v3`）。OpenShift 空 securityContext 对也会默认渲染为 `false`。 |
+| `network` | 可选的 Service `ipFamilyPolicy`/`ipFamilies` 以及 RustFS 监听地址。省略时保持 IPv4 `0.0.0.0`。IPv6 或双栈集群应设置 `ipFamilies: [IPv6]` 或 `ipFamilyPolicy: PreferDualStack`，使 Service 和 `RUSTFS_ADDRESS` 使用 `[::]`。 |
 
 这两个字段也可配置在每个 `spec.pools[]` 条目上。Pool 级字段会按字段覆盖
 Tenant 级字段，Tenant 级字段再覆盖 Operator 默认值。Operator 默认设置
@@ -532,6 +536,7 @@ namespace SCC；该契约与 MinIO Operator 保持一致：
 
 ```yaml
 spec:
+  hostUsers: false
   pools:
     - name: pool-0
       securityContext: {}
@@ -807,7 +812,9 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 - `spec.credsSecret`：RustFS 管理员凭据。
 - `spec.policies`：从 ConfigMap 读取 policy document。
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
-- `spec.buckets`：bucket，可选择开启 object lock。
+- `spec.buckets`：bucket，以及可选的 object lock、匿名访问（`Private` / `Download` / `Upload` / `Public`）或来自 ConfigMap 的自定义 bucket policy。`anonymous` 与 `policy` 互斥。两者都省略时，Operator 不会改写已有 bucket policy。
+
+Kubernetes 或 RustFS 管理/S3 API 的瞬时失败（超时、429、5xx、连接错误、TLS 未就绪）会把 provisioning 条目保持为 `Pending` 并重新入队，而不会把 Tenant 标为 `Failed`。永久性 4xx 配置错误仍会失败并等待 spec 或对象变更。
 
 ConfigMap 和 user Secret 必须位于 Tenant namespace。Operator 会从 Tenant spec 建立反向引用索引，因此被引用资源的创建或更新会触发所有引用它的 Tenant reconcile；无需要求或修改资源标签，也不需要对这些资源拥有写权限。
 
@@ -876,9 +883,12 @@ spec:
   buckets:
     - name: app-data
       objectLock: true
+      anonymous: Download
 ```
 
 删除行为是保守的：从 Tenant spec 移除已 provisioning 的资源时，实际 RustFS 资源会保留。
+
+本 Operator 把这些对象 provisioning 到 Tenant 的 RustFS 集群中；独立的 data-plane operator 不在当前范围内。
 
 ### 7.9 Pool 生命周期
 
@@ -1130,6 +1140,15 @@ kubectl logs -n <namespace> -l rustfs.tenant=<tenant>
 ```
 
 重点检查 PVC 绑定、StorageClass、镜像拉取、node selector、toleration 和资源 request。
+
+### 本地 erasure 盘必须使用不同物理磁盘
+
+RustFS 要求每个本地 erasure endpoint 对应不同的物理磁盘。Operator 只会按
+`volumesPerServer` 为每个卷创建 PVC；如果多个 PVC 落到同一块节点磁盘上，server
+会以 `local erasure endpoints must use distinct physical disks` 退出。这属于存储拓扑
+或 StorageClass 问题，不是 Operator provisioning 缺陷。应调整卷调度，或使用能提供
+独立磁盘的 StorageClass。`RUSTFS_UNSAFE_BYPASS_DISK_CHECK=true` 是 RustFS 数据面的
+逃生开关，Operator 不会自动注入。
 
 ### S3 API 不可访问
 

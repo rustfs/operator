@@ -7,6 +7,7 @@
   "CONSOLE_LOGIN_ADMISSION_MAX_IN_FLIGHT" "console.loginAdmission.maxInFlight"
   "CONSOLE_LOGIN_ADMISSION_BODY_LIMIT_BYTES" "console.loginAdmission.bodyLimitBytes"
   "CONSOLE_LOGIN_ADMISSION_TIMEOUT_SECONDS" "console.loginAdmission.timeoutSeconds"
+  "CONSOLE_BIND_ADDRESS" "console.bindAddress"
 -}}
 {{- range $env := .Values.console.env }}
 {{- if hasKey $reservedConsoleEnv $env.name -}}
@@ -48,6 +49,9 @@ spec:
         checksum/secret: {{ include (print $.Template.BasePath "/console-secret.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "rustfs-operator.consoleServiceAccountName" . }}
+      {{- if $openShiftEnabled }}
+      hostUsers: false
+      {{- end }}
       {{- with .Values.console.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -71,6 +75,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "rustfs-operator.fullname" . }}-console-secret
                   key: jwt-secret
+          {{- with .Values.console.bindAddress }}
+            - name: CONSOLE_BIND_ADDRESS
+              value: {{ . | quote }}
+          {{- end }}
           {{- with $consoleLoginAdmission }}
             - name: CONSOLE_LOGIN_ADMISSION_REQUESTS_PER_SECOND
               value: {{ .requestsPerSecond | quote }}

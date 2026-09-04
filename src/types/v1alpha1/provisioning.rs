@@ -121,8 +121,31 @@ pub(crate) fn duplicate_user_credentials_secret_names(
         .collect()
 }
 
+#[derive(
+    Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq,
+)]
+#[serde(rename_all = "PascalCase")]
+pub enum BucketAnonymousAccess {
+    #[default]
+    Private,
+    Download,
+    Upload,
+    Public,
+}
+
+impl BucketAnonymousAccess {
+    pub(crate) fn is_private(&self) -> bool {
+        matches!(self, Self::Private)
+    }
+}
+
+fn skip_private_anonymous(value: &BucketAnonymousAccess) -> bool {
+    value.is_private()
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("!(has(self.policy) && has(self.anonymous) && self.anonymous != 'Private')").message("bucket policy and anonymous access are mutually exclusive"))]
 pub struct ProvisioningBucket {
     #[schemars(
         length(min = MIN_BUCKET_NAME_LENGTH, max = MAX_BUCKET_NAME_LENGTH),
@@ -137,6 +160,14 @@ pub struct ProvisioningBucket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_lock: Option<bool>,
 
+    /// Canned anonymous access for this bucket. Mutually exclusive with `policy`.
+    #[serde(default, skip_serializing_if = "skip_private_anonymous")]
+    pub anonymous: BucketAnonymousAccess,
+
+    /// Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with `anonymous`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyDocumentSource>,
+
     #[serde(default, skip_serializing_if = "is_retain")]
     pub deletion_policy: ProvisioningDeletionPolicy,
 }
@@ -144,6 +175,14 @@ pub struct ProvisioningBucket {
 impl ProvisioningBucket {
     pub fn object_lock_enabled(&self) -> bool {
         self.object_lock.unwrap_or(false)
+    }
+
+    pub(crate) fn has_custom_policy(&self) -> bool {
+        self.policy.is_some()
+    }
+
+    pub(crate) fn has_anonymous_access(&self) -> bool {
+        !self.anonymous.is_private()
     }
 }
 
@@ -207,5 +246,24 @@ mod tests {
             duplicate_user_credentials_secret_names(&users),
             BTreeSet::from(["shared-secret"])
         );
+    }
+
+    #[test]
+    fn private_anonymous_access_is_omitted_from_serialized_bucket() {
+        let bucket = super::ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&bucket).expect("bucket serializes");
+        assert!(value.get("anonymous").is_none());
+        assert!(value.get("policy").is_none());
+
+        let public: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "anonymous": "Public"
+        }))
+        .expect("public anonymous deserializes");
+        assert!(public.has_anonymous_access());
+        assert!(!public.has_custom_policy());
     }
 }

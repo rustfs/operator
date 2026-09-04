@@ -52,6 +52,11 @@ impl TenantReferences {
         for policy in &tenant.spec.policies {
             references.insert_config_map(namespace, &policy.document.config_map_key_ref.name);
         }
+        for bucket in &tenant.spec.buckets {
+            if let Some(source) = bucket.policy.as_ref() {
+                references.insert_config_map(namespace, &source.config_map_key_ref.name);
+            }
+        }
         for env in &tenant.spec.env {
             if let Some(config_map) = env
                 .value_from
@@ -281,6 +286,19 @@ mod tests {
             },
             ..Default::default()
         });
+        tenant
+            .spec
+            .buckets
+            .push(crate::types::v1alpha1::provisioning::ProvisioningBucket {
+                name: "app-data".to_string(),
+                policy: Some(PolicyDocumentSource {
+                    config_map_key_ref: ConfigMapKeyReference {
+                        name: "bucket-policy".to_string(),
+                        key: "policy.json".to_string(),
+                    },
+                }),
+                ..Default::default()
+            });
         tenant.spec.creds_secret = Some(local_ref("credentials"));
         tenant.spec.image_pull_secret = Some(local_ref("image-pull"));
         tenant.spec.rpc_secret = Some(RpcSecretRef {
@@ -359,6 +377,11 @@ mod tests {
 
         assert_single_ref(
             &index.refs_for_config_map(Some("storage"), Some("policy-document")),
+            "tenant-a",
+            "storage",
+        );
+        assert_single_ref(
+            &index.refs_for_config_map(Some("storage"), Some("bucket-policy")),
             "tenant-a",
             "storage",
         );

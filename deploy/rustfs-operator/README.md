@@ -59,9 +59,10 @@ allowed runtime identity. Keep `openshift.enabled=false` and omit the Tenant
 fields on generic Kubernetes so the RustFS defaults remain in effect.
 
 This profile provides SCC-compatible manifests but does not by itself imply
-OpenShift certification or OperatorHub distribution. Support is currently
-limited to `restricted-v2`; the `restricted-v3` requirement to set
-`spec.hostUsers: false` is not implemented.
+OpenShift certification or OperatorHub distribution. Chart-managed Deployments
+set `hostUsers: false` when `openshift.enabled=true`, and Tenant workloads do
+the same for an explicit empty security-context pair or `spec.hostUsers: false`,
+covering the OpenShift `restricted-v3` host-user-namespace control.
 
 The RustFS server image is an independent prerequisite. It must support an
 arbitrary SCC-assigned UID: writable image-layer directories, including
@@ -109,6 +110,7 @@ The following table lists the configurable parameters of the RustFS Operator cha
 | `operator.prometheusRule.enabled` | Create Prometheus alert rules for operator and tenant storage health | `false` |
 | `operator.tenantMonitor.enabled` | Poll RustFS tenant storage health and capacity metrics | `true` |
 | `operator.tenantMonitor.intervalSeconds` | Tenant storage monitor interval | `300` |
+| `operator.bindAddress` | Optional literal IPv4/IPv6 bind address for operator HTTP sockets; empty prefers `::` then `0.0.0.0` | `""` |
 | `clusterDomain` | Kubernetes cluster DNS domain used for Tenant peer URLs, generated TLS SANs, and operator STS auto TLS | `cluster.local` |
 | `operator.env` | Environment variables | `[{name: RUST_LOG, value: info}]` |
 | `operator.nodeSelector` | Node selector for pod placement | `{}` |
@@ -236,7 +238,9 @@ The generated ClusterRole grants only `get`, `list`, and `watch` for Secrets and
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `openshift.enabled` | Omit chart-managed Deployment security contexts and delegate runtime identity to OpenShift SCC | `false` |
+| `openshift.enabled` | Omit chart-managed Deployment security contexts, set `hostUsers: false`, and delegate runtime identity to OpenShift SCC | `false` |
+| `network.ipFamilyPolicy` | Optional Service `ipFamilyPolicy` for chart-managed Services | `""` |
+| `network.ipFamilies` | Optional Service `ipFamilies` for chart-managed Services | `[]` |
 | `namespace` | Namespace to deploy to | `""` (uses release namespace) |
 | `commonLabels` | Labels to add to all resources | `{}` |
 | `commonAnnotations` | Annotations to add to all resources | `{}` |

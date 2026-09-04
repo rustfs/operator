@@ -16,6 +16,7 @@ use super::Tenant;
 use crate::cluster_dns;
 use crate::types;
 use crate::types::v1alpha1::encryption::KmsBackendType;
+use crate::types::v1alpha1::network::rustfs_listen_address;
 use crate::types::v1alpha1::persistence::{
     DEFAULT_PERSISTENCE_PATH, LEGACY_LOCAL_KMS_KEY_DIR, data_volume_mount_path,
     default_local_kms_key_directory,
@@ -526,6 +527,10 @@ fn effective_workload_security_context(
         ),
         pod_operator_defaults_delegated: effective_pod.operator_defaults_delegated,
     }
+}
+
+fn effective_host_users(explicit: Option<bool>, platform_delegated: bool) -> Option<bool> {
+    explicit.or_else(|| platform_delegated.then_some(false))
 }
 
 const TLS_OPERATOR_MANAGED_ENV_VARS: &[&str] = &[
@@ -1319,13 +1324,19 @@ impl Tenant {
         // Add required RustFS environment variables
         env_vars.push(corev1::EnvVar {
             name: "RUSTFS_ADDRESS".to_owned(),
-            value: Some("0.0.0.0:9000".to_owned()),
+            value: Some(self.spec.network.as_ref().map_or_else(
+                || rustfs_listen_address(None, 9000),
+                |network| network.rustfs_listen_address(9000),
+            )),
             ..Default::default()
         });
 
         env_vars.push(corev1::EnvVar {
             name: "RUSTFS_CONSOLE_ADDRESS".to_owned(),
-            value: Some("0.0.0.0:9001".to_owned()),
+            value: Some(self.spec.network.as_ref().map_or_else(
+                || rustfs_listen_address(None, 9001),
+                |network| network.rustfs_listen_address(9001),
+            )),
             ..Default::default()
         });
 
@@ -1424,6 +1435,10 @@ impl Tenant {
             pool.container_security_context.as_ref(),
         );
         self.validate_effective_workload_identity(pool, &security)?;
+        let host_users = effective_host_users(
+            self.spec.host_users,
+            security.pod_operator_defaults_delegated,
+        );
         let EffectiveWorkloadSecurityContext {
             pod: pod_security_context,
             container: container_security_context,
@@ -1517,6 +1532,7 @@ impl Tenant {
                             .service_account_name
                             .is_none()
                             .then_some(false),
+                        host_users,
                         containers: vec![container],
                         security_context: Some(pod_security_context),
                         volumes: Some(pod_volumes),
@@ -1661,6 +1677,10 @@ impl Tenant {
 
         // Check service account
         if existing_pod_spec.service_account_name != desired_pod_spec.service_account_name {
+            return Ok(true);
+        }
+
+        if existing_pod_spec.host_users != desired_pod_spec.host_users {
             return Ok(true);
         }
 
@@ -3242,6 +3262,10 @@ mod tests {
             container_security_context.read_only_root_filesystem, None,
             "readOnlyRootFilesystem is configurable but not required by restricted"
         );
+        assert_eq!(
+            pod_spec.host_users, None,
+            "default tenants keep the Kubernetes host user namespace"
+        );
     }
 
     #[test]
@@ -3272,9 +3296,76 @@ mod tests {
             pod_context.fs_group_change_policy.as_deref(),
             Some("OnRootMismatch")
         );
+        assert_eq!(pod_spec.host_users, Some(false));
         assert_eq!(
             pod_spec.containers[0].security_context,
             Some(corev1::SecurityContext::default())
+        );
+    }
+
+    #[test]
+    fn explicit_host_users_overrides_platform_delegation_default() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.security_context = Some(PodSecurityContextOverride::default());
+        tenant.spec.container_security_context = Some(corev1::SecurityContext::default());
+        tenant.spec.host_users = Some(true);
+
+        let pod_spec = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("hostUsers override should render")
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec");
+        assert_eq!(pod_spec.host_users, Some(true));
+    }
+
+    #[test]
+    fn ipv6_network_config_listens_on_unspecified_v6() {
+        use crate::types::v1alpha1::network::{IpFamily, IpFamilyPolicy, NetworkConfig};
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.network = Some(NetworkConfig {
+            ip_family_policy: Some(IpFamilyPolicy::SingleStack),
+            ip_families: vec![IpFamily::IPv6],
+        });
+
+        let env = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("IPv6 Tenant should render")
+            .spec
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .expect("Pod template should have spec")
+            .containers[0]
+            .env
+            .clone()
+            .unwrap_or_default();
+        let value = |name: &str| {
+            env.iter()
+                .find(|var| var.name == name)
+                .and_then(|var| var.value.clone())
+        };
+        assert_eq!(value("RUSTFS_ADDRESS").as_deref(), Some("[::]:9000"));
+        assert_eq!(
+            value("RUSTFS_CONSOLE_ADDRESS").as_deref(),
+            Some("[::]:9001")
+        );
+    }
+
+    #[test]
+    fn host_users_change_marks_statefulset_for_update() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let existing = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("existing StatefulSet");
+        tenant.spec.host_users = Some(false);
+        assert!(
+            tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .expect("compare should succeed")
         );
     }
 
