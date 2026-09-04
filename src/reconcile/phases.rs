@@ -499,41 +499,35 @@ pub(super) async fn reconcile_services(
     ];
     let mut services_to_recreate = Vec::new();
 
-    if desired_services
-        .first()
-        .and_then(service_primary_ip_family)
-        .is_some()
-    {
-        for desired in &desired_services {
-            let name = desired.name_any();
-            let existing = match ctx.get::<Service>(&name, namespace).await {
-                Ok(existing) => existing,
-                Err(error) if context::is_kube_not_found(&error) => continue,
-                Err(error) => return context_result(Err(error), ctx, tenant).await,
-            };
-            if existing.metadata.deletion_timestamp.is_some() {
-                return Ok(ServiceReconcileOutcome::Requeue(
-                    SERVICE_RECREATE_REQUEUE_INTERVAL,
-                ));
-            }
-            if !service_primary_ip_family_changed(&existing, desired) {
-                continue;
-            }
-            if !operator_resource_owned_by_tenant_or_predecessor(existing.meta(), tenant) {
-                return types_result(
-                    Err(types::error::Error::ImmutableFieldModified {
-                        name: format!("Service {namespace}/{name}"),
-                        field: "spec.ipFamilies[0]".to_string(),
-                        message: "the existing Service is not managed by this Operator and cannot be safely recreated"
-                            .to_string(),
-                    }),
-                    ctx,
-                    tenant,
-                )
-                .await;
-            }
-            services_to_recreate.push(existing);
+    for desired in &desired_services {
+        let name = desired.name_any();
+        let existing = match ctx.get::<Service>(&name, namespace).await {
+            Ok(existing) => existing,
+            Err(error) if context::is_kube_not_found(&error) => continue,
+            Err(error) => return context_result(Err(error), ctx, tenant).await,
+        };
+        if existing.metadata.deletion_timestamp.is_some() {
+            return Ok(ServiceReconcileOutcome::Requeue(
+                SERVICE_RECREATE_REQUEUE_INTERVAL,
+            ));
         }
+        if !service_ip_families_require_recreation(&existing, desired) {
+            continue;
+        }
+        if !operator_resource_owned_by_tenant_or_predecessor(existing.meta(), tenant) {
+            return types_result(
+                Err(types::error::Error::ImmutableFieldModified {
+                    name: format!("Service {namespace}/{name}"),
+                    field: "spec.ipFamilies[0]".to_string(),
+                    message: "the existing Service is not managed by this Operator and cannot be safely recreated"
+                        .to_string(),
+                }),
+                ctx,
+                tenant,
+            )
+            .await;
+        }
+        services_to_recreate.push(existing);
     }
 
     if !services_to_recreate.is_empty() {
@@ -595,11 +589,29 @@ fn service_primary_ip_family(service: &Service) -> Option<&str> {
         .map(String::as_str)
 }
 
-fn service_primary_ip_family_changed(existing: &Service, desired: &Service) -> bool {
-    let Some(desired_primary) = service_primary_ip_family(desired) else {
-        return false;
-    };
-    service_primary_ip_family(existing).is_some_and(|existing| existing != desired_primary)
+fn service_ip_families_require_recreation(existing: &Service, desired: &Service) -> bool {
+    match service_primary_ip_family(desired) {
+        Some(desired_primary) => {
+            service_primary_ip_family(existing).is_some_and(|existing| existing != desired_primary)
+        }
+        None => service_ip_families_managed_by_operator(existing),
+    }
+}
+
+fn service_ip_families_managed_by_operator(service: &Service) -> bool {
+    service
+        .metadata
+        .managed_fields
+        .as_ref()
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.manager.as_deref() == Some("rustfs-operator")
+                    && entry
+                        .fields_v1
+                        .as_ref()
+                        .is_some_and(|fields| fields.0.pointer("/f:spec/f:ipFamilies").is_some())
+            })
+        })
 }
 
 pub(super) async fn cleanup_removed_decommissioned_pool_statefulsets(
@@ -1469,7 +1481,9 @@ mod tests {
     use super::*;
     use http::{Method, Request, Response, StatusCode};
     use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, ObjectMeta};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+        FieldsV1, ManagedFieldsEntry, ObjectMeta,
+    };
     use kube::{Client, client::Body};
     use serde_json::{Value, json};
     use std::convert::Infallible;
@@ -1491,6 +1505,19 @@ mod tests {
     fn operator_managed_fields() -> Vec<ManagedFieldsEntry> {
         vec![ManagedFieldsEntry {
             manager: Some("rustfs-operator".to_string()),
+            ..Default::default()
+        }]
+    }
+
+    fn operator_managed_ip_family_fields() -> Vec<ManagedFieldsEntry> {
+        vec![ManagedFieldsEntry {
+            manager: Some("rustfs-operator".to_string()),
+            fields_type: Some("FieldsV1".to_string()),
+            fields_v1: Some(FieldsV1(json!({
+                "f:spec": {
+                    "f:ipFamilies": {}
+                }
+            }))),
             ..Default::default()
         }]
     }
@@ -1645,7 +1672,7 @@ mod tests {
     }
 
     #[test]
-    fn service_primary_ip_family_change_requires_recreation() {
+    fn service_ip_family_change_or_removal_requires_recreation() {
         let tenant = crate::tests::create_test_tenant(None, None);
         let mut existing = tenant.new_io_service();
         existing
@@ -1660,32 +1687,31 @@ mod tests {
             .expect("desired Service should have spec")
             .ip_families = Some(vec!["IPv6".to_string(), "IPv4".to_string()]);
 
-        assert!(service_primary_ip_family_changed(&existing, &desired));
+        assert!(service_ip_families_require_recreation(&existing, &desired));
 
         desired
             .spec
             .as_mut()
             .expect("desired Service should have spec")
             .ip_families = Some(vec!["IPv4".to_string(), "IPv6".to_string()]);
-        assert!(!service_primary_ip_family_changed(&existing, &desired));
+        assert!(!service_ip_families_require_recreation(&existing, &desired));
 
         desired
             .spec
             .as_mut()
             .expect("desired Service should have spec")
             .ip_families = None;
-        assert!(!service_primary_ip_family_changed(&existing, &desired));
+        assert!(!service_ip_families_require_recreation(&existing, &desired));
+
+        existing.metadata.managed_fields = Some(operator_managed_ip_family_fields());
+        assert!(service_ip_families_require_recreation(&existing, &desired));
     }
 
-    #[tokio::test]
-    async fn reconcile_services_recreates_operator_managed_services_for_new_primary_family() {
-        use crate::types::v1alpha1::network::{IpFamily, IpFamilyPolicy, NetworkConfig};
-
-        let mut tenant = crate::tests::create_test_tenant(None, None);
-        tenant.spec.network = Some(NetworkConfig {
-            ip_family_policy: Some(IpFamilyPolicy::SingleStack),
-            ip_families: vec![IpFamily::IPv6],
-        });
+    async fn assert_reconcile_services_recreates(
+        tenant: &Tenant,
+        existing_family: &str,
+        operator_managed_ip_families: bool,
+    ) {
         let mut existing_services = vec![
             tenant.new_io_service(),
             tenant.new_console_service(),
@@ -1694,12 +1720,16 @@ mod tests {
         for (index, service) in existing_services.iter_mut().enumerate() {
             service.metadata.uid = Some(format!("service-uid-{index}"));
             service.metadata.resource_version = Some(format!("{}", index + 10));
-            service.metadata.managed_fields = Some(operator_managed_fields());
+            service.metadata.managed_fields = Some(if operator_managed_ip_families {
+                operator_managed_ip_family_fields()
+            } else {
+                operator_managed_fields()
+            });
             service
                 .spec
                 .as_mut()
                 .expect("Service should have spec")
-                .ip_families = Some(vec!["IPv4".to_string()]);
+                .ip_families = Some(vec![existing_family.to_string()]);
         }
         let existing_services = Arc::new(existing_services);
         let request_count = Arc::new(AtomicUsize::new(0));
@@ -1771,6 +1801,26 @@ mod tests {
             ServiceReconcileOutcome::Requeue(SERVICE_RECREATE_REQUEUE_INTERVAL)
         );
         assert_eq!(request_count.load(Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test]
+    async fn reconcile_services_recreates_operator_managed_services_for_new_primary_family() {
+        use crate::types::v1alpha1::network::{IpFamily, IpFamilyPolicy, NetworkConfig};
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.network = Some(NetworkConfig {
+            ip_family_policy: Some(IpFamilyPolicy::SingleStack),
+            ip_families: vec![IpFamily::IPv6],
+        });
+
+        assert_reconcile_services_recreates(&tenant, "IPv4", false).await;
+    }
+
+    #[tokio::test]
+    async fn reconcile_services_recreates_when_explicit_ip_families_are_removed() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+
+        assert_reconcile_services_recreates(&tenant, "IPv6", true).await;
     }
 
     #[tokio::test]

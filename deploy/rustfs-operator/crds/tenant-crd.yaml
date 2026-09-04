@@ -32,8 +32,9 @@ spec:
                   properties:
                     anonymous:
                       description: |-
-                        Canned anonymous access for this bucket. Mutually exclusive with `policy`. Explicit
-                        `Private` removes an operator-managed bucket policy; omission leaves the live policy alone.
+                        Canned anonymous access for this bucket. Non-private values are mutually exclusive with
+                        `policy`. Explicit `Private` removes an operator-managed bucket policy when `policy` is
+                        absent; omission leaves the live policy alone.
                       enum:
                       - Private
                       - Download
@@ -58,7 +59,9 @@ spec:
                       nullable: true
                       type: boolean
                     policy:
-                      description: Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with `anonymous`.
+                      description: |-
+                        Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with non-private
+                        `anonymous`; legacy `Private` plus `policy` configurations keep the custom policy.
                       nullable: true
                       properties:
                         configMapKeyRef:
@@ -85,8 +88,8 @@ spec:
                   - name
                   type: object
                   x-kubernetes-validations:
-                  - message: bucket policy and anonymous access are mutually exclusive
-                    rule: '!(has(self.policy) && has(self.anonymous))'
+                  - message: bucket policy and non-private anonymous access are mutually exclusive
+                    rule: '!(has(self.policy) && has(self.anonymous) && self.anonymous != ''Private'')'
                 maxItems: 1024
                 type: array
                 x-kubernetes-list-map-keys:

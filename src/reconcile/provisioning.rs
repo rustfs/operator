@@ -1986,13 +1986,13 @@ async fn reconcile_bucket(
         return annotate_bucket_item(item, bucket);
     }
 
-    if bucket.has_custom_policy() && bucket.has_anonymous_access() {
+    if bucket.has_custom_policy() && bucket.has_non_private_anonymous_access() {
         let item = run.item(
             previous.as_ref(),
             &bucket.name,
             ProvisioningItemState::Failed,
             Reason::BucketPolicyConflict,
-            "bucket policy and anonymous access are mutually exclusive",
+            "bucket policy and non-private anonymous access are mutually exclusive",
         );
         return annotate_bucket_item(item, bucket);
     }
@@ -2075,10 +2075,11 @@ async fn reconcile_bucket(
         }
     };
 
-    if bucket
-        .anonymous
-        .as_ref()
-        .is_some_and(BucketAnonymousAccess::is_private)
+    if bucket.policy.is_none()
+        && bucket
+            .anonymous
+            .as_ref()
+            .is_some_and(BucketAnonymousAccess::is_private)
     {
         return reconcile_private_bucket_policy(
             run,
@@ -2091,13 +2092,19 @@ async fn reconcile_bucket(
     }
 
     let Some(desired) = desired_bucket_policy(run, bucket).await else {
-        let item = run.item(
+        let mut item = run.item(
             previous.as_ref(),
             &bucket.name,
             ProvisioningItemState::Ready,
             Reason::ProvisioningConfigured,
             created_message,
         );
+        item.last_applied_hash = previous
+            .as_ref()
+            .and_then(|item| item.last_applied_hash.clone());
+        item.last_applied_generation = previous
+            .as_ref()
+            .and_then(|item| item.last_applied_generation);
         return annotate_bucket_item(item, bucket);
     };
     let desired = match desired {
@@ -4669,8 +4676,22 @@ mod tests {
             ProvisioningItemState::Ready,
             Reason::ProvisioningConfigured.as_str(),
         );
-        previous.last_applied_hash = Some(live_hash);
+        previous.last_applied_hash = Some(live_hash.clone());
         run.previous.buckets.push(previous);
+        let omitted_bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        };
+
+        let omitted_item = reconcile_bucket(&mut run, &client, &omitted_bucket).await;
+
+        assert_eq!(omitted_item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(
+            omitted_item.last_applied_hash.as_deref(),
+            Some(live_hash.as_str())
+        );
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous.buckets.push(omitted_item);
         let bucket = ProvisioningBucket {
             name: "app-data".to_string(),
             anonymous: Some(BucketAnonymousAccess::Private),

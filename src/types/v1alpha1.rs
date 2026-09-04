@@ -363,7 +363,11 @@ mod tenant_provisioning_crd_tests {
         );
         assert_eq!(
             spec["properties"]["buckets"]["items"]["x-kubernetes-validations"][0]["message"],
-            json!("bucket policy and anonymous access are mutually exclusive")
+            json!("bucket policy and non-private anonymous access are mutually exclusive")
+        );
+        assert_eq!(
+            spec["properties"]["buckets"]["items"]["x-kubernetes-validations"][0]["rule"],
+            json!("!(has(self.policy) && has(self.anonymous) && self.anonymous != 'Private')")
         );
     }
 }

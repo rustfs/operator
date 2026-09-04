@@ -141,7 +141,7 @@ impl BucketAnonymousAccess {
 
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("!(has(self.policy) && has(self.anonymous))").message("bucket policy and anonymous access are mutually exclusive"))]
+#[x_kube(validation = Rule::new("!(has(self.policy) && has(self.anonymous) && self.anonymous != 'Private')").message("bucket policy and non-private anonymous access are mutually exclusive"))]
 pub struct ProvisioningBucket {
     #[schemars(
         length(min = MIN_BUCKET_NAME_LENGTH, max = MAX_BUCKET_NAME_LENGTH),
@@ -156,12 +156,14 @@ pub struct ProvisioningBucket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_lock: Option<bool>,
 
-    /// Canned anonymous access for this bucket. Mutually exclusive with `policy`. Explicit
-    /// `Private` removes an operator-managed bucket policy; omission leaves the live policy alone.
+    /// Canned anonymous access for this bucket. Non-private values are mutually exclusive with
+    /// `policy`. Explicit `Private` removes an operator-managed bucket policy when `policy` is
+    /// absent; omission leaves the live policy alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anonymous: Option<BucketAnonymousAccess>,
 
-    /// Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with `anonymous`.
+    /// Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with non-private
+    /// `anonymous`; legacy `Private` plus `policy` configurations keep the custom policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyDocumentSource>,
 
@@ -178,8 +180,10 @@ impl ProvisioningBucket {
         self.policy.is_some()
     }
 
-    pub(crate) fn has_anonymous_access(&self) -> bool {
-        self.anonymous.is_some()
+    pub(crate) fn has_non_private_anonymous_access(&self) -> bool {
+        self.anonymous
+            .as_ref()
+            .is_some_and(|access| !access.is_private())
     }
 }
 
@@ -274,7 +278,22 @@ mod tests {
             "anonymous": "Public"
         }))
         .expect("public anonymous deserializes");
-        assert!(public.has_anonymous_access());
+        assert!(public.has_non_private_anonymous_access());
         assert!(!public.has_custom_policy());
+
+        let legacy_private_policy: super::ProvisioningBucket =
+            serde_json::from_value(serde_json::json!({
+                "name": "app-data",
+                "anonymous": "Private",
+                "policy": {
+                    "configMapKeyRef": {
+                        "name": "bucket-policy",
+                        "key": "policy.json"
+                    }
+                }
+            }))
+            .expect("legacy private plus policy configuration deserializes");
+        assert!(legacy_private_policy.has_custom_policy());
+        assert!(!legacy_private_policy.has_non_private_anonymous_access());
     }
 }
