@@ -139,13 +139,9 @@ impl BucketAnonymousAccess {
     }
 }
 
-fn skip_private_anonymous(value: &BucketAnonymousAccess) -> bool {
-    value.is_private()
-}
-
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("!(has(self.policy) && has(self.anonymous) && self.anonymous != 'Private')").message("bucket policy and anonymous access are mutually exclusive"))]
+#[x_kube(validation = Rule::new("!(has(self.policy) && has(self.anonymous))").message("bucket policy and anonymous access are mutually exclusive"))]
 pub struct ProvisioningBucket {
     #[schemars(
         length(min = MIN_BUCKET_NAME_LENGTH, max = MAX_BUCKET_NAME_LENGTH),
@@ -160,9 +156,10 @@ pub struct ProvisioningBucket {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_lock: Option<bool>,
 
-    /// Canned anonymous access for this bucket. Mutually exclusive with `policy`.
-    #[serde(default, skip_serializing_if = "skip_private_anonymous")]
-    pub anonymous: BucketAnonymousAccess,
+    /// Canned anonymous access for this bucket. Mutually exclusive with `policy`. Explicit
+    /// `Private` removes an operator-managed bucket policy; omission leaves the live policy alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anonymous: Option<BucketAnonymousAccess>,
 
     /// Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with `anonymous`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,7 +179,7 @@ impl ProvisioningBucket {
     }
 
     pub(crate) fn has_anonymous_access(&self) -> bool {
-        !self.anonymous.is_private()
+        self.anonymous.is_some()
     }
 }
 
@@ -249,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn private_anonymous_access_is_omitted_from_serialized_bucket() {
+    fn omitted_and_explicit_private_anonymous_access_remain_distinct() {
         let bucket = super::ProvisioningBucket {
             name: "app-data".to_string(),
             ..Default::default()
@@ -257,6 +254,20 @@ mod tests {
         let value = serde_json::to_value(&bucket).expect("bucket serializes");
         assert!(value.get("anonymous").is_none());
         assert!(value.get("policy").is_none());
+
+        let private: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "anonymous": "Private"
+        }))
+        .expect("private anonymous deserializes");
+        assert_eq!(
+            private.anonymous,
+            Some(super::BucketAnonymousAccess::Private)
+        );
+        assert_eq!(
+            serde_json::to_value(&private).expect("private bucket serializes")["anonymous"],
+            "Private"
+        );
 
         let public: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
             "name": "app-data",

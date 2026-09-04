@@ -349,8 +349,17 @@ mod tenant_provisioning_crd_tests {
             json!(["IPv4", "IPv6"])
         );
         assert_eq!(
+            spec["properties"]["network"]["properties"]["ipFamilies"]["x-kubernetes-list-type"],
+            json!("atomic")
+        );
+        assert_eq!(
+            spec["properties"]["network"]["properties"]["ipFamilies"]["x-kubernetes-validations"]
+                [0]["message"],
+            json!("ipFamilies must not contain duplicates")
+        );
+        assert_eq!(
             spec["properties"]["buckets"]["items"]["properties"]["anonymous"]["enum"],
-            json!(["Private", "Download", "Upload", "Public"])
+            json!(["Private", "Download", "Upload", "Public", null])
         );
         assert_eq!(
             spec["properties"]["buckets"]["items"]["x-kubernetes-validations"][0]["message"],

@@ -31,12 +31,16 @@ spec:
                 items:
                   properties:
                     anonymous:
-                      description: Canned anonymous access for this bucket. Mutually exclusive with `policy`.
+                      description: |-
+                        Canned anonymous access for this bucket. Mutually exclusive with `policy`. Explicit
+                        `Private` removes an operator-managed bucket policy; omission leaves the live policy alone.
                       enum:
                       - Private
                       - Download
                       - Upload
                       - Public
+                      - null
+                      nullable: true
                       type: string
                     deletionPolicy:
                       enum:
@@ -82,7 +86,7 @@ spec:
                   type: object
                   x-kubernetes-validations:
                   - message: bucket policy and anonymous access are mutually exclusive
-                    rule: '!(has(self.policy) && has(self.anonymous) && self.anonymous != ''Private'')'
+                    rule: '!(has(self.policy) && has(self.anonymous))'
                 maxItems: 1024
                 type: array
                 x-kubernetes-list-map-keys:
@@ -627,7 +631,10 @@ spec:
                       type: string
                     maxItems: 2
                     type: array
-                    x-kubernetes-list-type: set
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: ipFamilies must not contain duplicates
+                      rule: self.size() != 2 || self[0] != self[1]
                   ipFamilyPolicy:
                     description: Kubernetes Service IP family policy values.
                     enum:

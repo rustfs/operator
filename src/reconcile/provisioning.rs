@@ -2075,6 +2075,21 @@ async fn reconcile_bucket(
         }
     };
 
+    if bucket
+        .anonymous
+        .as_ref()
+        .is_some_and(BucketAnonymousAccess::is_private)
+    {
+        return reconcile_private_bucket_policy(
+            run,
+            client,
+            bucket,
+            previous.as_ref(),
+            created_message,
+        )
+        .await;
+    }
+
     let Some(desired) = desired_bucket_policy(run, bucket).await else {
         let item = run.item(
             previous.as_ref(),
@@ -2121,7 +2136,10 @@ async fn desired_bucket_policy(
             .await,
         );
     }
-    canned_anonymous_bucket_policy(bucket.anonymous, &bucket.name)
+    bucket
+        .anonymous
+        .as_ref()
+        .and_then(|access| canned_anonymous_bucket_policy(*access, &bucket.name))
         .map(|raw| PolicyDocument::parse(&raw))
         .map(|result| {
             result.map_err(|message| SpecLoadError {
@@ -2130,6 +2148,104 @@ async fn desired_bucket_policy(
                 transient: false,
             })
         })
+}
+
+async fn reconcile_private_bucket_policy(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    previous: Option<&ProvisioningItemStatus>,
+    created_message: &str,
+) -> ProvisioningItemStatus {
+    let live_document = match client.get_bucket_policy(&bucket.name).await {
+        Ok(document) => document,
+        Err(error) => {
+            return finalize_private_bucket_policy_item(
+                run.item_from_admin_error(
+                    previous,
+                    &bucket.name,
+                    Reason::BucketPolicyApplyFailed,
+                    error,
+                    "failed to read RustFS bucket policy",
+                ),
+                previous,
+                bucket,
+            );
+        }
+    };
+    let Some(live_document) = live_document else {
+        return finalize_private_bucket_policy_item(
+            run.item(
+                previous,
+                &bucket.name,
+                ProvisioningItemState::Ready,
+                Reason::ProvisioningConfigured,
+                format!("{created_message}; RustFS bucket is private"),
+            ),
+            previous,
+            bucket,
+        );
+    };
+    let live_hash = match normalize_policy_document(&live_document) {
+        Ok(normalized) => hash_document(&normalized),
+        Err(message) => {
+            return finalize_private_bucket_policy_item(
+                run.item(
+                    previous,
+                    &bucket.name,
+                    ProvisioningItemState::Failed,
+                    Reason::BucketPolicyApplyFailed,
+                    format!("failed to normalize live RustFS bucket policy: {message}"),
+                ),
+                previous,
+                bucket,
+            );
+        }
+    };
+
+    if previous.and_then(|item| item.last_applied_hash.as_deref()) != Some(live_hash.as_str()) {
+        return finalize_private_bucket_policy_item(
+            run.item(
+                previous,
+                &bucket.name,
+                ProvisioningItemState::Failed,
+                Reason::BucketPolicyConflict,
+                "Live RustFS bucket policy is not owned by this status; refusing to delete it",
+            ),
+            previous,
+            bucket,
+        );
+    }
+
+    let item = match client.delete_bucket_policy(&bucket.name).await {
+        Ok(()) => run.item(
+            previous,
+            &bucket.name,
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured,
+            format!("{created_message}; RustFS bucket policy was removed"),
+        ),
+        Err(error) => run.item_from_admin_error(
+            previous,
+            &bucket.name,
+            Reason::BucketPolicyApplyFailed,
+            error,
+            "failed to remove RustFS bucket policy",
+        ),
+    };
+    finalize_private_bucket_policy_item(item, previous, bucket)
+}
+
+fn finalize_private_bucket_policy_item(
+    mut item: ProvisioningItemStatus,
+    previous: Option<&ProvisioningItemStatus>,
+    bucket: &ProvisioningBucket,
+) -> ProvisioningItemStatus {
+    item = annotate_bucket_item(item, bucket);
+    if item.state != ProvisioningItemState::Ready.as_str() {
+        item.last_applied_hash = previous.and_then(|item| item.last_applied_hash.clone());
+    }
+    item
 }
 
 async fn sync_bucket_policy(
@@ -4491,7 +4607,7 @@ mod tests {
         let mut run = empty_run(&ctx, &tenant);
         let bucket = ProvisioningBucket {
             name: "app-data".to_string(),
-            anonymous: BucketAnonymousAccess::Download,
+            anonymous: Some(BucketAnonymousAccess::Download),
             ..Default::default()
         };
 
@@ -4505,6 +4621,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_private_removes_operator_managed_anonymous_policy() {
+        let live_policy = canned_anonymous_bucket_policy(BucketAnonymousAccess::Public, "app-data")
+            .expect("public policy");
+        let live_hash = hash_document(
+            &normalize_policy_document(&live_policy).expect("public policy should normalize"),
+        );
+        let delete_count = Arc::new(AtomicUsize::new(0));
+        let route_delete_count = Arc::clone(&delete_count);
+        let route_live_policy = live_policy.clone();
+        let router = Router::new().route(
+            "/app-data",
+            put(|| async { StatusCode::OK })
+                .get(move |req: Request<Body>| {
+                    let live_policy = route_live_policy.clone();
+                    async move {
+                        assert_eq!(req.uri().query().unwrap_or(""), "policy=");
+                        (StatusCode::OK, live_policy)
+                    }
+                })
+                .delete(move |req: Request<Body>| {
+                    let delete_count = Arc::clone(&route_delete_count);
+                    async move {
+                        assert_eq!(req.uri().query().unwrap_or(""), "policy=");
+                        delete_count.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let mut previous = ProvisioningItemStatus::new(
+            "app-data",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        );
+        previous.last_applied_hash = Some(live_hash);
+        run.previous.buckets.push(previous);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            anonymous: Some(BucketAnonymousAccess::Private),
+            ..Default::default()
+        };
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(delete_count.load(Ordering::SeqCst), 1);
+        assert!(item.desired_hash.is_none());
+        assert!(item.last_applied_hash.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_private_preserves_unmanaged_live_policy() {
+        let live_policy = canned_anonymous_bucket_policy(BucketAnonymousAccess::Public, "app-data")
+            .expect("public policy");
+        let delete_count = Arc::new(AtomicUsize::new(0));
+        let route_delete_count = Arc::clone(&delete_count);
+        let router = Router::new().route(
+            "/app-data",
+            put(|| async { StatusCode::OK })
+                .get(move || {
+                    let live_policy = live_policy.clone();
+                    async move { (StatusCode::OK, live_policy) }
+                })
+                .delete(move || {
+                    let delete_count = Arc::clone(&route_delete_count);
+                    async move {
+                        delete_count.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            anonymous: Some(BucketAnonymousAccess::Private),
+            ..Default::default()
+        };
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketPolicyConflict.as_str());
+        assert_eq!(delete_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn mixed_anonymous_and_custom_policy_fails_before_rustfs_calls() {
         let ctx = empty_kube_context();
         let user = provisioning_user("app-user", "app-user-secret", "readwrite");
@@ -4513,7 +4745,7 @@ mod tests {
         let client = RustfsAdminClient::new_with_base_url("http://127.0.0.1:1", "access", "secret");
         let bucket = ProvisioningBucket {
             name: "app-data".to_string(),
-            anonymous: BucketAnonymousAccess::Public,
+            anonymous: Some(BucketAnonymousAccess::Public),
             policy: Some(PolicyDocumentSource {
                 config_map_key_ref: ConfigMapKeyReference {
                     name: "bucket-policy".to_string(),

@@ -31,6 +31,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Fixed
 
+- Explicit private bucket access now removes operator-managed policies, and primary Service IP
+  family changes recreate managed Services instead of repeatedly failing immutable-field updates.
 - Provisioning now requeues transient RustFS admin/S3 and Kubernetes failures instead of leaving
   policies, users, and buckets failed until an unrelated object change.
 

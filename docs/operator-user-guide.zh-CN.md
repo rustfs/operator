@@ -520,7 +520,7 @@ spec:
 | `securityContext` | 所有 RustFS Pool 的 Pod SecurityContext 覆盖。 |
 | `containerSecurityContext` | 所有 Pool 的 RustFS 容器 SecurityContext 覆盖。 |
 | `hostUsers` | 可选的 Pod `hostUsers`。`false` 会隔离用户命名空间（`restricted-v3`）。OpenShift 空 securityContext 对也会默认渲染为 `false`。 |
-| `network` | 可选的 Service `ipFamilyPolicy`/`ipFamilies` 以及 RustFS 监听地址。省略时保持 IPv4 `0.0.0.0`。IPv6 或双栈集群应设置 `ipFamilies: [IPv6]` 或 `ipFamilyPolicy: PreferDualStack`，使 Service 和 `RUSTFS_ADDRESS` 使用 `[::]`。 |
+| `network` | 可选的 Service `ipFamilyPolicy`/`ipFamilies` 以及 RustFS 监听地址。省略时保持 IPv4 `0.0.0.0`。IPv6 或双栈集群应设置 `ipFamilies: [IPv6]` 或 `ipFamilyPolicy: PreferDualStack`，使 Service 和 `RUSTFS_ADDRESS` 使用 `[::]`。`ipFamilies` 有顺序，第一个元素是主地址族；修改主地址族会重建 Tenant Service，并可能造成短暂的端点中断。 |
 
 这两个字段也可配置在每个 `spec.pools[]` 条目上。Pool 级字段会按字段覆盖
 Tenant 级字段，Tenant 级字段再覆盖 Operator 默认值。Operator 默认设置
@@ -812,7 +812,7 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 - `spec.credsSecret`：RustFS 管理员凭据。
 - `spec.policies`：从 ConfigMap 读取 policy document。
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
-- `spec.buckets`：bucket，以及可选的 object lock、匿名访问（`Private` / `Download` / `Upload` / `Public`）或来自 ConfigMap 的自定义 bucket policy。`anonymous` 与 `policy` 互斥。两者都省略时，Operator 不会改写已有 bucket policy。
+- `spec.buckets`：bucket，以及可选的 object lock、匿名访问（`Private` / `Download` / `Upload` / `Public`）或来自 ConfigMap 的自定义 bucket policy。`anonymous` 与 `policy` 互斥。显式设置 `anonymous: Private` 会删除此前由 Operator 应用的 bucket policy；若现有 policy 不归 Operator 管理，则报告冲突而不删除。两者都省略时，Operator 不会改写已有 bucket policy。
 
 Kubernetes 或 RustFS 管理/S3 API 的瞬时失败（超时、429、5xx、连接错误、TLS 未就绪）会把 provisioning 条目保持为 `Pending` 并重新入队，而不会把 Tenant 标为 `Failed`。永久性 4xx 配置错误仍会失败并等待 spec 或对象变更。
 

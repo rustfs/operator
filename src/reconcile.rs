@@ -38,10 +38,11 @@ mod tls;
 const OUT_OF_SERVICE_TAINT_KEY: &str = "node.kubernetes.io/out-of-service";
 
 use phases::{
-    cleanup_legacy_tenant_rbac, cleanup_removed_decommissioned_pool_statefulsets,
-    finalize_tenant_status, harden_existing_tenant_workload_identity,
-    maybe_cleanup_terminating_pods, reconcile_pool_statefulsets, reconcile_service_account,
-    reconcile_services, validate_no_pool_rename, validate_tenant_prerequisites,
+    ServiceReconcileOutcome, cleanup_legacy_tenant_rbac,
+    cleanup_removed_decommissioned_pool_statefulsets, finalize_tenant_status,
+    harden_existing_tenant_workload_identity, maybe_cleanup_terminating_pods,
+    reconcile_pool_statefulsets, reconcile_service_account, reconcile_services,
+    validate_no_pool_rename, validate_tenant_prerequisites,
 };
 use pool_lifecycle::reconcile_pool_lifecycle;
 
@@ -93,7 +94,11 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
 
     reconcile_service_account(&ctx, &latest_tenant, &ns).await?;
 
-    reconcile_services(&ctx, &latest_tenant, &ns, &tls_plan).await?;
+    if let ServiceReconcileOutcome::Requeue(duration) =
+        reconcile_services(&ctx, &latest_tenant, &ns, &tls_plan).await?
+    {
+        return Ok(requeue_after(duration));
+    }
 
     let removed_pool_cleanup =
         cleanup_removed_decommissioned_pool_statefulsets(&ctx, &latest_tenant, &ns).await?;

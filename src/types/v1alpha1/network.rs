@@ -66,7 +66,8 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_family_policy: Option<IpFamilyPolicy>,
 
-    #[schemars(length(max = 2), extend("x-kubernetes-list-type" = "set"))]
+    #[schemars(length(max = 2), extend("x-kubernetes-list-type" = "atomic"))]
+    #[x_kube(validation = Rule::new("self.size() != 2 || self[0] != self[1]").message("ipFamilies must not contain duplicates"))]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ip_families: Vec<IpFamily>,
 }

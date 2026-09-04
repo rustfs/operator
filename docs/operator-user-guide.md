@@ -548,7 +548,7 @@ Useful Tenant-level fields:
 | `securityContext` | Pod SecurityContext overrides for all RustFS Pools. |
 | `containerSecurityContext` | RustFS container SecurityContext overrides for all Pools. |
 | `hostUsers` | Optional Pod `hostUsers`. `false` isolates the user namespace (`restricted-v3`). An OpenShift empty security-context pair also defaults this to `false`. |
-| `network` | Optional Service `ipFamilyPolicy`/`ipFamilies` and RustFS listen addresses. Omitted Tenants keep IPv4 `0.0.0.0` listen addresses. IPv6 or dual-stack clusters should set `ipFamilies: [IPv6]` or `ipFamilyPolicy: PreferDualStack` so Services and `RUSTFS_ADDRESS` use `[::]`. |
+| `network` | Optional Service `ipFamilyPolicy`/`ipFamilies` and RustFS listen addresses. Omitted Tenants keep IPv4 `0.0.0.0` listen addresses. IPv6 or dual-stack clusters should set `ipFamilies: [IPv6]` or `ipFamilyPolicy: PreferDualStack` so Services and `RUSTFS_ADDRESS` use `[::]`. `ipFamilies` is ordered and its first entry is the primary family; changing the primary family recreates Tenant Services and can briefly interrupt endpoints. |
 
 Both fields are also available on each `spec.pools[]` entry. Pool values are
 merged over Tenant values, which are merged over the Operator's defaults. By
@@ -856,7 +856,7 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 - `spec.credsSecret` for RustFS admin credentials.
 - `spec.policies` for canned policies sourced from ConfigMaps.
 - `spec.users` for regular users. Each user must have at least one direct policy mapping.
-- `spec.buckets` for buckets, optional object lock, canned anonymous access (`Private`, `Download`, `Upload`, `Public`), or a custom bucket policy ConfigMap. `anonymous` and `policy` are mutually exclusive. When both are omitted, the operator does not change a live bucket policy.
+- `spec.buckets` for buckets, optional object lock, canned anonymous access (`Private`, `Download`, `Upload`, `Public`), or a custom bucket policy ConfigMap. `anonymous` and `policy` are mutually exclusive. Explicit `anonymous: Private` removes a bucket policy previously applied by the Operator; it reports a conflict instead of deleting an unowned live policy. When both fields are omitted, the Operator does not change a live bucket policy.
 
 Transient Kubernetes and RustFS admin/S3 failures (timeouts, 429, 5xx, connection errors, TLS not ready) leave provisioning items `Pending` and requeue instead of marking the Tenant `Failed`. Permanent 4xx configuration errors still fail and wait for a spec or object change.
 

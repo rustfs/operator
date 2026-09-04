@@ -19,7 +19,7 @@ use axum::{
     body::Body,
     extract::State,
     http::{Request, StatusCode},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
 };
 use k8s_openapi::{ByteString, api::core::v1 as corev1};
 use serde_json::Value;
@@ -1315,5 +1315,26 @@ async fn put_bucket_policy_sends_json_document() {
     let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
     client.put_bucket_policy("app-data", policy).await.unwrap();
     assert_eq!(&*capture.lock().await, policy);
+    server.abort();
+}
+
+#[tokio::test]
+async fn delete_bucket_policy_sends_signed_policy_request() {
+    let router = Router::new().route(
+        "/app-data",
+        delete(|req: Request<Body>| async move {
+            assert_eq!(req.uri().query().unwrap_or(""), "policy=");
+            assert!(req.headers().contains_key("authorization"));
+            StatusCode::NO_CONTENT
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+
+    client.delete_bucket_policy("app-data").await.unwrap();
     server.abort();
 }

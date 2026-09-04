@@ -30,7 +30,7 @@ use crate::types::v1alpha1::tenant::{
 use crate::types::v1alpha1::tls::TlsPlan;
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::ServiceAccount;
+use k8s_openapi::api::core::v1::{Service, ServiceAccount};
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
 use kube::api::{DeleteParams, ListParams, Preconditions, PropagationPolicy};
 use kube::runtime::controller::Action;
@@ -59,6 +59,13 @@ pub(super) struct PoolReconcileSummary {
 
 const REMOVED_POOL_CLEANUP_REQUEUE_INTERVAL: Duration = Duration::from_secs(10);
 const POD_DELETION_POLICY_REQUEUE_INTERVAL: Duration = Duration::from_secs(30);
+const SERVICE_RECREATE_REQUEUE_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ServiceReconcileOutcome {
+    Complete,
+    Requeue(Duration),
+}
 
 #[derive(Default)]
 pub(super) struct RemovedDecommissionedPoolCleanup {
@@ -484,32 +491,115 @@ pub(super) async fn reconcile_services(
     tenant: &Tenant,
     namespace: &str,
     tls_plan: &TlsPlan,
-) -> Result<(), Error> {
-    context_result(
-        ctx.apply(&tenant.new_io_service_with_tls_plan(tls_plan), namespace)
-            .await,
-        ctx,
-        tenant,
-    )
-    .await?;
-    context_result(
-        ctx.apply(&tenant.new_console_service(), namespace).await,
-        ctx,
-        tenant,
-    )
-    .await?;
-    context_result(
-        ctx.apply(
-            &tenant.new_headless_service_with_tls_plan(tls_plan),
-            namespace,
-        )
-        .await,
-        ctx,
-        tenant,
-    )
-    .await?;
+) -> Result<ServiceReconcileOutcome, Error> {
+    let desired_services = [
+        tenant.new_io_service_with_tls_plan(tls_plan),
+        tenant.new_console_service(),
+        tenant.new_headless_service_with_tls_plan(tls_plan),
+    ];
+    let mut services_to_recreate = Vec::new();
 
-    Ok(())
+    if desired_services
+        .first()
+        .and_then(service_primary_ip_family)
+        .is_some()
+    {
+        for desired in &desired_services {
+            let name = desired.name_any();
+            let existing = match ctx.get::<Service>(&name, namespace).await {
+                Ok(existing) => existing,
+                Err(error) if context::is_kube_not_found(&error) => continue,
+                Err(error) => return context_result(Err(error), ctx, tenant).await,
+            };
+            if existing.metadata.deletion_timestamp.is_some() {
+                return Ok(ServiceReconcileOutcome::Requeue(
+                    SERVICE_RECREATE_REQUEUE_INTERVAL,
+                ));
+            }
+            if !service_primary_ip_family_changed(&existing, desired) {
+                continue;
+            }
+            if !operator_resource_owned_by_tenant_or_predecessor(existing.meta(), tenant) {
+                return types_result(
+                    Err(types::error::Error::ImmutableFieldModified {
+                        name: format!("Service {namespace}/{name}"),
+                        field: "spec.ipFamilies[0]".to_string(),
+                        message: "the existing Service is not managed by this Operator and cannot be safely recreated"
+                            .to_string(),
+                    }),
+                    ctx,
+                    tenant,
+                )
+                .await;
+            }
+            services_to_recreate.push(existing);
+        }
+    }
+
+    if !services_to_recreate.is_empty() {
+        for service in services_to_recreate {
+            let name = service.name_any();
+            let Some(uid) = service.metadata.uid.clone() else {
+                return types_result(
+                    Err(types::error::Error::ImmutableFieldModified {
+                        name: format!("Service {namespace}/{name}"),
+                        field: "spec.ipFamilies[0]".to_string(),
+                        message: "the existing Service has no UID and cannot be safely recreated"
+                            .to_string(),
+                    }),
+                    ctx,
+                    tenant,
+                )
+                .await;
+            };
+            let delete_params = DeleteParams {
+                preconditions: Some(Preconditions {
+                    uid: Some(uid),
+                    resource_version: service.metadata.resource_version.clone(),
+                }),
+                ..DeleteParams::default()
+            };
+            match ctx
+                .delete_with_params::<Service>(&name, namespace, &delete_params)
+                .await
+            {
+                Ok(()) => info!(
+                    tenant = %tenant.name(),
+                    namespace = %namespace,
+                    service = %name,
+                    "recreating Tenant Service because its primary IP family changed"
+                ),
+                Err(error) if context::is_kube_not_found(&error) => {}
+                Err(error) => return context_result(Err(error), ctx, tenant).await,
+            }
+        }
+        return Ok(ServiceReconcileOutcome::Requeue(
+            SERVICE_RECREATE_REQUEUE_INTERVAL,
+        ));
+    }
+
+    for desired in &desired_services {
+        context_result(ctx.apply(desired, namespace).await, ctx, tenant).await?;
+    }
+
+    Ok(ServiceReconcileOutcome::Complete)
+}
+
+fn service_primary_ip_family(service: &Service) -> Option<&str> {
+    service
+        .spec
+        .as_ref()?
+        .ip_families
+        .as_ref()?
+        .first()
+        .map(String::as_str)
+}
+
+fn service_primary_ip_family_changed(existing: &Service, desired: &Service) -> bool {
+    let Some(desired_primary) = service_primary_ip_family(desired) else {
+        return false;
+    };
+    service_primary_ip_family(existing).is_some_and(|existing| existing != desired_primary)
 }
 
 pub(super) async fn cleanup_removed_decommissioned_pool_statefulsets(
@@ -1552,6 +1642,135 @@ mod tests {
             &user_managed,
             &tenant
         ));
+    }
+
+    #[test]
+    fn service_primary_ip_family_change_requires_recreation() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let mut existing = tenant.new_io_service();
+        existing
+            .spec
+            .as_mut()
+            .expect("existing Service should have spec")
+            .ip_families = Some(vec!["IPv4".to_string()]);
+        let mut desired = tenant.new_io_service();
+        desired
+            .spec
+            .as_mut()
+            .expect("desired Service should have spec")
+            .ip_families = Some(vec!["IPv6".to_string(), "IPv4".to_string()]);
+
+        assert!(service_primary_ip_family_changed(&existing, &desired));
+
+        desired
+            .spec
+            .as_mut()
+            .expect("desired Service should have spec")
+            .ip_families = Some(vec!["IPv4".to_string(), "IPv6".to_string()]);
+        assert!(!service_primary_ip_family_changed(&existing, &desired));
+
+        desired
+            .spec
+            .as_mut()
+            .expect("desired Service should have spec")
+            .ip_families = None;
+        assert!(!service_primary_ip_family_changed(&existing, &desired));
+    }
+
+    #[tokio::test]
+    async fn reconcile_services_recreates_operator_managed_services_for_new_primary_family() {
+        use crate::types::v1alpha1::network::{IpFamily, IpFamilyPolicy, NetworkConfig};
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.network = Some(NetworkConfig {
+            ip_family_policy: Some(IpFamilyPolicy::SingleStack),
+            ip_families: vec![IpFamily::IPv6],
+        });
+        let mut existing_services = vec![
+            tenant.new_io_service(),
+            tenant.new_console_service(),
+            tenant.new_headless_service(),
+        ];
+        for (index, service) in existing_services.iter_mut().enumerate() {
+            service.metadata.uid = Some(format!("service-uid-{index}"));
+            service.metadata.resource_version = Some(format!("{}", index + 10));
+            service.metadata.managed_fields = Some(operator_managed_fields());
+            service
+                .spec
+                .as_mut()
+                .expect("Service should have spec")
+                .ip_families = Some(vec!["IPv4".to_string()]);
+        }
+        let existing_services = Arc::new(existing_services);
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let existing_services = Arc::clone(&existing_services);
+            let request_count = Arc::clone(&request_count);
+            move |request: Request<Body>| {
+                let existing_services = Arc::clone(&existing_services);
+                let request_number = request_count.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let service_index = request_number % existing_services.len();
+                    let existing = &existing_services[service_index];
+                    assert_eq!(
+                        request.uri().path(),
+                        format!(
+                            "/api/v1/namespaces/default/services/{}",
+                            existing.name_any()
+                        )
+                    );
+
+                    if request_number < existing_services.len() {
+                        assert_eq!(request.method(), Method::GET);
+                        return Ok::<_, Infallible>(kube_response(
+                            StatusCode::OK,
+                            serde_json::to_value(existing).expect("Service should serialize"),
+                        ));
+                    }
+
+                    assert_eq!(request.method(), Method::DELETE);
+                    let body: Value = serde_json::from_slice(
+                        &request
+                            .into_body()
+                            .collect_bytes()
+                            .await
+                            .expect("delete body should read"),
+                    )
+                    .expect("delete body should be JSON");
+                    assert_eq!(
+                        body["preconditions"]["uid"],
+                        existing
+                            .metadata
+                            .uid
+                            .as_deref()
+                            .expect("Service should have UID")
+                    );
+                    assert_eq!(
+                        body["preconditions"]["resourceVersion"],
+                        existing
+                            .metadata
+                            .resource_version
+                            .as_deref()
+                            .expect("Service should have resource version")
+                    );
+                    Ok::<_, Infallible>(kube_response(
+                        StatusCode::OK,
+                        json!({"apiVersion":"v1","kind":"Status","status":"Success"}),
+                    ))
+                }
+            }
+        });
+        let ctx = Context::new(Client::new(service, "default"));
+
+        let outcome = reconcile_services(&ctx, &tenant, "default", &TlsPlan::disabled())
+            .await
+            .expect("Service reconciliation should request recreation");
+
+        assert_eq!(
+            outcome,
+            ServiceReconcileOutcome::Requeue(SERVICE_RECREATE_REQUEUE_INTERVAL)
+        );
+        assert_eq!(request_count.load(Ordering::SeqCst), 6);
     }
 
     #[tokio::test]

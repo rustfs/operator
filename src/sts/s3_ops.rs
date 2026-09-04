@@ -229,4 +229,43 @@ impl RustfsAdminClient {
             status, &body, truncated,
         ))
     }
+
+    pub async fn delete_bucket_policy(&self, bucket: &str) -> Result<(), RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let query = build_canonical_query(&[("policy", "")]);
+        let signed = self.sign_request("DELETE", &path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .delete(format!(
+                "{}{}?{query}",
+                self.base_url.trim_end_matches('/'),
+                path
+            ))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if is_absent_resource(status, &body) {
+            return Ok(());
+        }
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
+    }
 }
