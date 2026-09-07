@@ -78,7 +78,7 @@ jobs:
           sed -i -E 's/^version:.*/version: "${{ steps.version.outputs.chart_version }}"/' deploy/rustfs-operator/Chart.yaml
 
       - name: Set up Helm
-        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Package Helm Chart
         run: |
@@ -114,7 +114,7 @@ jobs:
           path: ./
 
       - name: Set up helm
-        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Generate index
         run: helm repo index . --url https://operator.rustfs.com
