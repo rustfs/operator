@@ -1002,6 +1002,40 @@ spec:
     }
 
     #[test]
+    fn json_create_rejects_single_disk_multi_pool_tenant() {
+        let mut request = minimal_create_request(None);
+        request.pools.push(CreatePoolRequest {
+            name: "pool-1".to_string(),
+            servers: 2,
+            volumes_per_server: 1,
+            storage_size: "1Gi".to_string(),
+            storage_class: None,
+        });
+        let error = tenant_from_create_request(request)
+            .expect_err("unsupported topology must be rejected before Kubernetes work");
+        assert!(matches!(error, Error::BadRequest { message }
+            if message.contains("pool-0") && message.contains("at least two storage endpoints")));
+    }
+
+    #[test]
+    fn yaml_create_and_update_reject_single_disk_multi_pool_tenant() {
+        let yaml = format!(
+            "{MINIMAL_TENANT_YAML}    - name: pool-1\n      servers: 1\n      persistence:\n        volumesPerServer: 1\n"
+        );
+        assert!(bad_request_message(&yaml).contains("at least two storage endpoints"));
+        let mut current = parse_tenant_yaml_for_create(MINIMAL_TENANT_YAML)
+            .expect("standalone single-disk tenant should be valid");
+        let mut incoming = current.clone();
+        let mut pool = incoming.spec.pools[0].clone();
+        pool.name = "pool-1".to_string();
+        incoming.spec.pools.push(pool);
+        let error = apply_tenant_yaml_update(&mut current, incoming)
+            .expect_err("unsupported expansion must be rejected before replace");
+        assert!(matches!(error, Error::BadRequest { message }
+            if message.contains("at least two storage endpoints")));
+    }
+
+    #[test]
     fn json_create_rejects_invalid_tenant_before_kubernetes_work() {
         let error = tenant_from_create_request(minimal_create_request(Some(
             "rustfs/rustfs:1.0.0-alpha.99",

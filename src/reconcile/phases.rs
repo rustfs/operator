@@ -1502,6 +1502,69 @@ mod tests {
             .expect("response should build")
     }
 
+    #[tokio::test]
+    async fn single_disk_multi_pool_prerequisites_report_invalid_spec() {
+        use http_body_util::BodyExt;
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 1;
+        tenant.spec.pools[0].persistence.volumes_per_server = 1;
+        let mut pool = tenant.spec.pools[0].clone();
+        pool.name = "pool-1".to_string();
+        tenant.spec.pools.push(pool);
+        let status_patches = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let tenant = tenant.clone();
+            let status_patches = Arc::clone(&status_patches);
+            move |request: Request<Body>| {
+                let tenant = tenant.clone();
+                let status_patches = Arc::clone(&status_patches);
+                async move {
+                    let path = request.uri().path().to_string();
+                    let is_status = path.ends_with("/tenants/test-tenant/status");
+                    assert!(
+                        is_status || path.contains("/events"),
+                        "unexpected prerequisite request: {path}"
+                    );
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    if is_status {
+                        assert!(
+                            payload["status"]["conditions"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|condition| {
+                                    condition["type"] == "SpecValid"
+                                        && condition["status"] == "False"
+                                        && condition["reason"] == "InvalidPoolSpec"
+                                        && condition["message"].as_str().unwrap().contains("pool-0")
+                                })
+                        );
+                        status_patches.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, Infallible>(kube_response(
+                            StatusCode::OK,
+                            serde_json::to_value(tenant).unwrap(),
+                        ))
+                    } else {
+                        Ok(kube_response(StatusCode::OK, payload))
+                    }
+                }
+            }
+        });
+        let ctx = Context::new(Client::new(service, "default"));
+        let error = validate_tenant_prerequisites(&ctx, &tenant)
+            .await
+            .expect_err("unsupported topology must stop reconciliation");
+        assert!(matches!(
+            error,
+            Error::Types {
+                source: crate::types::error::Error::InvalidPoolSpec { .. }
+            }
+        ));
+        assert_eq!(status_patches.load(Ordering::SeqCst), 1);
+    }
+
     fn operator_managed_fields() -> Vec<ManagedFieldsEntry> {
         vec![ManagedFieldsEntry {
             manager: Some("rustfs-operator".to_string()),

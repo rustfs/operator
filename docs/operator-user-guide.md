@@ -655,6 +655,8 @@ The operator reserves these environment variables and manages them automatically
 
 For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered as the local data path, for example `/data/rustfs0`. Multi-pool tenants and other layouts render peer DNS URLs through the Tenant headless Service and are validated by RustFS at runtime. Set the Helm chart `clusterDomain` value when the Kubernetes cluster DNS domain is not `cluster.local`; the same domain is used for generated TLS SANs.
 
+Multi-pool Tenants cannot contain a single-node single-disk pool. The Operator rejects this topology before applying pool workloads, including expansion from a standalone single-node single-disk Tenant. Every pool in a multi-pool Tenant must have at least two storage endpoints (`servers × volumesPerServer >= 2`); different pool sizes and single-node multi-disk pools remain allowed, subject to RustFS erasure-set and parity validation.
+
 `podDeletionPolicyWhenNodeIsDown` accepts:
 
 - `DoNothing`: do not delete pods automatically.

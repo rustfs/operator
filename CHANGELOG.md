@@ -31,6 +31,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Fixed
 
+- Reject multi-pool Tenants containing a single-node single-disk pool before applying pool workloads, matching RustFS startup constraints.
+
 - Explicit private bucket access now removes operator-managed policies, and primary Service IP
   family changes recreate managed Services instead of repeatedly failing immutable-field updates.
 - Provisioning now requeues transient RustFS admin/S3 and Kubernetes failures instead of leaving

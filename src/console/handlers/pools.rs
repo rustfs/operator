@@ -1024,6 +1024,25 @@ mod tests {
     }
 
     #[test]
+    fn pool_addition_rejects_single_disk_pool_in_either_position() {
+        for (existing_disks, added_disks, rejected_name) in
+            [(1, 2, "pool-0"), (2, 1, "pool-1"), (1, 1, "pool-0")]
+        {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.pools[0].servers = 1;
+            tenant.spec.pools[0].persistence.volumes_per_server = existing_disks;
+            let mut new_pool = tenant.spec.pools[0].clone();
+            new_pool.name = "pool-1".to_string();
+            new_pool.persistence.volumes_per_server = added_disks;
+            let error = push_pool_and_validate_tenant(&mut tenant, new_pool)
+                .expect_err("unsupported expansion must be rejected before replace");
+            assert!(matches!(&error, Error::BadRequest { message }
+                if message.contains(rejected_name) && message.contains("at least two storage endpoints")));
+            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
     fn pool_addition_rejects_legacy_images_that_would_inherit_runtime_default_seccomp() {
         for image in ["rustfs/rustfs:1.0.0-alpha.99", "rustfs/rustfs:1.0.0-beta.8"] {
             let mut tenant = crate::tests::create_test_tenant(None, None);
