@@ -141,6 +141,17 @@ pub fn validate_pool_collection(tenant_name: &str, pools: &[Pool]) -> Result<(),
         validate_rustfs_peer_dns_label(tenant_name, pool)?;
     }
 
+    // RustFS permits a single disk only through its standalone local-path layout.
+    // Multi-pool URL layouts require at least two storage endpoints in each pool.
+    if pools.len() > 1
+        && let Some(pool) = pools.iter().find(|pool| pool.is_single_node_single_disk())
+    {
+        return Err(format!(
+            "pool '{}' has only one storage endpoint; RustFS does not support single-node single-disk pools in a multi-pool tenant. Each pool must contain at least two storage endpoints",
+            pool.name
+        ));
+    }
+
     Ok(())
 }
 
@@ -218,6 +229,35 @@ mod tests {
         ];
 
         assert!(validate_pool_collection("tenant", &pools).is_ok());
+    }
+
+    #[test]
+    fn allows_standalone_single_disk_pool() {
+        assert!(validate_pool_collection("tenant", &[test_pool("pool-0", 1, 1)]).is_ok());
+    }
+
+    #[test]
+    fn rejects_single_disk_pools_in_multi_pool_layouts() {
+        for shapes in [
+            vec![(1, 1), (1, 1)],
+            vec![(1, 1), (2, 1)],
+            vec![(2, 1), (3, 1), (1, 1), (1, 1)],
+        ] {
+            let pools: Vec<_> = shapes
+                .iter()
+                .enumerate()
+                .map(|(index, &(servers, disks))| {
+                    test_pool(&format!("pool-{index}"), servers, disks)
+                })
+                .collect();
+            let rejected = pools
+                .iter()
+                .find(|pool| pool.is_single_node_single_disk())
+                .unwrap();
+            let err = validate_pool_collection("tenant", &pools).unwrap_err();
+            assert!(err.contains(&format!("pool '{}'", rejected.name)));
+            assert!(err.contains("at least two storage endpoints"));
+        }
     }
 
     #[test]

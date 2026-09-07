@@ -611,6 +611,8 @@ Operator 会自动管理以下环境变量：
 
 对于单 pool 的单节点单盘 Tenant，`RUSTFS_VOLUMES` 会渲染为本地数据路径，例如 `/data/rustfs0`。多 pool Tenant 和其他布局仍会通过 Tenant headless Service 渲染 peer DNS URL，并由 RustFS 在运行时校验。当 Kubernetes 集群 DNS 域不是 `cluster.local` 时，请设置 Helm chart 的 `clusterDomain`；自动生成的 TLS SAN 也会使用同一个域。
 
+多 pool Tenant 不能包含单节点单盘 pool。Operator 会在应用 pool 工作负载前拒绝这种拓扑，包括从独立单节点单盘 Tenant 新增 pool 的扩容操作。多 pool Tenant 中每个 pool 至少需要两个存储端点（`servers × volumesPerServer >= 2`）；不同大小的 pool 和单节点多盘 pool 仍然允许，但仍需满足 RustFS 的纠删码集合及 parity 校验。
+
 `podDeletionPolicyWhenNodeIsDown` 支持以下值：
 
 - `DoNothing`：不自动删除 Pod。

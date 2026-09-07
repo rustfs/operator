@@ -968,6 +968,7 @@ impl Tenant {
         scheme: &str,
         cluster_domain: &str,
     ) -> Result<String, types::error::Error> {
+        self.validate_pools()?;
         let namespace = self.namespace()?;
         let volume_specs = self
             .spec
@@ -3029,32 +3030,24 @@ mod tests {
     }
 
     #[test]
-    fn mixed_pool_single_node_single_disk_uses_peer_dns_volume() {
+    fn mixed_pool_single_node_single_disk_rejects_statefulset_generation() {
         let mut tenant = crate::tests::create_test_tenant(None, None);
         tenant.spec.pools[0].servers = 1;
         tenant.spec.pools[0].persistence.volumes_per_server = 1;
         let mut second_pool = tenant.spec.pools[0].clone();
         second_pool.name = "pool-1".to_string();
         second_pool.servers = 2;
-        second_pool.persistence.volumes_per_server = 1;
         tenant.spec.pools.push(second_pool);
-        let pool = &tenant.spec.pools[1];
 
-        let statefulset = tenant
-            .new_statefulset(pool)
-            .expect("Should create StatefulSet for mixed pools");
-
-        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
-        let container = &pod_spec.containers[0];
-        let rustfs_volumes =
-            env_value(container, "RUSTFS_VOLUMES").expect("RUSTFS_VOLUMES should be configured");
-        assert!(!rustfs_volumes.starts_with("/data/rustfs0"));
-        assert!(rustfs_volumes.contains(
-            "http://test-tenant-pool-0-{0...0}.test-tenant-hl.default.svc.cluster.local:9000/data/rustfs{0...0}"
-        ));
-        assert!(rustfs_volumes.contains(
-            "http://test-tenant-pool-1-{0...1}.test-tenant-hl.default.svc.cluster.local:9000/data/rustfs{0...0}"
-        ));
+        for pool in &tenant.spec.pools {
+            let error = tenant
+                .new_statefulset(pool)
+                .expect_err("invalid topology must not render workloads for either pool");
+            assert!(
+                matches!(error, crate::types::error::Error::InvalidPoolSpec { message, .. }
+                if message.contains("pool-0") && message.contains("at least two storage endpoints"))
+            );
+        }
     }
 
     #[test]
