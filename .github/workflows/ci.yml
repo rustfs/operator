@@ -164,7 +164,7 @@ jobs:
           version: 10.28.1
 
       - name: Setup Node environment
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
