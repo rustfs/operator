@@ -17,9 +17,11 @@
 //!   - request semantics for S3-style object storage operations.
 
 use super::helpers::{
-    bucket_already_exists, build_canonical_query, create_bucket_body, is_absent_resource,
+    BucketConflictKind, body_mentions_not_found, bucket_conflict_kind, build_canonical_query,
+    create_bucket_body, is_absent_resource,
 };
 use super::{ADMIN_SIGNING_SERVICE, CreateBucketResult, RustfsAdminClient, RustfsClientError};
+use reqwest::StatusCode;
 
 impl RustfsAdminClient {
     // S3 duties: bucket operations exposed by the RustFS/S3-compatible endpoint.
@@ -80,8 +82,48 @@ impl RustfsAdminClient {
 
         let status = response.status();
         let (body, truncated) = RustfsClientError::limited_response_body(response).await;
-        if bucket_already_exists(status, &body) {
-            return Ok(CreateBucketResult::AlreadyExists);
+        match bucket_conflict_kind(status, &body) {
+            Some(BucketConflictKind::OwnedByYou) => {
+                return Ok(CreateBucketResult::AlreadyOwnedByYou);
+            }
+            Some(BucketConflictKind::OwnedByOther) => return Ok(CreateBucketResult::AlreadyExists),
+            None => {}
+        }
+
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
+    }
+
+    /// Delete a bucket. Missing buckets are treated as success (idempotent).
+    pub async fn delete_bucket(&self, bucket: &str) -> Result<(), RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let signed = self.sign_request("DELETE", &path, "", "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .delete(format!("{}{}", self.base_url.trim_end_matches('/'), path))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if status == StatusCode::NOT_FOUND || body_mentions_not_found(&body) {
+            return Ok(());
         }
 
         Err(RustfsClientError::unexpected_status_with_limited_body(

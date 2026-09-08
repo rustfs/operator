@@ -2026,7 +2026,7 @@ async fn reconcile_bucket(
                     CreateBucketResult::Created => {
                         "Bucket was created but object lock is not enabled"
                     }
-                    CreateBucketResult::AlreadyExists => {
+                    CreateBucketResult::AlreadyExists | CreateBucketResult::AlreadyOwnedByYou => {
                         "Bucket already exists but object lock is not enabled"
                     }
                 };
@@ -2042,7 +2042,7 @@ async fn reconcile_bucket(
             Err(error) => {
                 let context = match create_result {
                     CreateBucketResult::Created => "failed to verify created bucket object lock",
-                    CreateBucketResult::AlreadyExists => {
+                    CreateBucketResult::AlreadyExists | CreateBucketResult::AlreadyOwnedByYou => {
                         "failed to verify existing bucket object lock"
                     }
                 };
@@ -2066,7 +2066,7 @@ async fn reconcile_bucket(
                 "RustFS bucket was created"
             }
         }
-        CreateBucketResult::AlreadyExists => {
+        CreateBucketResult::AlreadyExists | CreateBucketResult::AlreadyOwnedByYou => {
             if bucket.object_lock_enabled() {
                 "Bucket already existed with object lock enabled"
             } else {

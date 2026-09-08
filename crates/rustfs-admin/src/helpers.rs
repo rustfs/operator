@@ -4,13 +4,194 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+//! Internal helper duties: shared credential parsing, signature/hash utilities, and parsers.
+use hmac::{Hmac, Mac};
+use reqwest::StatusCode;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use url::form_urlencoded;
+
+use super::RustfsClientError;
+
+/// Encode an `application/x-www-form-urlencoded` request body.
+pub(super) fn build_form_body(params: &[(&str, &str)]) -> String {
+    let mut pairs: Vec<(String, String)> = params
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    pairs.sort_by(|(k1, v1), (k2, v2)| k1.cmp(k2).then(v1.cmp(v2)));
+
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    for (key, value) in pairs {
+        serializer.append_pair(&key, &value);
+    }
+
+    serializer.finish()
+}
+
+/// Encode and sort query parameters according to the AWS SigV4 rules.
+pub(super) fn build_canonical_query(params: &[(&str, &str)]) -> String {
+    let mut pairs: Vec<(String, String)> = params
+        .iter()
+        .map(|(key, value)| (uri_encode(key), uri_encode(value)))
+        .collect();
+    pairs.sort_unstable();
+
+    pairs
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn uri_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+pub(super) fn create_bucket_body(region: Option<&str>) -> String {
+    let Some(region) = region.map(str::trim).filter(|region| !region.is_empty()) else {
+        return String::new();
+    };
+
+    if region == "us-east-1" {
+        return String::new();
+    }
+
+    format!(
+        "<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LocationConstraint>{}</LocationConstraint></CreateBucketConfiguration>",
+        escape_xml(region)
+    )
+}
+
+pub(super) fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+pub(super) fn body_mentions_not_found(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("nosuchuser")
+        || body.contains("no such user")
+        || body.contains("user not exist")
+        || body.contains("nosuchpolicy")
+        || body.contains("no such policy")
+        || body.contains("objectlockconfigurationnotfound")
+        || body.contains("nosuchbucketpolicy")
+        || body.contains("no such bucket policy")
+        || body.contains("not found")
+}
+
+/// True when an upstream status means the queried object is absent.
+///
+/// 5xx, 408, 429, and 425 must not be treated as absence even if a proxy error page contains
+/// "Not Found"; those are transient and should retry.
+pub(super) fn is_absent_resource(status: StatusCode, body: &str) -> bool {
+    if status.is_server_error()
+        || status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status == StatusCode::TOO_EARLY
+    {
+        return false;
+    }
+    status == StatusCode::NOT_FOUND || body_mentions_not_found(body)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BucketConflictKind {
+    /// S3 `BucketAlreadyOwnedByYou`: same credentials already own this bucket.
+    OwnedByYou,
+    /// S3 `BucketAlreadyExists`: a different account owns this bucket name.
+    OwnedByOther,
+}
+
+pub(super) fn bucket_conflict_kind(status: StatusCode, body: &str) -> Option<BucketConflictKind> {
+    if status != StatusCode::CONFLICT {
+        return None;
+    }
+    let body = body.to_ascii_lowercase();
+    if body.contains("bucketalreadyownedbyyou") {
+        Some(BucketConflictKind::OwnedByYou)
+    } else if body.contains("bucketalreadyexists") {
+        Some(BucketConflictKind::OwnedByOther)
+    } else {
+        None
+    }
+}
+
+pub(super) fn extract_canned_policy_document(body: &str) -> Result<String, RustfsClientError> {
+    let value = serde_json::from_str::<Value>(body)
+        .map_err(|_| RustfsClientError::InvalidPolicyDocument)?;
+    let policy = value.get("policy").unwrap_or(&value);
+
+    serde_json::to_string(policy).map_err(|_| RustfsClientError::InvalidPolicyDocument)
+}
+
+pub(super) fn sha256_hex(payload: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(payload);
+    hex::encode(hasher.finalize())
+}
+
+pub(super) fn hmac_sha256(key: &[u8], message: &str) -> Result<Vec<u8>, RustfsClientError> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key).map_err(|_| RustfsClientError::SigningFailed)?;
+    mac.update(message.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+pub(super) fn hmac_sha256_hex(key: &[u8], message: &str) -> Result<String, RustfsClientError> {
+    let bytes = hmac_sha256(key, message)?;
+    Ok(hex::encode(bytes))
+}
+
+pub(super) fn derive_signing_key(
+    secret_key: &str,
+    date_stamp: &str,
+    region: &str,
+    service: &str,
+) -> Result<Vec<u8>, RustfsClientError> {
+    let k_secret = format!("AWS4{secret_key}").into_bytes();
+    let k_date = hmac_sha256(&k_secret, date_stamp)?;
+    let k_region = hmac_sha256(&k_date, region)?;
+    let k_service = hmac_sha256(&k_region, service)?;
+    hmac_sha256(&k_service, "aws4_request")
+}
+
+pub(super) fn extract_xml_tag(document: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+
+    let open_idx = document.find(&open)?;
+    let start = open_idx + open.len();
+    let rest = &document[start..];
+    let end = rest.find(&close)?;
+
+    Some(rest[..end].trim().to_string())
+}
 
 const SENSITIVE_KEYS: [&str; 22] = [
     "token",
@@ -37,7 +218,9 @@ const SENSITIVE_KEYS: [&str; 22] = [
     "credentials",
 ];
 
-pub(crate) fn redact_sensitive_pairs(message: &str) -> String {
+/// Redact sensitive credential-shaped key/value pairs and XML tags from an
+/// upstream error message before it is logged or surfaced in a gRPC status.
+pub fn redact_sensitive_pairs(message: &str) -> String {
     let message = redact_sensitive_xml_tags(message);
     redact_sensitive_key_value_pairs(&message)
 }
@@ -248,7 +431,42 @@ fn redacted_value(original: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod absent_resource_tests {
+    use super::is_absent_resource;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn absent_resource_accepts_not_found_and_semantic_4xx() {
+        assert!(is_absent_resource(StatusCode::NOT_FOUND, ""));
+        assert!(is_absent_resource(
+            StatusCode::NOT_FOUND,
+            "<Error><Code>NoSuchBucketPolicy</Code></Error>"
+        ));
+        assert!(is_absent_resource(
+            StatusCode::BAD_REQUEST,
+            "<Error><Code>NoSuchUser</Code></Error>"
+        ));
+    }
+
+    #[test]
+    fn absent_resource_rejects_transient_status_even_with_not_found_body() {
+        let proxy_page = "<html><title>Not Found</title></html>";
+        assert!(!is_absent_resource(
+            StatusCode::SERVICE_UNAVAILABLE,
+            proxy_page
+        ));
+        assert!(!is_absent_resource(StatusCode::BAD_GATEWAY, proxy_page));
+        assert!(!is_absent_resource(
+            StatusCode::TOO_MANY_REQUESTS,
+            proxy_page
+        ));
+        assert!(!is_absent_resource(StatusCode::REQUEST_TIMEOUT, proxy_page));
+        assert!(!is_absent_resource(StatusCode::TOO_EARLY, proxy_page));
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
     use super::redact_sensitive_pairs;
 
     #[test]
