@@ -19,8 +19,8 @@ use crate::types::v1alpha1::status::{
     pool, summarize_current_state,
 };
 use crate::types::v1alpha1::tenant::Tenant;
-use crate::utils::sanitize::redact_sensitive_pairs;
 use kube::runtime::events::EventType;
+use rustfs_admin::redact_sensitive_pairs;
 
 const LEGACY_PROGRESSING_CONDITION: &str = "Progressing";
 

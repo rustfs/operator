@@ -13,5 +13,4 @@
 // limitations under the License.
 
 pub(crate) mod listen;
-pub(crate) mod sanitize;
 pub mod tls;
