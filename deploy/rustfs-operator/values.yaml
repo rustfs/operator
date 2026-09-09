@@ -333,3 +333,97 @@ console:
       # - secretName: console-tls
       #   hosts:
       #     - console.example.com
+
+# RustFS COSI (Container Object Storage Interface) v1alpha1 driver.
+#
+# Requires the upstream COSI CRDs and controller
+# (https://github.com/kubernetes-sigs/container-object-storage-interface) to already be
+# installed in the cluster; this chart only deploys the RustFS driver + provisioner sidecar
+# Deployment that implements the COSI Identity/Provisioner gRPC service.
+#
+# Driver name for BucketClass / BucketAccessClass: rustfs.objectstorage.k8s.io
+cosiDriver:
+  # Disabled by default because it depends on cluster-wide COSI CRDs/controller as a
+  # prerequisite; enable once those are installed.
+  enabled: false
+
+  replicas: 1
+
+  # Log level for the driver (trace, debug, info, warn, error)
+  logLevel: info
+
+  image:
+    # The COSI driver binary ships in the same image as operator.
+    repository: rustfs/operator
+    tag: ""  # Defaults to operator.image.tag
+    pullPolicy: IfNotPresent
+
+  # Image pull secrets for private registries
+  imagePullSecrets: []
+
+  # Official COSI provisioner sidecar. It watches BucketClaim/BucketAccess/BucketClass/
+  # BucketAccessClass objects and calls the RustFS driver's Identity/Provisioner gRPC
+  # service over a Unix socket shared via an emptyDir volume.
+  sidecar:
+    image:
+      repository: gcr.io/k8s-staging-sig-storage/objectstorage-sidecar
+      tag: v0.2.2
+      pullPolicy: IfNotPresent
+    # klog verbosity (0-5)
+    verbosity: 4
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # Resource limits and requests for the driver container
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  # Security context for the driver pod
+  podSecurityContext:
+    fsGroup: 65534
+
+  # Security context for the driver container (also applied to the sidecar container)
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    runAsUser: 65534
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Node selector for driver pod placement
+  nodeSelector: {}
+
+  # Tolerations for driver pod scheduling
+  tolerations: []
+
+  # Affinity rules for driver pod scheduling
+  affinity: {}
+
+  # ServiceAccount configuration
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    name: ""
+
+  # RBAC configuration. The ClusterRole covers both the RustFS driver (Secrets/ConfigMaps
+  # for credential and CAS-ownership records) and the upstream sidecar (objectstorage.k8s.io
+  # CRDs and coordination.k8s.io Leases for leader election).
+  rbac:
+    # Specifies whether RBAC resources should be created
+    create: true

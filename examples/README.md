@@ -27,6 +27,12 @@ This directory contains example Tenant configurations for the RustFS Kubernetes 
 2. Read **simple-tenant.yaml** to understand all options
 3. Explore other examples based on your use case
 
+## COSI (Container Object Storage Interface)
+
+| Example | Use Case |
+|---------|----------|
+| [cosi-bucket-provisioning.yaml](./cosi-bucket-provisioning.yaml) | `BucketClass`/`BucketAccessClass`/`BucketClaim`/`BucketAccess` against a Tenant, via the `rustfs.objectstorage.k8s.io` driver (enable with `cosiDriver.enabled: true` in the Helm chart) |
+
 On OpenShift, use **openshift-tenant.yaml** only with an arbitrary-UID-compatible
 RustFS image. Its two explicit empty Pool security contexts form one delegation
 signal for UID, GID, FSGroup, and container security settings. Both objects are
