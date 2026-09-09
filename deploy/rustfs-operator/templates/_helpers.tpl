@@ -102,3 +102,14 @@ Create the name of the console service account to use
 {{- default "default" .Values.console.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Create the name of the COSI driver service account to use
+*/}}
+{{- define "rustfs-operator.cosiDriverServiceAccountName" -}}
+{{- if .Values.cosiDriver.serviceAccount.create }}
+{{- default (printf "%s-cosi-driver" (include "rustfs-operator.fullname" .)) .Values.cosiDriver.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.cosiDriver.serviceAccount.name }}
+{{- end }}
+{{- end }}

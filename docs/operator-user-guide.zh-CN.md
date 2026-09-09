@@ -1186,6 +1186,93 @@ RustFS Tenant Console 登录失败时，应使用 `spec.credsSecret` 或 RustFS 
 - Tenant YAML 可以进入版本控制，但不要提交明文 Secret 值。
 - 优先查看 `status.conditions`，再进一步排查 StatefulSet 和 Pod。
 
+## 13.1 COSI `preferredAccessKey`
+
+使用 RustFS COSI 驱动（`rustfs.objectstorage.k8s.io`）时：
+
+- 建议省略 `preferredAccessKey`，让每个 `BucketAccess` 从 COSI 授权名称（`ba-<UID>`）派生出唯一的账户 ID，与 Ceph COSI 的隔离方式保持一致。
+- 如果设置了 `preferredAccessKey`（或 `accessKey`），该值必须在所有 `BucketAccess` 中唯一；不同申请复用同一个值会被拒绝并返回 `AlreadyExists`，避免凭据在其他工作负载不知情的情况下被轮换。
+- 同一个 `BucketAccess` 的重复授权请求是幂等的，会返回相同的 Secret；驱动不会覆盖已有用户的密钥。
+
+## 13.2 部署 COSI 驱动
+
+RustFS COSI 驱动与 operator 共用同一个镜像（`./rustfs-cosi-driver`），但默认不会部署。它依赖集群中已安装的上游
+[COSI CRD 与控制器](https://github.com/kubernetes-sigs/container-object-storage-interface)
+（API 版本 `objectstorage.k8s.io/v1alpha1`）；chart 的 `cosiDriver.sidecar.image.tag` 默认对应
+匹配的 sidecar 发行版本 `v0.2.2`。
+
+RustFS 驱动 Deployment 与上游 controller/sidecar 镜像都是普通的非特权容器，其 Kubernetes 清单中
+没有 `hostNetwork`、`hostPath`，也没有固定 UID 要求（上游镜像仅在 Dockerfile 中声明了非 root 用户，
+并未写入 Pod spec，因此可以直接采用平台分配的 UID）。唯一与平台相关的步骤是启用本 chart 已有的
+`openshift.enabled` 开关——它对本 chart 中所有 Deployment 的处理方式是一致的。以下结论基于对所依赖的
+上游版本清单/Dockerfile 的静态分析，并未在真实 OpenShift 集群上做过冒烟测试，正式使用前请先在测试
+项目中验证。
+
+### 原生 Kubernetes
+
+1. 在集群中安装上游 COSI CRD 与控制器（每个集群安装一次即可）：
+
+   ```bash
+   kubectl apply -k "github.com/kubernetes-sigs/container-object-storage-interface?ref=v0.2.2"
+   ```
+
+   这也会在 `default` 命名空间下创建控制器自己的 `ServiceAccount`（这是上游 kustomize 清单本身的限制，
+   与本 chart 无关）。
+
+2. 在 Helm chart 中启用驱动 Deployment：
+
+   ```yaml
+   cosiDriver:
+     enabled: true
+   ```
+
+### OpenShift
+
+1. 安装上游 COSI CRD 与控制器，步骤与上面完全相同——不需要额外绑定 SCC 或执行
+   `oc adm policy` 命令；controller 和 sidecar 在默认的 `restricted-v2` SCC 下即可正常运行：
+
+   ```bash
+   oc apply -k "github.com/kubernetes-sigs/container-object-storage-interface?ref=v0.2.2"
+   ```
+
+2. 与本 chart 已有的 OpenShift 开关一起启用驱动 Deployment，这样 RustFS 驱动容器及与其共享 Pod 的
+   sidecar 容器都会省略显式的 `securityContext`/`runAsUser`，交由 SCC 分配 Pod 的 UID：
+
+   ```yaml
+   openshift:
+     enabled: true
+   cosiDriver:
+     enabled: true
+   ```
+
+无论哪种平台，这都会部署一个包含两个容器、共享 Unix socket 的 Deployment：RustFS 驱动
+（Identity + Provisioner gRPC）和上游 `objectstorage-sidecar` 容器（负责监听
+`BucketClaim`/`BucketAccess`）。同时会创建专用的 `ServiceAccount` 和 `ClusterRole`，覆盖两个容器所需的
+Kubernetes API 权限（sidecar 需要 `objectstorage.k8s.io` 相关资源；驱动需要 `Secrets`/`ConfigMaps`
+以存取凭据和所有权记录）。如需自行提供，可将 `cosiDriver.rbac.create` 或
+`cosiDriver.serviceAccount.create` 设为 `false`。
+
+### 创建一个桶
+
+3. 创建 `driverName` 为 `rustfs.objectstorage.k8s.io`、`authenticationType` 为 `Key`（驱动仅支持这一种
+   认证方式）的 `BucketClass` 和 `BucketAccessClass`，将 `endpoint`、`objectStoreUserSecretName`、
+   `objectStoreUserSecretNamespace` 指向某个 Tenant 的 S3 端点及其管理员凭据 Secret，再创建引用它们的
+   `BucketClaim` 和 `BucketAccess`。完整示例（含消费生成 Secret 的工作负载 Pod）参见
+   [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml)。
+4. 当 `BucketAccess.status.accessGranted` 变为 `true` 后，`credentialsSecretName` 指定的 Secret
+   会在该 `BucketAccess` 所在命名空间下生成，包含以下键（同一份值提供多个别名，以兼容不同 S3 客户端的约定）：
+
+   | 键 | 值 |
+   |---|---|
+   | `AWS_ACCESS_KEY_ID`、`accessKeyID`、`accesskey` | S3 access key |
+   | `AWS_SECRET_ACCESS_KEY`、`accessSecretKey`、`secretkey` | S3 secret key |
+   | `endpoint` | BucketClass 的 `endpoint` 参数 |
+   | `region` | BucketClass 的 `region` 参数 |
+   | `BUCKETS` | 该凭据可访问的桶名称（逗号分隔） |
+
+   工作负载可直接通过 `envFrom.secretRef` 使用这些键，参见
+   [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml)。
+
 ## 14. 相关文档
 
 - [项目 README](../README.md)

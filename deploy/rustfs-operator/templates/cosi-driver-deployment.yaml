@@ -1,0 +1,108 @@
+{{- if .Values.cosiDriver.enabled -}}
+{{- $openShift := default dict .Values.openshift -}}
+{{- $openShiftEnabled := default false $openShift.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-cosi-driver
+  namespace: {{ include "rustfs-operator.namespace" . }}
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cosi-driver
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.cosiDriver.replicas }}
+  selector:
+    matchLabels:
+      {{- include "rustfs-operator.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cosi-driver
+  template:
+    metadata:
+      labels:
+        {{- include "rustfs-operator.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: cosi-driver
+    spec:
+      serviceAccountName: {{ include "rustfs-operator.cosiDriverServiceAccountName" . }}
+      {{- if $openShiftEnabled }}
+      hostUsers: false
+      {{- end }}
+      {{- with .Values.cosiDriver.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if not $openShiftEnabled }}
+      {{- with .Values.cosiDriver.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
+      containers:
+        # RustFS driver: implements the COSI Identity + Provisioner gRPC service on a
+        # Unix socket shared with the sidecar container below.
+        - name: rustfs-driver
+          image: "{{ .Values.cosiDriver.image.repository }}:{{ .Values.cosiDriver.image.tag | default .Values.operator.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.cosiDriver.image.pullPolicy }}
+          command: ["./rustfs-cosi-driver"]
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.cosiDriver.logLevel | default "info" }}
+            - name: COSI_ENDPOINT
+              value: "unix:///var/lib/cosi/cosi.sock"
+          volumeMounts:
+            - name: socket
+              mountPath: /var/lib/cosi
+          {{- with .Values.cosiDriver.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if not $openShiftEnabled }}
+          {{- with .Values.cosiDriver.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+
+        # Upstream COSI provisioner sidecar: watches BucketClaim/BucketAccess and calls
+        # the driver above over the shared Unix socket.
+        - name: objectstorage-provisioner-sidecar
+          image: "{{ .Values.cosiDriver.sidecar.image.repository }}:{{ .Values.cosiDriver.sidecar.image.tag }}"
+          imagePullPolicy: {{ .Values.cosiDriver.sidecar.image.pullPolicy }}
+          args:
+            - "--v={{ .Values.cosiDriver.sidecar.verbosity }}"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: socket
+              mountPath: /var/lib/cosi
+          {{- with .Values.cosiDriver.sidecar.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if not $openShiftEnabled }}
+          {{- with .Values.cosiDriver.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
+      volumes:
+        - name: socket
+          emptyDir: {}
+      {{- with .Values.cosiDriver.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cosiDriver.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cosiDriver.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

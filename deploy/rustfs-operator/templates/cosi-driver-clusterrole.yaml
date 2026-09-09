@@ -1,0 +1,40 @@
+{{- if and .Values.cosiDriver.enabled .Values.cosiDriver.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rustfs-operator.fullname" . }}-cosi-driver
+  labels:
+    {{- include "rustfs-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cosi-driver
+rules:
+  # Upstream COSI sidecar: reconciles BucketClaim/BucketAccess against BucketClass/
+  # BucketAccessClass by calling this driver's Identity/Provisioner gRPC service.
+  - apiGroups: ["objectstorage.k8s.io"]
+    resources:
+      - "buckets"
+      - "bucketaccesses"
+      - "bucketclaims"
+      - "bucketaccessclasses"
+      - "buckets/status"
+      - "bucketaccesses/status"
+      - "bucketclaims/status"
+      - "bucketaccessclasses/status"
+    verbs: ["get", "list", "watch", "update", "create", "delete"]
+
+  # Upstream COSI sidecar: leader election.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
+
+  # Upstream COSI sidecar: BucketAccess credential Secrets, and admission Events.
+  - apiGroups: [""]
+    resources: ["secrets", "events"]
+    verbs: ["get", "list", "delete", "update", "create"]
+
+  # RustFS driver: reads the RustFS admin Secret and optional TLS CA ConfigMap named by
+  # BucketClass/BucketAccessClass parameters, and stores compare-and-swap grant/bucket
+  # ownership records as ConfigMaps.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "delete"]
+{{- end }}

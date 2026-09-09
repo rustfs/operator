@@ -1239,6 +1239,92 @@ When using the RustFS COSI driver (`rustfs.objectstorage.k8s.io`):
 - If you set `preferredAccessKey` (or `accessKey`), the value must be unique per `BucketAccess`. Reusing the same key across claims is rejected with `AlreadyExists` so credentials are never rotated out from under another workload.
 - Grant retries for the same `BucketAccess` are idempotent and return the same secret; the driver does not overwrite an existing user's secret key.
 
+## 13.2 Deploying the COSI driver
+
+The RustFS COSI driver ships in the same operator image (`./rustfs-cosi-driver`) but is not
+deployed by default. It requires the upstream
+[COSI CRDs and controller](https://github.com/kubernetes-sigs/container-object-storage-interface)
+(API version `objectstorage.k8s.io/v1alpha1`) to already be installed in the cluster; the chart's
+`cosiDriver.sidecar.image.tag` defaults to the matching sidecar release, `v0.2.2`.
+
+Both the RustFS driver Deployment and the upstream controller/sidecar images are plain
+non-privileged containers with no `hostNetwork`, `hostPath`, or fixed-UID requirement in their
+Kubernetes manifests (the upstream images declare a non-root user only in their Dockerfile, not
+the pod spec, so an platform-assigned UID applies cleanly). The only platform-specific step is
+enabling this chart's existing `openshift.enabled` flag, which already governs every other
+Deployment in this chart the same way. This is verified by manifest/Dockerfile inspection of the
+pinned upstream versions, not a live OpenShift smoke test — validate in a scratch project before
+relying on it in production.
+
+### Vanilla Kubernetes
+
+1. Install the upstream COSI CRDs and controller (once per cluster):
+
+   ```bash
+   kubectl apply -k "github.com/kubernetes-sigs/container-object-storage-interface?ref=v0.2.2"
+   ```
+
+   This also creates the controller's own `ServiceAccount` in the `default` namespace (an
+   upstream kustomize limitation, not specific to this chart).
+
+2. Enable the driver Deployment in the Helm chart:
+
+   ```yaml
+   cosiDriver:
+     enabled: true
+   ```
+
+### OpenShift
+
+1. Install the upstream COSI CRDs and controller, exactly as above — no SCC binding or
+   additional `oc adm policy` steps are needed; the controller and sidecar run fine under the
+   default `restricted-v2` SCC:
+
+   ```bash
+   oc apply -k "github.com/kubernetes-sigs/container-object-storage-interface?ref=v0.2.2"
+   ```
+
+2. Enable the driver Deployment alongside this chart's existing OpenShift toggle, so the
+   RustFS driver container and the sidecar container it shares a pod with also drop their
+   explicit `securityContext`/`runAsUser` and let the SCC assign the pod's UID:
+
+   ```yaml
+   openshift:
+     enabled: true
+   cosiDriver:
+     enabled: true
+   ```
+
+Either way, this deploys a Deployment with two containers sharing a Unix socket: the RustFS
+driver (Identity + Provisioner gRPC) and the upstream `objectstorage-sidecar` container that
+watches `BucketClaim`/`BucketAccess` objects. A dedicated `ServiceAccount` and `ClusterRole` are
+created covering both containers' Kubernetes API access (`objectstorage.k8s.io` resources for the
+sidecar; `Secrets`/`ConfigMaps` for the driver's credential and ownership records). Set
+`cosiDriver.rbac.create: false` or `cosiDriver.serviceAccount.create: false` to supply your own.
+
+### Provisioning a bucket
+
+3. Create a `BucketClass` and `BucketAccessClass` with `driverName: rustfs.objectstorage.k8s.io`
+   and `authenticationType: Key` (the only mode this driver supports), pointing `endpoint` /
+   `objectStoreUserSecretName` / `objectStoreUserSecretNamespace` at a Tenant's S3 endpoint and
+   an admin credentials Secret. Then create a `BucketClaim` and a `BucketAccess` referencing it.
+   See [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml) for a
+   full walkthrough, including a workload Pod consuming the resulting Secret.
+4. Once `BucketAccess.status.accessGranted` is `true`, the Secret named by
+   `credentialsSecretName` exists in the `BucketAccess`'s namespace with these keys (several
+   aliases of the same values, for compatibility with different S3 client conventions):
+
+   | Key(s) | Value |
+   |---|---|
+   | `AWS_ACCESS_KEY_ID`, `accessKeyID`, `accesskey` | S3 access key |
+   | `AWS_SECRET_ACCESS_KEY`, `accessSecretKey`, `secretkey` | S3 secret key |
+   | `endpoint` | The BucketClass's `endpoint` parameter |
+   | `region` | The BucketClass's `region` parameter |
+   | `BUCKETS` | Comma-separated bucket name(s) this credential can access |
+
+   A workload can consume these directly with `envFrom.secretRef`, as shown in
+   [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml).
+
 ## 14. Related Documentation
 
 - [Project README](../README.md)

@@ -1,0 +1,99 @@
+# Example: provisioning an S3 bucket and scoped credentials against a RustFS
+# Tenant through the Kubernetes COSI (Container Object Storage Interface) API.
+#
+# Prerequisites (not created by this file or by the rustfs-operator chart):
+#   1. The upstream COSI CRDs and controller are installed in the cluster:
+#      https://github.com/kubernetes-sigs/container-object-storage-interface
+#   2. The RustFS operator chart is installed with `cosiDriver.enabled: true`
+#      (see deploy/rustfs-operator/values.yaml), which deploys the
+#      `rustfs.objectstorage.k8s.io` driver + provisioner sidecar.
+#   3. A RustFS Tenant is running, and a Kubernetes Secret in its namespace
+#      holds RustFS admin credentials this driver will authenticate with
+#      (e.g. the Tenant's own `spec.credsSecret`, or a dedicated admin user's
+#      secret with `accesskey`/`secretkey` keys).
+#
+# Apply order: BucketClass and BucketAccessClass first, then BucketClaim, then
+# BucketAccess (BucketAccess references the BucketClaim by name).
+---
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketClass
+metadata:
+  name: rustfs-bucket-class
+driverName: rustfs.objectstorage.k8s.io
+deletionPolicy: Delete
+parameters:
+  # RustFS S3 endpoint for the target Tenant (in-cluster Service DNS name).
+  endpoint: "http://my-tenant-hl.rustfs-tenant.svc.cluster.local:9000"
+  # Secret holding RustFS admin credentials (accesskey/secretkey keys), used by
+  # the driver to create buckets and manage per-BucketAccess users.
+  objectStoreUserSecretName: my-tenant-admin-creds
+  objectStoreUserSecretNamespace: rustfs-tenant
+  region: us-east-1
+  # Optional: TLS CA for a TLS-enabled Tenant endpoint.
+  # tlsCAConfigMapName: my-tenant-ca-bundle
+  # tlsCAConfigMapNamespace: rustfs-tenant
+---
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketAccessClass
+metadata:
+  name: rustfs-bucket-access-class
+driverName: rustfs.objectstorage.k8s.io
+# The RustFS driver only supports Key (static access/secret key) authentication;
+# it rejects IAM-style BucketAccessClasses.
+authenticationType: Key
+parameters:
+  endpoint: "http://my-tenant-hl.rustfs-tenant.svc.cluster.local:9000"
+  objectStoreUserSecretName: my-tenant-admin-creds
+  objectStoreUserSecretNamespace: rustfs-tenant
+  region: us-east-1
+  # Optional: reference an existing RustFS canned policy instead of a
+  # driver-generated per-grant policy scoped to this bucket.
+  # policy: my-existing-policy-name
+---
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketClaim
+metadata:
+  name: my-app-bucket
+  namespace: my-app
+spec:
+  bucketClassName: rustfs-bucket-class
+  protocols:
+    - S3
+---
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketAccess
+metadata:
+  name: my-app-bucket-access
+  namespace: my-app
+spec:
+  bucketClaimName: my-app-bucket
+  bucketAccessClassName: rustfs-bucket-access-class
+  # Secret the driver will create/populate with S3 access key, secret key, and
+  # endpoint, for a workload to mount as env vars or files.
+  credentialsSecretName: my-app-bucket-credentials
+  serviceAccountName: my-app-workload
+---
+# Once BucketAccess reports status.accessGranted: true, the Secret named by
+# credentialsSecretName above exists in this same namespace with these keys
+# (several aliases of the same values, for compatibility with different S3
+# client conventions):
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   - standard AWS SDK env var names
+#   accessKeyID / accessSecretKey               - COSI convention
+#   accesskey / secretkey                       - RustFS/MinIO admin API convention
+#   endpoint                                    - the BucketClass's `endpoint` parameter
+#   region                                      - the BucketClass's `region` parameter
+#   BUCKETS                                     - comma-separated bucket name(s) granted
+#
+# A workload can consume it directly as environment variables:
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+  namespace: my-app
+spec:
+  containers:
+    - name: my-app
+      image: my-app:latest
+      envFrom:
+        - secretRef:
+            name: my-app-bucket-credentials
