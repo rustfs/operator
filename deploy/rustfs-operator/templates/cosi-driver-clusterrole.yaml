@@ -26,10 +26,17 @@ rules:
     resources: ["leases"]
     verbs: ["get", "watch", "list", "delete", "update", "create"]
 
-  # Upstream COSI sidecar: BucketAccess credential Secrets, and admission Events.
+  # Upstream COSI sidecar and RustFS driver: BucketAccess credential Secrets and the
+  # RustFS admin Secret. No `list`/`watch`: both only ever address Secrets by name.
   - apiGroups: [""]
-    resources: ["secrets", "events"]
-    verbs: ["get", "list", "delete", "update", "create"]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "delete"]
+
+  # Upstream COSI sidecar: event recording. client-go's event recorder only ever
+  # creates new Events and PATCHes repeated/aggregated ones (no list/watch/delete).
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 
   # RustFS driver: reads the RustFS admin Secret and optional TLS CA ConfigMap named by
   # BucketClass/BucketAccessClass parameters, and stores compare-and-swap grant/bucket

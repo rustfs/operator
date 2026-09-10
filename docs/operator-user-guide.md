@@ -1307,23 +1307,39 @@ sidecar; `Secrets`/`ConfigMaps` for the driver's credential and ownership record
 3. Create a `BucketClass` and `BucketAccessClass` with `driverName: rustfs.objectstorage.k8s.io`
    and `authenticationType: Key` (the only mode this driver supports), pointing `endpoint` /
    `objectStoreUserSecretName` / `objectStoreUserSecretNamespace` at a Tenant's S3 endpoint and
-   an admin credentials Secret. Then create a `BucketClaim` and a `BucketAccess` referencing it.
-   See [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml) for a
+   an admin credentials Secret. Then create a `BucketClaim` and a `BucketAccess` referencing it,
+   with an explicit `spec.protocol: S3` — `objectstorage-sidecar` v0.2.2 copies this field
+   verbatim into the generated credentials and does not implement the CRD's documented
+   fallback to the bucket's supported protocols, so an omitted value produces an empty
+   protocol. See
+   [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml) for a
    full walkthrough, including a workload Pod consuming the resulting Secret.
 4. Once `BucketAccess.status.accessGranted` is `true`, the Secret named by
-   `credentialsSecretName` exists in the `BucketAccess`'s namespace with these keys (several
-   aliases of the same values, for compatibility with different S3 client conventions):
+   `credentialsSecretName` exists in the `BucketAccess`'s namespace — **not** as flat keys, but
+   as a single key, `BucketInfo`, whose value is a JSON document (this is
+   `objectstorage-sidecar` v0.2.2's own Secret format, not something the RustFS driver
+   controls):
 
-   | Key(s) | Value |
-   |---|---|
-   | `AWS_ACCESS_KEY_ID`, `accessKeyID`, `accesskey` | S3 access key |
-   | `AWS_SECRET_ACCESS_KEY`, `accessSecretKey`, `secretkey` | S3 secret key |
-   | `endpoint` | The BucketClass's `endpoint` parameter |
-   | `region` | The BucketClass's `region` parameter |
-   | `BUCKETS` | Comma-separated bucket name(s) this credential can access |
+   ```json
+   {
+     "spec": {
+       "bucketName": "<the provisioned S3 bucket name>",
+       "authenticationType": "Key",
+       "secretS3": {
+         "endpoint": "<the BucketClass's endpoint parameter>",
+         "region": "<the BucketClass's region parameter>",
+         "accessKeyID": "<S3 access key>",
+         "accessSecretKey": "<S3 secret key>"
+       },
+       "protocols": ["S3"]
+     }
+   }
+   ```
 
-   A workload can consume these directly with `envFrom.secretRef`, as shown in
-   [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml).
+   A workload must mount this Secret as a file and parse the JSON — `envFrom.secretRef` does
+   not produce usable flat environment variables, since there is only one key. See
+   [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml) for a
+   Pod mounting and reading it.
 
 ## 14. Related Documentation
 
