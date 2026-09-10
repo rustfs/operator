@@ -68,23 +68,35 @@ metadata:
 spec:
   bucketClaimName: my-app-bucket
   bucketAccessClassName: rustfs-bucket-access-class
-  # Secret the driver will create/populate with S3 access key, secret key, and
-  # endpoint, for a workload to mount as env vars or files.
+  # Required in practice: objectstorage-sidecar v0.2.2 copies this value verbatim into
+  # the generated BucketInfo (see below) and does not fall back to the bucket's
+  # supported protocols despite the BucketAccess CRD describing the field as optional.
+  protocol: S3
+  # Secret the sidecar will create with a single `BucketInfo` JSON key (see below).
   credentialsSecretName: my-app-bucket-credentials
-  serviceAccountName: my-app-workload
 ---
-# Once BucketAccess reports status.accessGranted: true, the Secret named by
-# credentialsSecretName above exists in this same namespace with these keys
-# (several aliases of the same values, for compatibility with different S3
-# client conventions):
-#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   - standard AWS SDK env var names
-#   accessKeyID / accessSecretKey               - COSI convention
-#   accesskey / secretkey                       - RustFS/MinIO admin API convention
-#   endpoint                                    - the BucketClass's `endpoint` parameter
-#   region                                      - the BucketClass's `region` parameter
-#   BUCKETS                                     - comma-separated bucket name(s) granted
+# IMPORTANT: with objectstorage-sidecar v0.2.2, the credentialsSecretName Secret above is
+# NOT a set of flat keys like AWS_ACCESS_KEY_ID. Once BucketAccess reports
+# status.accessGranted: true, the sidecar writes exactly one key, `BucketInfo`, whose
+# value is a JSON document shaped like:
 #
-# A workload can consume it directly as environment variables:
+#   {
+#     "metadata": {"name": "bucketinfo-<BucketAccess UID>"},
+#     "spec": {
+#       "bucketName": "<the provisioned S3 bucket name>",
+#       "authenticationType": "Key",
+#       "secretS3": {
+#         "endpoint": "<the BucketClass's endpoint parameter>",
+#         "region": "<the BucketClass's region parameter>",
+#         "accessKeyID": "<S3 access key>",
+#         "accessSecretKey": "<S3 secret key>"
+#       },
+#       "protocols": ["S3"]
+#     }
+#   }
+#
+# A workload must mount and parse this JSON — envFrom/flat env vars do not apply. Mounting
+# it as a file is the simplest option:
 apiVersion: v1
 kind: Pod
 metadata:
@@ -94,6 +106,15 @@ spec:
   containers:
     - name: my-app
       image: my-app:latest
-      envFrom:
-        - secretRef:
-            name: my-app-bucket-credentials
+      # Reads $BUCKET_INFO_PATH, parses the JSON, and extracts .spec.secretS3.*.
+      volumeMounts:
+        - name: bucket-credentials
+          mountPath: /var/run/secrets/cosi
+          readOnly: true
+      env:
+        - name: BUCKET_INFO_PATH
+          value: /var/run/secrets/cosi/BucketInfo
+  volumes:
+    - name: bucket-credentials
+      secret:
+        secretName: my-app-bucket-credentials

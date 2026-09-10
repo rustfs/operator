@@ -1257,20 +1257,33 @@ Kubernetes API 权限（sidecar 需要 `objectstorage.k8s.io` 相关资源；驱
 3. 创建 `driverName` 为 `rustfs.objectstorage.k8s.io`、`authenticationType` 为 `Key`（驱动仅支持这一种
    认证方式）的 `BucketClass` 和 `BucketAccessClass`，将 `endpoint`、`objectStoreUserSecretName`、
    `objectStoreUserSecretNamespace` 指向某个 Tenant 的 S3 端点及其管理员凭据 Secret，再创建引用它们的
-   `BucketClaim` 和 `BucketAccess`。完整示例（含消费生成 Secret 的工作负载 Pod）参见
+   `BucketClaim` 和 `BucketAccess`，并显式设置 `spec.protocol: S3`——`objectstorage-sidecar`
+   v0.2.2 会原样将该字段写入生成的凭据，并未实现 CRD 文档中所述“回退到桶支持的协议”的逻辑，省略该字段会
+   导致协议值为空。完整示例（含消费生成 Secret 的工作负载 Pod）参见
    [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml)。
 4. 当 `BucketAccess.status.accessGranted` 变为 `true` 后，`credentialsSecretName` 指定的 Secret
-   会在该 `BucketAccess` 所在命名空间下生成，包含以下键（同一份值提供多个别名，以兼容不同 S3 客户端的约定）：
+   会在该 `BucketAccess` 所在命名空间下生成——**并不是**扁平的键值对，而是单独一个键
+   `BucketInfo`，其值是一段 JSON（这是 `objectstorage-sidecar` v0.2.2 自身的 Secret 格式，并非
+   RustFS 驱动决定的）：
 
-   | 键 | 值 |
-   |---|---|
-   | `AWS_ACCESS_KEY_ID`、`accessKeyID`、`accesskey` | S3 access key |
-   | `AWS_SECRET_ACCESS_KEY`、`accessSecretKey`、`secretkey` | S3 secret key |
-   | `endpoint` | BucketClass 的 `endpoint` 参数 |
-   | `region` | BucketClass 的 `region` 参数 |
-   | `BUCKETS` | 该凭据可访问的桶名称（逗号分隔） |
+   ```json
+   {
+     "spec": {
+       "bucketName": "<生成的 S3 桶名称>",
+       "authenticationType": "Key",
+       "secretS3": {
+         "endpoint": "<BucketClass 的 endpoint 参数>",
+         "region": "<BucketClass 的 region 参数>",
+         "accessKeyID": "<S3 access key>",
+         "accessSecretKey": "<S3 secret key>"
+       },
+       "protocols": ["S3"]
+     }
+   }
+   ```
 
-   工作负载可直接通过 `envFrom.secretRef` 使用这些键，参见
+   工作负载必须将该 Secret 挂载为文件并解析这段 JSON——由于只有一个键，`envFrom.secretRef`
+   无法得到可直接使用的扁平环境变量。挂载并读取该文件的 Pod 示例参见
    [examples/cosi-bucket-provisioning.yaml](../examples/cosi-bucket-provisioning.yaml)。
 
 ## 14. 相关文档

@@ -99,6 +99,48 @@ jobs:
         with:
           version: 3.21.3
 
+      - name: Lint and render Helm chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/rustfs-operator
+
+          # Default: cosiDriver disabled, nothing COSI-related should render.
+          helm template test deploy/rustfs-operator > /tmp/helm-default.yaml
+          ! grep -q "cosi-driver" /tmp/helm-default.yaml
+
+          # cosiDriver enabled on vanilla Kubernetes.
+          helm template test deploy/rustfs-operator \
+            --set cosiDriver.enabled=true > /tmp/helm-cosi.yaml
+          grep -q "kind: Deployment" /tmp/helm-cosi.yaml
+          grep -q "rustfs-cosi-driver" /tmp/helm-cosi.yaml
+          grep -q "objectstorage-sidecar" /tmp/helm-cosi.yaml
+
+          # cosiDriver enabled on OpenShift: no hardcoded securityContext, hostUsers set.
+          helm template test deploy/rustfs-operator \
+            --set cosiDriver.enabled=true --set openshift.enabled=true \
+            --show-only templates/cosi-driver-deployment.yaml > /tmp/helm-cosi-openshift.yaml
+          grep -q "hostUsers: false" /tmp/helm-cosi-openshift.yaml
+          ! grep -q "runAsUser" /tmp/helm-cosi-openshift.yaml
+
+          # Custom ServiceAccount: chart must not create its own (a disabled template
+          # renders nothing, so assert on the full render rather than --show-only,
+          # which errors on a template that produced no manifest), and the Deployment
+          # must reference the supplied name.
+          helm template test deploy/rustfs-operator \
+            --set cosiDriver.enabled=true \
+            --set cosiDriver.serviceAccount.create=false \
+            --set cosiDriver.serviceAccount.name=my-custom-sa \
+            > /tmp/helm-cosi-custom-sa.yaml
+          ! grep -q "cosi-driver-serviceaccount.yaml" /tmp/helm-cosi-custom-sa.yaml
+          grep -q "serviceAccountName: my-custom-sa" /tmp/helm-cosi-custom-sa.yaml
+
+          # Custom RBAC: chart must not create its own ClusterRole/ClusterRoleBinding.
+          helm template test deploy/rustfs-operator \
+            --set cosiDriver.enabled=true \
+            --set cosiDriver.rbac.create=false \
+            > /tmp/helm-cosi-custom-rbac.yaml
+          ! grep -q "cosi-driver-clusterrole" /tmp/helm-cosi-custom-rbac.yaml
+
       - name: Check release metadata
         run: make release-metadata-check
 
