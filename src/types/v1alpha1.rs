@@ -141,7 +141,9 @@ mod policy_binding_tests {
 mod tenant_provisioning_crd_tests {
     use super::{
         pool_lifecycle::MAX_DECOMMISSION_REQUESTS,
-        provisioning::MAX_POLICIES_PER_USER,
+        provisioning::{
+            MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULES, MAX_POLICIES_PER_USER,
+        },
         tenant::{
             MAX_TENANT_BUCKETS, MAX_TENANT_POLICIES, MAX_TENANT_POOLS, MAX_TENANT_USERS, Tenant,
         },
@@ -368,6 +370,56 @@ mod tenant_provisioning_crd_tests {
         assert_eq!(
             spec["properties"]["buckets"]["items"]["x-kubernetes-validations"][0]["rule"],
             json!("!(has(self.policy) && has(self.anonymous) && self.anonymous != 'Private')")
+        );
+        let lifecycle = &spec["properties"]["buckets"]["items"]["properties"]["lifecycle"];
+        assert_eq!(
+            lifecycle["properties"]["state"]["enum"],
+            json!(["Present", "Absent"])
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["maxItems"],
+            json!(MAX_BUCKET_LIFECYCLE_RULES)
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["x-kubernetes-list-map-keys"],
+            json!(["id"])
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["items"]["properties"]["id"]["maxLength"],
+            json!(MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH)
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["items"]["properties"]["expiration"]["properties"]["days"]
+                ["minimum"]
+                .as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["items"]["properties"]["abortIncompleteMultipartUpload"]
+                ["properties"]["daysAfterInitiation"]["minimum"]
+                .as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(
+            lifecycle["x-kubernetes-validations"][0]["message"],
+            json!("Present lifecycle requires rules and Absent lifecycle forbids rules")
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["items"]["x-kubernetes-validations"][0]["message"],
+            json!("lifecycle rule must configure expiration or abortIncompleteMultipartUpload")
+        );
+        let bucket_status = &status["properties"]["provisioning"]["properties"]["buckets"]["items"];
+        assert_eq!(
+            bucket_status["properties"]["lifecycleDesiredHash"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            bucket_status["properties"]["lifecycleLastAppliedHash"]["nullable"],
+            json!(true)
         );
     }
 }

@@ -860,6 +860,8 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 - `spec.users` for regular users. Each user must have at least one direct policy mapping.
 - `spec.buckets` for buckets, optional object lock, canned anonymous access (`Private`, `Download`, `Upload`, `Public`), or a custom bucket policy ConfigMap. Non-private `anonymous` values and `policy` are mutually exclusive. Explicit `anonymous: Private` without `policy` removes a bucket policy previously applied by the Operator; it reports a conflict instead of deleting an unowned live policy. For compatibility, legacy `Private` plus `policy` configurations keep the custom policy. When both fields are omitted, the Operator does not change a live bucket policy and retains its ownership record for a later explicit `Private` transition.
 
+Each bucket may also declare `lifecycle.state: Present` with one or more S3 lifecycle rules. The current schema supports expiration after a positive number of days and aborting incomplete multipart uploads after a positive number of days; every rule has a unique ID, an `Enabled` or `Disabled` status, and an explicit prefix filter (use `prefix: ""` for all objects). `lifecycle.state: Absent` requests deletion and cannot include rules. The Operator adopts an identical live configuration, but never replaces or deletes a different configuration without a matching ownership hash in `status.provisioning.buckets`. Omitting `lifecycle` performs no lifecycle API calls and leaves the live configuration untouched.
+
 Transient Kubernetes and RustFS admin/S3 failures (timeouts, 429, 5xx, connection errors, TLS not ready) leave provisioning items `Pending` and requeue instead of marking the Tenant `Failed`. Permanent 4xx configuration errors still fail and wait for a spec or object change.
 
 ConfigMaps and user Secrets must live in the Tenant namespace. The Operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object.
@@ -930,6 +932,21 @@ spec:
     - name: app-data
       objectLock: true
       anonymous: Download
+      lifecycle:
+        state: Present
+        rules:
+          - id: expire-old-logs
+            status: Enabled
+            filter:
+              prefix: logs/
+            expiration:
+              days: 30
+          - id: cleanup-incomplete-uploads
+            status: Enabled
+            filter:
+              prefix: ""
+            abortIncompleteMultipartUpload:
+              daysAfterInitiation: 1
 ```
 
 Deletion behavior is conservative: provisioned resources are retained when removed from the Tenant spec.

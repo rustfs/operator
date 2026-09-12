@@ -47,6 +47,77 @@ spec:
                       enum:
                       - Retain
                       type: string
+                    lifecycle:
+                      description: |-
+                        Declarative S3 bucket lifecycle configuration. Omission leaves the live lifecycle
+                        configuration unmanaged; `Absent` removes only a configuration previously owned by the
+                        operator.
+                      nullable: true
+                      properties:
+                        rules:
+                          items:
+                            properties:
+                              abortIncompleteMultipartUpload:
+                                nullable: true
+                                properties:
+                                  daysAfterInitiation:
+                                    format: int32
+                                    minimum: 1.0
+                                    type: integer
+                                required:
+                                - daysAfterInitiation
+                                type: object
+                              expiration:
+                                nullable: true
+                                properties:
+                                  days:
+                                    format: int32
+                                    minimum: 1.0
+                                    type: integer
+                                required:
+                                - days
+                                type: object
+                              filter:
+                                properties:
+                                  prefix:
+                                    description: Object-key prefix selected by this rule. An empty prefix selects all objects.
+                                    type: string
+                                required:
+                                - prefix
+                                type: object
+                              id:
+                                maxLength: 255
+                                minLength: 1
+                                type: string
+                              status:
+                                enum:
+                                - Enabled
+                                - Disabled
+                                type: string
+                            required:
+                            - filter
+                            - id
+                            - status
+                            type: object
+                            x-kubernetes-validations:
+                            - message: lifecycle rule must configure expiration or abortIncompleteMultipartUpload
+                              rule: has(self.expiration) || has(self.abortIncompleteMultipartUpload)
+                          maxItems: 1000
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - id
+                          x-kubernetes-list-type: map
+                        state:
+                          enum:
+                          - Present
+                          - Absent
+                          type: string
+                      required:
+                      - state
+                      type: object
+                      x-kubernetes-validations:
+                      - message: Present lifecycle requires rules and Absent lifecycle forbids rules
+                        rule: 'self.state == ''Present'' ? has(self.rules) && self.rules.size() > 0 : !has(self.rules) || self.rules.size() == 0'
                     name:
                       maxLength: 63
                       minLength: 3
@@ -2565,6 +2636,9 @@ spec:
                 properties:
                   buckets:
                     items:
+                      description: |-
+                        Bucket-specific provisioning status. Lifecycle ownership hashes are separate from the
+                        existing bucket-policy hashes while preserving the established flattened wire format.
                       properties:
                         desiredHash:
                           nullable: true
@@ -2580,6 +2654,12 @@ spec:
                           nullable: true
                           type: string
                         lastTransitionTime:
+                          nullable: true
+                          type: string
+                        lifecycleDesiredHash:
+                          nullable: true
+                          type: string
+                        lifecycleLastAppliedHash:
                           nullable: true
                           type: string
                         message:

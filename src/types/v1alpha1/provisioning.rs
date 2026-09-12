@@ -27,6 +27,8 @@ pub(crate) const MAX_POLICIES_PER_USER: u32 = 64;
 pub(crate) const MAX_USER_POLICY_NAME_LENGTH: u32 = 253;
 pub(crate) const MIN_BUCKET_NAME_LENGTH: u32 = 3;
 pub(crate) const MAX_BUCKET_NAME_LENGTH: u32 = 63;
+pub(crate) const MAX_BUCKET_LIFECYCLE_RULES: u32 = 1_000;
+pub(crate) const MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH: u32 = 255;
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -133,6 +135,73 @@ pub enum BucketAnonymousAccess {
     Public,
 }
 
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum BucketLifecycleState {
+    Present,
+    Absent,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum BucketLifecycleRuleStatus {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketLifecycleRuleFilter {
+    /// Object-key prefix selected by this rule. An empty prefix selects all objects.
+    pub prefix: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketLifecycleExpiration {
+    #[schemars(range(min = 1))]
+    pub days: i32,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketLifecycleAbortIncompleteMultipartUpload {
+    #[schemars(range(min = 1))]
+    pub days_after_initiation: i32,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("has(self.expiration) || has(self.abortIncompleteMultipartUpload)").message("lifecycle rule must configure expiration or abortIncompleteMultipartUpload"))]
+pub struct BucketLifecycleRule {
+    #[schemars(length(min = 1, max = MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH))]
+    pub id: String,
+
+    pub status: BucketLifecycleRuleStatus,
+
+    pub filter: BucketLifecycleRuleFilter,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<BucketLifecycleExpiration>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort_incomplete_multipart_upload: Option<BucketLifecycleAbortIncompleteMultipartUpload>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("self.state == 'Present' ? has(self.rules) && self.rules.size() > 0 : !has(self.rules) || self.rules.size() == 0").message("Present lifecycle requires rules and Absent lifecycle forbids rules"))]
+pub struct BucketLifecycleSpec {
+    pub state: BucketLifecycleState,
+
+    #[schemars(
+        length(max = MAX_BUCKET_LIFECYCLE_RULES),
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["id"])
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<BucketLifecycleRule>,
+}
+
 impl BucketAnonymousAccess {
     pub(crate) fn is_private(&self) -> bool {
         matches!(self, Self::Private)
@@ -166,6 +235,12 @@ pub struct ProvisioningBucket {
     /// `anonymous`; legacy `Private` plus `policy` configurations keep the custom policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyDocumentSource>,
+
+    /// Declarative S3 bucket lifecycle configuration. Omission leaves the live lifecycle
+    /// configuration unmanaged; `Absent` removes only a configuration previously owned by the
+    /// operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<BucketLifecycleSpec>,
 
     #[serde(default, skip_serializing_if = "is_retain")]
     pub deletion_policy: ProvisioningDeletionPolicy,
@@ -295,5 +370,39 @@ mod tests {
             .expect("legacy private plus policy configuration deserializes");
         assert!(legacy_private_policy.has_custom_policy());
         assert!(!legacy_private_policy.has_non_private_anonymous_access());
+    }
+
+    #[test]
+    fn bucket_lifecycle_deserializes_present_and_absent_states() {
+        let present: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "lifecycle": {
+                "state": "Present",
+                "rules": [{
+                    "id": "expire-logs",
+                    "status": "Enabled",
+                    "filter": {"prefix": "logs/"},
+                    "expiration": {"days": 30},
+                    "abortIncompleteMultipartUpload": {"daysAfterInitiation": 1}
+                }]
+            }
+        }))
+        .expect("Present lifecycle should deserialize");
+        let lifecycle = present.lifecycle.expect("lifecycle is present");
+        assert_eq!(lifecycle.state, super::BucketLifecycleState::Present);
+        assert_eq!(lifecycle.rules[0].filter.prefix, "logs/");
+
+        let absent: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "lifecycle": {"state": "Absent"}
+        }))
+        .expect("Absent lifecycle should deserialize without rules");
+        assert!(
+            absent
+                .lifecycle
+                .expect("lifecycle is present")
+                .rules
+                .is_empty()
+        );
     }
 }

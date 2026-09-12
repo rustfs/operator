@@ -177,6 +177,8 @@ pub enum Reason {
     BucketObjectLockConflict,
     BucketPolicyApplyFailed,
     BucketPolicyConflict,
+    BucketLifecycleApplyFailed,
+    BucketLifecycleConflict,
     KubernetesApiError,
     StatusPatchFailed,
     ObservedGenerationStale,
@@ -250,6 +252,8 @@ impl Reason {
             Self::BucketObjectLockConflict => "BucketObjectLockConflict",
             Self::BucketPolicyApplyFailed => "BucketPolicyApplyFailed",
             Self::BucketPolicyConflict => "BucketPolicyConflict",
+            Self::BucketLifecycleApplyFailed => "BucketLifecycleApplyFailed",
+            Self::BucketLifecycleConflict => "BucketLifecycleConflict",
             Self::KubernetesApiError => "KubernetesApiError",
             Self::StatusPatchFailed => "StatusPatchFailed",
             Self::ObservedGenerationStale => "ObservedGenerationStale",
@@ -526,6 +530,8 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "BucketObjectLockConflict"
             | "BucketPolicyApplyFailed"
             | "BucketPolicyConflict"
+            | "BucketLifecycleApplyFailed"
+            | "BucketLifecycleConflict"
     )
 }
 
@@ -624,6 +630,10 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "BucketObjectLockConflict" => vec!["createObjectLockBucket", "fixBucketSpec"],
         "BucketPolicyApplyFailed" => vec!["fixBucketPolicy", "inspectOperatorLogs"],
         "BucketPolicyConflict" => vec!["inspectLiveBucketPolicy", "updateBucketSpec"],
+        "BucketLifecycleApplyFailed" => vec!["fixBucketLifecycle", "inspectOperatorLogs"],
+        "BucketLifecycleConflict" => {
+            vec!["inspectLiveBucketLifecycle", "updateBucketSpec"]
+        }
         "KubernetesApiError" => vec!["retry", "inspectOperatorLogs"],
         "ObservedGenerationStale" => vec!["waitForReconcile"],
         _ => Vec::new(),
@@ -722,6 +732,16 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("BucketPolicyConflict"),
             vec!["inspectLiveBucketPolicy", "updateBucketSpec"]
+        );
+        assert!(is_blocked_reason("BucketLifecycleApplyFailed"));
+        assert!(is_blocked_reason("BucketLifecycleConflict"));
+        assert_eq!(
+            next_actions_for_reason("BucketLifecycleApplyFailed"),
+            vec!["fixBucketLifecycle", "inspectOperatorLogs"]
+        );
+        assert_eq!(
+            next_actions_for_reason("BucketLifecycleConflict"),
+            vec!["inspectLiveBucketLifecycle", "updateBucketSpec"]
         );
     }
 

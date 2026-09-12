@@ -13,15 +13,25 @@
 // limitations under the License.
 
 use crate::context::{self, Context};
-use crate::sts::rustfs_client::{CreateBucketResult, RustfsAdminClient, RustfsClientError};
+use crate::sts::rustfs_client::{
+    BucketLifecycleAbortIncompleteMultipartUpload as AdminLifecycleAbort,
+    BucketLifecycleConfiguration as AdminLifecycleConfiguration,
+    BucketLifecycleExpiration as AdminLifecycleExpiration,
+    BucketLifecycleRule as AdminLifecycleRule,
+    BucketLifecycleRuleStatus as AdminLifecycleRuleStatus, CreateBucketResult, RustfsAdminClient,
+    RustfsClientError, canonicalize_bucket_lifecycle_xml,
+};
 use crate::types::v1alpha1::provisioning::{
-    BucketAnonymousAccess, PolicyDocumentSource, ProvisioningBucket, ProvisioningPolicy,
-    ProvisioningUser, duplicate_user_credentials_secret_names,
+    BucketAnonymousAccess, BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState,
+    MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULES, PolicyDocumentSource,
+    ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
+    duplicate_user_credentials_secret_names,
 };
 use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::provisioning::{
-    ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus,
-    ProvisioningUserOwnershipState, ProvisioningUserOwnershipStatus, ProvisioningUserStatus,
+    ProvisioningBucketStatus, ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase,
+    ProvisioningStatus, ProvisioningUserOwnershipState, ProvisioningUserOwnershipStatus,
+    ProvisioningUserStatus,
 };
 use crate::types::v1alpha1::tenant::Tenant;
 use k8s_openapi::ByteString;
@@ -131,6 +141,14 @@ enum PolicyReconcileAction {
     Failed(Reason, &'static str),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum LifecycleReconcileAction {
+    Ready(&'static str),
+    Apply,
+    Delete,
+    Failed(&'static str),
+}
+
 impl PolicyDocument {
     fn parse(raw: &str) -> Result<Self, String> {
         Ok(Self {
@@ -153,8 +171,12 @@ impl ProvisioningRun<'_> {
         self.previous.users.iter().find(|item| item.name == name)
     }
 
-    fn previous_bucket(&self, name: &str) -> Option<&ProvisioningItemStatus> {
+    fn previous_bucket_status(&self, name: &str) -> Option<&ProvisioningBucketStatus> {
         self.previous.buckets.iter().find(|item| item.name == name)
+    }
+
+    fn previous_bucket(&self, name: &str) -> Option<&ProvisioningItemStatus> {
+        self.previous_bucket_status(name).map(AsRef::as_ref)
     }
 
     fn push_policy(&mut self, item: ProvisioningItemStatus) {
@@ -179,8 +201,8 @@ impl ProvisioningRun<'_> {
         self.status.users.push(item);
     }
 
-    fn push_bucket(&mut self, item: ProvisioningItemStatus) {
-        self.log_item_transition("bucket", self.previous_bucket(&item.name), &item);
+    fn push_bucket(&mut self, item: ProvisioningBucketStatus) {
+        self.log_item_transition("bucket", self.previous_bucket(&item.name), item.as_ref());
         if item.state == ProvisioningItemState::Failed.as_str() {
             self.failures
                 .push((reason_from_str(&item.reason), item_message(&item)));
@@ -339,9 +361,14 @@ impl ProvisioningRun<'_> {
         self.status
             .policies
             .iter()
-            .chain(self.status.buckets.iter())
             .find(|item| item.state == ProvisioningItemState::Pending.as_str())
             .map(item_message)
+            .or_else(|| {
+                self.status.buckets.iter().find_map(|item| {
+                    (item.state == ProvisioningItemState::Pending.as_str())
+                        .then(|| item_message(item))
+                })
+            })
             .or_else(|| {
                 self.status.users.iter().find_map(|item| {
                     (item.state == ProvisioningItemState::Pending.as_str())
@@ -376,6 +403,13 @@ impl ProvisioningRun<'_> {
     fn retained_user(&self, previous: &ProvisioningUserStatus) -> ProvisioningUserStatus {
         let mut item = ProvisioningUserStatus::new(self.retained_item(previous.as_ref()));
         item.ownership = previous.ownership.clone();
+        item
+    }
+
+    fn retained_bucket(&self, previous: &ProvisioningBucketStatus) -> ProvisioningBucketStatus {
+        let mut item = ProvisioningBucketStatus::new(self.retained_item(previous.as_ref()));
+        item.lifecycle_desired_hash = previous.lifecycle_desired_hash.clone();
+        item.lifecycle_last_applied_hash = previous.lifecycle_last_applied_hash.clone();
         item
     }
 
@@ -424,6 +458,11 @@ impl ProvisioningRun<'_> {
                 reason,
                 message,
             );
+            let mut item = ProvisioningBucketStatus::new(item);
+            if let Some(previous) = self.previous_bucket_status(&bucket.name) {
+                item.lifecycle_desired_hash = previous.lifecycle_desired_hash.clone();
+                item.lifecycle_last_applied_hash = previous.lifecycle_last_applied_hash.clone();
+            }
             self.push_bucket(item);
         }
     }
@@ -450,7 +489,7 @@ impl ProvisioningRun<'_> {
         let buckets = desired_names(self.tenant.spec.buckets.iter().map(|bucket| &bucket.name));
         for previous in &self.previous.buckets {
             if !buckets.contains(&previous.name) {
-                self.status.buckets.push(self.retained_item(previous));
+                self.status.buckets.push(self.retained_bucket(previous));
             }
         }
     }
@@ -1620,7 +1659,7 @@ async fn persist_user_ownership_checkpoints(
         .unwrap_or_default();
     merge_provisioning_items(&mut provisioning.policies, &run.status.policies);
     merge_provisioning_user_items(&mut provisioning.users, &run.status.users);
-    merge_provisioning_items(&mut provisioning.buckets, &run.status.buckets);
+    merge_provisioning_bucket_items(&mut provisioning.buckets, &run.status.buckets);
     merge_provisioning_user_items(&mut provisioning.users, checkpoints);
     provisioning.observed_generation = run.tenant.metadata.generation;
     provisioning.phase = Some(ProvisioningPhase::Pending);
@@ -1737,6 +1776,19 @@ fn merge_provisioning_items(
 fn merge_provisioning_user_items(
     destination: &mut Vec<ProvisioningUserStatus>,
     updates: &[ProvisioningUserStatus],
+) {
+    for update in updates {
+        if let Some(item) = destination.iter_mut().find(|item| item.name == update.name) {
+            *item = update.clone();
+        } else {
+            destination.push(update.clone());
+        }
+    }
+}
+
+fn merge_provisioning_bucket_items(
+    destination: &mut Vec<ProvisioningBucketStatus>,
+    updates: &[ProvisioningBucketStatus],
 ) {
     for update in updates {
         if let Some(item) = destination.iter_mut().find(|item| item.name == update.name) {
@@ -1973,6 +2025,21 @@ async fn reconcile_bucket(
     run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     bucket: &ProvisioningBucket,
+) -> ProvisioningBucketStatus {
+    let previous = run.previous_bucket_status(&bucket.name).cloned();
+    let item = reconcile_bucket_policy(run, client, bucket).await;
+    if item.state != ProvisioningItemState::Ready.as_str() {
+        let mut status = bucket_status_with_preserved_lifecycle(item, previous.as_ref());
+        status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
+        return status;
+    }
+    reconcile_bucket_lifecycle(run, client, bucket, previous.as_ref(), item).await
+}
+
+async fn reconcile_bucket_policy(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
 ) -> ProvisioningItemStatus {
     let previous = run.previous_bucket(&bucket.name).cloned();
     if let Err(message) = validate_bucket_name(&bucket.name) {
@@ -2126,6 +2193,426 @@ async fn reconcile_bucket(
         created_message,
     )
     .await
+}
+
+async fn reconcile_bucket_lifecycle(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    previous: Option<&ProvisioningBucketStatus>,
+    base_item: ProvisioningItemStatus,
+) -> ProvisioningBucketStatus {
+    let Some(spec) = bucket.lifecycle.as_ref() else {
+        let mut status = bucket_status_with_preserved_lifecycle(base_item, previous);
+        status.lifecycle_desired_hash = None;
+        return status;
+    };
+
+    let desired = match lifecycle_configuration(spec) {
+        Ok(configuration) => configuration,
+        Err(message) => {
+            let item = replace_bucket_item_state(
+                run,
+                previous,
+                &base_item,
+                ProvisioningItemState::Failed,
+                Reason::BucketLifecycleApplyFailed,
+                message,
+            );
+            let mut status = bucket_status_with_preserved_lifecycle(item, previous);
+            status.lifecycle_desired_hash = None;
+            return status;
+        }
+    };
+    let desired_document = desired.as_ref().map(AdminLifecycleConfiguration::to_xml);
+    let desired_hash = match desired_document.as_deref() {
+        Some(document) => match canonicalize_bucket_lifecycle_xml(document) {
+            Ok(document) => Some(hash_document(&document)),
+            Err(error) => {
+                let item = replace_bucket_item_state(
+                    run,
+                    previous,
+                    &base_item,
+                    ProvisioningItemState::Failed,
+                    Reason::BucketLifecycleApplyFailed,
+                    format!("failed to encode RustFS bucket lifecycle configuration: {error}"),
+                );
+                return bucket_status_with_preserved_lifecycle(item, previous);
+            }
+        },
+        None => None,
+    };
+
+    let live_document = match client
+        .get_bucket_lifecycle_configuration(&bucket.name)
+        .await
+    {
+        Ok(document) => document,
+        Err(error) => {
+            let item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &base_item,
+                Reason::BucketLifecycleApplyFailed,
+                error,
+                "failed to read RustFS bucket lifecycle configuration",
+            );
+            return finalize_bucket_lifecycle_status(item, previous, desired_hash, false);
+        }
+    };
+    let live_hash = match live_document.as_deref() {
+        Some(document) => match canonicalize_bucket_lifecycle_xml(document) {
+            Ok(document) => Some(hash_document(&document)),
+            Err(error) => {
+                let item = bucket_item_from_admin_error(
+                    run,
+                    previous,
+                    &base_item,
+                    Reason::BucketLifecycleApplyFailed,
+                    error,
+                    "failed to normalize live RustFS bucket lifecycle configuration",
+                );
+                return finalize_bucket_lifecycle_status(item, previous, desired_hash, false);
+            }
+        },
+        None => None,
+    };
+
+    let action = lifecycle_reconcile_action(
+        previous.and_then(|item| item.lifecycle_last_applied_hash.as_deref()),
+        live_hash.as_deref(),
+        desired_hash.as_deref(),
+    );
+    let (item, applied) = match action {
+        LifecycleReconcileAction::Ready(message) => (
+            replace_bucket_item_state(
+                run,
+                previous,
+                &base_item,
+                ProvisioningItemState::Ready,
+                Reason::ProvisioningConfigured,
+                append_bucket_message(&base_item, message),
+            ),
+            true,
+        ),
+        LifecycleReconcileAction::Apply => {
+            if let Some(configuration) = desired.as_ref() {
+                match client
+                    .put_bucket_lifecycle_configuration(&bucket.name, configuration)
+                    .await
+                {
+                    Ok(()) => (
+                        replace_bucket_item_state(
+                            run,
+                            previous,
+                            &base_item,
+                            ProvisioningItemState::Ready,
+                            Reason::ProvisioningConfigured,
+                            append_bucket_message(
+                                &base_item,
+                                "RustFS bucket lifecycle configuration was applied",
+                            ),
+                        ),
+                        true,
+                    ),
+                    Err(error) => (
+                        bucket_item_from_admin_error(
+                            run,
+                            previous,
+                            &base_item,
+                            Reason::BucketLifecycleApplyFailed,
+                            error,
+                            "failed to apply RustFS bucket lifecycle configuration",
+                        ),
+                        false,
+                    ),
+                }
+            } else {
+                (
+                    replace_bucket_item_state(
+                        run,
+                        previous,
+                        &base_item,
+                        ProvisioningItemState::Failed,
+                        Reason::BucketLifecycleApplyFailed,
+                        "bucket lifecycle apply action is missing a desired configuration",
+                    ),
+                    false,
+                )
+            }
+        }
+        LifecycleReconcileAction::Delete => {
+            match client
+                .delete_bucket_lifecycle_configuration(&bucket.name)
+                .await
+            {
+                Ok(()) => (
+                    replace_bucket_item_state(
+                        run,
+                        previous,
+                        &base_item,
+                        ProvisioningItemState::Ready,
+                        Reason::ProvisioningConfigured,
+                        append_bucket_message(
+                            &base_item,
+                            "RustFS bucket lifecycle configuration was removed",
+                        ),
+                    ),
+                    true,
+                ),
+                Err(error) => (
+                    bucket_item_from_admin_error(
+                        run,
+                        previous,
+                        &base_item,
+                        Reason::BucketLifecycleApplyFailed,
+                        error,
+                        "failed to remove RustFS bucket lifecycle configuration",
+                    ),
+                    false,
+                ),
+            }
+        }
+        LifecycleReconcileAction::Failed(message) => (
+            replace_bucket_item_state(
+                run,
+                previous,
+                &base_item,
+                ProvisioningItemState::Failed,
+                Reason::BucketLifecycleConflict,
+                message,
+            ),
+            false,
+        ),
+    };
+
+    finalize_bucket_lifecycle_status(item, previous, desired_hash, applied)
+}
+
+fn lifecycle_configuration(
+    spec: &BucketLifecycleSpec,
+) -> Result<Option<AdminLifecycleConfiguration>, String> {
+    match spec.state {
+        BucketLifecycleState::Absent => {
+            if spec.rules.is_empty() {
+                return Ok(None);
+            }
+            return Err("Absent bucket lifecycle must not contain rules".to_string());
+        }
+        BucketLifecycleState::Present if spec.rules.is_empty() => {
+            return Err("Present bucket lifecycle must contain at least one rule".to_string());
+        }
+        BucketLifecycleState::Present => {}
+    }
+    if spec.rules.len() > MAX_BUCKET_LIFECYCLE_RULES as usize {
+        return Err(format!(
+            "bucket lifecycle cannot contain more than {MAX_BUCKET_LIFECYCLE_RULES} rules"
+        ));
+    }
+
+    let mut ids = BTreeSet::new();
+    let mut rules = Vec::with_capacity(spec.rules.len());
+    for rule in &spec.rules {
+        let id_length = rule.id.len();
+        if id_length == 0 || id_length > MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH as usize {
+            return Err(format!(
+                "bucket lifecycle rule ID must contain between 1 and {MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH} UTF-8 bytes"
+            ));
+        }
+        if !is_valid_xml_text(&rule.id) {
+            return Err(format!(
+                "bucket lifecycle rule ID '{}' contains characters that cannot be represented in S3 XML",
+                rule.id
+            ));
+        }
+        if !is_valid_xml_text(&rule.filter.prefix) {
+            return Err(format!(
+                "bucket lifecycle rule '{}' prefix contains characters that cannot be represented in S3 XML",
+                rule.id
+            ));
+        }
+        if !ids.insert(rule.id.as_str()) {
+            return Err(format!(
+                "bucket lifecycle rule ID '{}' must be unique",
+                rule.id
+            ));
+        }
+        if rule.expiration.is_none() && rule.abort_incomplete_multipart_upload.is_none() {
+            return Err(format!(
+                "bucket lifecycle rule '{}' must configure expiration or abortIncompleteMultipartUpload",
+                rule.id
+            ));
+        }
+        if rule
+            .expiration
+            .as_ref()
+            .is_some_and(|value| value.days <= 0)
+        {
+            return Err(format!(
+                "bucket lifecycle rule '{}' expiration.days must be greater than zero",
+                rule.id
+            ));
+        }
+        if rule
+            .abort_incomplete_multipart_upload
+            .as_ref()
+            .is_some_and(|value| value.days_after_initiation <= 0)
+        {
+            return Err(format!(
+                "bucket lifecycle rule '{}' abortIncompleteMultipartUpload.daysAfterInitiation must be greater than zero",
+                rule.id
+            ));
+        }
+
+        rules.push(AdminLifecycleRule {
+            id: rule.id.clone(),
+            status: match rule.status {
+                BucketLifecycleRuleStatus::Enabled => AdminLifecycleRuleStatus::Enabled,
+                BucketLifecycleRuleStatus::Disabled => AdminLifecycleRuleStatus::Disabled,
+            },
+            prefix: rule.filter.prefix.clone(),
+            expiration: rule
+                .expiration
+                .as_ref()
+                .map(|value| AdminLifecycleExpiration { days: value.days }),
+            abort_incomplete_multipart_upload: rule.abort_incomplete_multipart_upload.as_ref().map(
+                |value| AdminLifecycleAbort {
+                    days_after_initiation: value.days_after_initiation,
+                },
+            ),
+        });
+    }
+    Ok(Some(AdminLifecycleConfiguration { rules }))
+}
+
+fn lifecycle_desired_hash(spec: &BucketLifecycleSpec) -> Option<String> {
+    lifecycle_configuration(spec)
+        .ok()
+        .flatten()
+        .map(|configuration| configuration.to_xml())
+        .and_then(|document| canonicalize_bucket_lifecycle_xml(&document).ok())
+        .map(|document| hash_document(&document))
+}
+
+fn is_valid_xml_text(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\u{9}' | '\u{A}' | '\u{D}')
+            || ('\u{20}'..='\u{D7FF}').contains(&character)
+            || ('\u{E000}'..='\u{FFFD}').contains(&character)
+            || ('\u{10000}'..='\u{10FFFF}').contains(&character)
+    })
+}
+
+fn lifecycle_reconcile_action(
+    last_applied_hash: Option<&str>,
+    live_hash: Option<&str>,
+    desired_hash: Option<&str>,
+) -> LifecycleReconcileAction {
+    match (desired_hash, last_applied_hash, live_hash) {
+        (Some(_), _, None) => LifecycleReconcileAction::Apply,
+        (Some(desired), None, Some(live)) if desired == live => {
+            LifecycleReconcileAction::Ready("RustFS bucket lifecycle configuration matches spec")
+        }
+        (Some(_), None, Some(_)) => LifecycleReconcileAction::Failed(
+            "Live RustFS bucket lifecycle configuration is not owned by this status; refusing to replace it",
+        ),
+        (Some(desired), Some(last), Some(live)) if last == live && desired != live => {
+            LifecycleReconcileAction::Apply
+        }
+        (Some(desired), Some(_), Some(live)) if desired == live => {
+            LifecycleReconcileAction::Ready("RustFS bucket lifecycle configuration matches spec")
+        }
+        (Some(_), Some(_), Some(_)) => LifecycleReconcileAction::Failed(
+            "Live RustFS bucket lifecycle configuration changed since the operator last applied it",
+        ),
+        (None, _, None) => {
+            LifecycleReconcileAction::Ready("RustFS bucket lifecycle configuration is absent")
+        }
+        (None, Some(last), Some(live)) if last == live => LifecycleReconcileAction::Delete,
+        (None, None, Some(_)) => LifecycleReconcileAction::Failed(
+            "Live RustFS bucket lifecycle configuration is not owned by this status; refusing to delete it",
+        ),
+        (None, Some(_), Some(_)) => LifecycleReconcileAction::Failed(
+            "Live RustFS bucket lifecycle configuration changed since the operator last applied it",
+        ),
+    }
+}
+
+fn bucket_status_with_preserved_lifecycle(
+    item: ProvisioningItemStatus,
+    previous: Option<&ProvisioningBucketStatus>,
+) -> ProvisioningBucketStatus {
+    let mut status = ProvisioningBucketStatus::new(item);
+    status.lifecycle_desired_hash = previous.and_then(|item| item.lifecycle_desired_hash.clone());
+    status.lifecycle_last_applied_hash =
+        previous.and_then(|item| item.lifecycle_last_applied_hash.clone());
+    status
+}
+
+fn finalize_bucket_lifecycle_status(
+    item: ProvisioningItemStatus,
+    previous: Option<&ProvisioningBucketStatus>,
+    desired_hash: Option<String>,
+    applied: bool,
+) -> ProvisioningBucketStatus {
+    let mut status = ProvisioningBucketStatus::new(item);
+    status.lifecycle_desired_hash = desired_hash.clone();
+    status.lifecycle_last_applied_hash = if applied {
+        desired_hash
+    } else {
+        previous.and_then(|item| item.lifecycle_last_applied_hash.clone())
+    };
+    status
+}
+
+fn replace_bucket_item_state(
+    run: &ProvisioningRun<'_>,
+    previous: Option<&ProvisioningBucketStatus>,
+    base_item: &ProvisioningItemStatus,
+    state: ProvisioningItemState,
+    reason: Reason,
+    message: impl Into<String>,
+) -> ProvisioningItemStatus {
+    let mut item = run.item(
+        previous.map(AsRef::as_ref),
+        &base_item.name,
+        state,
+        reason,
+        message,
+    );
+    copy_bucket_configuration_status(&mut item, base_item);
+    item
+}
+
+fn bucket_item_from_admin_error(
+    run: &mut ProvisioningRun<'_>,
+    previous: Option<&ProvisioningBucketStatus>,
+    base_item: &ProvisioningItemStatus,
+    reason: Reason,
+    error: RustfsClientError,
+    context: &'static str,
+) -> ProvisioningItemStatus {
+    let mut item = run.item_from_admin_error(previous, &base_item.name, reason, error, context);
+    copy_bucket_configuration_status(&mut item, base_item);
+    item
+}
+
+fn copy_bucket_configuration_status(
+    target: &mut ProvisioningItemStatus,
+    source: &ProvisioningItemStatus,
+) {
+    target.desired_hash = source.desired_hash.clone();
+    target.last_applied_hash = source.last_applied_hash.clone();
+    target.last_applied_generation = source.last_applied_generation;
+    target.region = source.region.clone();
+    target.object_lock = source.object_lock;
+}
+
+fn append_bucket_message(item: &ProvisioningItemStatus, lifecycle_message: &str) -> String {
+    item.message
+        .as_deref()
+        .map(|message| format!("{message}; {lifecycle_message}"))
+        .unwrap_or_else(|| lifecycle_message.to_string())
 }
 
 async fn desired_bucket_policy(
@@ -2613,6 +3100,8 @@ fn reason_from_str(reason: &str) -> Reason {
         "BucketObjectLockConflict" => Reason::BucketObjectLockConflict,
         "BucketPolicyApplyFailed" => Reason::BucketPolicyApplyFailed,
         "BucketPolicyConflict" => Reason::BucketPolicyConflict,
+        "BucketLifecycleApplyFailed" => Reason::BucketLifecycleApplyFailed,
+        "BucketLifecycleConflict" => Reason::BucketLifecycleConflict,
         _ => Reason::ProvisioningFailed,
     }
 }
@@ -2626,6 +3115,7 @@ mod tests {
         body::Body,
         extract::State,
         http::{Request, StatusCode},
+        response::{IntoResponse, Response},
         routing::{any, get, put},
     };
     use http_body_util::BodyExt;
@@ -2648,6 +3138,105 @@ mod tests {
     #[derive(Clone, Default)]
     struct UserCredentialCapture {
         body: Arc<Mutex<String>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct LifecycleCapture {
+        live: Arc<Mutex<Option<String>>>,
+        put_body: Arc<Mutex<String>>,
+        get_count: Arc<AtomicUsize>,
+        put_count: Arc<AtomicUsize>,
+        delete_count: Arc<AtomicUsize>,
+        get_error_status: Arc<AtomicUsize>,
+    }
+
+    async fn lifecycle_bucket_handler(
+        State(capture): State<LifecycleCapture>,
+        request: Request<Body>,
+    ) -> Response {
+        let method = request.method().clone();
+        let lifecycle = request.uri().query().unwrap_or("") == "lifecycle=";
+        if !lifecycle {
+            return StatusCode::OK.into_response();
+        }
+        match method {
+            axum::http::Method::GET => {
+                capture.get_count.fetch_add(1, Ordering::SeqCst);
+                let error_status = capture.get_error_status.load(Ordering::SeqCst);
+                if error_status != 0 {
+                    return StatusCode::from_u16(error_status as u16)
+                        .expect("configured test status is valid")
+                        .into_response();
+                }
+                match capture.live.lock().await.clone() {
+                    Some(document) => (StatusCode::OK, document).into_response(),
+                    None => (
+                        StatusCode::NOT_FOUND,
+                        "<Error><Code>NoSuchLifecycleConfiguration</Code></Error>",
+                    )
+                        .into_response(),
+                }
+            }
+            axum::http::Method::PUT => {
+                capture.put_count.fetch_add(1, Ordering::SeqCst);
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .expect("lifecycle request body");
+                *capture.put_body.lock().await =
+                    String::from_utf8(body.to_vec()).expect("lifecycle body is UTF-8");
+                StatusCode::OK.into_response()
+            }
+            axum::http::Method::DELETE => {
+                capture.delete_count.fetch_add(1, Ordering::SeqCst);
+                StatusCode::NO_CONTENT.into_response()
+            }
+            _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        }
+    }
+
+    async fn lifecycle_test_client(
+        capture: LifecycleCapture,
+    ) -> (RustfsAdminClient, tokio::task::JoinHandle<()>) {
+        let router = Router::new()
+            .route("/app-data", any(lifecycle_bucket_handler))
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        (
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret"),
+            server,
+        )
+    }
+
+    fn present_lifecycle_bucket(days: i32) -> ProvisioningBucket {
+        serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "lifecycle": {
+                "state": "Present",
+                "rules": [{
+                    "id": "expire-logs",
+                    "status": "Enabled",
+                    "filter": {"prefix": "logs/"},
+                    "expiration": {"days": days}
+                }]
+            }
+        }))
+        .expect("lifecycle bucket should deserialize")
+    }
+
+    fn absent_lifecycle_bucket() -> ProvisioningBucket {
+        serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "lifecycle": {"state": "Absent"}
+        }))
+        .expect("Absent lifecycle bucket should deserialize")
     }
 
     #[test]
@@ -4452,13 +5041,15 @@ mod tests {
         let user = provisioning_user("app-user", "app-user-secret", "readwrite");
         let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
         let mut run = empty_run(&ctx, &tenant);
-        run.status.buckets.push(run.item(
-            None::<&ProvisioningItemStatus>,
-            "app-data",
-            ProvisioningItemState::Pending,
-            Reason::ProvisioningPending,
-            "failed to create RustFS bucket: upstream returned 503",
-        ));
+        run.status
+            .buckets
+            .push(ProvisioningBucketStatus::new(run.item(
+                None::<&ProvisioningItemStatus>,
+                "app-data",
+                ProvisioningItemState::Pending,
+                Reason::ProvisioningPending,
+                "failed to create RustFS bucket: upstream returned 503",
+            )));
 
         match run.finish().outcome {
             ProvisioningOutcome::Retry { persist_status, .. } => {
@@ -4562,6 +5153,290 @@ mod tests {
             _ => panic!("permanent bucket create errors must not retry"),
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn present_bucket_lifecycle_is_applied_when_live_configuration_is_missing() {
+        let capture = LifecycleCapture::default();
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &present_lifecycle_bucket(30)).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.get_count.load(Ordering::SeqCst), 1);
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 1);
+        assert_eq!(capture.delete_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            item.lifecycle_desired_hash,
+            item.lifecycle_last_applied_hash
+        );
+        assert!(item.lifecycle_desired_hash.is_some());
+        let body = capture.put_body.lock().await;
+        assert!(body.contains("<ID>expire-logs</ID>"));
+        assert!(body.contains("<Prefix>logs/</Prefix>"));
+        assert!(body.contains("<Days>30</Days>"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn present_bucket_lifecycle_refuses_to_replace_unmanaged_live_configuration() {
+        let capture = LifecycleCapture::default();
+        *capture.live.lock().await = Some(
+            concat!(
+                "<LifecycleConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+                "<Rule><Expiration><Days>7</Days></Expiration><Filter></Filter>",
+                "<ID>external</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+            )
+            .to_string(),
+        );
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &present_lifecycle_bucket(30)).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketLifecycleConflict.as_str());
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 0);
+        assert_eq!(capture.delete_count.load(Ordering::SeqCst), 0);
+        assert!(item.lifecycle_desired_hash.is_some());
+        assert!(item.lifecycle_last_applied_hash.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matching_live_bucket_lifecycle_is_adopted_without_write() {
+        let bucket = present_lifecycle_bucket(30);
+        let live = lifecycle_configuration(bucket.lifecycle.as_ref().expect("lifecycle spec"))
+            .expect("valid lifecycle")
+            .expect("Present lifecycle")
+            .to_xml();
+        let capture = LifecycleCapture::default();
+        *capture.live.lock().await = Some(live);
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.get_count.load(Ordering::SeqCst), 1);
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            item.lifecycle_desired_hash,
+            item.lifecycle_last_applied_hash
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn transient_bucket_lifecycle_read_preserves_ownership_and_retries() {
+        let capture = LifecycleCapture::default();
+        capture.get_error_status.store(
+            StatusCode::SERVICE_UNAVAILABLE.as_u16() as usize,
+            Ordering::SeqCst,
+        );
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let mut previous = ProvisioningBucketStatus::new(ProvisioningItemStatus::new(
+            "app-data",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        ));
+        previous.lifecycle_last_applied_hash = Some("owned-live".to_string());
+        run.previous.buckets.push(previous);
+
+        let item = reconcile_bucket(&mut run, &client, &present_lifecycle_bucket(30)).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Pending.as_str());
+        assert_eq!(item.reason, Reason::ProvisioningPending.as_str());
+        assert_eq!(
+            item.lifecycle_last_applied_hash.as_deref(),
+            Some("owned-live")
+        );
+        assert!(run.retry.is_some());
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn oversized_bucket_lifecycle_response_fails_without_write() {
+        let capture = LifecycleCapture::default();
+        *capture.live.lock().await = Some(format!(
+            "<LifecycleConfiguration>{}</LifecycleConfiguration>",
+            "x".repeat(4 * 1024 * 1024)
+        ));
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &present_lifecycle_bucket(30)).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketLifecycleApplyFailed.as_str());
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 0);
+        assert!(run.retry.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn absent_bucket_lifecycle_deletes_only_matching_owned_configuration() {
+        let live = concat!(
+            "<LifecycleConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+            "<Rule><Expiration><Days>30</Days></Expiration><Filter><Prefix>logs/</Prefix></Filter>",
+            "<ID>expire-logs</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let live_hash = hash_document(
+            &canonicalize_bucket_lifecycle_xml(live).expect("live lifecycle should normalize"),
+        );
+        let capture = LifecycleCapture::default();
+        *capture.live.lock().await = Some(live.to_string());
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let mut previous = ProvisioningBucketStatus::new(ProvisioningItemStatus::new(
+            "app-data",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        ));
+        previous.lifecycle_desired_hash = Some(live_hash.clone());
+        previous.lifecycle_last_applied_hash = Some(live_hash);
+        run.previous.buckets.push(previous);
+
+        let item = reconcile_bucket(&mut run, &client, &absent_lifecycle_bucket()).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.delete_count.load(Ordering::SeqCst), 1);
+        assert!(item.lifecycle_desired_hash.is_none());
+        assert!(item.lifecycle_last_applied_hash.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn omitted_bucket_lifecycle_performs_no_lifecycle_request_and_preserves_ownership() {
+        let capture = LifecycleCapture::default();
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let mut previous = ProvisioningBucketStatus::new(ProvisioningItemStatus::new(
+            "app-data",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        ));
+        previous.lifecycle_desired_hash = Some("old-desired".to_string());
+        previous.lifecycle_last_applied_hash = Some("owned-live".to_string());
+        run.previous.buckets.push(previous);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        };
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.get_count.load(Ordering::SeqCst), 0);
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 0);
+        assert_eq!(capture.delete_count.load(Ordering::SeqCst), 0);
+        assert!(item.lifecycle_desired_hash.is_none());
+        assert_eq!(
+            item.lifecycle_last_applied_hash.as_deref(),
+            Some("owned-live")
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn lifecycle_reconcile_action_protects_owned_and_unmanaged_configurations() {
+        assert_eq!(
+            lifecycle_reconcile_action(None, None, Some("desired")),
+            LifecycleReconcileAction::Apply
+        );
+        assert_eq!(
+            lifecycle_reconcile_action(None, Some("desired"), Some("desired")),
+            LifecycleReconcileAction::Ready("RustFS bucket lifecycle configuration matches spec")
+        );
+        assert!(matches!(
+            lifecycle_reconcile_action(None, Some("external"), Some("desired")),
+            LifecycleReconcileAction::Failed(_)
+        ));
+        assert_eq!(
+            lifecycle_reconcile_action(Some("owned"), Some("owned"), Some("changed")),
+            LifecycleReconcileAction::Apply
+        );
+        assert_eq!(
+            lifecycle_reconcile_action(Some("owned"), Some("owned"), None),
+            LifecycleReconcileAction::Delete
+        );
+        assert!(matches!(
+            lifecycle_reconcile_action(None, Some("external"), None),
+            LifecycleReconcileAction::Failed(_)
+        ));
+
+        let mut bucket = present_lifecycle_bucket(30);
+        bucket.lifecycle.as_mut().expect("lifecycle").rules[0]
+            .filter
+            .prefix = "invalid\0prefix".to_string();
+        assert!(
+            lifecycle_configuration(bucket.lifecycle.as_ref().expect("lifecycle")).is_err(),
+            "invalid XML characters must fail before an S3 request"
+        );
+    }
+
+    #[test]
+    fn lifecycle_configuration_validates_empty_and_exact_boundaries() {
+        let mut bucket = present_lifecycle_bucket(1);
+        let spec = bucket.lifecycle.as_mut().expect("lifecycle");
+        let template = spec.rules[0].clone();
+        spec.rules = (0..MAX_BUCKET_LIFECYCLE_RULES)
+            .map(|index| {
+                let mut rule = template.clone();
+                rule.id = format!("rule-{index}");
+                rule
+            })
+            .collect();
+        assert!(lifecycle_configuration(spec).is_ok());
+        let mut overflow = template.clone();
+        overflow.id = "overflow".to_string();
+        spec.rules.push(overflow);
+        assert!(lifecycle_configuration(spec).is_err());
+
+        spec.rules = vec![template.clone()];
+        spec.rules[0].id = "x".repeat(MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH as usize);
+        assert!(lifecycle_configuration(spec).is_ok());
+        spec.rules[0].id.push('x');
+        assert!(lifecycle_configuration(spec).is_err());
+        spec.rules[0].id = "界".repeat(86);
+        assert!(
+            lifecycle_configuration(spec).is_err(),
+            "RustFS enforces the lifecycle rule ID limit in UTF-8 bytes"
+        );
+
+        spec.rules.clear();
+        assert!(lifecycle_configuration(spec).is_err());
+        spec.state = BucketLifecycleState::Absent;
+        assert_eq!(lifecycle_configuration(spec), Ok(None));
+        spec.rules.push(template);
+        assert!(lifecycle_configuration(spec).is_err());
+
+        let zero_days = present_lifecycle_bucket(0);
+        assert!(lifecycle_configuration(zero_days.lifecycle.as_ref().expect("lifecycle")).is_err());
     }
 
     #[tokio::test]
@@ -4677,7 +5552,7 @@ mod tests {
             Reason::ProvisioningConfigured.as_str(),
         );
         previous.last_applied_hash = Some(live_hash.clone());
-        run.previous.buckets.push(previous);
+        run.previous.buckets.push(previous.into());
         let omitted_bucket = ProvisioningBucket {
             name: "app-data".to_string(),
             ..Default::default()

@@ -219,9 +219,18 @@ spec:
   buckets:
     - name: app-data
       objectLock: true
+      lifecycle:
+        state: Present
+        rules:
+          - id: expire-logs
+            status: Enabled
+            filter:
+              prefix: logs/
+            expiration:
+              days: 30
 ```
 
-Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].credsSecret.name` selects the credentials Secret; when omitted, the operator falls back to a Secret named after `users[].name` for compatibility with existing manifests. The operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object. Provisioned resources are retained when removed from the Tenant spec.
+Policy ConfigMaps and user Secrets must live in the Tenant namespace. `users[].credsSecret.name` selects the credentials Secret; when omitted, the operator falls back to a Secret named after `users[].name` for compatibility with existing manifests. Bucket lifecycle supports expiration and incomplete multipart upload cleanup rules. Omission leaves lifecycle unmanaged; `state: Absent` deletes only a configuration whose live hash still matches the Operator's ownership record. The operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object. Provisioned resources are retained when removed from the Tenant spec.
 
 ### RBAC Configuration
 
