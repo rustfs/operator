@@ -32,6 +32,11 @@ mod pool_ops;
 /// s3_ops: bucket/object-lock operations for S3-compatible endpoints.
 #[path = "s3_ops.rs"]
 mod s3_ops;
+pub use s3_ops::{
+    BucketLifecycleAbortIncompleteMultipartUpload, BucketLifecycleConfiguration,
+    BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleStatus,
+    canonicalize_bucket_lifecycle_xml,
+};
 /// sts_ops: temporary credential flows.
 #[path = "sts_ops.rs"]
 mod sts_ops;
@@ -227,6 +232,7 @@ pub enum RustfsClientError {
         status: StatusCode,
         detail: Option<String>,
     },
+    InvalidLifecycleConfigurationResponse,
     ParseResponseFailed,
     SigningFailed,
 }
@@ -267,6 +273,9 @@ impl std::fmt::Display for RustfsClientError {
                     write!(f, ": {detail}")?;
                 }
                 Ok(())
+            }
+            Self::InvalidLifecycleConfigurationResponse => {
+                write!(f, "invalid bucket lifecycle configuration response")
             }
             Self::ParseResponseFailed => write!(f, "failed to parse AssumeRole response"),
             Self::SigningFailed => write!(f, "failed to compute request signature"),
@@ -312,6 +321,7 @@ impl RustfsClientError {
             | Self::InvalidTenantTlsCa
             | Self::TlsClientBuildFailed
             | Self::RequestBuildFailed
+            | Self::InvalidLifecycleConfigurationResponse
             | Self::SigningFailed => false,
         }
     }

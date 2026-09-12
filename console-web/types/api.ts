@@ -126,7 +126,29 @@ export interface ProvisioningBucket {
   name: string
   region?: string
   objectLock?: boolean
+  anonymous?: "Private" | "Download" | "Upload" | "Public"
+  policy?: PolicyDocumentSource
+  lifecycle?: BucketLifecycleSpec
   deletionPolicy?: ProvisioningDeletionPolicy
+}
+
+export interface BucketLifecycleSpec {
+  state: "Present" | "Absent"
+  rules?: BucketLifecycleRule[]
+}
+
+export interface BucketLifecycleRule {
+  id: string
+  status: "Enabled" | "Disabled"
+  filter: {
+    prefix: string
+  }
+  expiration?: {
+    days: number
+  }
+  abortIncompleteMultipartUpload?: {
+    daysAfterInitiation: number
+  }
 }
 
 export interface ProvisioningItemStatus {
@@ -146,12 +168,17 @@ export interface ProvisioningItemStatus {
   objectLock?: boolean | null
 }
 
+export interface ProvisioningBucketStatus extends ProvisioningItemStatus {
+  lifecycleDesiredHash?: string | null
+  lifecycleLastAppliedHash?: string | null
+}
+
 export interface ProvisioningStatus {
   observedGeneration?: number | null
   phase?: "Pending" | "Ready" | "Failed"
   policies?: ProvisioningItemStatus[]
   users?: ProvisioningItemStatus[]
-  buckets?: ProvisioningItemStatus[]
+  buckets?: ProvisioningBucketStatus[]
 }
 
 export interface CreatePoolRequest {

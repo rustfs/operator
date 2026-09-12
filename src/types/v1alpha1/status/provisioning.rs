@@ -33,7 +33,7 @@ pub struct ProvisioningStatus {
     pub users: Vec<ProvisioningUserStatus>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub buckets: Vec<ProvisioningItemStatus>,
+    pub buckets: Vec<ProvisioningBucketStatus>,
 }
 
 impl ProvisioningStatus {
@@ -117,6 +117,57 @@ impl AsRef<ProvisioningItemStatus> for ProvisioningUserStatus {
     }
 }
 
+/// Bucket-specific provisioning status. Lifecycle ownership hashes are separate from the
+/// existing bucket-policy hashes while preserving the established flattened wire format.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisioningBucketStatus {
+    #[serde(flatten)]
+    pub item: ProvisioningItemStatus,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_desired_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_last_applied_hash: Option<String>,
+}
+
+impl ProvisioningBucketStatus {
+    pub fn new(item: ProvisioningItemStatus) -> Self {
+        Self {
+            item,
+            lifecycle_desired_hash: None,
+            lifecycle_last_applied_hash: None,
+        }
+    }
+}
+
+impl Deref for ProvisioningBucketStatus {
+    type Target = ProvisioningItemStatus;
+
+    fn deref(&self) -> &Self::Target {
+        &self.item
+    }
+}
+
+impl DerefMut for ProvisioningBucketStatus {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.item
+    }
+}
+
+impl AsRef<ProvisioningItemStatus> for ProvisioningBucketStatus {
+    fn as_ref(&self) -> &ProvisioningItemStatus {
+        &self.item
+    }
+}
+
+impl From<ProvisioningItemStatus> for ProvisioningBucketStatus {
+    fn from(item: ProvisioningItemStatus) -> Self {
+        Self::new(item)
+    }
+}
+
 impl ProvisioningItemState {
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -189,5 +240,30 @@ impl ProvisioningItemStatus {
 impl AsRef<ProvisioningItemStatus> for ProvisioningItemStatus {
     fn as_ref(&self) -> &ProvisioningItemStatus {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_bucket_status_deserializes_without_lifecycle_hashes() {
+        let status: ProvisioningStatus = serde_json::from_value(serde_json::json!({
+            "buckets": [{
+                "name": "app-data",
+                "state": "Ready",
+                "reason": "ProvisioningConfigured",
+                "lastAppliedHash": "bucket-policy-hash"
+            }]
+        }))
+        .expect("legacy bucket status should deserialize");
+
+        assert_eq!(
+            status.buckets[0].last_applied_hash.as_deref(),
+            Some("bucket-policy-hash")
+        );
+        assert!(status.buckets[0].lifecycle_desired_hash.is_none());
+        assert!(status.buckets[0].lifecycle_last_applied_hash.is_none());
     }
 }

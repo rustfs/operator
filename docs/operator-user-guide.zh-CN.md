@@ -816,6 +816,8 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
 - `spec.buckets`：bucket，以及可选的 object lock、匿名访问（`Private` / `Download` / `Upload` / `Public`）或来自 ConfigMap 的自定义 bucket policy。非 `Private` 的 `anonymous` 值与 `policy` 互斥。未设置 `policy` 时，显式设置 `anonymous: Private` 会删除此前由 Operator 应用的 bucket policy；若现有 policy 不归 Operator 管理，则报告冲突而不删除。为兼容旧对象，`Private` 与 `policy` 同时存在时继续以自定义 policy 为准。两者都省略时，Operator 不会改写已有 bucket policy，并会保留所有权记录供后续显式切换为 `Private` 时校验。
 
+每个 bucket 还可以通过 `lifecycle.state: Present` 声明一个或多个 S3 生命周期规则。当前 schema 支持按正整数天数过期对象，以及按正整数天数清理未完成的分片上传；每条规则必须有唯一 ID、`Enabled` 或 `Disabled` 状态，并显式指定 prefix filter（`prefix: ""` 表示全部对象）。`lifecycle.state: Absent` 表示请求删除，且不能包含规则。Operator 可以接管与声明完全相同的现有配置，但没有 `status.provisioning.buckets` 中匹配的所有权哈希时，不会覆盖或删除不同的现有配置。省略 `lifecycle` 时不会调用 Lifecycle API，也不会改动现有配置。
+
 Kubernetes 或 RustFS 管理/S3 API 的瞬时失败（超时、429、5xx、连接错误、TLS 未就绪）会把 provisioning 条目保持为 `Pending` 并重新入队，而不会把 Tenant 标为 `Failed`。永久性 4xx 配置错误仍会失败并等待 spec 或对象变更。
 
 ConfigMap 和 user Secret 必须位于 Tenant namespace。Operator 会从 Tenant spec 建立反向引用索引，因此被引用资源的创建或更新会触发所有引用它的 Tenant reconcile；无需要求或修改资源标签，也不需要对这些资源拥有写权限。
@@ -886,6 +888,21 @@ spec:
     - name: app-data
       objectLock: true
       anonymous: Download
+      lifecycle:
+        state: Present
+        rules:
+          - id: expire-old-logs
+            status: Enabled
+            filter:
+              prefix: logs/
+            expiration:
+              days: 30
+          - id: cleanup-incomplete-uploads
+            status: Enabled
+            filter:
+              prefix: ""
+            abortIncompleteMultipartUpload:
+              daysAfterInitiation: 1
 ```
 
 删除行为是保守的：从 Tenant spec 移除已 provisioning 的资源时，实际 RustFS 资源会保留。

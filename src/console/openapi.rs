@@ -55,11 +55,15 @@ use crate::console::models::topology::{
     TopologyOverviewResponse, TopologyPod, TopologyPool, TopologyTenant, TopologyTenantSummary,
 };
 use crate::types::v1alpha1::provisioning::{
-    BucketAnonymousAccess, ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket,
-    ProvisioningDeletionPolicy, ProvisioningPolicy, ProvisioningUser, UserCredentialsSecretRef,
+    BucketAnonymousAccess, BucketLifecycleAbortIncompleteMultipartUpload,
+    BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleFilter,
+    BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState, ConfigMapKeyReference,
+    PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy, ProvisioningPolicy,
+    ProvisioningUser, UserCredentialsSecretRef,
 };
 use crate::types::v1alpha1::status::provisioning::{
-    ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus,
+    ProvisioningBucketStatus, ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase,
+    ProvisioningStatus,
 };
 
 #[derive(OpenApi)]
@@ -117,6 +121,7 @@ use crate::types::v1alpha1::status::provisioning::{
         ProvisioningStatus,
         ProvisioningPhase,
         ProvisioningItemStatus,
+        ProvisioningBucketStatus,
         ProvisioningItemState,
         ProvisioningPolicy,
         ProvisioningUser,
@@ -126,6 +131,13 @@ use crate::types::v1alpha1::status::provisioning::{
         PolicyDocumentSource,
         ConfigMapKeyReference,
         BucketAnonymousAccess,
+        BucketLifecycleSpec,
+        BucketLifecycleState,
+        BucketLifecycleRule,
+        BucketLifecycleRuleStatus,
+        BucketLifecycleRuleFilter,
+        BucketLifecycleExpiration,
+        BucketLifecycleAbortIncompleteMultipartUpload,
         CreateTenantRequest,
         CreatePoolRequest,
         PoolInfo,
@@ -773,6 +785,8 @@ mod tests {
             .expect("schemas exist");
 
         assert!(schemas.contains_key("ProvisioningStatus"));
+        assert!(schemas.contains_key("ProvisioningBucketStatus"));
+        assert!(schemas.contains_key("BucketLifecycleSpec"));
         assert!(schemas.contains_key("UserCredentialsSecretRef"));
         assert_eq!(
             spec.pointer("/components/schemas/TenantDetailsResponse/properties/provisioning/$ref")
@@ -795,6 +809,18 @@ mod tests {
             )
             .and_then(Value::as_str),
             Some("#/components/schemas/UserCredentialsSecretRef")
+        );
+        assert_eq!(
+            spec.pointer(
+                "/components/schemas/ProvisioningBucket/properties/lifecycle/oneOf/1/$ref",
+            )
+            .and_then(Value::as_str),
+            Some("#/components/schemas/BucketLifecycleSpec")
+        );
+        assert_eq!(
+            spec.pointer("/components/schemas/ProvisioningStatus/properties/buckets/items/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/ProvisioningBucketStatus")
         );
     }
 

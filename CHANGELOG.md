@@ -28,6 +28,7 @@ All notable changes to RustFS Operator are documented in this file. The format i
   for operator observability, STS, and Console sockets.
 - Tenant `spec.hostUsers` and OpenShift `hostUsers: false` defaults for `restricted-v3`.
 - Tenant bucket canned anonymous access and ConfigMap-sourced bucket policies.
+- Declarative Tenant bucket lifecycle rules with drift-aware ownership and explicit removal.
 - Helm chart `cosiDriver.enabled` to deploy the RustFS COSI (`rustfs.objectstorage.k8s.io`)
   driver alongside the upstream provisioner sidecar, with dedicated ServiceAccount/RBAC.
 

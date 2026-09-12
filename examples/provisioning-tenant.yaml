@@ -86,3 +86,18 @@ spec:
     - name: provisioning-demo-data
       objectLock: true
       anonymous: Download
+      lifecycle:
+        state: Present
+        rules:
+          - id: expire-old-logs
+            status: Enabled
+            filter:
+              prefix: logs/
+            expiration:
+              days: 30
+          - id: cleanup-incomplete-uploads
+            status: Enabled
+            filter:
+              prefix: ""
+            abortIncompleteMultipartUpload:
+              daysAfterInitiation: 1
