@@ -22,7 +22,8 @@ use super::helpers::{
 };
 use super::{ADMIN_SIGNING_SERVICE, CreateBucketResult, RustfsAdminClient, RustfsClientError};
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::escape::resolve_xml_entity;
+use quick_xml::events::{BytesCData, BytesRef, BytesStart, BytesText, Event};
 use reqwest::StatusCode;
 
 const S3_XML_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
@@ -108,7 +109,7 @@ impl BucketLifecycleConfiguration {
 pub fn canonicalize_bucket_lifecycle_xml(xml: &str) -> Result<String, RustfsClientError> {
     let mut reader = Reader::from_str(xml);
     let mut canonical = String::new();
-    let mut elements = Vec::new();
+    let mut elements = Vec::<CanonicalElement>::new();
     let mut saw_root = false;
 
     loop {
@@ -120,9 +121,11 @@ pub fn canonicalize_bucket_lifecycle_xml(xml: &str) -> Result<String, RustfsClie
                         return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
                     }
                     saw_root = true;
+                } else if let Some(parent) = elements.last_mut() {
+                    parent.start_child(&mut canonical);
                 }
                 append_start_element(&mut canonical, &element, &reader)?;
-                elements.push(name);
+                elements.push(CanonicalElement::new(name));
             }
             Ok(Event::Empty(element)) => {
                 let name = element_local_name(element.name().as_ref())?;
@@ -131,6 +134,8 @@ pub fn canonicalize_bucket_lifecycle_xml(xml: &str) -> Result<String, RustfsClie
                         return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
                     }
                     saw_root = true;
+                } else if let Some(parent) = elements.last_mut() {
+                    parent.start_child(&mut canonical);
                 }
                 append_start_element(&mut canonical, &element, &reader)?;
                 canonical.push_str("</");
@@ -139,35 +144,43 @@ pub fn canonicalize_bucket_lifecycle_xml(xml: &str) -> Result<String, RustfsClie
             }
             Ok(Event::End(element)) => {
                 let name = element_local_name(element.name().as_ref())?;
-                if elements.pop().as_deref() != Some(name.as_str()) {
+                let Some(mut current) = elements.pop() else {
+                    return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
+                };
+                if current.name != name {
                     return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
                 }
+                current.finish(&mut canonical);
                 canonical.push_str("</");
                 canonical.push_str(&name);
                 canonical.push('>');
             }
             Ok(Event::Text(text)) => {
-                let text = std::str::from_utf8(text.as_ref())
-                    .map_err(|_| RustfsClientError::InvalidLifecycleConfigurationResponse)?;
-                if !text.trim().is_empty() {
-                    if elements.is_empty() {
-                        return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
-                    }
-                    canonical.push_str(text);
-                }
+                append_canonical_text(
+                    &mut canonical,
+                    elements.last_mut(),
+                    decode_text(&text)?,
+                    false,
+                )?;
             }
             Ok(Event::CData(text)) => {
-                if elements.is_empty() {
-                    return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
-                }
-                let text = std::str::from_utf8(text.as_ref())
-                    .map_err(|_| RustfsClientError::InvalidLifecycleConfigurationResponse)?;
-                canonical.push_str("<![CDATA[");
-                canonical.push_str(text);
-                canonical.push_str("]]>");
+                append_canonical_text(
+                    &mut canonical,
+                    elements.last_mut(),
+                    decode_cdata(&text)?,
+                    true,
+                )?;
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                append_canonical_text(
+                    &mut canonical,
+                    elements.last_mut(),
+                    decode_reference(&reference)?,
+                    true,
+                )?;
             }
             Ok(Event::Decl(_) | Event::Comment(_) | Event::PI(_)) => {}
-            Ok(Event::DocType(_) | Event::GeneralRef(_)) => {
+            Ok(Event::DocType(_)) => {
                 return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
             }
             Ok(Event::Eof) => break,
@@ -179,6 +192,98 @@ pub fn canonicalize_bucket_lifecycle_xml(xml: &str) -> Result<String, RustfsClie
         return Err(RustfsClientError::InvalidLifecycleConfigurationResponse);
     }
     Ok(canonical)
+}
+
+struct CanonicalElement {
+    name: String,
+    has_child: bool,
+    has_text: bool,
+    pending_whitespace: String,
+}
+
+impl CanonicalElement {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            has_child: false,
+            has_text: false,
+            pending_whitespace: String::new(),
+        }
+    }
+
+    fn start_child(&mut self, canonical: &mut String) {
+        self.has_child = true;
+        if self.has_text {
+            canonical.push_str(&self.pending_whitespace);
+        }
+        self.pending_whitespace.clear();
+    }
+
+    fn finish(&mut self, canonical: &mut String) {
+        if !self.has_child || self.has_text {
+            canonical.push_str(&self.pending_whitespace);
+        }
+    }
+}
+
+fn append_canonical_text(
+    canonical: &mut String,
+    element: Option<&mut CanonicalElement>,
+    text: String,
+    explicit_text: bool,
+) -> Result<(), RustfsClientError> {
+    let Some(element) = element else {
+        return if !explicit_text && is_xml_whitespace(&text) {
+            Ok(())
+        } else {
+            Err(RustfsClientError::InvalidLifecycleConfigurationResponse)
+        };
+    };
+
+    let is_whitespace = is_xml_whitespace(&text);
+    let text = escape_xml(&text);
+    if is_whitespace && !explicit_text {
+        element.pending_whitespace.push_str(&text);
+    } else {
+        canonical.push_str(&element.pending_whitespace);
+        element.pending_whitespace.clear();
+        canonical.push_str(&text);
+        element.has_text = true;
+    }
+    Ok(())
+}
+
+fn is_xml_whitespace(text: &str) -> bool {
+    text.chars()
+        .all(|character| matches!(character, ' ' | '\t' | '\r' | '\n'))
+}
+
+fn decode_text(text: &BytesText<'_>) -> Result<String, RustfsClientError> {
+    text.xml10_content()
+        .map(|text| text.into_owned())
+        .map_err(|_| RustfsClientError::InvalidLifecycleConfigurationResponse)
+}
+
+fn decode_cdata(text: &BytesCData<'_>) -> Result<String, RustfsClientError> {
+    text.xml10_content()
+        .map(|text| text.into_owned())
+        .map_err(|_| RustfsClientError::InvalidLifecycleConfigurationResponse)
+}
+
+fn decode_reference(reference: &BytesRef<'_>) -> Result<String, RustfsClientError> {
+    if let Some(character) = reference
+        .resolve_char_ref()
+        .map_err(|_| RustfsClientError::InvalidLifecycleConfigurationResponse)?
+    {
+        return Ok(character.to_string());
+    }
+
+    let name = reference
+        .xml10_content()
+        .map_err(|_| RustfsClientError::InvalidLifecycleConfigurationResponse)?;
+    resolve_xml_entity(&name)
+        .map(str::to_string)
+        .ok_or(RustfsClientError::InvalidLifecycleConfigurationResponse)
 }
 
 async fn read_bucket_lifecycle_response(
@@ -770,6 +875,79 @@ mod tests {
         assert_ne!(
             canonicalize_bucket_lifecycle_xml(desired).unwrap(),
             canonicalize_bucket_lifecycle_xml(live).unwrap()
+        );
+    }
+
+    #[test]
+    fn lifecycle_canonicalization_preserves_leaf_whitespace_and_decodes_text() {
+        let prefix_with_one_space = concat!(
+            "<LifecycleConfiguration><Rule><Filter><Prefix> </Prefix></Filter>",
+            "<ID>all</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let prefix_with_two_spaces = concat!(
+            "<LifecycleConfiguration><Rule><Filter><Prefix>  </Prefix></Filter>",
+            "<ID>all</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let escaped_text = concat!(
+            "<LifecycleConfiguration><Rule><Filter><Prefix>logs/&apos;</Prefix></Filter>",
+            "<ID>all</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let literal_text = concat!(
+            "<LifecycleConfiguration><Rule><Filter><Prefix>logs/'</Prefix></Filter>",
+            "<ID>all</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let cdata_text = concat!(
+            "<LifecycleConfiguration><Rule><Filter><Prefix><![CDATA[logs/']]></Prefix></Filter>",
+            "<ID>all</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let numeric_reference = concat!(
+            "<LifecycleConfiguration><Rule><Filter><Prefix>logs/&#39;</Prefix></Filter>",
+            "<ID>all</ID><Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let non_xml_whitespace = concat!(
+            "<LifecycleConfiguration><Rule><Filter></Filter>\u{a0}<ID>all</ID>",
+            "<Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let no_interstitial_text = concat!(
+            "<LifecycleConfiguration><Rule><Filter></Filter><ID>all</ID>",
+            "<Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let explicit_whitespace = concat!(
+            "<LifecycleConfiguration><Rule><Filter></Filter><![CDATA[ ]]><ID>all</ID>",
+            "<Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+        let referenced_whitespace = concat!(
+            "<LifecycleConfiguration><Rule><Filter></Filter>&#32;<ID>all</ID>",
+            "<Status>Enabled</Status></Rule></LifecycleConfiguration>"
+        );
+
+        assert_ne!(
+            canonicalize_bucket_lifecycle_xml(prefix_with_one_space).unwrap(),
+            canonicalize_bucket_lifecycle_xml(prefix_with_two_spaces).unwrap()
+        );
+        assert_eq!(
+            canonicalize_bucket_lifecycle_xml(escaped_text).unwrap(),
+            canonicalize_bucket_lifecycle_xml(literal_text).unwrap()
+        );
+        assert_eq!(
+            canonicalize_bucket_lifecycle_xml(literal_text).unwrap(),
+            canonicalize_bucket_lifecycle_xml(cdata_text).unwrap()
+        );
+        assert_eq!(
+            canonicalize_bucket_lifecycle_xml(literal_text).unwrap(),
+            canonicalize_bucket_lifecycle_xml(numeric_reference).unwrap()
+        );
+        assert_ne!(
+            canonicalize_bucket_lifecycle_xml(non_xml_whitespace).unwrap(),
+            canonicalize_bucket_lifecycle_xml(no_interstitial_text).unwrap()
+        );
+        assert_ne!(
+            canonicalize_bucket_lifecycle_xml(explicit_whitespace).unwrap(),
+            canonicalize_bucket_lifecycle_xml(no_interstitial_text).unwrap()
+        );
+        assert_eq!(
+            canonicalize_bucket_lifecycle_xml(explicit_whitespace).unwrap(),
+            canonicalize_bucket_lifecycle_xml(referenced_whitespace).unwrap()
         );
     }
 
