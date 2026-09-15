@@ -26,6 +26,10 @@ Before installing, pre-create `sts-tls` in the release namespace with `tls.crt`,
 `ca.crt`. For development environments only, opt in to Operator-generated certificates with
 `--set sts.tls.auto=true`.
 
+The chart publishes the seven bundled RustFS Grafana dashboards as ConfigMaps by
+default. It does not install Grafana or Prometheus. A Grafana dashboard sidecar
+must watch the ConfigMap namespace and match the configured discovery labels.
+
 ### OpenShift Installation
 
 Enable the OpenShift profile so the chart omits the fixed Pod and container
@@ -89,6 +93,28 @@ helm uninstall rustfs-operator --namespace rustfs-system
 ## Configuration
 
 The following table lists the configurable parameters of the RustFS Operator chart and their default values.
+
+### Grafana Dashboard Configuration
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `dashboard.enabled` | Publish the bundled RustFS Grafana dashboards as ConfigMaps | `true` |
+| `dashboard.namespace` | Dashboard ConfigMap namespace; empty uses the operator namespace | `""` |
+| `dashboard.additionalLabels` | Labels used by a Grafana sidecar to discover dashboard ConfigMaps | `{grafana_dashboard: "1"}` |
+
+The bundled dashboards require a Prometheus data source containing RustFS metrics.
+The default `grafana_dashboard: "1"` label matches the dashboard sidecar defaults
+used by `kube-prometheus-stack`. When a Grafana sidecar only watches its own
+namespace, set `dashboard.namespace` to that namespace or configure the sidecar
+to search the Operator release namespace. The target namespace must already
+exist and the Helm installer must be authorized to create ConfigMaps there.
+
+Disable dashboard ConfigMaps when they are managed separately:
+
+```bash
+helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
+  --set dashboard.enabled=false
+```
 
 ### Operator Configuration
 

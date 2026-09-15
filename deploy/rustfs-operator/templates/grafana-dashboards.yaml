@@ -1,0 +1,24 @@
+{{- if .Values.dashboard.enabled -}}
+{{- $root := . -}}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" -}}
+{{- $filename := base $path -}}
+{{- $dashboardName := trimSuffix ".json" $filename -}}
+{{- $nameSuffix := printf "dashboard-%s" $dashboardName -}}
+{{- $prefixLength := sub 62 (len $nameSuffix) -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-%s" (include "rustfs-operator.fullname" $root | trunc (int $prefixLength) | trimSuffix "-") $nameSuffix }}
+  namespace: {{ default (include "rustfs-operator.namespace" $root) $root.Values.dashboard.namespace }}
+  labels:
+    {{- include "rustfs-operator.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: grafana-dashboard
+    {{- with $root.Values.dashboard.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  {{ $filename }}: |-
+{{ $root.Files.Get $path | trimSuffix "\n" | nindent 4 }}
+{{ end }}
+{{ end }}

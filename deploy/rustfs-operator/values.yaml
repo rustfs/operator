@@ -21,6 +21,16 @@ network:
   ipFamilyPolicy: ""
   ipFamilies: []
 
+# Grafana dashboard provisioning. The chart publishes the bundled RustFS
+# dashboards as labeled ConfigMaps for discovery by a Grafana sidecar.
+dashboard:
+  enabled: true
+  # Empty uses the operator namespace (the global namespace override or the
+  # Helm release namespace). Set this when Grafana watches another namespace.
+  namespace: ""
+  additionalLabels:
+    grafana_dashboard: "1"
+
 # Operator deployment configuration
 operator:
   # Number of operator replicas
