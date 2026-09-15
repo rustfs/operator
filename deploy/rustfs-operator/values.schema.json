@@ -29,6 +29,34 @@
         }
       }
     },
+    "dashboard": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "namespace",
+        "additionalLabels"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Publish the bundled RustFS Grafana dashboards as ConfigMaps."
+        },
+        "namespace": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "description": "Namespace for dashboard ConfigMaps; empty uses the operator namespace."
+        },
+        "additionalLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Additional labels used by Grafana sidecars to discover dashboard ConfigMaps."
+        }
+      }
+    },
     "sts": {
       "type": "object",
       "properties": {
