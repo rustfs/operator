@@ -18,20 +18,26 @@ use crate::sts::rustfs_client::{
     BucketLifecycleConfiguration as AdminLifecycleConfiguration,
     BucketLifecycleExpiration as AdminLifecycleExpiration,
     BucketLifecycleRule as AdminLifecycleRule,
-    BucketLifecycleRuleStatus as AdminLifecycleRuleStatus, CreateBucketResult, RustfsAdminClient,
-    RustfsClientError, canonicalize_bucket_lifecycle_xml,
+    BucketLifecycleRuleStatus as AdminLifecycleRuleStatus,
+    BucketObjectLockConfiguration as AdminObjectLockConfiguration,
+    BucketObjectLockDefaultRetention as AdminObjectLockDefaultRetention,
+    BucketObjectLockRetentionMode as AdminObjectLockRetentionMode,
+    BucketObjectLockRetentionPeriod as AdminObjectLockRetentionPeriod, BucketVersioningState,
+    BucketVersioningUpdate, CreateBucketResult, RustfsAdminClient, RustfsClientError,
+    canonicalize_bucket_lifecycle_xml,
 };
 use crate::types::v1alpha1::provisioning::{
     BucketAnonymousAccess, BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState,
-    MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULES, PolicyDocumentSource,
-    ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
-    duplicate_user_credentials_secret_names,
+    BucketObjectLockConfigurationState, BucketObjectLockRetentionMode,
+    MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULES,
+    MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS, PolicyDocumentSource, ProvisioningBucket,
+    ProvisioningPolicy, ProvisioningUser, duplicate_user_credentials_secret_names,
 };
 use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::provisioning::{
-    ProvisioningBucketStatus, ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase,
-    ProvisioningStatus, ProvisioningUserOwnershipState, ProvisioningUserOwnershipStatus,
-    ProvisioningUserStatus,
+    BucketVersioningStatus, ProvisioningBucketStatus, ProvisioningItemState,
+    ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus, ProvisioningUserOwnershipState,
+    ProvisioningUserOwnershipStatus, ProvisioningUserStatus,
 };
 use crate::types::v1alpha1::tenant::Tenant;
 use k8s_openapi::ByteString;
@@ -146,6 +152,13 @@ enum LifecycleReconcileAction {
     Ready(&'static str),
     Apply,
     Delete,
+    Failed(&'static str),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ObjectLockConfigurationReconcileAction {
+    Ready(&'static str),
+    Apply,
     Failed(&'static str),
 }
 
@@ -410,6 +423,7 @@ impl ProvisioningRun<'_> {
         let mut item = ProvisioningBucketStatus::new(self.retained_item(previous.as_ref()));
         item.lifecycle_desired_hash = previous.lifecycle_desired_hash.clone();
         item.lifecycle_last_applied_hash = previous.lifecycle_last_applied_hash.clone();
+        copy_bucket_control_status(&mut item, previous);
         item
     }
 
@@ -462,6 +476,7 @@ impl ProvisioningRun<'_> {
             if let Some(previous) = self.previous_bucket_status(&bucket.name) {
                 item.lifecycle_desired_hash = previous.lifecycle_desired_hash.clone();
                 item.lifecycle_last_applied_hash = previous.lifecycle_last_applied_hash.clone();
+                copy_bucket_control_status(&mut item, previous);
             }
             self.push_bucket(item);
         }
@@ -2027,16 +2042,45 @@ async fn reconcile_bucket(
     bucket: &ProvisioningBucket,
 ) -> ProvisioningBucketStatus {
     let previous = run.previous_bucket_status(&bucket.name).cloned();
-    let item = reconcile_bucket_policy(run, client, bucket).await;
-    if item.state != ProvisioningItemState::Ready.as_str() {
-        let mut status = bucket_status_with_preserved_lifecycle(item, previous.as_ref());
+    let item = ensure_bucket(run, client, bucket).await;
+    let mut status = bucket_status_with_preserved_lifecycle(item, previous.as_ref());
+    status.object_lock_configuration_desired_hash = bucket
+        .object_lock_configuration
+        .as_ref()
+        .and_then(object_lock_configuration_desired_hash);
+    if status.state != ProvisioningItemState::Ready.as_str() {
         status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
         return status;
     }
-    reconcile_bucket_lifecycle(run, client, bucket, previous.as_ref(), item).await
+
+    status = reconcile_bucket_versioning(run, client, bucket, previous.as_ref(), status).await;
+    if status.state != ProvisioningItemState::Ready.as_str() {
+        status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
+        return status;
+    }
+
+    status = reconcile_bucket_object_lock(run, client, bucket, previous.as_ref(), status).await;
+    if status.state != ProvisioningItemState::Ready.as_str() {
+        status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
+        return status;
+    }
+
+    let observed_object_lock = status.object_lock;
+    status.item = reconcile_bucket_policy_configuration(run, client, bucket, status.item).await;
+    status.object_lock = observed_object_lock;
+    if status.state != ProvisioningItemState::Ready.as_str() {
+        status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
+        return status;
+    }
+
+    let mut completed =
+        reconcile_bucket_lifecycle(run, client, bucket, previous.as_ref(), status.item.clone())
+            .await;
+    copy_bucket_control_status(&mut completed, &status);
+    completed
 }
 
-async fn reconcile_bucket_policy(
+async fn ensure_bucket(
     run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
     bucket: &ProvisioningBucket,
@@ -2048,6 +2092,17 @@ async fn reconcile_bucket_policy(
             &bucket.name,
             ProvisioningItemState::Failed,
             Reason::BucketCreateFailed,
+            message,
+        );
+        return annotate_bucket_item(item, bucket);
+    }
+
+    if let Err((reason, message)) = validate_bucket_configuration(bucket) {
+        let item = run.item(
+            previous.as_ref(),
+            &bucket.name,
+            ProvisioningItemState::Failed,
+            reason,
             message,
         );
         return annotate_bucket_item(item, bucket);
@@ -2085,46 +2140,6 @@ async fn reconcile_bucket_policy(
         }
     };
 
-    if bucket.object_lock_enabled() {
-        match client.bucket_object_lock_enabled(&bucket.name).await {
-            Ok(true) => {}
-            Ok(false) => {
-                let message = match create_result {
-                    CreateBucketResult::Created => {
-                        "Bucket was created but object lock is not enabled"
-                    }
-                    CreateBucketResult::AlreadyExists | CreateBucketResult::AlreadyOwnedByYou => {
-                        "Bucket already exists but object lock is not enabled"
-                    }
-                };
-                let item = run.item(
-                    previous.as_ref(),
-                    &bucket.name,
-                    ProvisioningItemState::Failed,
-                    Reason::BucketObjectLockConflict,
-                    message,
-                );
-                return annotate_bucket_item(item, bucket);
-            }
-            Err(error) => {
-                let context = match create_result {
-                    CreateBucketResult::Created => "failed to verify created bucket object lock",
-                    CreateBucketResult::AlreadyExists | CreateBucketResult::AlreadyOwnedByYou => {
-                        "failed to verify existing bucket object lock"
-                    }
-                };
-                let item = run.item_from_admin_error(
-                    previous.as_ref(),
-                    &bucket.name,
-                    Reason::BucketObjectLockConflict,
-                    error,
-                    context,
-                );
-                return annotate_bucket_item(item, bucket);
-            }
-        }
-    }
-
     let created_message = match create_result {
         CreateBucketResult::Created => {
             if bucket.object_lock_enabled() {
@@ -2134,13 +2149,364 @@ async fn reconcile_bucket_policy(
             }
         }
         CreateBucketResult::AlreadyExists | CreateBucketResult::AlreadyOwnedByYou => {
-            if bucket.object_lock_enabled() {
-                "Bucket already existed with object lock enabled"
-            } else {
-                "RustFS bucket already exists"
-            }
+            "RustFS bucket already exists"
         }
     };
+
+    annotate_bucket_item(
+        run.item(
+            previous.as_ref(),
+            &bucket.name,
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured,
+            created_message,
+        ),
+        bucket,
+    )
+}
+
+async fn reconcile_bucket_versioning(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    previous: Option<&ProvisioningBucketStatus>,
+    mut status: ProvisioningBucketStatus,
+) -> ProvisioningBucketStatus {
+    let desired = if bucket.object_lock_enabled() {
+        Some(BucketVersioningUpdate::Enabled)
+    } else {
+        bucket.versioning.map(|enabled| {
+            if enabled {
+                BucketVersioningUpdate::Enabled
+            } else {
+                BucketVersioningUpdate::Suspended
+            }
+        })
+    };
+    let Some(desired) = desired else {
+        status.versioning = None;
+        return status;
+    };
+
+    let live = match client.get_bucket_versioning(&bucket.name).await {
+        Ok(live) => live,
+        Err(error) => {
+            status.item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &status.item,
+                Reason::BucketVersioningApplyFailed,
+                error,
+                "failed to read RustFS bucket versioning",
+            );
+            return status;
+        }
+    };
+    status.versioning = Some(versioning_status(live));
+
+    if desired == BucketVersioningUpdate::Suspended && live == BucketVersioningState::Enabled {
+        match client
+            .get_bucket_object_lock_configuration(&bucket.name)
+            .await
+        {
+            Ok(Some(_)) => {
+                status.item = replace_bucket_item_state(
+                    run,
+                    previous,
+                    &status.item,
+                    ProvisioningItemState::Failed,
+                    Reason::BucketVersioningConflict,
+                    "Object Lock is enabled on the bucket; versioning cannot be suspended",
+                );
+                return status;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                status.item = bucket_item_from_admin_error(
+                    run,
+                    previous,
+                    &status.item,
+                    Reason::BucketVersioningApplyFailed,
+                    error,
+                    "failed to verify Object Lock before suspending bucket versioning",
+                );
+                return status;
+            }
+        }
+    }
+
+    let desired_state = BucketVersioningState::from(desired);
+    let matches = live == desired_state
+        || (desired == BucketVersioningUpdate::Suspended
+            && live == BucketVersioningState::Unversioned);
+    if matches {
+        status.item.message = Some(append_bucket_message(
+            &status.item,
+            "RustFS bucket versioning matches spec",
+        ));
+        return status;
+    }
+
+    if let Err(error) = client.put_bucket_versioning(&bucket.name, desired).await {
+        status.item = bucket_item_from_admin_error(
+            run,
+            previous,
+            &status.item,
+            Reason::BucketVersioningApplyFailed,
+            error,
+            "failed to apply RustFS bucket versioning",
+        );
+        return status;
+    }
+
+    let verified = match client.get_bucket_versioning(&bucket.name).await {
+        Ok(verified) => verified,
+        Err(error) => {
+            status.item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &status.item,
+                Reason::BucketVersioningApplyFailed,
+                error,
+                "failed to verify RustFS bucket versioning after update",
+            );
+            return status;
+        }
+    };
+    if verified != desired_state {
+        status.item = replace_bucket_item_state(
+            run,
+            previous,
+            &status.item,
+            ProvisioningItemState::Failed,
+            Reason::BucketVersioningApplyFailed,
+            "RustFS bucket versioning did not match spec after update",
+        );
+        status.versioning = Some(versioning_status(verified));
+        return status;
+    }
+
+    let applied = versioning_status(desired_state);
+    status.versioning = Some(applied);
+    status.item.message = Some(append_bucket_message(
+        &status.item,
+        "RustFS bucket versioning was applied",
+    ));
+    status
+}
+
+async fn reconcile_bucket_object_lock(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    previous: Option<&ProvisioningBucketStatus>,
+    mut status: ProvisioningBucketStatus,
+) -> ProvisioningBucketStatus {
+    if bucket.object_lock.is_none() && bucket.object_lock_configuration.is_none() {
+        return status;
+    }
+
+    let live = match client
+        .get_bucket_object_lock_configuration(&bucket.name)
+        .await
+    {
+        Ok(live) => live,
+        Err(error) => {
+            status.item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &status.item,
+                Reason::BucketObjectLockApplyFailed,
+                error,
+                "failed to read RustFS bucket Object Lock configuration",
+            );
+            return status;
+        }
+    };
+    status.object_lock = Some(live.is_some());
+
+    if bucket.object_lock == Some(false) {
+        if live.is_some() {
+            status.item = replace_bucket_item_state(
+                run,
+                previous,
+                &status.item,
+                ProvisioningItemState::Failed,
+                Reason::BucketObjectLockConflict,
+                "Object Lock is enabled on the bucket and cannot be disabled",
+            );
+        } else {
+            status.item.message = Some(append_bucket_message(
+                &status.item,
+                "RustFS bucket Object Lock is disabled",
+            ));
+        }
+        return status;
+    }
+
+    let explicit_configuration = match bucket.object_lock_configuration.as_ref() {
+        Some(spec) => match object_lock_configuration(spec) {
+            Ok(configuration) => Some(configuration),
+            Err(message) => {
+                status.item = replace_bucket_item_state(
+                    run,
+                    previous,
+                    &status.item,
+                    ProvisioningItemState::Failed,
+                    Reason::BucketObjectLockApplyFailed,
+                    message,
+                );
+                return status;
+            }
+        },
+        None => None,
+    };
+
+    if explicit_configuration.is_none() {
+        if live.is_some() {
+            status.item.message = Some(append_bucket_message(
+                &status.item,
+                "RustFS bucket Object Lock is enabled",
+            ));
+            return status;
+        }
+        let desired = AdminObjectLockConfiguration::enabled_without_default_retention();
+        return apply_bucket_object_lock_configuration(
+            run, client, bucket, previous, status, &desired, false,
+        )
+        .await;
+    }
+
+    let Some(desired) = explicit_configuration else {
+        return status;
+    };
+    let desired_hash = hash_document(&desired.to_xml());
+    status.object_lock_configuration_desired_hash = Some(desired_hash.clone());
+    let live_hash = live
+        .as_ref()
+        .map(|configuration| hash_document(&configuration.to_xml()));
+    let action = object_lock_configuration_reconcile_action(
+        previous.and_then(|item| item.object_lock_configuration_last_applied_hash.as_deref()),
+        live_hash.as_deref(),
+        &desired_hash,
+        live.as_ref()
+            .is_some_and(|configuration| configuration.default_retention.is_none())
+            && desired.default_retention.is_some(),
+    );
+    match action {
+        ObjectLockConfigurationReconcileAction::Ready(message) => {
+            status.object_lock_configuration_last_applied_hash = Some(desired_hash);
+            status.item.message = Some(append_bucket_message(&status.item, message));
+            status
+        }
+        ObjectLockConfigurationReconcileAction::Apply => {
+            apply_bucket_object_lock_configuration(
+                run, client, bucket, previous, status, &desired, true,
+            )
+            .await
+        }
+        ObjectLockConfigurationReconcileAction::Failed(message) => {
+            status.item = replace_bucket_item_state(
+                run,
+                previous,
+                &status.item,
+                ProvisioningItemState::Failed,
+                Reason::BucketObjectLockConfigurationConflict,
+                message,
+            );
+            status
+        }
+    }
+}
+
+async fn apply_bucket_object_lock_configuration(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    previous: Option<&ProvisioningBucketStatus>,
+    mut status: ProvisioningBucketStatus,
+    desired: &AdminObjectLockConfiguration,
+    owned_configuration: bool,
+) -> ProvisioningBucketStatus {
+    if let Err(error) = client
+        .put_bucket_object_lock_configuration(&bucket.name, desired)
+        .await
+    {
+        status.item = bucket_item_from_admin_error(
+            run,
+            previous,
+            &status.item,
+            Reason::BucketObjectLockApplyFailed,
+            error,
+            "failed to apply RustFS bucket Object Lock configuration",
+        );
+        return status;
+    }
+
+    let verified = match client
+        .get_bucket_object_lock_configuration(&bucket.name)
+        .await
+    {
+        Ok(Some(verified)) => verified,
+        Ok(None) => {
+            status.item = replace_bucket_item_state(
+                run,
+                previous,
+                &status.item,
+                ProvisioningItemState::Failed,
+                Reason::BucketObjectLockApplyFailed,
+                "RustFS bucket Object Lock was not enabled after update",
+            );
+            status.object_lock = Some(false);
+            return status;
+        }
+        Err(error) => {
+            status.item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &status.item,
+                Reason::BucketObjectLockApplyFailed,
+                error,
+                "failed to verify RustFS bucket Object Lock configuration after update",
+            );
+            return status;
+        }
+    };
+    if &verified != desired {
+        status.item = replace_bucket_item_state(
+            run,
+            previous,
+            &status.item,
+            ProvisioningItemState::Failed,
+            Reason::BucketObjectLockApplyFailed,
+            "RustFS bucket Object Lock configuration did not match spec after update",
+        );
+        status.object_lock = Some(true);
+        return status;
+    }
+
+    status.object_lock = Some(true);
+    if owned_configuration {
+        status.object_lock_configuration_last_applied_hash = Some(hash_document(&desired.to_xml()));
+    }
+    status.item.message = Some(append_bucket_message(
+        &status.item,
+        "RustFS bucket Object Lock configuration was applied",
+    ));
+    status
+}
+
+async fn reconcile_bucket_policy_configuration(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    base_item: ProvisioningItemStatus,
+) -> ProvisioningItemStatus {
+    let previous = run.previous_bucket(&bucket.name).cloned();
+    let created_message = base_item
+        .message
+        .as_deref()
+        .unwrap_or("RustFS bucket exists");
 
     if bucket.policy.is_none()
         && bucket
@@ -2193,6 +2559,127 @@ async fn reconcile_bucket_policy(
         created_message,
     )
     .await
+}
+
+fn validate_bucket_configuration(bucket: &ProvisioningBucket) -> Result<(), (Reason, String)> {
+    if bucket.object_lock_configuration.is_some() && bucket.object_lock != Some(true) {
+        return Err((
+            Reason::BucketObjectLockApplyFailed,
+            "objectLockConfiguration requires objectLock: true".to_string(),
+        ));
+    }
+    if bucket.versioning == Some(false) && bucket.object_lock_enabled() {
+        return Err((
+            Reason::BucketVersioningConflict,
+            "versioning cannot be disabled when Object Lock is enabled".to_string(),
+        ));
+    }
+    if let Some(spec) = bucket.object_lock_configuration.as_ref()
+        && let Err(message) = object_lock_configuration(spec)
+    {
+        return Err((Reason::BucketObjectLockApplyFailed, message));
+    }
+    if let Some(spec) = bucket.lifecycle.as_ref()
+        && let Err(message) = lifecycle_configuration(spec)
+    {
+        return Err((Reason::BucketLifecycleApplyFailed, message));
+    }
+    Ok(())
+}
+
+fn object_lock_configuration(
+    spec: &crate::types::v1alpha1::provisioning::BucketObjectLockConfiguration,
+) -> Result<AdminObjectLockConfiguration, String> {
+    match spec.state() {
+        BucketObjectLockConfigurationState::Absent => {
+            if spec.mode.is_some() || spec.days.is_some() {
+                return Err(
+                    "Absent object lock configuration must not contain mode or days".to_string(),
+                );
+            }
+            Ok(AdminObjectLockConfiguration::enabled_without_default_retention())
+        }
+        BucketObjectLockConfigurationState::Present => {
+            let mode = match spec.mode {
+                Some(BucketObjectLockRetentionMode::Governance) => {
+                    AdminObjectLockRetentionMode::Governance
+                }
+                Some(BucketObjectLockRetentionMode::Compliance) => {
+                    AdminObjectLockRetentionMode::Compliance
+                }
+                None => {
+                    return Err("Present object lock configuration must contain a mode".to_string());
+                }
+            };
+            let Some(days) = spec.days else {
+                return Err(
+                    "Present object lock configuration must contain retention days".to_string(),
+                );
+            };
+            if days <= 0 || days > MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS as i32 {
+                return Err(format!(
+                    "object lock retention days must be between 1 and {MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS}"
+                ));
+            }
+            Ok(AdminObjectLockConfiguration {
+                default_retention: Some(AdminObjectLockDefaultRetention {
+                    mode,
+                    period: AdminObjectLockRetentionPeriod::Days(days),
+                }),
+            })
+        }
+    }
+}
+
+fn object_lock_configuration_desired_hash(
+    spec: &crate::types::v1alpha1::provisioning::BucketObjectLockConfiguration,
+) -> Option<String> {
+    object_lock_configuration(spec)
+        .ok()
+        .map(|configuration| hash_document(&configuration.to_xml()))
+}
+
+fn object_lock_configuration_reconcile_action(
+    last_applied_hash: Option<&str>,
+    live_hash: Option<&str>,
+    desired_hash: &str,
+    may_initialize_default_retention: bool,
+) -> ObjectLockConfigurationReconcileAction {
+    match (last_applied_hash, live_hash) {
+        (_, Some(live)) if live == desired_hash => ObjectLockConfigurationReconcileAction::Ready(
+            "RustFS bucket Object Lock configuration matches spec",
+        ),
+        (_, None) => ObjectLockConfigurationReconcileAction::Apply,
+        (Some(last), Some(live)) if last == live => ObjectLockConfigurationReconcileAction::Apply,
+        (None, Some(_)) if may_initialize_default_retention => {
+            ObjectLockConfigurationReconcileAction::Apply
+        }
+        (None, Some(_)) => ObjectLockConfigurationReconcileAction::Failed(
+            "Live RustFS bucket Object Lock configuration is not owned by this status; refusing to replace it",
+        ),
+        (Some(_), Some(_)) => ObjectLockConfigurationReconcileAction::Failed(
+            "Live RustFS bucket Object Lock configuration changed since the operator last applied it",
+        ),
+    }
+}
+
+fn versioning_status(state: BucketVersioningState) -> BucketVersioningStatus {
+    match state {
+        BucketVersioningState::Unversioned => BucketVersioningStatus::Unversioned,
+        BucketVersioningState::Enabled => BucketVersioningStatus::Enabled,
+        BucketVersioningState::Suspended => BucketVersioningStatus::Suspended,
+    }
+}
+
+fn copy_bucket_control_status(
+    target: &mut ProvisioningBucketStatus,
+    source: &ProvisioningBucketStatus,
+) {
+    target.versioning = source.versioning;
+    target.object_lock_configuration_desired_hash =
+        source.object_lock_configuration_desired_hash.clone();
+    target.object_lock_configuration_last_applied_hash =
+        source.object_lock_configuration_last_applied_hash.clone();
 }
 
 async fn reconcile_bucket_lifecycle(
@@ -2546,6 +3033,9 @@ fn bucket_status_with_preserved_lifecycle(
     status.lifecycle_desired_hash = previous.and_then(|item| item.lifecycle_desired_hash.clone());
     status.lifecycle_last_applied_hash =
         previous.and_then(|item| item.lifecycle_last_applied_hash.clone());
+    if let Some(previous) = previous {
+        copy_bucket_control_status(&mut status, previous);
+    }
     status
 }
 
@@ -3097,7 +3587,11 @@ fn reason_from_str(reason: &str) -> Reason {
         "UserOwnershipConflict" => Reason::UserOwnershipConflict,
         "UserOwnershipCheckpointFailed" => Reason::UserOwnershipCheckpointFailed,
         "BucketCreateFailed" => Reason::BucketCreateFailed,
+        "BucketVersioningApplyFailed" => Reason::BucketVersioningApplyFailed,
+        "BucketVersioningConflict" => Reason::BucketVersioningConflict,
+        "BucketObjectLockApplyFailed" => Reason::BucketObjectLockApplyFailed,
         "BucketObjectLockConflict" => Reason::BucketObjectLockConflict,
+        "BucketObjectLockConfigurationConflict" => Reason::BucketObjectLockConfigurationConflict,
         "BucketPolicyApplyFailed" => Reason::BucketPolicyApplyFailed,
         "BucketPolicyConflict" => Reason::BucketPolicyConflict,
         "BucketLifecycleApplyFailed" => Reason::BucketLifecycleApplyFailed,
@@ -3148,6 +3642,175 @@ mod tests {
         put_count: Arc<AtomicUsize>,
         delete_count: Arc<AtomicUsize>,
         get_error_status: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct BucketControlCapture {
+        existing: bool,
+        ignore_versioning_put: bool,
+        ignore_object_lock_put: bool,
+        versioning: Arc<Mutex<BucketVersioningState>>,
+        object_lock: Arc<Mutex<Option<AdminObjectLockConfiguration>>>,
+        requests: Arc<Mutex<Vec<String>>>,
+        create_object_lock_header: Arc<Mutex<Option<String>>>,
+    }
+
+    impl Default for BucketControlCapture {
+        fn default() -> Self {
+            Self {
+                existing: false,
+                ignore_versioning_put: false,
+                ignore_object_lock_put: false,
+                versioning: Arc::new(Mutex::new(BucketVersioningState::Unversioned)),
+                object_lock: Arc::new(Mutex::new(None)),
+                requests: Arc::new(Mutex::new(Vec::new())),
+                create_object_lock_header: Arc::new(Mutex::new(None)),
+            }
+        }
+    }
+
+    async fn bucket_control_handler(
+        State(capture): State<BucketControlCapture>,
+        request: Request<Body>,
+    ) -> Response {
+        let method = request.method().clone();
+        let query = request.uri().query().unwrap_or("").to_string();
+        capture
+            .requests
+            .lock()
+            .await
+            .push(format!("{method} {query}"));
+
+        match (method, query.as_str()) {
+            (axum::http::Method::PUT, "") => {
+                let header = request
+                    .headers()
+                    .get("x-amz-bucket-object-lock-enabled")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
+                *capture.create_object_lock_header.lock().await = header.clone();
+                if capture.existing {
+                    return (
+                        StatusCode::CONFLICT,
+                        "<Error><Code>BucketAlreadyOwnedByYou</Code></Error>",
+                    )
+                        .into_response();
+                }
+                if header.as_deref() == Some("true") {
+                    *capture.versioning.lock().await = BucketVersioningState::Enabled;
+                    *capture.object_lock.lock().await =
+                        Some(AdminObjectLockConfiguration::enabled_without_default_retention());
+                }
+                StatusCode::OK.into_response()
+            }
+            (axum::http::Method::GET, "versioning=") => {
+                let state = *capture.versioning.lock().await;
+                match state {
+                    BucketVersioningState::Unversioned => {
+                        (StatusCode::OK, "<VersioningConfiguration/>").into_response()
+                    }
+                    BucketVersioningState::Enabled => (
+                        StatusCode::OK,
+                        "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+                    )
+                        .into_response(),
+                    BucketVersioningState::Suspended => (
+                        StatusCode::OK,
+                        "<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>",
+                    )
+                        .into_response(),
+                }
+            }
+            (axum::http::Method::PUT, "versioning=") => {
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .expect("versioning request body");
+                let body = String::from_utf8(body.to_vec()).expect("versioning body is UTF-8");
+                if !capture.ignore_versioning_put {
+                    *capture.versioning.lock().await = if body.contains("<Status>Enabled</Status>")
+                    {
+                        BucketVersioningState::Enabled
+                    } else {
+                        BucketVersioningState::Suspended
+                    };
+                }
+                StatusCode::OK.into_response()
+            }
+            (axum::http::Method::GET, "object-lock=") => {
+                match capture.object_lock.lock().await.clone() {
+                    Some(configuration) => (StatusCode::OK, configuration.to_xml()).into_response(),
+                    None => (
+                        StatusCode::NOT_FOUND,
+                        "<Error><Code>ObjectLockConfigurationNotFoundError</Code></Error>"
+                            .to_string(),
+                    )
+                        .into_response(),
+                }
+            }
+            (axum::http::Method::PUT, "object-lock=") => {
+                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+                    .await
+                    .expect("Object Lock request body");
+                let body = String::from_utf8(body.to_vec()).expect("Object Lock body is UTF-8");
+                let default_retention = if body.contains("<Rule>") {
+                    Some(AdminObjectLockDefaultRetention {
+                        mode: if body.contains("<Mode>COMPLIANCE</Mode>") {
+                            AdminObjectLockRetentionMode::Compliance
+                        } else {
+                            AdminObjectLockRetentionMode::Governance
+                        },
+                        period: AdminObjectLockRetentionPeriod::Days(
+                            body.split_once("<Days>")
+                                .and_then(|(_, tail)| tail.split_once("</Days>"))
+                                .and_then(|(days, _)| days.parse().ok())
+                                .expect("Object Lock days are present"),
+                        ),
+                    })
+                } else {
+                    None
+                };
+                if !capture.ignore_object_lock_put {
+                    *capture.object_lock.lock().await =
+                        Some(AdminObjectLockConfiguration { default_retention });
+                }
+                StatusCode::OK.into_response()
+            }
+            _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        }
+    }
+
+    async fn bucket_control_test_client(
+        capture: BucketControlCapture,
+    ) -> (RustfsAdminClient, tokio::task::JoinHandle<()>) {
+        let router = Router::new()
+            .route("/secure-bucket", any(bucket_control_handler))
+            .with_state(capture);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        (
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret"),
+            server,
+        )
+    }
+
+    fn object_lock_bucket() -> ProvisioningBucket {
+        serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "versioning": true,
+            "objectLock": true,
+            "objectLockConfiguration": {
+                "mode": "Compliance",
+                "days": 30
+            }
+        }))
+        .expect("Object Lock bucket should deserialize")
     }
 
     async fn lifecycle_bucket_handler(
@@ -5078,6 +5741,507 @@ mod tests {
             detail: None,
         });
         assert!(pending);
+    }
+
+    #[tokio::test]
+    async fn new_bucket_applies_issue_object_lock_configuration() {
+        let capture = BucketControlCapture::default();
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &object_lock_bucket()).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(item.versioning, Some(BucketVersioningStatus::Enabled));
+        assert_eq!(item.object_lock, Some(true));
+        assert!(item.object_lock_configuration_desired_hash.is_some());
+        assert_eq!(
+            item.object_lock_configuration_desired_hash,
+            item.object_lock_configuration_last_applied_hash
+        );
+        assert_eq!(
+            capture.create_object_lock_header.lock().await.as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            capture.object_lock.lock().await.as_ref(),
+            Some(&AdminObjectLockConfiguration {
+                default_retention: Some(AdminObjectLockDefaultRetention {
+                    mode: AdminObjectLockRetentionMode::Compliance,
+                    period: AdminObjectLockRetentionPeriod::Days(30),
+                }),
+            })
+        );
+        let requests = capture.requests.lock().await;
+        assert!(!requests.iter().any(|request| request == "PUT versioning="));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.as_str() == "PUT object-lock=")
+                .count(),
+            1
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_bucket_enables_versioning_before_object_lock() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &object_lock_bucket()).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        let message = item.message.as_deref().expect("ready item has a message");
+        assert!(message.contains("RustFS bucket already exists"));
+        assert!(!message.contains("already existed with object lock enabled"));
+        let requests = capture.requests.lock().await;
+        let versioning_put = requests
+            .iter()
+            .position(|request| request == "PUT versioning=")
+            .expect("versioning PUT is present");
+        let object_lock_put = requests
+            .iter()
+            .position(|request| request == "PUT object-lock=")
+            .expect("Object Lock PUT is present");
+        assert!(versioning_put < object_lock_put);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_bucket_can_suspend_versioning_when_object_lock_is_absent() {
+        let capture = BucketControlCapture {
+            existing: true,
+            versioning: Arc::new(Mutex::new(BucketVersioningState::Enabled)),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket: ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "versioning": false
+        }))
+        .expect("bucket should deserialize");
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(item.versioning, Some(BucketVersioningStatus::Suspended));
+        assert_eq!(
+            *capture.versioning.lock().await,
+            BucketVersioningState::Suspended
+        );
+        assert!(
+            capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request == "GET object-lock=")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn versioning_false_keeps_a_never_versioned_bucket_unchanged() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket: ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "versioning": false
+        }))
+        .expect("bucket should deserialize");
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(item.versioning, Some(BucketVersioningStatus::Unversioned));
+        assert!(
+            !capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request == "PUT versioning=")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn versioning_update_is_verified_after_a_success_response() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ignore_versioning_put: true,
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket: ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "versioning": true
+        }))
+        .expect("bucket should deserialize");
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketVersioningApplyFailed.as_str());
+        assert_eq!(item.versioning, Some(BucketVersioningStatus::Unversioned));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn object_lock_prevents_versioning_suspension() {
+        let capture = BucketControlCapture {
+            existing: true,
+            versioning: Arc::new(Mutex::new(BucketVersioningState::Enabled)),
+            object_lock: Arc::new(Mutex::new(Some(
+                AdminObjectLockConfiguration::enabled_without_default_retention(),
+            ))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket: ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "versioning": false,
+            "objectLock": false
+        }))
+        .expect("bucket should deserialize");
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketVersioningConflict.as_str());
+        assert!(
+            !capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request == "PUT versioning=")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unowned_object_lock_retention_is_not_overwritten() {
+        let capture = BucketControlCapture {
+            existing: true,
+            versioning: Arc::new(Mutex::new(BucketVersioningState::Enabled)),
+            object_lock: Arc::new(Mutex::new(Some(AdminObjectLockConfiguration {
+                default_retention: Some(AdminObjectLockDefaultRetention {
+                    mode: AdminObjectLockRetentionMode::Governance,
+                    period: AdminObjectLockRetentionPeriod::Days(7),
+                }),
+            }))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &object_lock_bucket()).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(
+            item.reason,
+            Reason::BucketObjectLockConfigurationConflict.as_str()
+        );
+        assert!(
+            !capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request == "PUT object-lock=")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matching_live_object_lock_configuration_is_adopted_without_a_write() {
+        let live = AdminObjectLockConfiguration {
+            default_retention: Some(AdminObjectLockDefaultRetention {
+                mode: AdminObjectLockRetentionMode::Compliance,
+                period: AdminObjectLockRetentionPeriod::Days(30),
+            }),
+        };
+        let capture = BucketControlCapture {
+            existing: true,
+            versioning: Arc::new(Mutex::new(BucketVersioningState::Enabled)),
+            object_lock: Arc::new(Mutex::new(Some(live))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &object_lock_bucket()).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(
+            item.object_lock_configuration_desired_hash,
+            item.object_lock_configuration_last_applied_hash
+        );
+        assert!(
+            !capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request == "PUT object-lock=")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn omitted_object_lock_configuration_leaves_live_retention_unmanaged() {
+        let live = AdminObjectLockConfiguration {
+            default_retention: Some(AdminObjectLockDefaultRetention {
+                mode: AdminObjectLockRetentionMode::Governance,
+                period: AdminObjectLockRetentionPeriod::Days(7),
+            }),
+        };
+        let capture = BucketControlCapture {
+            existing: true,
+            versioning: Arc::new(Mutex::new(BucketVersioningState::Enabled)),
+            object_lock: Arc::new(Mutex::new(Some(live.clone()))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket: ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "objectLock": true
+        }))
+        .expect("bucket should deserialize");
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.object_lock.lock().await.as_ref(), Some(&live));
+        assert!(item.object_lock_configuration_desired_hash.is_none());
+        assert!(
+            !capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request == "PUT object-lock=")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn owned_object_lock_default_retention_can_be_removed() {
+        let live = AdminObjectLockConfiguration {
+            default_retention: Some(AdminObjectLockDefaultRetention {
+                mode: AdminObjectLockRetentionMode::Compliance,
+                period: AdminObjectLockRetentionPeriod::Days(30),
+            }),
+        };
+        let capture = BucketControlCapture {
+            existing: true,
+            versioning: Arc::new(Mutex::new(BucketVersioningState::Enabled)),
+            object_lock: Arc::new(Mutex::new(Some(live.clone()))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let mut previous = ProvisioningBucketStatus::new(ProvisioningItemStatus::new(
+            "secure-bucket",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        ));
+        previous.object_lock_configuration_last_applied_hash = Some(hash_document(&live.to_xml()));
+        run.previous.buckets.push(previous);
+        let bucket: ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "objectLock": true,
+            "objectLockConfiguration": {
+                "state": "Absent"
+            }
+        }))
+        .expect("bucket should deserialize");
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(
+            capture.object_lock.lock().await.as_ref(),
+            Some(&AdminObjectLockConfiguration::enabled_without_default_retention())
+        );
+        assert_eq!(
+            item.object_lock_configuration_desired_hash,
+            item.object_lock_configuration_last_applied_hash
+        );
+        assert_eq!(
+            capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .filter(|request| request.as_str() == "PUT object-lock=")
+                .count(),
+            1
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn object_lock_update_is_verified_after_a_success_response() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ignore_object_lock_put: true,
+            versioning: Arc::new(Mutex::new(BucketVersioningState::Enabled)),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(&mut run, &client, &object_lock_bucket()).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketObjectLockApplyFailed.as_str());
+        assert_eq!(item.object_lock, Some(false));
+        assert!(item.object_lock_configuration_last_applied_hash.is_none());
+        server.abort();
+    }
+
+    #[test]
+    fn object_lock_configuration_requires_explicit_object_lock_enablement() {
+        let bucket: ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "objectLockConfiguration": {
+                "mode": "Compliance",
+                "days": 30
+            }
+        }))
+        .expect("older CRDs can admit the structurally valid payload");
+
+        let (reason, message) = validate_bucket_configuration(&bucket)
+            .expect_err("runtime validation must protect clusters with an older CRD");
+
+        assert_eq!(reason, Reason::BucketObjectLockApplyFailed);
+        assert_eq!(message, "objectLockConfiguration requires objectLock: true");
+    }
+
+    #[test]
+    fn object_lock_configuration_maps_modes_and_enforces_runtime_boundaries() {
+        let configuration = |mode, days| {
+            serde_json::from_value(serde_json::json!({
+                "mode": mode,
+                "days": days
+            }))
+            .expect("Object Lock configuration should deserialize")
+        };
+
+        for (mode, expected_mode) in [
+            ("Governance", AdminObjectLockRetentionMode::Governance),
+            ("Compliance", AdminObjectLockRetentionMode::Compliance),
+        ] {
+            for days in [1, MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS as i32] {
+                assert_eq!(
+                    object_lock_configuration(&configuration(mode, days)).unwrap(),
+                    AdminObjectLockConfiguration {
+                        default_retention: Some(AdminObjectLockDefaultRetention {
+                            mode: expected_mode,
+                            period: AdminObjectLockRetentionPeriod::Days(days),
+                        }),
+                    }
+                );
+            }
+        }
+        for days in [0, MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS as i32 + 1] {
+            let error = object_lock_configuration(&configuration("Governance", days))
+                .expect_err("out-of-range retention must fail");
+            assert!(error.contains("must be between"));
+        }
+    }
+
+    #[test]
+    fn object_lock_reconcile_action_protects_owned_and_unmanaged_configurations() {
+        assert_eq!(
+            object_lock_configuration_reconcile_action(None, None, "desired", false),
+            ObjectLockConfigurationReconcileAction::Apply
+        );
+        assert_eq!(
+            object_lock_configuration_reconcile_action(None, Some("desired"), "desired", false),
+            ObjectLockConfigurationReconcileAction::Ready(
+                "RustFS bucket Object Lock configuration matches spec"
+            )
+        );
+        assert_eq!(
+            object_lock_configuration_reconcile_action(
+                Some("owned"),
+                Some("owned"),
+                "changed",
+                false,
+            ),
+            ObjectLockConfigurationReconcileAction::Apply
+        );
+        assert_eq!(
+            object_lock_configuration_reconcile_action(
+                None,
+                Some("enabled-without-retention"),
+                "desired",
+                true,
+            ),
+            ObjectLockConfigurationReconcileAction::Apply
+        );
+        assert!(matches!(
+            object_lock_configuration_reconcile_action(None, Some("external"), "desired", false,),
+            ObjectLockConfigurationReconcileAction::Failed(_)
+        ));
+        assert!(matches!(
+            object_lock_configuration_reconcile_action(
+                Some("owned"),
+                Some("external-drift"),
+                "desired",
+                false,
+            ),
+            ObjectLockConfigurationReconcileAction::Failed(_)
+        ));
     }
 
     #[tokio::test]

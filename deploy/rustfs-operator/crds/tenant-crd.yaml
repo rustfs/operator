@@ -129,6 +129,37 @@ spec:
                     objectLock:
                       nullable: true
                       type: boolean
+                    objectLockConfiguration:
+                      description: |-
+                        Default Object Lock retention. Omission leaves the live rule unmanaged; `Absent`
+                        removes only a rule previously owned by the operator and never disables Object Lock.
+                      nullable: true
+                      properties:
+                        days:
+                          format: int32
+                          maximum: 36500.0
+                          minimum: 1.0
+                          nullable: true
+                          type: integer
+                        mode:
+                          enum:
+                          - Governance
+                          - Compliance
+                          - null
+                          nullable: true
+                          type: string
+                        state:
+                          description: Omission is equivalent to `Present`, preserving the concise issue-compatible YAML shape.
+                          enum:
+                          - Present
+                          - Absent
+                          - null
+                          nullable: true
+                          type: string
+                      type: object
+                      x-kubernetes-validations:
+                      - message: Present object lock configuration requires mode and days; Absent forbids them
+                        rule: '(!has(self.state) || self.state == ''Present'') ? has(self.mode) && has(self.days) : !has(self.mode) && !has(self.days)'
                     policy:
                       description: |-
                         Custom bucket policy document sourced from a ConfigMap. Mutually exclusive with non-private
@@ -155,12 +186,23 @@ spec:
                     region:
                       nullable: true
                       type: string
+                    versioning:
+                      description: |-
+                        Declarative S3 bucket versioning. `false` keeps a never-versioned bucket unchanged or
+                        suspends versioning after it has been enabled. Omission leaves versioning unmanaged unless
+                        Object Lock requires it.
+                      nullable: true
+                      type: boolean
                   required:
                   - name
                   type: object
                   x-kubernetes-validations:
                   - message: bucket policy and non-private anonymous access are mutually exclusive
                     rule: '!(has(self.policy) && has(self.anonymous) && self.anonymous != ''Private'')'
+                  - message: 'objectLockConfiguration requires objectLock: true'
+                    rule: '!has(self.objectLockConfiguration) || (has(self.objectLock) && self.objectLock)'
+                  - message: versioning cannot be disabled when object lock is configured
+                    rule: '!(has(self.versioning) && self.versioning == false && ((has(self.objectLock) && self.objectLock) || has(self.objectLockConfiguration)))'
                 maxItems: 1024
                 type: array
                 x-kubernetes-list-map-keys:
@@ -2670,6 +2712,12 @@ spec:
                         objectLock:
                           nullable: true
                           type: boolean
+                        objectLockConfigurationDesiredHash:
+                          nullable: true
+                          type: string
+                        objectLockConfigurationLastAppliedHash:
+                          nullable: true
+                          type: string
                         observedSecretName:
                           nullable: true
                           type: string
@@ -2686,6 +2734,14 @@ spec:
                           nullable: true
                           type: string
                         state:
+                          type: string
+                        versioning:
+                          enum:
+                          - Unversioned
+                          - Enabled
+                          - Suspended
+                          - null
+                          nullable: true
                           type: string
                       required:
                       - name

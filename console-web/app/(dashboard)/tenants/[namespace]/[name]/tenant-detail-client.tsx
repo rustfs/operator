@@ -34,6 +34,7 @@ import type {
   EncryptionInfoResponse,
   UpdateEncryptionRequest,
   UpdateSecurityContextRequest,
+  ProvisioningBucketStatus,
   ProvisioningItemStatus,
 } from "@/types/api"
 import { ApiError } from "@/lib/api-client"
@@ -107,11 +108,12 @@ function provisioningGroups(tenant: TenantDetailsResponse) {
   ].filter((group) => group.items.length > 0)
 }
 
-function provisioningItemDetails(item: ProvisioningItemStatus): string {
+function provisioningItemDetails(item: ProvisioningItemStatus | ProvisioningBucketStatus): string {
   const details: string[] = []
   if (item.policies && item.policies.length > 0) details.push(`policies=${item.policies.join(",")}`)
   if (item.region) details.push(`region=${item.region}`)
   if (item.objectLock != null) details.push(`objectLock=${item.objectLock ? "true" : "false"}`)
+  if ("versioning" in item && item.versioning) details.push(`versioning=${item.versioning}`)
   if (item.lastAppliedGeneration != null) details.push(`generation=${item.lastAppliedGeneration}`)
   return details.length > 0 ? details.join(" ") : "-"
 }

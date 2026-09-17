@@ -858,7 +858,9 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 - `spec.credsSecret` for RustFS admin credentials.
 - `spec.policies` for canned policies sourced from ConfigMaps.
 - `spec.users` for regular users. Each user must have at least one direct policy mapping.
-- `spec.buckets` for buckets, optional object lock, canned anonymous access (`Private`, `Download`, `Upload`, `Public`), or a custom bucket policy ConfigMap. Non-private `anonymous` values and `policy` are mutually exclusive. Explicit `anonymous: Private` without `policy` removes a bucket policy previously applied by the Operator; it reports a conflict instead of deleting an unowned live policy. For compatibility, legacy `Private` plus `policy` configurations keep the custom policy. When both fields are omitted, the Operator does not change a live bucket policy and retains its ownership record for a later explicit `Private` transition.
+- `spec.buckets` for buckets, versioning, Object Lock and default retention, canned anonymous access (`Private`, `Download`, `Upload`, `Public`), or a custom bucket policy ConfigMap. Non-private `anonymous` values and `policy` are mutually exclusive. Explicit `anonymous: Private` without `policy` removes a bucket policy previously applied by the Operator; it reports a conflict instead of deleting an unowned live policy. For compatibility, legacy `Private` plus `policy` configurations keep the custom policy. When both fields are omitted, the Operator does not change a live bucket policy and retains its ownership record for a later explicit `Private` transition.
+
+Bucket versioning and Object Lock are declarative but conservative. `versioning: true` enables versioning. `versioning: false` keeps a never-versioned bucket unchanged or requests S3 `Suspended` after versioning has been enabled; omitting the field leaves versioning unmanaged unless Object Lock requires it. `objectLock: true` enables Object Lock after versioning is enabled. Object Lock cannot be disabled, and the Operator refuses `objectLock: false` or versioning suspension when the live bucket has Object Lock enabled. `objectLockConfiguration` manages the default retention rule: omit `state` for `Present`, specify `mode: Governance` or `Compliance` with `days`, or use `state: Absent` without `mode` and `days` to remove only the default rule. Omitting the entire field leaves a live default-retention rule unmanaged. The Operator adopts an identical live rule, but does not replace or remove a different rule unless its hash matches the last configuration recorded in status. Default retention applies to new object versions; it does not retroactively lock existing versions.
 
 Each bucket may also declare `lifecycle.state: Present` with one or more S3 lifecycle rules. The current schema supports expiration after a positive number of days and aborting incomplete multipart uploads after a positive number of days; every rule has a unique ID, an `Enabled` or `Disabled` status, and an explicit prefix filter (use `prefix: ""` for all objects). `lifecycle.state: Absent` requests deletion and cannot include rules. The Operator adopts an identical live configuration, but never replaces or deletes a different configuration without a matching ownership hash in `status.provisioning.buckets`. Omitting `lifecycle` performs no lifecycle API calls and leaves the live configuration untouched.
 
@@ -930,7 +932,11 @@ spec:
         - app-readwrite
   buckets:
     - name: app-data
+      versioning: true
       objectLock: true
+      objectLockConfiguration:
+        mode: Compliance
+        days: 30
       anonymous: Download
       lifecycle:
         state: Present

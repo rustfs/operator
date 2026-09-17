@@ -61,6 +61,14 @@ pub enum ProvisioningItemState {
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
+pub enum BucketVersioningStatus {
+    Unversioned,
+    Enabled,
+    Suspended,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
 pub enum ProvisioningUserOwnershipState {
     PendingCreate,
     Managed,
@@ -130,6 +138,15 @@ pub struct ProvisioningBucketStatus {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_last_applied_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versioning: Option<BucketVersioningStatus>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_lock_configuration_desired_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_lock_configuration_last_applied_hash: Option<String>,
 }
 
 impl ProvisioningBucketStatus {
@@ -138,6 +155,9 @@ impl ProvisioningBucketStatus {
             item,
             lifecycle_desired_hash: None,
             lifecycle_last_applied_hash: None,
+            versioning: None,
+            object_lock_configuration_desired_hash: None,
+            object_lock_configuration_last_applied_hash: None,
         }
     }
 }

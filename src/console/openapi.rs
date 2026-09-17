@@ -57,13 +57,14 @@ use crate::console::models::topology::{
 use crate::types::v1alpha1::provisioning::{
     BucketAnonymousAccess, BucketLifecycleAbortIncompleteMultipartUpload,
     BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleFilter,
-    BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState, ConfigMapKeyReference,
-    PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy, ProvisioningPolicy,
-    ProvisioningUser, UserCredentialsSecretRef,
+    BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState,
+    BucketObjectLockConfiguration, BucketObjectLockConfigurationState,
+    BucketObjectLockRetentionMode, ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket,
+    ProvisioningDeletionPolicy, ProvisioningPolicy, ProvisioningUser, UserCredentialsSecretRef,
 };
 use crate::types::v1alpha1::status::provisioning::{
-    ProvisioningBucketStatus, ProvisioningItemState, ProvisioningItemStatus, ProvisioningPhase,
-    ProvisioningStatus,
+    BucketVersioningStatus, ProvisioningBucketStatus, ProvisioningItemState,
+    ProvisioningItemStatus, ProvisioningPhase, ProvisioningStatus,
 };
 
 #[derive(OpenApi)]
@@ -122,6 +123,7 @@ use crate::types::v1alpha1::status::provisioning::{
         ProvisioningPhase,
         ProvisioningItemStatus,
         ProvisioningBucketStatus,
+        BucketVersioningStatus,
         ProvisioningItemState,
         ProvisioningPolicy,
         ProvisioningUser,
@@ -131,6 +133,9 @@ use crate::types::v1alpha1::status::provisioning::{
         PolicyDocumentSource,
         ConfigMapKeyReference,
         BucketAnonymousAccess,
+        BucketObjectLockConfiguration,
+        BucketObjectLockConfigurationState,
+        BucketObjectLockRetentionMode,
         BucketLifecycleSpec,
         BucketLifecycleState,
         BucketLifecycleRule,
@@ -787,6 +792,7 @@ mod tests {
         assert!(schemas.contains_key("ProvisioningStatus"));
         assert!(schemas.contains_key("ProvisioningBucketStatus"));
         assert!(schemas.contains_key("BucketLifecycleSpec"));
+        assert!(schemas.contains_key("BucketObjectLockConfiguration"));
         assert!(schemas.contains_key("UserCredentialsSecretRef"));
         assert_eq!(
             spec.pointer("/components/schemas/TenantDetailsResponse/properties/provisioning/$ref")
@@ -816,6 +822,13 @@ mod tests {
             )
             .and_then(Value::as_str),
             Some("#/components/schemas/BucketLifecycleSpec")
+        );
+        assert_eq!(
+            spec.pointer(
+                "/components/schemas/ProvisioningBucket/properties/objectLockConfiguration/oneOf/1/$ref",
+            )
+            .and_then(Value::as_str),
+            Some("#/components/schemas/BucketObjectLockConfiguration")
         );
         assert_eq!(
             spec.pointer("/components/schemas/ProvisioningStatus/properties/buckets/items/$ref")

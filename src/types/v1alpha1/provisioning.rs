@@ -29,6 +29,7 @@ pub(crate) const MIN_BUCKET_NAME_LENGTH: u32 = 3;
 pub(crate) const MAX_BUCKET_NAME_LENGTH: u32 = 63;
 pub(crate) const MAX_BUCKET_LIFECYCLE_RULES: u32 = 1_000;
 pub(crate) const MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH: u32 = 255;
+pub(crate) const MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS: u32 = 36_500;
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -149,6 +150,43 @@ pub enum BucketLifecycleRuleStatus {
     Disabled,
 }
 
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum BucketObjectLockRetentionMode {
+    Governance,
+    Compliance,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum BucketObjectLockConfigurationState {
+    Present,
+    Absent,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("(!has(self.state) || self.state == 'Present') ? has(self.mode) && has(self.days) : !has(self.mode) && !has(self.days)").message("Present object lock configuration requires mode and days; Absent forbids them"))]
+pub struct BucketObjectLockConfiguration {
+    /// Omission is equivalent to `Present`, preserving the concise issue-compatible YAML shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<BucketObjectLockConfigurationState>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<BucketObjectLockRetentionMode>,
+
+    #[schemars(range(min = 1, max = MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<i32>,
+}
+
+impl BucketObjectLockConfiguration {
+    pub(crate) fn state(&self) -> BucketObjectLockConfigurationState {
+        self.state
+            .unwrap_or(BucketObjectLockConfigurationState::Present)
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BucketLifecycleRuleFilter {
@@ -211,6 +249,8 @@ impl BucketAnonymousAccess {
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[x_kube(validation = Rule::new("!(has(self.policy) && has(self.anonymous) && self.anonymous != 'Private')").message("bucket policy and non-private anonymous access are mutually exclusive"))]
+#[x_kube(validation = Rule::new("!has(self.objectLockConfiguration) || (has(self.objectLock) && self.objectLock)").message("objectLockConfiguration requires objectLock: true"))]
+#[x_kube(validation = Rule::new("!(has(self.versioning) && self.versioning == false && ((has(self.objectLock) && self.objectLock) || has(self.objectLockConfiguration)))").message("versioning cannot be disabled when object lock is configured"))]
 pub struct ProvisioningBucket {
     #[schemars(
         length(min = MIN_BUCKET_NAME_LENGTH, max = MAX_BUCKET_NAME_LENGTH),
@@ -224,6 +264,17 @@ pub struct ProvisioningBucket {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_lock: Option<bool>,
+
+    /// Declarative S3 bucket versioning. `false` keeps a never-versioned bucket unchanged or
+    /// suspends versioning after it has been enabled. Omission leaves versioning unmanaged unless
+    /// Object Lock requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versioning: Option<bool>,
+
+    /// Default Object Lock retention. Omission leaves the live rule unmanaged; `Absent`
+    /// removes only a rule previously owned by the operator and never disables Object Lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_lock_configuration: Option<BucketObjectLockConfiguration>,
 
     /// Canned anonymous access for this bucket. Non-private values are mutually exclusive with
     /// `policy`. Explicit `Private` removes an operator-managed bucket policy when `policy` is
@@ -404,5 +455,53 @@ mod tests {
                 .rules
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn bucket_object_lock_configuration_preserves_issue_yaml_shape() {
+        let bucket: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "versioning": true,
+            "objectLock": true,
+            "objectLockConfiguration": {
+                "mode": "Compliance",
+                "days": 30
+            }
+        }))
+        .expect("Object Lock bucket should deserialize");
+
+        assert_eq!(bucket.versioning, Some(true));
+        let configuration = bucket
+            .object_lock_configuration
+            .expect("Object Lock configuration is present");
+        assert_eq!(
+            configuration.state(),
+            super::BucketObjectLockConfigurationState::Present
+        );
+        assert_eq!(
+            configuration.mode,
+            Some(super::BucketObjectLockRetentionMode::Compliance)
+        );
+        assert_eq!(configuration.days, Some(30));
+    }
+
+    #[test]
+    fn bucket_object_lock_configuration_supports_explicit_absence() {
+        let bucket: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "objectLock": true,
+            "objectLockConfiguration": {"state": "Absent"}
+        }))
+        .expect("Absent Object Lock configuration should deserialize");
+
+        let configuration = bucket
+            .object_lock_configuration
+            .expect("Object Lock configuration is present");
+        assert_eq!(
+            configuration.state(),
+            super::BucketObjectLockConfigurationState::Absent
+        );
+        assert!(configuration.mode.is_none());
+        assert!(configuration.days.is_none());
     }
 }
