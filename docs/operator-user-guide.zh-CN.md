@@ -500,6 +500,51 @@ spec:
 `RpcAuthReady=True`。更新 Secret 不会改变已运行 Pod 的进程环境；协调重启和
 热加载不在此功能范围内。
 
+#### OIDC 自定义 CA 信任
+
+当 RustFS 使用私有 CA 签发证书的 OIDC provider 时，配置
+`spec.oidc.extraCaCertSecretRef`。Secret 必须与 Tenant 位于同一 namespace，所选 key
+必须包含一个或多个 PEM 编码的 CA 证书：
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oidc-extra-ca
+  namespace: storage
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...
+    -----END CERTIFICATE-----
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
+spec:
+  image: rustfs/rustfs:1.0.0
+  oidc:
+    extraCaCertSecretRef:
+      name: oidc-extra-ca
+      # key 默认是 ca.crt
+  # pools: ...
+```
+
+Operator 会在应用 workload 前校验每张证书，把所选 key 挂载到
+`/var/run/rustfs/oidc-extra-ca/ca.pem`，并将 `RUSTFS_EXTRA_CA_CERT` 设置为该路径。
+该 volume 刻意不使用 `subPath`，因此 Kubernetes 可以把 Secret 更新投射到运行中的
+Pod。Secret 更新会触发所有引用该 Secret 的 Tenant 重新 reconcile，但不会触发 Pod
+滚动更新。该环境变量需要 RustFS `1.0.0-rc.2` 或更高版本；Operator 当前的 fallback
+镜像早于该功能，因此应显式固定兼容镜像。有效的托管配置会报告
+`OidcTrustReady=True`。
+
+此配置只扩展 RustFS 出站 OIDC 连接的信任，不等同于配置进程级 TLS 和服务端 mTLS
+信任的 `spec.tls.caTrust`。省略该字段时，`spec.env` 中显式提供的
+`RUSTFS_EXTRA_CA_CERT` 仍会按非托管环境变量传入。
+
 ### 7.4 工作负载配置
 
 常用 Tenant 级字段：
@@ -511,6 +556,7 @@ spec:
 | `imagePullPolicy` | RustFS 镜像拉取策略。 |
 | `scheduler` | 自定义 scheduler 名称。 |
 | `env` | 额外 RustFS 容器环境变量。不要覆盖 Operator 自动管理的变量。 |
+| `oidc` | OIDC 专用设置，包括用于出站 OIDC 信任的同 namespace 自定义 CA Secret。 |
 | `serviceAccountName` | RustFS Pod 使用的自定义 ServiceAccount。 |
 | `createServiceAccountRbac` | 已废弃的兼容字段，不再生效；自定义 ServiceAccount 所需 RBAC 必须显式管理。 |
 | `priorityClassName` | Tenant 级 PriorityClass。 |
@@ -607,6 +653,7 @@ Operator 会自动管理以下环境变量：
 - `RUSTFS_CONSOLE_ADDRESS`
 - `RUSTFS_CONSOLE_ENABLE`
 - `RUSTFS_KMS_*` 变量；请改用 `spec.encryption` 配置
+- 配置 `spec.oidc.extraCaCertSecretRef` 时的 `RUSTFS_EXTRA_CA_CERT`
 - 启用 TLS 时的 RustFS TLS 相关变量
 
 对于单 pool 的单节点单盘 Tenant，`RUSTFS_VOLUMES` 会渲染为本地数据路径，例如 `/data/rustfs0`。多 pool Tenant 和其他布局仍会通过 Tenant headless Service 渲染 peer DNS URL，并由 RustFS 在运行时校验。当 Kubernetes 集群 DNS 域不是 `cluster.local` 时，请设置 Helm chart 的 `clusterDomain`；自动生成的 TLS SAN 也会使用同一个域。
@@ -1057,6 +1104,7 @@ kubectl describe tenant -n <namespace> <tenant>
 - `Degraded`
 - `SpecValid`
 - `CredentialsReady`
+- `OidcTrustReady`
 - `KmsReady`
 - `TlsReady`
 - `PoolsReady`

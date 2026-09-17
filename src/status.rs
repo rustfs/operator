@@ -108,6 +108,32 @@ impl StatusError {
                     secret_name, key
                 ),
             ),
+            context::Error::OidcExtraCaSecretNotFound { name } => Self::blocked(
+                Reason::OidcExtraCaSecretNotFound,
+                ConditionType::OidcTrustReady,
+                format!("OIDC extra CA Secret '{}' was not found", name),
+            ),
+            context::Error::OidcExtraCaInvalidReference { field } => Self::blocked(
+                Reason::OidcExtraCaInvalidReference,
+                ConditionType::OidcTrustReady,
+                format!("spec.oidc.extraCaCertSecretRef.{} must not be blank", field),
+            ),
+            context::Error::OidcExtraCaSecretMissingKey { secret_name, key } => Self::blocked(
+                Reason::OidcExtraCaSecretMissingKey,
+                ConditionType::OidcTrustReady,
+                format!(
+                    "OIDC extra CA Secret '{}' is missing required key '{}'",
+                    secret_name, key
+                ),
+            ),
+            context::Error::OidcExtraCaBundleInvalid { secret_name, key } => Self::blocked(
+                Reason::OidcExtraCaBundleInvalid,
+                ConditionType::OidcTrustReady,
+                format!(
+                    "OIDC extra CA Secret '{}' key '{}' must contain at least one valid PEM certificate",
+                    secret_name, key
+                ),
+            ),
             context::Error::KmsSecretNotFound { name } => Self::blocked(
                 Reason::KmsSecretNotFound,
                 ConditionType::KmsReady,
@@ -272,6 +298,7 @@ pub struct StatusBuilder {
     generation: Option<i64>,
     now: String,
     rpc_secret_configured: bool,
+    oidc_extra_ca_configured: bool,
     next: Status,
 }
 
@@ -281,6 +308,11 @@ impl StatusBuilder {
             generation: tenant.metadata.generation,
             now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             rpc_secret_configured: tenant.spec.rpc_secret.is_some(),
+            oidc_extra_ca_configured: tenant
+                .spec
+                .oidc
+                .as_ref()
+                .is_some_and(|oidc| oidc.extra_ca_cert_secret_ref.is_some()),
             next: tenant.status.clone().unwrap_or_default(),
         }
     }
@@ -600,6 +632,18 @@ impl StatusBuilder {
             self.next
                 .remove_condition_by_type(ConditionType::RpcAuthReady.as_str());
         }
+
+        if self.oidc_extra_ca_configured {
+            self.set_condition(
+                ConditionType::OidcTrustReady,
+                ConditionStatus::True,
+                Reason::ReconcileSucceeded,
+                "Configured OIDC extra CA bundle is valid".to_string(),
+            );
+        } else {
+            self.next
+                .remove_condition_by_type(ConditionType::OidcTrustReady.as_str());
+        }
     }
 
     fn clear_stale_blocked_conditions(
@@ -738,6 +782,38 @@ mod tests {
     }
 
     #[test]
+    fn status_builder_maps_invalid_oidc_extra_ca_bundle() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.oidc = Some(crate::types::v1alpha1::tenant::OidcConfig {
+            extra_ca_cert_secret_ref: Some(
+                crate::types::v1alpha1::tenant::OidcExtraCaCertSecretRef {
+                    name: "oidc-extra-ca".to_string(),
+                    key: "ca.crt".to_string(),
+                },
+            ),
+        });
+        let err = context::Error::OidcExtraCaBundleInvalid {
+            secret_name: "oidc-extra-ca".to_string(),
+            key: "ca.crt".to_string(),
+        };
+
+        let status_error = StatusError::from_context_error(&err);
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let status = builder.build();
+
+        let condition = status.condition(ConditionType::OidcTrustReady).unwrap();
+        assert_eq!(condition.status, "False");
+        assert_eq!(condition.reason, "OidcExtraCaBundleInvalid");
+        assert_eq!(status.current_state, "Blocked");
+        assert_eq!(
+            crate::types::v1alpha1::status::next_actions_for_reason(&condition.reason),
+            vec!["replaceOidcExtraCaBundle"]
+        );
+        assert!(status.condition(ConditionType::WorkloadsReady).is_none());
+    }
+
+    #[test]
     fn status_builder_blocks_incompatible_workload_security() {
         let tenant = crate::tests::create_test_tenant(None, None);
         let err = types::error::Error::WorkloadSecurityIncompatible {
@@ -809,6 +885,36 @@ mod tests {
         let condition = status.condition(ConditionType::RpcAuthReady).unwrap();
         assert_eq!(condition.status, "True");
         assert_eq!(condition.message, "Configured RPC Secret is valid");
+    }
+
+    #[test]
+    fn successful_status_only_reports_oidc_trust_when_configured() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.finish_success();
+        let status = builder.build();
+
+        assert!(status.condition(ConditionType::OidcTrustReady).is_none());
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.oidc = Some(crate::types::v1alpha1::tenant::OidcConfig {
+            extra_ca_cert_secret_ref: Some(
+                crate::types::v1alpha1::tenant::OidcExtraCaCertSecretRef {
+                    name: "oidc-extra-ca".to_string(),
+                    key: "ca.crt".to_string(),
+                },
+            ),
+        });
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.finish_success();
+        let status = builder.build();
+
+        let condition = status.condition(ConditionType::OidcTrustReady).unwrap();
+        assert_eq!(condition.status, "True");
+        assert_eq!(
+            condition.message,
+            "Configured OIDC extra CA bundle is valid"
+        );
     }
 
     #[test]

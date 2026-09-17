@@ -57,6 +57,31 @@ pub struct RpcSecretRef {
     pub key: String,
 }
 
+fn default_oidc_extra_ca_key() -> String {
+    "ca.crt".to_string()
+}
+
+/// Reference to a PEM CA bundle used for outbound OIDC HTTPS connections.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcExtraCaCertSecretRef {
+    #[schemars(length(min = 1))]
+    pub name: String,
+
+    #[serde(default = "default_oidc_extra_ca_key")]
+    #[schemars(length(min = 1))]
+    pub key: String,
+}
+
+/// OpenID Connect transport configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OidcConfig {
+    /// Secret key containing one or more PEM CA certificates for outbound OIDC HTTPS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_ca_cert_secret_ref: Option<OidcExtraCaCertSecretRef>,
+}
+
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[kube(
     group = "rustfs.com",
@@ -138,6 +163,10 @@ pub struct TenantSpec {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsConfig>,
+
+    /// OpenID Connect transport settings for RustFS workloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcConfig>,
 
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub request_auto_cert: Option<bool>,
@@ -287,6 +316,13 @@ impl TenantSpec {
                 insert(&secret.name);
             }
             if let Some(secret) = &self.rpc_secret {
+                insert(&secret.name);
+            }
+            if let Some(secret) = self
+                .oidc
+                .as_ref()
+                .and_then(|oidc| oidc.extra_ca_cert_secret_ref.as_ref())
+            {
                 insert(&secret.name);
             }
             for user in &self.users {
@@ -542,11 +578,27 @@ pub fn validate_dns1035_label(name: &str) -> Result<(), types::error::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::TenantSpec;
+    use super::{OidcConfig, OidcExtraCaCertSecretRef, TenantSpec};
     use crate::types::v1alpha1::status::pool::PoolState;
     use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn oidc_extra_ca_secret_ref_defaults_to_ca_crt() {
+        let config: OidcConfig = serde_json::from_value(serde_json::json!({
+            "extraCaCertSecretRef": { "name": "oidc-extra-ca" }
+        }))
+        .expect("OIDC configuration should deserialize");
+
+        assert_eq!(
+            config.extra_ca_cert_secret_ref,
+            Some(OidcExtraCaCertSecretRef {
+                name: "oidc-extra-ca".to_string(),
+                key: "ca.crt".to_string(),
+            })
+        );
+    }
 
     #[test]
     fn referenced_secret_names_cover_all_tenant_secret_sources() {
@@ -561,6 +613,9 @@ mod tests {
             }],
             "credsSecret": { "name": "admin-creds" },
             "rpcSecret": { "name": "rpc-auth", "key": "rpc-secret" },
+            "oidc": {
+                "extraCaCertSecretRef": { "name": "oidc-extra-ca" }
+            },
             "users": [
                 { "name": "legacy-user", "policies": ["readwrite"] },
                 {
@@ -612,6 +667,7 @@ mod tests {
                 "image-pull".to_string(),
                 "legacy-user".to_string(),
                 "local-master-key".to_string(),
+                "oidc-extra-ca".to_string(),
                 "public-client-ca".to_string(),
                 "public-tls".to_string(),
                 "rpc-auth".to_string(),

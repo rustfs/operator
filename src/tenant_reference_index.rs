@@ -262,7 +262,7 @@ mod tests {
         ConfigMapKeyReference, PolicyDocumentSource, ProvisioningPolicy, ProvisioningUser,
         UserCredentialsSecretRef,
     };
-    use crate::types::v1alpha1::tenant::RpcSecretRef;
+    use crate::types::v1alpha1::tenant::{OidcConfig, OidcExtraCaCertSecretRef, RpcSecretRef};
     use crate::types::v1alpha1::tls::{
         CaTrustConfig, CertManagerTlsConfig, SecretKeyReference, TlsCertificateConfig, TlsConfig,
     };
@@ -304,6 +304,12 @@ mod tests {
         tenant.spec.rpc_secret = Some(RpcSecretRef {
             name: "rpc".to_string(),
             key: "secret".to_string(),
+        });
+        tenant.spec.oidc = Some(OidcConfig {
+            extra_ca_cert_secret_ref: Some(OidcExtraCaCertSecretRef {
+                name: "oidc-extra-ca".to_string(),
+                key: "ca.crt".to_string(),
+            }),
         });
         tenant.spec.env.push(corev1::EnvVar {
             name: "OIDC_CLIENT_SECRET".to_string(),
@@ -395,6 +401,7 @@ mod tests {
             "env-secret",
             "image-pull",
             "rpc",
+            "oidc-extra-ca",
             "provisioned-user-credentials",
             "legacy-user",
             "vault-token",

@@ -27,6 +27,7 @@ pub enum ConditionType {
     SpecValid,
     CredentialsReady,
     RpcAuthReady,
+    OidcTrustReady,
     KmsReady,
     TlsReady,
     PoolsReady,
@@ -43,6 +44,7 @@ impl ConditionType {
             Self::SpecValid => "SpecValid",
             Self::CredentialsReady => "CredentialsReady",
             Self::RpcAuthReady => "RpcAuthReady",
+            Self::OidcTrustReady => "OidcTrustReady",
             Self::KmsReady => "KmsReady",
             Self::TlsReady => "TlsReady",
             Self::PoolsReady => "PoolsReady",
@@ -59,6 +61,7 @@ impl ConditionType {
             Self::SpecValid,
             Self::CredentialsReady,
             Self::RpcAuthReady,
+            Self::OidcTrustReady,
             Self::KmsReady,
             Self::TlsReady,
             Self::PoolsReady,
@@ -126,6 +129,10 @@ pub enum Reason {
     RpcSecretMissingKey,
     RpcSecretInvalidEncoding,
     RpcSecretInvalidValue,
+    OidcExtraCaSecretNotFound,
+    OidcExtraCaInvalidReference,
+    OidcExtraCaSecretMissingKey,
+    OidcExtraCaBundleInvalid,
     KmsSecretNotFound,
     KmsSecretMissingKey,
     KmsConfigInvalid,
@@ -205,6 +212,10 @@ impl Reason {
             Self::RpcSecretMissingKey => "RpcSecretMissingKey",
             Self::RpcSecretInvalidEncoding => "RpcSecretInvalidEncoding",
             Self::RpcSecretInvalidValue => "RpcSecretInvalidValue",
+            Self::OidcExtraCaSecretNotFound => "OidcExtraCaSecretNotFound",
+            Self::OidcExtraCaInvalidReference => "OidcExtraCaInvalidReference",
+            Self::OidcExtraCaSecretMissingKey => "OidcExtraCaSecretMissingKey",
+            Self::OidcExtraCaBundleInvalid => "OidcExtraCaBundleInvalid",
             Self::KmsSecretNotFound => "KmsSecretNotFound",
             Self::KmsSecretMissingKey => "KmsSecretMissingKey",
             Self::KmsConfigInvalid => "KmsConfigInvalid",
@@ -501,6 +512,10 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "RpcSecretMissingKey"
             | "RpcSecretInvalidEncoding"
             | "RpcSecretInvalidValue"
+            | "OidcExtraCaSecretNotFound"
+            | "OidcExtraCaInvalidReference"
+            | "OidcExtraCaSecretMissingKey"
+            | "OidcExtraCaBundleInvalid"
             | "KmsSecretNotFound"
             | "KmsSecretMissingKey"
             | "KmsConfigInvalid"
@@ -576,6 +591,10 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "RpcSecretMissingKey" => vec!["addRequiredRpcSecretKey"],
         "RpcSecretInvalidEncoding" => vec!["replaceRpcSecretValueWithUtf8"],
         "RpcSecretInvalidValue" => vec!["rotateRpcSecret"],
+        "OidcExtraCaSecretNotFound" => vec!["createOidcExtraCaSecret"],
+        "OidcExtraCaInvalidReference" => vec!["fixOidcExtraCaSecretRef"],
+        "OidcExtraCaSecretMissingKey" => vec!["addRequiredOidcExtraCaKey"],
+        "OidcExtraCaBundleInvalid" => vec!["replaceOidcExtraCaBundle"],
         "KmsSecretNotFound" => vec!["createKmsSecret"],
         "KmsSecretMissingKey" => vec!["addRequiredKmsSecretKey"],
         "KmsConfigInvalid" => vec!["fixKmsConfig"],

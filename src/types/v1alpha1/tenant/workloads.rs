@@ -38,6 +38,10 @@ const LOCAL_KMS_LOCAL_KEY_DIR_ENV: &str = "RUSTFS_KMS_LOCAL_KEY_DIR";
 const LOCAL_KMS_MASTER_KEY_ENV: &str = "RUSTFS_KMS_LOCAL_MASTER_KEY";
 const KMS_ALLOW_INSECURE_DEV_DEFAULTS_ENV: &str = "RUSTFS_KMS_ALLOW_INSECURE_DEV_DEFAULTS";
 const RPC_SECRET_ENV: &str = "RUSTFS_RPC_SECRET";
+const OIDC_EXTRA_CA_ENV: &str = "RUSTFS_EXTRA_CA_CERT";
+const OIDC_EXTRA_CA_VOLUME: &str = "rustfs-oidc-extra-ca";
+const OIDC_EXTRA_CA_MOUNT_PATH: &str = "/var/run/rustfs/oidc-extra-ca";
+const OIDC_EXTRA_CA_FILE: &str = "ca.pem";
 const VOLUME_CLAIM_TEMPLATE_PREFIX: &str = "vol";
 const DEFAULT_RUN_AS_USER: i64 = 10001;
 const DEFAULT_RUN_AS_GROUP: i64 = 10001;
@@ -1267,6 +1271,51 @@ impl Tenant {
         (env, volumes, mounts)
     }
 
+    fn configure_oidc_extra_ca(
+        &self,
+    ) -> (
+        Vec<corev1::EnvVar>,
+        Vec<corev1::Volume>,
+        Vec<corev1::VolumeMount>,
+    ) {
+        let Some(secret_ref) = self
+            .spec
+            .oidc
+            .as_ref()
+            .and_then(|oidc| oidc.extra_ca_cert_secret_ref.as_ref())
+        else {
+            return (Vec::new(), Vec::new(), Vec::new());
+        };
+
+        let env = vec![corev1::EnvVar {
+            name: OIDC_EXTRA_CA_ENV.to_string(),
+            value: Some(format!("{OIDC_EXTRA_CA_MOUNT_PATH}/{OIDC_EXTRA_CA_FILE}")),
+            ..Default::default()
+        }];
+        let volumes = vec![corev1::Volume {
+            name: OIDC_EXTRA_CA_VOLUME.to_string(),
+            secret: Some(corev1::SecretVolumeSource {
+                secret_name: Some(secret_ref.name.clone()),
+                items: Some(vec![corev1::KeyToPath {
+                    key: secret_ref.key.clone(),
+                    path: OIDC_EXTRA_CA_FILE.to_string(),
+                    ..Default::default()
+                }]),
+                optional: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        let mounts = vec![corev1::VolumeMount {
+            name: OIDC_EXTRA_CA_VOLUME.to_string(),
+            mount_path: OIDC_EXTRA_CA_MOUNT_PATH.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        }];
+
+        (env, volumes, mounts)
+    }
+
     pub fn new_statefulset(&self, pool: &Pool) -> Result<v1::StatefulSet, types::error::Error> {
         self.new_statefulset_with_tls_plan(pool, &TlsPlan::disabled())
     }
@@ -1321,6 +1370,8 @@ impl Tenant {
             ..Default::default()
         });
         env_vars.extend(tls_plan.env.clone());
+        let (oidc_env, mut oidc_volumes, mut oidc_mounts) = self.configure_oidc_extra_ca();
+        env_vars.extend(oidc_env);
 
         // Add required RustFS environment variables
         env_vars.push(corev1::EnvVar {
@@ -1409,6 +1460,15 @@ impl Tenant {
             if self.spec.rpc_secret.is_some() && user_env.name == RPC_SECRET_ENV {
                 continue;
             }
+            if self
+                .spec
+                .oidc
+                .as_ref()
+                .is_some_and(|oidc| oidc.extra_ca_cert_secret_ref.is_some())
+                && user_env.name == OIDC_EXTRA_CA_ENV
+            {
+                continue;
+            }
             // Remove any existing var with the same name to allow non-reserved overrides.
             env_vars.retain(|e| e.name != user_env.name);
             env_vars.push(user_env.clone());
@@ -1426,6 +1486,8 @@ impl Tenant {
         env_vars.extend(kms_env);
         pod_volumes.append(&mut kms_volumes);
         volume_mounts.append(&mut kms_mounts);
+        pod_volumes.append(&mut oidc_volumes);
+        volume_mounts.append(&mut oidc_mounts);
         pod_volumes.extend(tls_plan.volumes.clone());
         volume_mounts.extend(tls_plan.volume_mounts.clone());
 
@@ -2088,7 +2150,9 @@ mod tests {
     };
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
     use crate::types::v1alpha1::security_context::{MAX_KUBERNETES_ID, PodSecurityContextOverride};
-    use crate::types::v1alpha1::tenant::{RpcSecretRef, Tenant};
+    use crate::types::v1alpha1::tenant::{
+        OidcConfig, OidcExtraCaCertSecretRef, RpcSecretRef, Tenant,
+    };
     use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
     use k8s_openapi::api::apps::v1;
     use k8s_openapi::api::core::v1 as corev1;
@@ -2546,6 +2610,107 @@ mod tests {
             env_value(container, "RUSTFS_RPC_SECRET"),
             Some("legacy-explicit-rpc-secret")
         );
+    }
+
+    #[test]
+    fn oidc_extra_ca_mounts_selected_secret_key_without_sub_path() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.oidc = Some(OidcConfig {
+            extra_ca_cert_secret_ref: Some(OidcExtraCaCertSecretRef {
+                name: "authentik-ca".to_string(),
+                key: "bundle.pem".to_string(),
+            }),
+        });
+        tenant.spec.env.push(corev1::EnvVar {
+            name: "RUSTFS_EXTRA_CA_CERT".to_string(),
+            value: Some("/wrong/override.pem".to_string()),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with OIDC extra CA trust");
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+
+        assert_eq!(
+            env_value(container, "RUSTFS_EXTRA_CA_CERT"),
+            Some("/var/run/rustfs/oidc-extra-ca/ca.pem")
+        );
+        assert_eq!(
+            container
+                .env
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|var| var.name == "RUSTFS_EXTRA_CA_CERT")
+                .count(),
+            1
+        );
+
+        let mount = container
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|mount| mount.name == "rustfs-oidc-extra-ca")
+            .expect("OIDC extra CA volume mount should exist");
+        assert_eq!(mount.mount_path, "/var/run/rustfs/oidc-extra-ca");
+        assert_eq!(mount.read_only, Some(true));
+        assert_eq!(
+            mount.sub_path, None,
+            "Secret rotation requires a directory mount"
+        );
+
+        let secret = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|volume| volume.name == "rustfs-oidc-extra-ca")
+            .and_then(|volume| volume.secret.as_ref())
+            .expect("OIDC extra CA Secret volume should exist");
+        assert_eq!(secret.secret_name.as_deref(), Some("authentik-ca"));
+        assert_eq!(secret.optional, Some(false));
+        assert_eq!(
+            secret.items.as_deref(),
+            Some(
+                [corev1::KeyToPath {
+                    key: "bundle.pem".to_string(),
+                    path: "ca.pem".to_string(),
+                    ..Default::default()
+                }]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn raw_oidc_extra_ca_env_remains_supported_without_managed_secret_ref() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.env.push(corev1::EnvVar {
+            name: "RUSTFS_EXTRA_CA_CERT".to_string(),
+            value: Some("/custom/ca.pem".to_string()),
+            ..Default::default()
+        });
+        let pool = &tenant.spec.pools[0];
+
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should preserve an unmanaged OIDC extra CA environment variable");
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+
+        assert_eq!(
+            env_value(container, "RUSTFS_EXTRA_CA_CERT"),
+            Some("/custom/ca.pem")
+        );
+        assert!(pod_spec.volumes.as_ref().is_none_or(|volumes| {
+            volumes
+                .iter()
+                .all(|volume| volume.name != "rustfs-oidc-extra-ca")
+        }));
     }
 
     #[test]
@@ -5015,6 +5180,40 @@ mod tests {
         assert!(
             needs_update,
             "StatefulSet should need update when the RPC Secret reference changes"
+        );
+    }
+
+    #[test]
+    fn test_statefulset_oidc_extra_ca_secret_change_detected() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.oidc = Some(OidcConfig {
+            extra_ca_cert_secret_ref: Some(OidcExtraCaCertSecretRef {
+                name: "old-oidc-ca".to_string(),
+                key: "ca.crt".to_string(),
+            }),
+        });
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet");
+
+        tenant
+            .spec
+            .oidc
+            .as_mut()
+            .unwrap()
+            .extra_ca_cert_secret_ref
+            .as_mut()
+            .unwrap()
+            .name = "new-oidc-ca".to_string();
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should check update need");
+
+        assert!(
+            needs_update,
+            "StatefulSet should need update when the OIDC extra CA Secret reference changes"
         );
     }
 

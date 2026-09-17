@@ -125,6 +125,14 @@ pub(super) async fn validate_tenant_prerequisites(
         return Err(e.into());
     }
 
+    // Validate OIDC trust material before rolling workloads. Kubernetes would otherwise
+    // reject a missing Secret key, while malformed certificate data would fail RustFS startup.
+    if let Err(e) = ctx.validate_oidc_extra_ca_secret(tenant).await {
+        let status_error = StatusError::from_context_error(&e);
+        patch_status_error(ctx, tenant, &status_error).await;
+        return Err(e.into());
+    }
+
     // Validate encryption / KMS and reject raw RUSTFS_KMS_* env overrides even when
     // spec.encryption is omitted or disabled.
     if let Err(e) = ctx.validate_kms_secret(tenant).await {

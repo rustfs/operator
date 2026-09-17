@@ -939,6 +939,10 @@ pub fn error_policy(object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> A
             | context::Error::RpcSecretMissingKey { .. }
             | context::Error::RpcSecretInvalidEncoding { .. }
             | context::Error::RpcSecretInvalidValue { .. }
+            | context::Error::OidcExtraCaSecretNotFound { .. }
+            | context::Error::OidcExtraCaInvalidReference { .. }
+            | context::Error::OidcExtraCaSecretMissingKey { .. }
+            | context::Error::OidcExtraCaBundleInvalid { .. }
             | context::Error::KmsSecretNotFound { .. }
             | context::Error::KmsSecretMissingKey { .. }
             | context::Error::KmsConfigInvalid { .. } => Duration::from_secs(60),
@@ -996,6 +1000,10 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
             context::Error::RpcSecretMissingKey { .. } => "RpcSecretMissingKey",
             context::Error::RpcSecretInvalidEncoding { .. } => "RpcSecretInvalidEncoding",
             context::Error::RpcSecretInvalidValue { .. } => "RpcSecretInvalidValue",
+            context::Error::OidcExtraCaSecretNotFound { .. } => "OidcExtraCaSecretNotFound",
+            context::Error::OidcExtraCaInvalidReference { .. } => "OidcExtraCaInvalidReference",
+            context::Error::OidcExtraCaSecretMissingKey { .. } => "OidcExtraCaSecretMissingKey",
+            context::Error::OidcExtraCaBundleInvalid { .. } => "OidcExtraCaBundleInvalid",
             context::Error::KmsSecretNotFound { .. } => "KmsSecretNotFound",
             context::Error::KmsSecretMissingKey { .. } => "KmsSecretMissingKey",
             context::Error::KmsConfigInvalid { .. } => "KmsConfigInvalid",
