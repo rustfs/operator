@@ -15,7 +15,7 @@
 use crate::cluster_dns::ClusterDomain;
 use crate::types;
 use crate::types::v1alpha1::encryption::LocalKmsMasterKeySecretRef;
-use crate::types::v1alpha1::tenant::{RpcSecretRef, Tenant};
+use crate::types::v1alpha1::tenant::{OidcExtraCaCertSecretRef, RpcSecretRef, Tenant};
 use k8s_openapi::NamespaceResourceScope;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams, PostParams};
@@ -26,6 +26,7 @@ use serde::de::DeserializeOwned;
 use snafu::Snafu;
 use snafu::futures::TryFutureExt;
 use std::fmt::Debug;
+use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
@@ -87,6 +88,26 @@ pub enum Error {
         key
     ))]
     RpcSecretInvalidValue { secret_name: String, key: String },
+
+    #[snafu(display("OIDC extra CA Secret '{}' not found", name))]
+    OidcExtraCaSecretNotFound { name: String },
+
+    #[snafu(display("spec.oidc.extraCaCertSecretRef.{} must not be blank", field))]
+    OidcExtraCaInvalidReference { field: String },
+
+    #[snafu(display(
+        "OIDC extra CA Secret '{}' missing required key '{}'",
+        secret_name,
+        key
+    ))]
+    OidcExtraCaSecretMissingKey { secret_name: String, key: String },
+
+    #[snafu(display(
+        "OIDC extra CA Secret '{}' key '{}' must contain at least one valid PEM certificate",
+        secret_name,
+        key
+    ))]
+    OidcExtraCaBundleInvalid { secret_name: String, key: String },
 
     #[snafu(display("KMS secret '{}' not found", name))]
     KmsSecretNotFound { name: String },
@@ -374,6 +395,48 @@ fn validate_rpc_secret_value(secret: &Secret, secret_name: &str, key: &str) -> R
     Ok(())
 }
 
+fn validate_oidc_extra_ca_ref(secret_ref: &OidcExtraCaCertSecretRef) -> Result<(), Error> {
+    for (field, value) in [("name", &secret_ref.name), ("key", &secret_ref.key)] {
+        if value.trim().is_empty() {
+            return Err(Error::OidcExtraCaInvalidReference {
+                field: field.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_oidc_extra_ca_bundle(
+    secret: &Secret,
+    secret_name: &str,
+    key: &str,
+) -> Result<(), Error> {
+    let Some(value) = secret.data.as_ref().and_then(|data| data.get(key)) else {
+        return Err(Error::OidcExtraCaSecretMissingKey {
+            secret_name: secret_name.to_string(),
+            key: key.to_string(),
+        });
+    };
+
+    let invalid = || Error::OidcExtraCaBundleInvalid {
+        secret_name: secret_name.to_string(),
+        key: key.to_string(),
+    };
+    let mut roots = rustls::RootCertStore::empty();
+    let mut reader = Cursor::new(&value.0);
+    let mut certificates = rustls_pemfile::certs(&mut reader).peekable();
+    if certificates.peek().is_none() {
+        return Err(invalid());
+    }
+    for certificate in certificates {
+        roots
+            .add(certificate.map_err(|_| invalid())?)
+            .map_err(|_| invalid())?;
+    }
+
+    Ok(())
+}
+
 fn status_semantically_equal(
     current: Option<&types::v1alpha1::status::Status>,
     next: &types::v1alpha1::status::Status,
@@ -399,6 +462,7 @@ fn normalize_status_for_compare(status: &mut types::v1alpha1::status::Status) {
 pub(crate) enum SecretValidationKind {
     Credential,
     Rpc,
+    OidcExtraCa,
     Kms,
 }
 
@@ -435,6 +499,7 @@ pub(crate) fn map_secret_get_error(
     match kind {
         SecretValidationKind::Credential => Error::CredentialSecretNotFound { name },
         SecretValidationKind::Rpc => Error::RpcSecretNotFound { name },
+        SecretValidationKind::OidcExtraCa => Error::OidcExtraCaSecretNotFound { name },
         SecretValidationKind::Kms => Error::KmsSecretNotFound { name },
     }
 }
@@ -720,6 +785,33 @@ impl Context {
         };
 
         validate_rpc_secret_value(&secret, &secret_ref.name, &secret_ref.key)
+    }
+
+    /// Validates the optional OIDC extra root CA bundle before applying workloads.
+    pub async fn validate_oidc_extra_ca_secret(&self, tenant: &Tenant) -> Result<(), Error> {
+        let Some(secret_ref) = tenant
+            .spec
+            .oidc
+            .as_ref()
+            .and_then(|oidc| oidc.extra_ca_cert_secret_ref.as_ref())
+        else {
+            return Ok(());
+        };
+
+        validate_oidc_extra_ca_ref(secret_ref)?;
+
+        let secret: Secret = match self.get(&secret_ref.name, &tenant.namespace()?).await {
+            Ok(secret) => secret,
+            Err(error) => {
+                return Err(map_secret_get_error(
+                    error,
+                    secret_ref.name.clone(),
+                    SecretValidationKind::OidcExtraCa,
+                ));
+            }
+        };
+
+        validate_oidc_extra_ca_bundle(&secret, &secret_ref.name, &secret_ref.key)
     }
 
     /// Validates encryption configuration and the KMS Secret.
@@ -1072,12 +1164,13 @@ mod validate_local_kms_tests {
     use super::{SecretValidationKind, map_secret_get_error};
     use super::{
         validate_local_kms_master_key_ref, validate_local_kms_tenant, validate_no_reserved_kms_env,
-        validate_rpc_secret_ref, validate_rpc_secret_value, validate_secret_utf8_non_blank,
+        validate_oidc_extra_ca_bundle, validate_oidc_extra_ca_ref, validate_rpc_secret_ref,
+        validate_rpc_secret_value, validate_secret_utf8_non_blank,
     };
     use crate::types::v1alpha1::encryption::{LocalKmsConfig, LocalKmsMasterKeySecretRef};
     use crate::types::v1alpha1::persistence::PersistenceConfig;
     use crate::types::v1alpha1::pool::Pool;
-    use crate::types::v1alpha1::tenant::RpcSecretRef;
+    use crate::types::v1alpha1::tenant::{OidcExtraCaCertSecretRef, RpcSecretRef};
     use k8s_openapi::ByteString;
     use k8s_openapi::api::core::v1 as corev1;
     use std::collections::BTreeMap;
@@ -1166,6 +1259,19 @@ mod validate_local_kms_tests {
     }
 
     #[test]
+    fn oidc_extra_ca_secret_get_maps_only_404_to_not_found() {
+        let err = map_secret_get_error(
+            api_error(404, "NotFound"),
+            "oidc-extra-ca".to_string(),
+            SecretValidationKind::OidcExtraCa,
+        );
+
+        assert!(
+            matches!(err, Error::OidcExtraCaSecretNotFound { name } if name == "oidc-extra-ca")
+        );
+    }
+
+    #[test]
     fn rpc_secret_ref_rejects_blank_name_and_key() {
         for secret_ref in [
             RpcSecretRef {
@@ -1230,6 +1336,73 @@ mod validate_local_kms_tests {
         };
 
         validate_rpc_secret_value(&secret, "rpc-auth", "rpc-secret").unwrap();
+    }
+
+    #[test]
+    fn oidc_extra_ca_ref_rejects_blank_name_and_key() {
+        for secret_ref in [
+            OidcExtraCaCertSecretRef {
+                name: "  ".to_string(),
+                key: "ca.crt".to_string(),
+            },
+            OidcExtraCaCertSecretRef {
+                name: "oidc-extra-ca".to_string(),
+                key: "\n".to_string(),
+            },
+        ] {
+            let err = validate_oidc_extra_ca_ref(&secret_ref).unwrap_err();
+            assert!(matches!(err, Error::OidcExtraCaInvalidReference { .. }));
+        }
+    }
+
+    #[test]
+    fn oidc_extra_ca_bundle_requires_selected_secret_key() {
+        let secret = corev1::Secret::default();
+
+        let err = validate_oidc_extra_ca_bundle(&secret, "oidc-extra-ca", "ca.crt")
+            .expect_err("missing CA key must fail validation");
+
+        assert!(matches!(
+            err,
+            Error::OidcExtraCaSecretMissingKey { secret_name, key }
+                if secret_name == "oidc-extra-ca" && key == "ca.crt"
+        ));
+    }
+
+    #[test]
+    fn oidc_extra_ca_bundle_rejects_empty_and_malformed_certificates() {
+        for value in [
+            b"not a certificate".to_vec(),
+            b"-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n".to_vec(),
+        ] {
+            let secret = corev1::Secret {
+                data: Some(BTreeMap::from([("ca.crt".to_string(), ByteString(value))])),
+                ..Default::default()
+            };
+
+            let err = validate_oidc_extra_ca_bundle(&secret, "oidc-extra-ca", "ca.crt")
+                .expect_err("invalid CA bundle must fail validation");
+            assert!(matches!(err, Error::OidcExtraCaBundleInvalid { .. }));
+        }
+    }
+
+    #[test]
+    fn oidc_extra_ca_bundle_accepts_multiple_pem_certificates() {
+        let certificate_a = rcgen::generate_simple_self_signed(vec!["a.example".to_string()])
+            .expect("first CA certificate should generate");
+        let certificate_b = rcgen::generate_simple_self_signed(vec!["b.example".to_string()])
+            .expect("second CA certificate should generate");
+        let bundle = format!("{}{}", certificate_a.cert.pem(), certificate_b.cert.pem());
+        let secret = corev1::Secret {
+            data: Some(BTreeMap::from([(
+                "bundle.pem".to_string(),
+                ByteString(bundle.into_bytes()),
+            )])),
+            ..Default::default()
+        };
+
+        validate_oidc_extra_ca_bundle(&secret, "oidc-extra-ca", "bundle.pem")
+            .expect("valid CA bundle should pass validation");
     }
 
     #[test]

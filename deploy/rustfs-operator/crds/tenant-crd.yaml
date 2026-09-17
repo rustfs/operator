@@ -761,6 +761,25 @@ spec:
                     nullable: true
                     type: string
                 type: object
+              oidc:
+                description: OpenID Connect transport settings for RustFS workloads.
+                nullable: true
+                properties:
+                  extraCaCertSecretRef:
+                    description: Secret key containing one or more PEM CA certificates for outbound OIDC HTTPS.
+                    nullable: true
+                    properties:
+                      key:
+                        default: ca.crt
+                        minLength: 1
+                        type: string
+                      name:
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
               podDeletionPolicyWhenNodeIsDown:
                 description: |-
                   Controls how the operator handles Pods when the node hosting them is down (NotReady/Unknown).

@@ -528,6 +528,53 @@ configured Secret passes validation, the Operator reports
 already-running Pods; coordinated restart and hot reload are outside this
 feature.
 
+#### OIDC custom CA trust
+
+Use `spec.oidc.extraCaCertSecretRef` when the RustFS OIDC provider is signed by
+a private CA. The Secret must be in the Tenant namespace and the selected key
+must contain one or more PEM-encoded CA certificates:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oidc-extra-ca
+  namespace: storage
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...
+    -----END CERTIFICATE-----
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
+spec:
+  image: rustfs/rustfs:1.0.0
+  oidc:
+    extraCaCertSecretRef:
+      name: oidc-extra-ca
+      # key defaults to ca.crt
+  # pools: ...
+```
+
+The Operator validates every certificate before applying workloads, mounts the
+selected key at `/var/run/rustfs/oidc-extra-ca/ca.pem`, and sets
+`RUSTFS_EXTRA_CA_CERT` to that path. The volume intentionally does not use a
+`subPath`, so Kubernetes can project Secret updates into running Pods. Secret
+updates enqueue all referencing Tenants and do not trigger a Pod rollout.
+RustFS `1.0.0-rc.2` or later is required for this environment variable; pin a
+compatible image because the Operator's current fallback image predates that
+support. A valid managed configuration reports `OidcTrustReady=True`.
+
+This setting only extends trust for RustFS outbound OIDC connections. It is
+separate from `spec.tls.caTrust`, which configures process-wide TLS and server
+mTLS trust. When this field is omitted, an explicitly supplied
+`RUSTFS_EXTRA_CA_CERT` in `spec.env` remains unmanaged and is passed through.
+
 ### 7.4 Workload Settings
 
 Useful Tenant-level fields:
@@ -539,6 +586,7 @@ Useful Tenant-level fields:
 | `imagePullPolicy` | RustFS image pull policy. |
 | `scheduler` | Custom scheduler name. |
 | `env` | Additional RustFS container environment variables. Do not override operator-managed variables. |
+| `oidc` | OIDC-specific settings, including a namespaced custom CA Secret for outbound OIDC trust. |
 | `serviceAccountName` | Custom ServiceAccount for RustFS pods. |
 | `createServiceAccountRbac` | Deprecated compatibility field; ignored. Manage any custom ServiceAccount RBAC explicitly. |
 | `priorityClassName` | Tenant-level priority class. |
@@ -651,6 +699,7 @@ The operator reserves these environment variables and manages them automatically
 - `RUSTFS_CONSOLE_ADDRESS`
 - `RUSTFS_CONSOLE_ENABLE`
 - `RUSTFS_KMS_*` variables; use `spec.encryption` instead.
+- `RUSTFS_EXTRA_CA_CERT` when `spec.oidc.extraCaCertSecretRef` is configured.
 - TLS-related RustFS variables when Tenant TLS is enabled.
 
 For a single-pool single-node single-disk Tenant, `RUSTFS_VOLUMES` is rendered as the local data path, for example `/data/rustfs0`. Multi-pool tenants and other layouts render peer DNS URLs through the Tenant headless Service and are validated by RustFS at runtime. Set the Helm chart `clusterDomain` value when the Kubernetes cluster DNS domain is not `cluster.local`; the same domain is used for generated TLS SANs.
@@ -1102,6 +1151,7 @@ Important conditions include:
 - `Degraded`
 - `SpecValid`
 - `CredentialsReady`
+- `OidcTrustReady`
 - `KmsReady`
 - `TlsReady`
 - `PoolsReady`

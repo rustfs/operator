@@ -220,6 +220,44 @@ is omitted, the operator does not set
 `RUSTFS_RPC_SECRET`, RustFS resolves it from its own credential configuration,
 and the operator does not report `RpcAuthReady` for that unmanaged value.
 
+### Tenant OIDC Custom CA Trust
+
+Use `spec.oidc.extraCaCertSecretRef` when RustFS must trust a private CA for
+outbound OIDC connections:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oidc-extra-ca
+  namespace: storage
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    ...
+    -----END CERTIFICATE-----
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
+spec:
+  image: rustfs/rustfs:1.0.0
+  oidc:
+    extraCaCertSecretRef:
+      name: oidc-extra-ca
+```
+
+The key defaults to `ca.crt`. The operator validates the PEM certificates,
+mounts the selected key at `/var/run/rustfs/oidc-extra-ca/ca.pem` without a
+`subPath`, and sets `RUSTFS_EXTRA_CA_CERT` to that path. Secret updates enqueue
+referencing Tenants without forcing a Pod rollout. This requires RustFS
+`1.0.0-rc.2` or later; pin a compatible Tenant image because the chart's
+current fallback image predates this support. This OIDC-only trust is separate
+from process-wide `spec.tls.caTrust`.
+
 ### Tenant Provisioning
 
 Tenants can declare RustFS canned policies, regular users, and buckets directly in `spec.policies`, `spec.users`, and `spec.buckets`. Provisioning starts only after the Tenant workload is ready, uses `spec.credsSecret` as the RustFS admin credential source, and reports progress under `status.provisioning`.
