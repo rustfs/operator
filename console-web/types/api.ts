@@ -126,10 +126,18 @@ export interface ProvisioningBucket {
   name: string
   region?: string
   objectLock?: boolean
+  versioning?: boolean
+  objectLockConfiguration?: BucketObjectLockConfiguration
   anonymous?: "Private" | "Download" | "Upload" | "Public"
   policy?: PolicyDocumentSource
   lifecycle?: BucketLifecycleSpec
   deletionPolicy?: ProvisioningDeletionPolicy
+}
+
+export interface BucketObjectLockConfiguration {
+  state?: "Present" | "Absent"
+  mode?: "Governance" | "Compliance"
+  days?: number
 }
 
 export interface BucketLifecycleSpec {
@@ -171,6 +179,9 @@ export interface ProvisioningItemStatus {
 export interface ProvisioningBucketStatus extends ProvisioningItemStatus {
   lifecycleDesiredHash?: string | null
   lifecycleLastAppliedHash?: string | null
+  versioning?: "Unversioned" | "Enabled" | "Suspended" | null
+  objectLockConfigurationDesiredHash?: string | null
+  objectLockConfigurationLastAppliedHash?: string | null
 }
 
 export interface ProvisioningStatus {

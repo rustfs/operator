@@ -142,7 +142,8 @@ mod tenant_provisioning_crd_tests {
     use super::{
         pool_lifecycle::MAX_DECOMMISSION_REQUESTS,
         provisioning::{
-            MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULES, MAX_POLICIES_PER_USER,
+            MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULES,
+            MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS, MAX_POLICIES_PER_USER,
         },
         tenant::{
             MAX_TENANT_BUCKETS, MAX_TENANT_POLICIES, MAX_TENANT_POOLS, MAX_TENANT_USERS, Tenant,
@@ -412,6 +413,34 @@ mod tenant_provisioning_crd_tests {
             lifecycle["properties"]["rules"]["items"]["x-kubernetes-validations"][0]["message"],
             json!("lifecycle rule must configure expiration or abortIncompleteMultipartUpload")
         );
+        let object_lock =
+            &spec["properties"]["buckets"]["items"]["properties"]["objectLockConfiguration"];
+        assert_eq!(
+            object_lock["properties"]["mode"]["enum"],
+            json!(["Governance", "Compliance", null])
+        );
+        assert_eq!(
+            object_lock["properties"]["days"]["minimum"].as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(
+            object_lock["properties"]["days"]["maximum"].as_f64(),
+            Some(MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS as f64)
+        );
+        assert_eq!(
+            object_lock["x-kubernetes-validations"][0]["message"],
+            json!("Present object lock configuration requires mode and days; Absent forbids them")
+        );
+        let bucket_validations = spec["properties"]["buckets"]["items"]["x-kubernetes-validations"]
+            .as_array()
+            .expect("bucket validations are present");
+        assert!(bucket_validations.iter().any(|validation| {
+            validation["message"] == json!("objectLockConfiguration requires objectLock: true")
+        }));
+        assert!(bucket_validations.iter().any(|validation| {
+            validation["message"]
+                == json!("versioning cannot be disabled when object lock is configured")
+        }));
         let bucket_status = &status["properties"]["provisioning"]["properties"]["buckets"]["items"];
         assert_eq!(
             bucket_status["properties"]["lifecycleDesiredHash"]["type"],
@@ -419,6 +448,14 @@ mod tenant_provisioning_crd_tests {
         );
         assert_eq!(
             bucket_status["properties"]["lifecycleLastAppliedHash"]["nullable"],
+            json!(true)
+        );
+        assert_eq!(
+            bucket_status["properties"]["versioning"]["enum"],
+            json!(["Unversioned", "Enabled", "Suspended", null])
+        );
+        assert_eq!(
+            bucket_status["properties"]["objectLockConfigurationLastAppliedHash"]["nullable"],
             json!(true)
         );
     }

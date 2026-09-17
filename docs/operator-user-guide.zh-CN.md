@@ -814,7 +814,9 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 - `spec.credsSecret`：RustFS 管理员凭据。
 - `spec.policies`：从 ConfigMap 读取 policy document。
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
-- `spec.buckets`：bucket，以及可选的 object lock、匿名访问（`Private` / `Download` / `Upload` / `Public`）或来自 ConfigMap 的自定义 bucket policy。非 `Private` 的 `anonymous` 值与 `policy` 互斥。未设置 `policy` 时，显式设置 `anonymous: Private` 会删除此前由 Operator 应用的 bucket policy；若现有 policy 不归 Operator 管理，则报告冲突而不删除。为兼容旧对象，`Private` 与 `policy` 同时存在时继续以自定义 policy 为准。两者都省略时，Operator 不会改写已有 bucket policy，并会保留所有权记录供后续显式切换为 `Private` 时校验。
+- `spec.buckets`：bucket、版本控制、Object Lock 及默认保留策略、匿名访问（`Private` / `Download` / `Upload` / `Public`），或来自 ConfigMap 的自定义 bucket policy。非 `Private` 的 `anonymous` 值与 `policy` 互斥。未设置 `policy` 时，显式设置 `anonymous: Private` 会删除此前由 Operator 应用的 bucket policy；若现有 policy 不归 Operator 管理，则报告冲突而不删除。为兼容旧对象，`Private` 与 `policy` 同时存在时继续以自定义 policy 为准。两者都省略时，Operator 不会改写已有 bucket policy，并会保留所有权记录供后续显式切换为 `Private` 时校验。
+
+Bucket 版本控制和 Object Lock 采用声明式但保守的调和策略。`versioning: true` 启用版本控制。`versioning: false` 会让从未启用版本控制的 bucket 保持原状，或在版本控制已启用后请求 S3 `Suspended`；省略该字段时保持现状，除非 Object Lock 要求先启用版本控制。`objectLock: true` 会在版本控制启用后开启 Object Lock。Object Lock 不可关闭；当线上 bucket 已启用 Object Lock 时，Operator 会拒绝 `objectLock: false` 或暂停版本控制。`objectLockConfiguration` 管理默认保留规则：省略 `state` 等同于 `Present`，此时必须设置 `mode: Governance` 或 `Compliance` 以及 `days`；`state: Absent` 必须省略 `mode` 和 `days`，仅移除默认规则。完全省略 `objectLockConfiguration` 时，不管理已有默认保留规则。Operator 可以接管与声明完全相同的线上规则，但只有线上配置哈希仍与 status 中最后一次应用的配置一致时，才会替换或移除不同规则。默认保留策略只作用于之后创建的对象版本，不会追溯锁定已有版本。
 
 每个 bucket 还可以通过 `lifecycle.state: Present` 声明一个或多个 S3 生命周期规则。当前 schema 支持按正整数天数过期对象，以及按正整数天数清理未完成的分片上传；每条规则必须有唯一 ID、`Enabled` 或 `Disabled` 状态，并显式指定 prefix filter（`prefix: ""` 表示全部对象）。`lifecycle.state: Absent` 表示请求删除，且不能包含规则。Operator 可以接管与声明完全相同的现有配置，但没有 `status.provisioning.buckets` 中匹配的所有权哈希时，不会覆盖或删除不同的现有配置。省略 `lifecycle` 时不会调用 Lifecycle API，也不会改动现有配置。
 
@@ -886,7 +888,11 @@ spec:
         - app-readwrite
   buckets:
     - name: app-data
+      versioning: true
       objectLock: true
+      objectLockConfiguration:
+        mode: Compliance
+        days: 30
       anonymous: Download
       lifecycle:
         state: Present

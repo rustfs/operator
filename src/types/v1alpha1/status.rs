@@ -174,7 +174,11 @@ pub enum Reason {
     UserOwnershipConflict,
     UserOwnershipCheckpointFailed,
     BucketCreateFailed,
+    BucketVersioningApplyFailed,
+    BucketVersioningConflict,
+    BucketObjectLockApplyFailed,
     BucketObjectLockConflict,
+    BucketObjectLockConfigurationConflict,
     BucketPolicyApplyFailed,
     BucketPolicyConflict,
     BucketLifecycleApplyFailed,
@@ -249,7 +253,11 @@ impl Reason {
             Self::UserOwnershipConflict => "UserOwnershipConflict",
             Self::UserOwnershipCheckpointFailed => "UserOwnershipCheckpointFailed",
             Self::BucketCreateFailed => "BucketCreateFailed",
+            Self::BucketVersioningApplyFailed => "BucketVersioningApplyFailed",
+            Self::BucketVersioningConflict => "BucketVersioningConflict",
+            Self::BucketObjectLockApplyFailed => "BucketObjectLockApplyFailed",
             Self::BucketObjectLockConflict => "BucketObjectLockConflict",
+            Self::BucketObjectLockConfigurationConflict => "BucketObjectLockConfigurationConflict",
             Self::BucketPolicyApplyFailed => "BucketPolicyApplyFailed",
             Self::BucketPolicyConflict => "BucketPolicyConflict",
             Self::BucketLifecycleApplyFailed => "BucketLifecycleApplyFailed",
@@ -527,7 +535,11 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "UserOwnershipConflict"
             | "UserOwnershipCheckpointFailed"
             | "BucketCreateFailed"
+            | "BucketVersioningApplyFailed"
+            | "BucketVersioningConflict"
+            | "BucketObjectLockApplyFailed"
             | "BucketObjectLockConflict"
+            | "BucketObjectLockConfigurationConflict"
             | "BucketPolicyApplyFailed"
             | "BucketPolicyConflict"
             | "BucketLifecycleApplyFailed"
@@ -627,7 +639,21 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
             ]
         }
         "BucketCreateFailed" => vec!["inspectBucket", "inspectOperatorLogs"],
-        "BucketObjectLockConflict" => vec!["createObjectLockBucket", "fixBucketSpec"],
+        "BucketVersioningApplyFailed" => {
+            vec!["fixBucketVersioning", "inspectOperatorLogs"]
+        }
+        "BucketVersioningConflict" => {
+            vec!["inspectLiveBucketVersioning", "updateBucketSpec"]
+        }
+        "BucketObjectLockApplyFailed" => {
+            vec!["fixBucketObjectLock", "inspectOperatorLogs"]
+        }
+        "BucketObjectLockConflict" => {
+            vec!["inspectLiveBucketObjectLock", "updateBucketSpec"]
+        }
+        "BucketObjectLockConfigurationConflict" => {
+            vec!["inspectLiveBucketObjectLock", "updateBucketSpec"]
+        }
         "BucketPolicyApplyFailed" => vec!["fixBucketPolicy", "inspectOperatorLogs"],
         "BucketPolicyConflict" => vec!["inspectLiveBucketPolicy", "updateBucketSpec"],
         "BucketLifecycleApplyFailed" => vec!["fixBucketLifecycle", "inspectOperatorLogs"],
@@ -732,6 +758,14 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("BucketPolicyConflict"),
             vec!["inspectLiveBucketPolicy", "updateBucketSpec"]
+        );
+        assert_eq!(
+            next_actions_for_reason("BucketObjectLockConflict"),
+            vec!["inspectLiveBucketObjectLock", "updateBucketSpec"]
+        );
+        assert_eq!(
+            next_actions_for_reason("BucketObjectLockConfigurationConflict"),
+            vec!["inspectLiveBucketObjectLock", "updateBucketSpec"]
         );
         assert!(is_blocked_reason("BucketLifecycleApplyFailed"));
         assert!(is_blocked_reason("BucketLifecycleConflict"));

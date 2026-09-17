@@ -22,10 +22,12 @@ use crate::cluster_dns;
 
 pub use rustfs_admin::{
     BucketLifecycleAbortIncompleteMultipartUpload, BucketLifecycleConfiguration,
-    BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleStatus, CreateBucketResult,
-    RustfsClientError, RustfsCredentials, RustfsErasureBackend, RustfsErasureSetInfo,
-    RustfsPoolDecommissionInfo, RustfsPoolListItem, RustfsPoolStatus, RustfsServerInfo,
-    RustfsServerUsage, RustfsUserInfo, canonicalize_bucket_lifecycle_xml,
+    BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleStatus,
+    BucketObjectLockConfiguration, BucketObjectLockDefaultRetention, BucketObjectLockRetentionMode,
+    BucketObjectLockRetentionPeriod, BucketVersioningState, BucketVersioningUpdate,
+    CreateBucketResult, RustfsClientError, RustfsCredentials, RustfsErasureBackend,
+    RustfsErasureSetInfo, RustfsPoolDecommissionInfo, RustfsPoolListItem, RustfsPoolStatus,
+    RustfsServerInfo, RustfsServerUsage, RustfsUserInfo, canonicalize_bucket_lifecycle_xml,
 };
 
 /// Tenant-aware wrapper around the kube-agnostic RustFS admin client.

@@ -84,7 +84,11 @@ spec:
 
   buckets:
     - name: provisioning-demo-data
+      versioning: true
       objectLock: true
+      objectLockConfiguration:
+        mode: Compliance
+        days: 30
       anonymous: Download
       lifecycle:
         state: Present
