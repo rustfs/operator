@@ -537,13 +537,43 @@ Operator 会在应用 workload 前校验每张证书，把所选 key 挂载到
 `/var/run/rustfs/oidc-extra-ca/ca.pem`，并将 `RUSTFS_EXTRA_CA_CERT` 设置为该路径。
 该 volume 刻意不使用 `subPath`，因此 Kubernetes 可以把 Secret 更新投射到运行中的
 Pod。Secret 更新会触发所有引用该 Secret 的 Tenant 重新 reconcile，但不会触发 Pod
-滚动更新。该环境变量需要 RustFS `1.0.0-rc.2` 或更高版本；Operator 当前的 fallback
-镜像早于该功能，因此应显式固定兼容镜像。有效的托管配置会报告
+滚动更新。该功能支持 RustFS GA 以及之后的镜像。有效的托管配置会报告
 `OidcTrustReady=True`。
 
 此配置只扩展 RustFS 出站 OIDC 连接的信任，不等同于配置进程级 TLS 和服务端 mTLS
 信任的 `spec.tls.caTrust`。省略该字段时，`spec.env` 中显式提供的
 `RUSTFS_EXTRA_CA_CERT` 仍会按非托管环境变量传入。
+
+#### 附加 Volume 和 VolumeMount
+
+对于没有 Tenant 专用字段的文件，可以使用 `spec.additionalVolumes` 和
+`spec.additionalVolumeMounts`。这两个字段采用 Kubernetes `Volume` 和 `VolumeMount`
+结构，并应用到每个 Pool 的 RustFS 容器：
+
+```yaml
+spec:
+  env:
+    - name: RUSTFS_EXTRA_CA_CERT
+      value: /etc/rustfs/custom-ca/ca.crt
+  additionalVolumes:
+    - name: custom-ca
+      secret:
+        secretName: custom-ca
+        items:
+          - key: ca.crt
+            path: ca.crt
+  additionalVolumeMounts:
+    - name: custom-ca
+      mountPath: /etc/rustfs/custom-ca
+      readOnly: true
+  # pools: ...
+```
+
+每个附加 VolumeMount 必须引用 `additionalVolumes` 中的 Volume。Operator 会拒绝重复
+名称、重复挂载路径、相对路径，以及与数据、日志、TLS、OIDC 管理路径冲突的配置。
+Kubernetes 负责校验 VolumeSource，并把 Secret 和 ConfigMap 更新投射到 Pod。需要让
+更新进入运行中的 Pod 时，请勿使用 `subPath`。修改这两个字段会改变 StatefulSet
+PodTemplate，并触发滚动更新。应用包含这些字段的 Tenant 之前，需要更新 CRD。
 
 ### 7.4 工作负载配置
 
@@ -557,6 +587,8 @@ Pod。Secret 更新会触发所有引用该 Secret 的 Tenant 重新 reconcile�
 | `scheduler` | 自定义 scheduler 名称。 |
 | `env` | 额外 RustFS 容器环境变量。不要覆盖 Operator 自动管理的变量。 |
 | `oidc` | OIDC 专用设置，包括用于出站 OIDC 信任的同 namespace 自定义 CA Secret。 |
+| `additionalVolumes` | 添加到每个 RustFS Pod 的 Kubernetes Volume。 |
+| `additionalVolumeMounts` | 添加到每个 Pool 中 RustFS 容器的 VolumeMount。 |
 | `serviceAccountName` | RustFS Pod 使用的自定义 ServiceAccount。 |
 | `createServiceAccountRbac` | 已废弃的兼容字段，不再生效；自定义 ServiceAccount 所需 RBAC 必须显式管理。 |
 | `priorityClassName` | Tenant 级 PriorityClass。 |

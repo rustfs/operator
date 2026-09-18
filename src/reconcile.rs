@@ -961,6 +961,7 @@ pub fn error_policy(object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> A
             // Use 60-second requeue to reduce event/log spam while user fixes the issue
             types::error::Error::ImmutableFieldModified { .. }
             | types::error::Error::InvalidTenantName { .. }
+            | types::error::Error::InvalidAdditionalVolumeSpec { .. }
             | types::error::Error::KmsMigrationBlocked { .. }
             | types::error::Error::InvalidWorkloadSecurityProfile { .. }
             | types::error::Error::WorkloadSecurityIncompatible { .. }
@@ -1015,6 +1016,9 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
         Error::Types { source } => match source {
             types::error::Error::InvalidTenantName { .. } => "InvalidTenantName",
             types::error::Error::InvalidPoolSpec { .. } => "InvalidPoolSpec",
+            types::error::Error::InvalidAdditionalVolumeSpec { .. } => {
+                "InvalidAdditionalVolumeSpec"
+            }
             types::error::Error::ImmutableFieldModified { .. } => "ImmutableFieldModified",
             types::error::Error::PoolDeleteBlocked { .. } => "PoolDeleteBlocked",
             types::error::Error::KmsMigrationBlocked { .. } => "KmsMigrationBlocked",

@@ -253,10 +253,39 @@ spec:
 The key defaults to `ca.crt`. The operator validates the PEM certificates,
 mounts the selected key at `/var/run/rustfs/oidc-extra-ca/ca.pem` without a
 `subPath`, and sets `RUSTFS_EXTRA_CA_CERT` to that path. Secret updates enqueue
-referencing Tenants without forcing a Pod rollout. This requires RustFS
-`1.0.0-rc.2` or later; pin a compatible Tenant image because the chart's
-current fallback image predates this support. This OIDC-only trust is separate
-from process-wide `spec.tls.caTrust`.
+referencing Tenants without forcing a Pod rollout. This feature targets RustFS
+GA and later images. This OIDC-only trust is separate from process-wide
+`spec.tls.caTrust`.
+
+### Additional RustFS Files
+
+Use `spec.additionalVolumes` and `spec.additionalVolumeMounts` to provide files
+that do not have a dedicated Tenant field. Both fields use the Kubernetes
+`Volume` and `VolumeMount` schemas and apply to the RustFS container in every
+Pool. For example, the following configuration provides an unmanaged CA bundle
+to `RUSTFS_EXTRA_CA_CERT`:
+
+```yaml
+spec:
+  env:
+    - name: RUSTFS_EXTRA_CA_CERT
+      value: /etc/rustfs/custom-ca/ca.crt
+  additionalVolumes:
+    - name: custom-ca
+      secret:
+        secretName: custom-ca
+  additionalVolumeMounts:
+    - name: custom-ca
+      mountPath: /etc/rustfs/custom-ca
+      readOnly: true
+```
+
+Every additional mount must reference an additional volume. Volume names and
+mount paths must not conflict with operator-managed storage, logging, TLS, or
+OIDC mounts. Kubernetes validates the selected volume source and projects
+Secret and ConfigMap updates. Avoid `subPath` when projected updates must reach
+running Pods. Changing either Tenant field updates the StatefulSet Pod template
+and starts a rolling update.
 
 ### Tenant Provisioning
 

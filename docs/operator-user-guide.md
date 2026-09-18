@@ -566,14 +566,46 @@ selected key at `/var/run/rustfs/oidc-extra-ca/ca.pem`, and sets
 `RUSTFS_EXTRA_CA_CERT` to that path. The volume intentionally does not use a
 `subPath`, so Kubernetes can project Secret updates into running Pods. Secret
 updates enqueue all referencing Tenants and do not trigger a Pod rollout.
-RustFS `1.0.0-rc.2` or later is required for this environment variable; pin a
-compatible image because the Operator's current fallback image predates that
-support. A valid managed configuration reports `OidcTrustReady=True`.
+This feature targets RustFS GA and later images. A valid managed configuration
+reports `OidcTrustReady=True`.
 
 This setting only extends trust for RustFS outbound OIDC connections. It is
 separate from `spec.tls.caTrust`, which configures process-wide TLS and server
 mTLS trust. When this field is omitted, an explicitly supplied
 `RUSTFS_EXTRA_CA_CERT` in `spec.env` remains unmanaged and is passed through.
+
+#### Additional volumes and mounts
+
+Use `spec.additionalVolumes` and `spec.additionalVolumeMounts` for files that do
+not have a dedicated Tenant field. The fields use the Kubernetes `Volume` and
+`VolumeMount` schemas and apply to the RustFS container in every Pool:
+
+```yaml
+spec:
+  env:
+    - name: RUSTFS_EXTRA_CA_CERT
+      value: /etc/rustfs/custom-ca/ca.crt
+  additionalVolumes:
+    - name: custom-ca
+      secret:
+        secretName: custom-ca
+        items:
+          - key: ca.crt
+            path: ca.crt
+  additionalVolumeMounts:
+    - name: custom-ca
+      mountPath: /etc/rustfs/custom-ca
+      readOnly: true
+  # pools: ...
+```
+
+Every additional mount must reference an additional volume. The Operator also
+rejects duplicate names, duplicate or relative mount paths, and conflicts with
+operator-managed data, logging, TLS, and OIDC mounts. Kubernetes validates the
+volume source and projects Secret and ConfigMap updates. Avoid `subPath` when
+projected updates must reach running Pods. Changing either field changes the
+StatefulSet Pod template and starts a rolling update. Install the updated CRD
+before applying a Tenant that uses these fields.
 
 ### 7.4 Workload Settings
 
@@ -587,6 +619,8 @@ Useful Tenant-level fields:
 | `scheduler` | Custom scheduler name. |
 | `env` | Additional RustFS container environment variables. Do not override operator-managed variables. |
 | `oidc` | OIDC-specific settings, including a namespaced custom CA Secret for outbound OIDC trust. |
+| `additionalVolumes` | Additional Kubernetes volumes for every RustFS Pod. |
+| `additionalVolumeMounts` | Additional mounts for the RustFS container in every Pool. |
 | `serviceAccountName` | Custom ServiceAccount for RustFS pods. |
 | `createServiceAccountRbac` | Deprecated compatibility field; ignored. Manage any custom ServiceAccount RBAC explicitly. |
 | `priorityClassName` | Tenant-level priority class. |

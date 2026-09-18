@@ -39,6 +39,13 @@ pub enum Error {
     #[snafu(display("invalid pool specification for tenant '{}': {}", name, message))]
     InvalidPoolSpec { name: String, message: String },
 
+    #[snafu(display(
+        "invalid additional volume specification for tenant '{}': {}",
+        name,
+        message
+    ))]
+    InvalidAdditionalVolumeSpec { name: String, message: String },
+
     #[snafu(display("KMS migration is blocked for tenant '{}': {}", name, message))]
     KmsMigrationBlocked { name: String, message: String },
 

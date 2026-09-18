@@ -172,6 +172,26 @@ mod tenant_provisioning_crd_tests {
             spec["properties"]["rpcSecret"]["required"],
             json!(["key", "name"])
         );
+        assert_eq!(
+            spec["properties"]["additionalVolumes"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            spec["properties"]["additionalVolumes"]["x-kubernetes-list-map-keys"],
+            json!(["name"])
+        );
+        assert_eq!(
+            spec["properties"]["additionalVolumeMounts"]["x-kubernetes-list-type"],
+            json!("map")
+        );
+        assert_eq!(
+            spec["properties"]["additionalVolumeMounts"]["x-kubernetes-list-map-keys"],
+            json!(["mountPath"])
+        );
+        assert_eq!(
+            spec["properties"]["additionalVolumeMounts"]["items"]["required"],
+            json!(["mountPath", "name"])
+        );
 
         assert_eq!(spec["properties"]["policies"]["type"], json!("array"));
         assert_eq!(spec["properties"]["users"]["type"], json!("array"));
