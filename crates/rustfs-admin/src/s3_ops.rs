@@ -21,6 +21,8 @@ use super::helpers::{
     create_bucket_body, escape_xml, is_absent_resource,
 };
 use super::{ADMIN_SIGNING_SERVICE, CreateBucketResult, RustfsAdminClient, RustfsClientError};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use md5::{Digest as _, Md5};
 use quick_xml::Reader;
 use quick_xml::escape::resolve_xml_entity;
 use quick_xml::events::{BytesCData, BytesRef, BytesStart, BytesText, Event};
@@ -29,6 +31,10 @@ use reqwest::StatusCode;
 const S3_XML_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 const MAX_BUCKET_CONFIGURATION_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_BUCKET_LIFECYCLE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+fn content_md5(body: &str) -> String {
+    BASE64_STANDARD.encode(Md5::digest(body.as_bytes()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BucketVersioningState {
@@ -854,13 +860,17 @@ impl RustfsAdminClient {
         let path = format!("/{bucket}");
         let query = build_canonical_query(&[("versioning", "")]);
         let body = update.to_xml();
-        let signed = self.sign_request(
+        let content_md5 = content_md5(&body);
+        let signed = self.sign_request_with_extra_headers(
             "PUT",
             &path,
             &query,
             &body,
-            Some("application/xml"),
             ADMIN_SIGNING_SERVICE,
+            &[
+                ("content-md5", content_md5.as_str()),
+                ("content-type", "application/xml"),
+            ],
         )?;
         let host = self.host()?;
         let response = self
@@ -874,6 +884,7 @@ impl RustfsAdminClient {
             .header("x-amz-content-sha256", &signed.payload_hash)
             .header("authorization", &signed.authorization)
             .header("host", host)
+            .header("content-md5", content_md5)
             .header("content-type", "application/xml")
             .body(body)
             .send()
@@ -944,13 +955,17 @@ impl RustfsAdminClient {
         let path = format!("/{bucket}");
         let query = build_canonical_query(&[("object-lock", "")]);
         let body = configuration.to_xml();
-        let signed = self.sign_request(
+        let content_md5 = content_md5(&body);
+        let signed = self.sign_request_with_extra_headers(
             "PUT",
             &path,
             &query,
             &body,
-            Some("application/xml"),
             ADMIN_SIGNING_SERVICE,
+            &[
+                ("content-md5", content_md5.as_str()),
+                ("content-type", "application/xml"),
+            ],
         )?;
         let host = self.host()?;
         let response = self
@@ -964,6 +979,7 @@ impl RustfsAdminClient {
             .header("x-amz-content-sha256", &signed.payload_hash)
             .header("authorization", &signed.authorization)
             .header("host", host)
+            .header("content-md5", content_md5)
             .header("content-type", "application/xml")
             .body(body)
             .send()
