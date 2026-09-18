@@ -3652,7 +3652,16 @@ mod tests {
         versioning: Arc<Mutex<BucketVersioningState>>,
         object_lock: Arc<Mutex<Option<AdminObjectLockConfiguration>>>,
         requests: Arc<Mutex<Vec<String>>>,
+        put_requests: Arc<Mutex<Vec<BucketControlPutRequest>>>,
         create_object_lock_header: Arc<Mutex<Option<String>>>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct BucketControlPutRequest {
+        query: String,
+        body: String,
+        content_md5: Option<String>,
+        authorization: Option<String>,
     }
 
     impl Default for BucketControlCapture {
@@ -3664,9 +3673,59 @@ mod tests {
                 versioning: Arc::new(Mutex::new(BucketVersioningState::Unversioned)),
                 object_lock: Arc::new(Mutex::new(None)),
                 requests: Arc::new(Mutex::new(Vec::new())),
+                put_requests: Arc::new(Mutex::new(Vec::new())),
                 create_object_lock_header: Arc::new(Mutex::new(None)),
             }
         }
+    }
+
+    async fn capture_bucket_control_put(
+        capture: &BucketControlCapture,
+        query: &str,
+        request: Request<Body>,
+    ) -> String {
+        let content_md5 = request
+            .headers()
+            .get("content-md5")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let authorization = request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("bucket control request body");
+        let body = String::from_utf8(body.to_vec()).expect("bucket control body is UTF-8");
+        capture
+            .put_requests
+            .lock()
+            .await
+            .push(BucketControlPutRequest {
+                query: query.to_string(),
+                body: body.clone(),
+                content_md5,
+                authorization,
+            });
+        body
+    }
+
+    fn assert_signed_content_md5(
+        request: &BucketControlPutRequest,
+        expected_body: &str,
+        expected_content_md5: &str,
+    ) {
+        assert_eq!(request.body, expected_body);
+        assert_eq!(request.content_md5.as_deref(), Some(expected_content_md5));
+        assert!(
+            request
+                .authorization
+                .as_deref()
+                .is_some_and(|authorization| authorization.contains(
+                    "SignedHeaders=content-md5;content-type;host;x-amz-content-sha256;x-amz-date"
+                ))
+        );
     }
 
     async fn bucket_control_handler(
@@ -3722,10 +3781,7 @@ mod tests {
                 }
             }
             (axum::http::Method::PUT, "versioning=") => {
-                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
-                    .await
-                    .expect("versioning request body");
-                let body = String::from_utf8(body.to_vec()).expect("versioning body is UTF-8");
+                let body = capture_bucket_control_put(&capture, &query, request).await;
                 if !capture.ignore_versioning_put {
                     *capture.versioning.lock().await = if body.contains("<Status>Enabled</Status>")
                     {
@@ -3748,10 +3804,7 @@ mod tests {
                 }
             }
             (axum::http::Method::PUT, "object-lock=") => {
-                let body = axum::body::to_bytes(request.into_body(), usize::MAX)
-                    .await
-                    .expect("Object Lock request body");
-                let body = String::from_utf8(body.to_vec()).expect("Object Lock body is UTF-8");
+                let body = capture_bucket_control_put(&capture, &query, request).await;
                 let default_retention = if body.contains("<Rule>") {
                     Some(AdminObjectLockDefaultRetention {
                         mode: if body.contains("<Mode>COMPLIANCE</Mode>") {
@@ -5815,6 +5868,26 @@ mod tests {
             .position(|request| request == "PUT object-lock=")
             .expect("Object Lock PUT is present");
         assert!(versioning_put < object_lock_put);
+        drop(requests);
+        let put_requests = capture.put_requests.lock().await;
+        let versioning_request = put_requests
+            .iter()
+            .find(|request| request.query == "versioning=")
+            .expect("versioning PUT is captured");
+        assert_signed_content_md5(
+            versioning_request,
+            "<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Status>Enabled</Status></VersioningConfiguration>",
+            "QQFYoy/mRYV9PGZUfFi0Bw==",
+        );
+        let object_lock_request = put_requests
+            .iter()
+            .find(|request| request.query == "object-lock=")
+            .expect("Object Lock PUT is captured");
+        assert_signed_content_md5(
+            object_lock_request,
+            "<ObjectLockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>COMPLIANCE</Mode><Days>30</Days></DefaultRetention></Rule></ObjectLockConfiguration>",
+            "Bf0uwNnf4kZqbmEzi36kOA==",
+        );
         server.abort();
     }
 
