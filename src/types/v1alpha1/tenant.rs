@@ -149,6 +149,22 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<corev1::EnvVar>,
 
+    /// Additional Kubernetes volumes added to every RustFS Pod.
+    ///
+    /// These volumes are mounted only when referenced by `additionalVolumeMounts`.
+    #[schemars(
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_volumes: Vec<corev1::Volume>,
+
+    /// Additional volume mounts added to the RustFS container in every Pool.
+    #[schemars(
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["mountPath"])
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_volume_mounts: Vec<corev1::VolumeMount>,
+
     /// Tenant Service IP family policy and RustFS listen addresses.
     /// When omitted, generated Services inherit the cluster default and RustFS listens on IPv4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,7 +306,7 @@ pub struct TenantSpec {
 }
 
 impl TenantSpec {
-    /// Returns every Kubernetes Secret name referenced by the Tenant specification.
+    /// Returns Secret names whose lifecycle requires Tenant reconciliation.
     pub(crate) fn referenced_secret_names(&self) -> BTreeSet<String> {
         let mut names = BTreeSet::new();
         {

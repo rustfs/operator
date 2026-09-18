@@ -26,12 +26,14 @@ use crate::types::v1alpha1::security_context::{
     MAX_KUBERNETES_ID, PodSecurityContextOverride, effective_run_as_non_root,
     security_context_pair_delegates_to_platform,
 };
-use crate::types::v1alpha1::tls::{TlsPlan, http_probe};
+use crate::types::v1alpha1::tls::{TLS_SERVER_VOLUME_NAME, TlsPlan, http_probe};
 use k8s_openapi::DeepMerge;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
+use std::collections::BTreeSet;
+use std::path::Path;
 
 const LOCAL_KMS_KEY_DIR_ENV: &str = "RUSTFS_KMS_KEY_DIR";
 const LOCAL_KMS_LOCAL_KEY_DIR_ENV: &str = "RUSTFS_KMS_LOCAL_KEY_DIR";
@@ -725,6 +727,110 @@ fn stateful_name(tenant: &Tenant, pool: &Pool) -> String {
 }
 
 impl Tenant {
+    pub(crate) fn validate_additional_volumes(&self) -> Result<(), types::error::Error> {
+        let invalid = |message| types::error::Error::InvalidAdditionalVolumeSpec {
+            name: self.name(),
+            message,
+        };
+
+        let mut volume_names = BTreeSet::new();
+        for volume in &self.spec.additional_volumes {
+            if volume.name.trim().is_empty() {
+                return Err(invalid(
+                    "spec.additionalVolumes[].name must not be blank".to_string(),
+                ));
+            }
+            if !volume_names.insert(volume.name.as_str()) {
+                return Err(invalid(format!(
+                    "spec.additionalVolumes contains duplicate volume name '{}'",
+                    volume.name
+                )));
+            }
+        }
+
+        let mut mount_paths = BTreeSet::new();
+        for mount in &self.spec.additional_volume_mounts {
+            if !Path::new(&mount.mount_path).is_absolute() {
+                return Err(invalid(format!(
+                    "spec.additionalVolumeMounts mountPath '{}' must be absolute",
+                    mount.mount_path
+                )));
+            }
+            if !mount_paths.insert(mount.mount_path.as_str()) {
+                return Err(invalid(format!(
+                    "spec.additionalVolumeMounts contains duplicate mountPath '{}'",
+                    mount.mount_path
+                )));
+            }
+            if !volume_names.contains(mount.name.as_str()) {
+                return Err(invalid(format!(
+                    "spec.additionalVolumeMounts mountPath '{}' references volume '{}', which is not declared in spec.additionalVolumes",
+                    mount.mount_path, mount.name
+                )));
+            }
+        }
+
+        let mut managed_volume_names = BTreeSet::new();
+        let mut managed_mount_paths = BTreeSet::new();
+        for pool in &self.spec.pools {
+            for shard in 0..pool.persistence.volumes_per_server {
+                managed_volume_names.insert(volume_claim_template_name(shard));
+                managed_mount_paths.insert(data_volume_mount_path(
+                    pool.persistence.path.as_deref(),
+                    shard,
+                ));
+            }
+        }
+
+        if let Some(logging) = &self.spec.logging
+            && logging.mode != crate::types::v1alpha1::logging::LoggingMode::Stdout
+        {
+            managed_volume_names.insert("logs".to_string());
+            managed_mount_paths.insert(
+                logging
+                    .mount_path
+                    .clone()
+                    .unwrap_or_else(|| "/logs".to_string()),
+            );
+        }
+
+        if self
+            .spec
+            .oidc
+            .as_ref()
+            .is_some_and(|oidc| oidc.extra_ca_cert_secret_ref.is_some())
+        {
+            managed_volume_names.insert(OIDC_EXTRA_CA_VOLUME.to_string());
+            managed_mount_paths.insert(OIDC_EXTRA_CA_MOUNT_PATH.to_string());
+        }
+
+        if let Some(tls) = &self.spec.tls
+            && tls.is_enabled()
+        {
+            managed_volume_names.insert(TLS_SERVER_VOLUME_NAME.to_string());
+            managed_mount_paths.insert(tls.mount_path.clone());
+        }
+
+        for volume_name in volume_names {
+            if managed_volume_names.contains(volume_name) {
+                return Err(invalid(format!(
+                    "spec.additionalVolumes volume name '{}' conflicts with an operator-managed volume",
+                    volume_name
+                )));
+            }
+        }
+        for mount_path in mount_paths {
+            if managed_mount_paths.contains(mount_path) {
+                return Err(invalid(format!(
+                    "spec.additionalVolumeMounts mountPath '{}' conflicts with an operator-managed mount",
+                    mount_path
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     fn validate_declared_workload_security_contexts(&self) -> Result<(), types::error::Error> {
         let invalid_profile = |message| types::error::Error::InvalidWorkloadSecurityProfile {
             name: self.name(),
@@ -1339,6 +1445,7 @@ impl Tenant {
         cluster_domain: &str,
     ) -> Result<v1::StatefulSet, types::error::Error> {
         self.validate_declared_workload_security_contexts()?;
+        self.validate_additional_volumes()?;
 
         let labels = self.pool_labels(pool);
         let selector_labels = self.pool_selector_labels(pool);
@@ -1490,6 +1597,18 @@ impl Tenant {
         volume_mounts.append(&mut oidc_mounts);
         pod_volumes.extend(tls_plan.volumes.clone());
         volume_mounts.extend(tls_plan.volume_mounts.clone());
+
+        let mut additional_volumes = self.spec.additional_volumes.clone();
+        additional_volumes.sort_by(|left, right| left.name.cmp(&right.name));
+        pod_volumes.extend(additional_volumes);
+
+        let mut additional_volume_mounts = self.spec.additional_volume_mounts.clone();
+        additional_volume_mounts.sort_by(|left, right| {
+            left.mount_path
+                .cmp(&right.mount_path)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        volume_mounts.extend(additional_volume_mounts);
 
         let security = effective_workload_security_context(
             self.spec.security_context.as_ref(),
@@ -2711,6 +2830,237 @@ mod tests {
                 .iter()
                 .all(|volume| volume.name != "rustfs-oidc-extra-ca")
         }));
+    }
+
+    #[test]
+    fn additional_secret_volume_supports_rustfs_extra_ca_cert() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.env.push(corev1::EnvVar {
+            name: "RUSTFS_EXTRA_CA_CERT".to_string(),
+            value: Some("/etc/rustfs/custom-ca/ca.crt".to_string()),
+            ..Default::default()
+        });
+        tenant.spec.additional_volumes.push(corev1::Volume {
+            name: "custom-ca".to_string(),
+            secret: Some(corev1::SecretVolumeSource {
+                secret_name: Some("custom-ca".to_string()),
+                optional: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        tenant
+            .spec
+            .additional_volume_mounts
+            .push(corev1::VolumeMount {
+                name: "custom-ca".to_string(),
+                mount_path: "/etc/rustfs/custom-ca".to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            });
+
+        let statefulset = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("additional CA volume should render");
+        let pod_spec = statefulset.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+
+        assert_eq!(
+            env_value(container, "RUSTFS_EXTRA_CA_CERT"),
+            Some("/etc/rustfs/custom-ca/ca.crt")
+        );
+        assert_eq!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|volume| volume.name == "custom-ca")
+                .and_then(|volume| volume.secret.as_ref())
+                .and_then(|secret| secret.secret_name.as_deref()),
+            Some("custom-ca")
+        );
+        assert_eq!(
+            container
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|mount| mount.name == "custom-ca")
+                .map(|mount| (mount.mount_path.as_str(), mount.read_only, &mount.sub_path)),
+            Some(("/etc/rustfs/custom-ca", Some(true), &None))
+        );
+    }
+
+    #[test]
+    fn omitted_additional_volumes_do_not_change_tenant_json() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let spec = serde_json::to_value(&tenant.spec).expect("Tenant spec should serialize");
+
+        assert!(spec.get("additionalVolumes").is_none());
+        assert!(spec.get("additionalVolumeMounts").is_none());
+    }
+
+    #[test]
+    fn additional_volume_validation_rejects_unknown_volume_and_managed_collisions() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant
+            .spec
+            .additional_volume_mounts
+            .push(corev1::VolumeMount {
+                name: "missing".to_string(),
+                mount_path: "/etc/rustfs/custom".to_string(),
+                ..Default::default()
+            });
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("unknown volume reference should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("not declared in spec.additionalVolumes")
+        ));
+
+        tenant.spec.additional_volume_mounts.clear();
+        tenant.spec.additional_volumes.push(corev1::Volume {
+            name: "vol-0".to_string(),
+            empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+            ..Default::default()
+        });
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("data volume name collision should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("operator-managed volume")
+        ));
+    }
+
+    #[test]
+    fn additional_volume_validation_rejects_relative_and_managed_mount_paths() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.additional_volumes.push(corev1::Volume {
+            name: "custom".to_string(),
+            empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+            ..Default::default()
+        });
+        tenant
+            .spec
+            .additional_volume_mounts
+            .push(corev1::VolumeMount {
+                name: "custom".to_string(),
+                mount_path: "relative/path".to_string(),
+                ..Default::default()
+            });
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("relative mount path should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("must be absolute")
+        ));
+
+        tenant.spec.additional_volume_mounts[0].mount_path = "/data/rustfs0".to_string();
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("data mount path collision should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("operator-managed mount")
+        ));
+    }
+
+    #[test]
+    fn additional_volume_order_does_not_trigger_statefulset_update() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.additional_volumes = vec![
+            corev1::Volume {
+                name: "second".to_string(),
+                empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+                ..Default::default()
+            },
+            corev1::Volume {
+                name: "first".to_string(),
+                empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+                ..Default::default()
+            },
+        ];
+        tenant.spec.additional_volume_mounts = vec![
+            corev1::VolumeMount {
+                name: "second".to_string(),
+                mount_path: "/etc/rustfs/second".to_string(),
+                ..Default::default()
+            },
+            corev1::VolumeMount {
+                name: "first".to_string(),
+                mount_path: "/etc/rustfs/first".to_string(),
+                ..Default::default()
+            },
+        ];
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("additional volumes should render");
+
+        tenant.spec.additional_volumes.reverse();
+        tenant.spec.additional_volume_mounts.reverse();
+
+        assert!(
+            !tenant
+                .statefulset_needs_update(&statefulset, pool)
+                .expect("reordered map lists should compare")
+        );
+    }
+
+    #[test]
+    fn additional_volume_and_mount_changes_trigger_statefulset_update() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.additional_volumes.push(corev1::Volume {
+            name: "custom-ca".to_string(),
+            secret: Some(corev1::SecretVolumeSource {
+                secret_name: Some("custom-ca".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        tenant
+            .spec
+            .additional_volume_mounts
+            .push(corev1::VolumeMount {
+                name: "custom-ca".to_string(),
+                mount_path: "/etc/rustfs/custom-ca".to_string(),
+                ..Default::default()
+            });
+        let pool = &tenant.spec.pools[0];
+        let statefulset = tenant
+            .new_statefulset(pool)
+            .expect("additional volume should render");
+
+        tenant.spec.additional_volumes[0]
+            .secret
+            .as_mut()
+            .unwrap()
+            .secret_name = Some("rotated-ca".to_string());
+        assert!(
+            tenant
+                .statefulset_needs_update(&statefulset, pool)
+                .expect("additional volume source should compare")
+        );
+
+        tenant.spec.additional_volumes[0]
+            .secret
+            .as_mut()
+            .unwrap()
+            .secret_name = Some("custom-ca".to_string());
+        tenant.spec.additional_volume_mounts[0].mount_path = "/etc/rustfs/rotated-ca".to_string();
+        assert!(
+            tenant
+                .statefulset_needs_update(&statefulset, pool)
+                .expect("additional volume mount should compare")
+        );
     }
 
     #[test]

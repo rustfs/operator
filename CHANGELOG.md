@@ -26,6 +26,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 - Tenant `spec.oidc.extraCaCertSecretRef` for validated, reloadable custom CA trust used by
   RustFS OIDC outbound connections.
+- Tenant `spec.additionalVolumes` and `spec.additionalVolumeMounts` for Kubernetes-native file
+  injection into every RustFS Pool workload.
 - Tenant `spec.network` for Service IP families and IPv6 listen addresses, plus dual-stack binds
   for operator observability, STS, and Console sockets.
 - Tenant `spec.hostUsers` and OpenShift `hostUsers: false` defaults for `restricted-v3`.

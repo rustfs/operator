@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const DEFAULT_TLS_MOUNT_PATH: &str = "/var/run/rustfs/tls";
+pub(crate) const TLS_SERVER_VOLUME_NAME: &str = "rustfs-tls-server";
 pub const TLS_HASH_ANNOTATION: &str = "operator.rustfs.com/tls-hash";
 pub const RUSTFS_TLS_CERT_FILE: &str = "rustfs_cert.pem";
 pub const RUSTFS_TLS_KEY_FILE: &str = "rustfs_key.pem";
@@ -560,8 +561,8 @@ impl TlsPlan {
             probe_scheme: "HTTPS",
             pod_template_annotations: annotations,
             env,
-            volumes: vec![projected_volume("rustfs-tls-server", sources)],
-            volume_mounts: vec![directory_mount("rustfs-tls-server", &mount_path)],
+            volumes: vec![projected_volume(TLS_SERVER_VOLUME_NAME, sources)],
+            volume_mounts: vec![directory_mount(TLS_SERVER_VOLUME_NAME, &mount_path)],
             status,
         }
     }

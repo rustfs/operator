@@ -119,6 +119,7 @@ pub enum Reason {
     ReconcileSucceeded,
     InvalidTenantName,
     InvalidPoolSpec,
+    InvalidAdditionalVolumeSpec,
     ImmutableFieldModified,
     CredentialSecretNotFound,
     CredentialSecretMissingKey,
@@ -202,6 +203,7 @@ impl Reason {
             Self::ReconcileSucceeded => "ReconcileSucceeded",
             Self::InvalidTenantName => "InvalidTenantName",
             Self::InvalidPoolSpec => "InvalidPoolSpec",
+            Self::InvalidAdditionalVolumeSpec => "InvalidAdditionalVolumeSpec",
             Self::ImmutableFieldModified => "ImmutableFieldModified",
             Self::CredentialSecretNotFound => "CredentialSecretNotFound",
             Self::CredentialSecretMissingKey => "CredentialSecretMissingKey",
@@ -502,6 +504,7 @@ pub fn is_blocked_reason(reason: &str) -> bool {
         reason,
         "InvalidTenantName"
             | "InvalidPoolSpec"
+            | "InvalidAdditionalVolumeSpec"
             | "ImmutableFieldModified"
             | "CredentialSecretNotFound"
             | "CredentialSecretMissingKey"
@@ -582,6 +585,7 @@ fn condition_matches_observed_generation(status: &Status, condition: &Condition)
 pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
     match reason {
         "InvalidPoolSpec" => vec!["fixPoolSpec"],
+        "InvalidAdditionalVolumeSpec" => vec!["fixAdditionalVolumeSpec"],
         "CredentialSecretNotFound" => vec!["createCredentialSecret"],
         "CredentialSecretMissingKey" => vec!["addRequiredSecretKey"],
         "CredentialSecretInvalidEncoding" => vec!["replaceSecretValueWithUtf8"],
