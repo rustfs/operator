@@ -42,6 +42,7 @@ All notable changes to RustFS Operator are documented in this file. The format i
 ### Fixed
 
 - Reject multi-pool Tenants containing a single-node single-disk pool before applying pool workloads, matching RustFS startup constraints.
+- Reject additional volume mounts that overlap operator-managed data, logging, TLS, or OIDC paths.
 
 - Explicit private bucket access now removes operator-managed policies, and primary Service IP
   family changes recreate managed Services instead of repeatedly failing immutable-field updates.
@@ -50,6 +51,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Changed
 
+- Updated the default RustFS server image from `rustfs/rustfs:1.0.0-beta.10` to
+  `rustfs/rustfs:1.0.0`.
 - Documented that distinct-physical-disk erasure failures and a separate data-plane operator are
   outside this controller's scope.
 - Refreshed the Console dashboard and tenant navigation with semantic status colors, clearer primary

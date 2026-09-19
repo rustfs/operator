@@ -266,7 +266,7 @@ mod tests {
         let tenant = TenantTemplate::real_cluster(
             "rustfs-fault-test",
             "fault-test-tenant",
-            "rustfs/rustfs:1.0.0-beta.10",
+            "rustfs/rustfs:1.0.0",
             "fast-csi",
             "fault-test-tenant-credentials",
         )

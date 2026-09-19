@@ -1050,7 +1050,7 @@ spec:
 
     #[test]
     fn json_create_validates_namespace_before_kubernetes_work() {
-        let mut request = minimal_create_request(Some("rustfs/rustfs:1.0.0-beta.10"));
+        let mut request = minimal_create_request(Some("rustfs/rustfs:1.0.0"));
         request.namespace = "Storage_Team".to_string();
 
         let error = tenant_from_create_request(request)
@@ -1065,7 +1065,7 @@ spec:
     #[test]
     fn raw_yaml_update_validates_image_and_acknowledgement_from_the_same_request() {
         let mut current = crate::tests::create_test_tenant(None, None);
-        current.spec.image = Some("rustfs/rustfs:1.0.0-beta.10".to_string());
+        current.spec.image = Some("rustfs/rustfs:1.0.0".to_string());
 
         let image = "registry.example.com/rustfs/rustfs@sha256:0123456789abcdef";
         let mut incoming = current.clone();

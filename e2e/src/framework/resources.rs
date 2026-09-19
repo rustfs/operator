@@ -366,7 +366,7 @@ mod tests {
 
         assert!(manifest.contains("kind: Tenant"));
         assert!(manifest.contains("namespace: rustfs-e2e-smoke"));
-        assert!(manifest.contains("image: rustfs/rustfs:1.0.0-beta.10"));
+        assert!(manifest.contains("image: rustfs/rustfs:1.0.0"));
         assert!(!manifest.contains("seccompProfile:"));
         assert!(!manifest.contains("operator.rustfs.com/runtime-default-image-ack"));
         assert!(manifest.contains("storageClassName: local-storage"));

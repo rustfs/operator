@@ -20,7 +20,7 @@ import { ApiError } from "@/lib/api-client"
 
 type CreateMode = "form" | "yaml"
 
-const DEFAULT_RUSTFS_IMAGE = "rustfs/rustfs:1.0.0-beta.10"
+const DEFAULT_RUSTFS_IMAGE = "rustfs/rustfs:1.0.0"
 
 const defaultPool: CreatePoolRequest = {
   name: "pool-0",
@@ -209,7 +209,7 @@ export default function TenantCreatePage() {
                     required
                     value={image}
                     onChange={(e) => setImage(e.target.value)}
-                    placeholder="rustfs/rustfs:1.0.0-beta.10"
+                    placeholder="rustfs/rustfs:1.0.0"
                   />
                   <p className="text-xs text-muted-foreground">
                     {t(

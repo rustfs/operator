@@ -382,7 +382,7 @@ metadata:
   namespace: <namespace>
 spec:
   # Container image (optional)
-  image: rustfs/rustfs:1.0.0-beta.10
+  image: rustfs/rustfs:1.0.0
 
   # Storage pools (required, at least one)
   pools:

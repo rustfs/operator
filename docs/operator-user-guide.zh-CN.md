@@ -190,7 +190,7 @@ StatefulSet template 如果尚未包含这些值，会在下一次 reconcile 时
 较低容量运行。应先核对每个 Tenant 的镜像。已知不兼容镜像会在 rollout 前被阻断；
 只要最终生效的 profile 为 `RuntimeDefault`，可变 tag、digest 引用或自定义仓库都需要
 与镜像绑定的确认注解。
-升级前应固定到已验证的 RustFS beta.9 或更高 release tag；也可先验证实际生效的镜像，
+升级前应固定到已验证的 RustFS 1.0.0 或更高 release tag；也可先验证实际生效的镜像，
 再将 `operator.rustfs.com/runtime-default-image-ack` 设置为完全相同的镜像引用。
 
 Operator 还会删除旧版本为 Tenant workload 创建的 Role 和 RoleBinding，并禁止其
@@ -202,8 +202,8 @@ template 变化发生一次滚动更新。若自定义镜像需要调用 Kuberne
 因为其 Pod template 会禁用 token 挂载。`createServiceAccountRbac` 仅作为已忽略的
 兼容字段保留。
 
-内置 RustFS 镜像 fallback 也会从可变的 `latest` 改为
-`rustfs/rustfs:1.0.0-beta.10`。未设置 `spec.image`，且 Operator 没有配置
+内置 RustFS 镜像 fallback 现已从 `rustfs/rustfs:1.0.0-beta.10` 更新为
+`rustfs/rustfs:1.0.0`。未设置 `spec.image`，且 Operator 没有配置
 `TENANT_RUSTFS_IMAGE` 环境变量覆盖的 Tenant，会在 reconcile 时滚动到该固定版本。
 若希望 RustFS 升级节奏独立于 Operator 默认值，应显式设置 `spec.image`。
 
@@ -326,7 +326,7 @@ metadata:
   name: dev-minimal
   namespace: default
 spec:
-  image: rustfs/rustfs:1.0.0-beta.10
+  image: rustfs/rustfs:1.0.0
   pools:
     - name: dev-pool
       servers: 1
@@ -538,7 +538,14 @@ Operator 会在应用 workload 前校验每张证书，把所选 key 挂载到
 该 volume 刻意不使用 `subPath`，因此 Kubernetes 可以把 Secret 更新投射到运行中的
 Pod。Secret 更新会触发所有引用该 Secret 的 Tenant 重新 reconcile，但不会触发 Pod
 滚动更新。该功能支持 RustFS GA 以及之后的镜像。有效的托管配置会报告
-`OidcTrustReady=True`。
+`OidcTrustReady=True`。该条件表示最近一次 reconcile 检查的 Secret key 包含有效 CA
+bundle，无法证明所有 Pod 已经读取相同 Secret 版本，也无法证明 OIDC provider 可以访问。
+
+Kubernetes 会分别向每个 Pod 投射 Secret 更新。轮换 CA 时，应先发布同时包含当前根证书
+和新根证书的 bundle，等待每个 RustFS Pod 读取该 bundle，并检查 OIDC discovery、JWKS
+读取和登录流程。完成 provider 证书切换并确认所有 Pod 信任新根证书后，才可删除旧根
+证书。无效的 Secret 原位更新可能先进入 Pod，随后 Operator 才会报告
+`OidcTrustReady=False`。
 
 此配置只扩展 RustFS 出站 OIDC 连接的信任，不等同于配置进程级 TLS 和服务端 mTLS
 信任的 `spec.tls.caTrust`。省略该字段时，`spec.env` 中显式提供的
@@ -570,10 +577,11 @@ spec:
 ```
 
 每个附加 VolumeMount 必须引用 `additionalVolumes` 中的 Volume。Operator 会拒绝重复
-名称、重复挂载路径、相对路径，以及与数据、日志、TLS、OIDC 管理路径冲突的配置。
-Kubernetes 负责校验 VolumeSource，并把 Secret 和 ConfigMap 更新投射到 Pod。需要让
-更新进入运行中的 Pod 时，请勿使用 `subPath`。修改这两个字段会改变 StatefulSet
-PodTemplate，并触发滚动更新。应用包含这些字段的 Tenant 之前，需要更新 CRD。
+名称、相对路径、`..` 路径组件、等价路径，以及与数据、日志、TLS、OIDC 管理路径形成
+相同、父目录或子目录关系的配置。Kubernetes 负责校验 VolumeSource，并把 Secret 和
+ConfigMap 更新投射到 Pod。需要让更新进入运行中的 Pod 时，请勿使用 `subPath`。修改这
+两个字段会改变 StatefulSet PodTemplate，并触发滚动更新。应用包含这些字段的 Tenant
+之前，需要更新 CRD。
 
 ### 7.4 工作负载配置
 
@@ -581,7 +589,7 @@ PodTemplate，并触发滚动更新。应用包含这些字段的 Tenant 之前�
 
 | 字段 | 用途 |
 |------|------|
-| `image` | RustFS server 镜像。未配置时依次使用 `TENANT_RUSTFS_IMAGE` 和固定 fallback `rustfs/rustfs:1.0.0-beta.10`。 |
+| `image` | RustFS server 镜像。未配置时依次使用 `TENANT_RUSTFS_IMAGE` 和固定 fallback `rustfs/rustfs:1.0.0`。 |
 | `imagePullSecret` | 镜像拉取 Secret。 |
 | `imagePullPolicy` | RustFS 镜像拉取策略。 |
 | `scheduler` | 自定义 scheduler 名称。 |

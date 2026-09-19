@@ -208,7 +208,7 @@ Tenant image first. Known incompatible images are blocked before rollout, and
 mutable tags, digest references, or custom repositories are blocked whenever
 the effective profile is `RuntimeDefault` unless the Tenant carries an
 image-bound acknowledgement. Before upgrade, either pin a verified RustFS
-beta.9-or-later release tag, or verify the effective image and set
+1.0.0 or later release tag, or verify the effective image and set
 `operator.rustfs.com/runtime-default-image-ack` to that exact image reference.
 
 The Operator also removes legacy Tenant workload Roles and RoleBindings and
@@ -222,7 +222,7 @@ Granting RBAC to the generated ServiceAccount is insufficient because its Pod
 template disables token mounting. `createServiceAccountRbac` is retained only
 as an ignored compatibility field.
 
-The built-in RustFS image fallback also changes from the mutable `latest` tag to
+The built-in RustFS image fallback is now `rustfs/rustfs:1.0.0`, replacing
 `rustfs/rustfs:1.0.0-beta.10`. A Tenant that omits `spec.image` and has no
 `TENANT_RUSTFS_IMAGE` Operator environment override will therefore roll to that
 pinned release on reconciliation. Set `spec.image` explicitly when you want to
@@ -351,7 +351,7 @@ metadata:
   name: dev-minimal
   namespace: default
 spec:
-  image: rustfs/rustfs:1.0.0-beta.10
+  image: rustfs/rustfs:1.0.0
   pools:
     - name: dev-pool
       servers: 1
@@ -567,7 +567,18 @@ selected key at `/var/run/rustfs/oidc-extra-ca/ca.pem`, and sets
 `subPath`, so Kubernetes can project Secret updates into running Pods. Secret
 updates enqueue all referencing Tenants and do not trigger a Pod rollout.
 This feature targets RustFS GA and later images. A valid managed configuration
-reports `OidcTrustReady=True`.
+reports `OidcTrustReady=True`. This condition confirms that the configured
+Secret key contained a valid CA bundle during the latest reconciliation. It
+does not confirm that every Pod has observed the same Secret version or that
+the OIDC provider is reachable.
+
+Kubernetes projects an updated Secret to each Pod independently. Rotate a CA by
+first publishing a bundle that contains both the current and replacement roots.
+Wait until every RustFS Pod has observed that bundle and verify OIDC discovery,
+JWKS retrieval, and login before switching the provider certificate. Remove the
+old root only after every Pod trusts the replacement root. An invalid in-place
+Secret update can reach a Pod before the Operator reports
+`OidcTrustReady=False`.
 
 This setting only extends trust for RustFS outbound OIDC connections. It is
 separate from `spec.tls.caTrust`, which configures process-wide TLS and server
@@ -600,12 +611,13 @@ spec:
 ```
 
 Every additional mount must reference an additional volume. The Operator also
-rejects duplicate names, duplicate or relative mount paths, and conflicts with
-operator-managed data, logging, TLS, and OIDC mounts. Kubernetes validates the
-volume source and projects Secret and ConfigMap updates. Avoid `subPath` when
-projected updates must reach running Pods. Changing either field changes the
-StatefulSet Pod template and starts a rolling update. Install the updated CRD
-before applying a Tenant that uses these fields.
+rejects duplicate names, relative paths, `..` path components, equivalent paths,
+and any parent, child, or equal relationship with operator-managed data,
+logging, TLS, and OIDC mounts. Kubernetes validates the volume source and
+projects Secret and ConfigMap updates. Avoid `subPath` when projected updates
+must reach running Pods. Changing either field changes the StatefulSet Pod
+template and starts a rolling update. Install the updated CRD before applying a
+Tenant that uses these fields.
 
 ### 7.4 Workload Settings
 
@@ -613,7 +625,7 @@ Useful Tenant-level fields:
 
 | Field | Purpose |
 |-------|---------|
-| `image` | RustFS server image. Defaults to `TENANT_RUSTFS_IMAGE`, then the pinned fallback `rustfs/rustfs:1.0.0-beta.10`. |
+| `image` | RustFS server image. Defaults to `TENANT_RUSTFS_IMAGE`, then the pinned fallback `rustfs/rustfs:1.0.0`. |
 | `imagePullSecret` | Image pull Secret reference. |
 | `imagePullPolicy` | RustFS image pull policy. |
 | `scheduler` | Custom scheduler name. |

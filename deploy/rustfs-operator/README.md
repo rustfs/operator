@@ -257,6 +257,14 @@ referencing Tenants without forcing a Pod rollout. This feature targets RustFS
 GA and later images. This OIDC-only trust is separate from process-wide
 `spec.tls.caTrust`.
 
+`OidcTrustReady=True` confirms that the configured Secret key contained a valid
+CA bundle during the latest reconciliation. Kubernetes projects Secret updates
+to each Pod independently, so the condition does not confirm that every Pod has
+observed the same version. For CA rotation, publish both the current and
+replacement roots, wait for every Pod to observe the combined bundle, verify
+OIDC discovery and login, switch the provider certificate, and remove the old
+root only after every Pod trusts the replacement.
+
 ### Additional RustFS Files
 
 Use `spec.additionalVolumes` and `spec.additionalVolumeMounts` to provide files
@@ -282,10 +290,11 @@ spec:
 
 Every additional mount must reference an additional volume. Volume names and
 mount paths must not conflict with operator-managed storage, logging, TLS, or
-OIDC mounts. Kubernetes validates the selected volume source and projects
-Secret and ConfigMap updates. Avoid `subPath` when projected updates must reach
-running Pods. Changing either Tenant field updates the StatefulSet Pod template
-and starts a rolling update.
+OIDC mounts. Relative paths, `..` components, equivalent paths, and parent or
+child relationships with managed mounts are rejected. Kubernetes validates the
+selected volume source and projects Secret and ConfigMap updates. Avoid
+`subPath` when projected updates must reach running Pods. Changing either Tenant
+field updates the StatefulSet Pod template and starts a rolling update.
 
 ### Tenant Provisioning
 
@@ -562,7 +571,7 @@ and a multi-replica Tenant temporarily runs with reduced capacity. Verify every
 Tenant image first. Known incompatible images are blocked before rollout, and
 mutable tags, digest references, or custom repositories are blocked under an
 effective `RuntimeDefault` profile unless the Tenant carries an image-bound
-acknowledgement. Before upgrade, either pin a verified RustFS beta.9-or-later
+acknowledgement. Before upgrade, either pin a verified RustFS 1.0.0 or later
 release tag, or verify the effective image and set
 `operator.rustfs.com/runtime-default-image-ack` to that exact image reference:
 
@@ -591,7 +600,7 @@ verifying that exact digest, acknowledge the complete reference. Mutable tags ca
 change content without changing the annotation, so prefer an immutable digest
 in production.
 
-The built-in RustFS image fallback also changes from the mutable `latest` tag to
+The built-in RustFS image fallback is now `rustfs/rustfs:1.0.0`, replacing
 `rustfs/rustfs:1.0.0-beta.10`. Tenants without `spec.image` and without a
 `TENANT_RUSTFS_IMAGE` Operator environment override roll to that pinned release
 on reconciliation. Set `spec.image` explicitly to control future server upgrades.

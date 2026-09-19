@@ -90,7 +90,7 @@ metadata:
   name: cloud-identity-tenant
   namespace: default
 spec:
-  image: rustfs/rustfs:1.0.0-beta.10
+  image: rustfs/rustfs:1.0.0
   serviceAccountName: cloud-identity-sa
   pools:
     - name: pool-0
