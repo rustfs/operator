@@ -86,7 +86,7 @@ operator ns:      rustfs-system
 test namespace:   rustfs-e2e-smoke
 tenant name:      e2e-tenant
 console URL:      http://127.0.0.1:19090
-rustfs image:      rustfs/rustfs:1.0.0-beta.10
+rustfs image:      rustfs/rustfs:1.0.0
 storage class:    local-storage
 PV count:         12
 kind config:      e2e/manifests/kind-rustfs-e2e.yaml

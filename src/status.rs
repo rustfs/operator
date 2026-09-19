@@ -643,7 +643,7 @@ impl StatusBuilder {
                 ConditionType::OidcTrustReady,
                 ConditionStatus::True,
                 Reason::ReconcileSucceeded,
-                "Configured OIDC extra CA bundle is valid".to_string(),
+                "Configured OIDC extra CA bundle in Secret is valid".to_string(),
             );
         } else {
             self.next
@@ -941,7 +941,7 @@ mod tests {
         assert_eq!(condition.status, "True");
         assert_eq!(
             condition.message,
-            "Configured OIDC extra CA bundle is valid"
+            "Configured OIDC extra CA bundle in Secret is valid"
         );
     }
 

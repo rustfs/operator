@@ -5,7 +5,7 @@ metadata:
   namespace: rustfs-system
 spec:
   # Container image for RustFS (optional, defaults to a specific version)
-  image: rustfs/rustfs:1.0.0-beta.10
+  image: rustfs/rustfs:1.0.0
 
   # Pod management policy for StatefulSet (defaults to Parallel)
   # Parallel is recommended for multi-node RustFS deployments

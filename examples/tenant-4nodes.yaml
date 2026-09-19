@@ -9,7 +9,7 @@ metadata:
   labels:
     app: rustfs
 spec:
-  image: rustfs/rustfs:1.0.0-beta.10
+  image: rustfs/rustfs:1.0.0
   # Kind demos load the server image into node-local containerd. Avoid forcing
   # Docker Hub access when the pinned image is already present.
   imagePullPolicy: IfNotPresent

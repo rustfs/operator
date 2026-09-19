@@ -33,7 +33,7 @@ use k8s_openapi::api::core::v1 as corev1;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 const LOCAL_KMS_KEY_DIR_ENV: &str = "RUSTFS_KMS_KEY_DIR";
 const LOCAL_KMS_LOCAL_KEY_DIR_ENV: &str = "RUSTFS_KMS_LOCAL_KEY_DIR";
@@ -726,6 +726,30 @@ fn stateful_name(tenant: &Tenant, pool: &Pool) -> String {
     format!("{}-{}", tenant.name(), pool.name)
 }
 
+fn normalize_absolute_mount_path(path: &str) -> Option<PathBuf> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+fn mount_paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 impl Tenant {
     pub(crate) fn validate_additional_volumes(&self) -> Result<(), types::error::Error> {
         let invalid = |message| types::error::Error::InvalidAdditionalVolumeSpec {
@@ -750,15 +774,25 @@ impl Tenant {
 
         let mut mount_paths = BTreeSet::new();
         for mount in &self.spec.additional_volume_mounts {
-            if !Path::new(&mount.mount_path).is_absolute() {
+            let Some(normalized_mount_path) = normalize_absolute_mount_path(&mount.mount_path)
+            else {
                 return Err(invalid(format!(
                     "spec.additionalVolumeMounts mountPath '{}' must be absolute",
                     mount.mount_path
                 )));
-            }
-            if !mount_paths.insert(mount.mount_path.as_str()) {
+            };
+            if Path::new(&mount.mount_path)
+                .components()
+                .any(|component| component == Component::ParentDir)
+            {
                 return Err(invalid(format!(
-                    "spec.additionalVolumeMounts contains duplicate mountPath '{}'",
+                    "spec.additionalVolumeMounts mountPath '{}' must not contain '..' path components",
+                    mount.mount_path
+                )));
+            }
+            if !mount_paths.insert(normalized_mount_path) {
+                return Err(invalid(format!(
+                    "spec.additionalVolumeMounts contains duplicate or equivalent mountPath '{}'",
                     mount.mount_path
                 )));
             }
@@ -775,10 +809,10 @@ impl Tenant {
         for pool in &self.spec.pools {
             for shard in 0..pool.persistence.volumes_per_server {
                 managed_volume_names.insert(volume_claim_template_name(shard));
-                managed_mount_paths.insert(data_volume_mount_path(
-                    pool.persistence.path.as_deref(),
-                    shard,
-                ));
+                let mount_path = data_volume_mount_path(pool.persistence.path.as_deref(), shard);
+                if let Some(mount_path) = normalize_absolute_mount_path(&mount_path) {
+                    managed_mount_paths.insert(mount_path);
+                }
             }
         }
 
@@ -786,12 +820,10 @@ impl Tenant {
             && logging.mode != crate::types::v1alpha1::logging::LoggingMode::Stdout
         {
             managed_volume_names.insert("logs".to_string());
-            managed_mount_paths.insert(
-                logging
-                    .mount_path
-                    .clone()
-                    .unwrap_or_else(|| "/logs".to_string()),
-            );
+            let mount_path = logging.mount_path.as_deref().unwrap_or("/logs");
+            if let Some(mount_path) = normalize_absolute_mount_path(mount_path) {
+                managed_mount_paths.insert(mount_path);
+            }
         }
 
         if self
@@ -801,14 +833,16 @@ impl Tenant {
             .is_some_and(|oidc| oidc.extra_ca_cert_secret_ref.is_some())
         {
             managed_volume_names.insert(OIDC_EXTRA_CA_VOLUME.to_string());
-            managed_mount_paths.insert(OIDC_EXTRA_CA_MOUNT_PATH.to_string());
+            managed_mount_paths.insert(PathBuf::from(OIDC_EXTRA_CA_MOUNT_PATH));
         }
 
         if let Some(tls) = &self.spec.tls
             && tls.is_enabled()
         {
             managed_volume_names.insert(TLS_SERVER_VOLUME_NAME.to_string());
-            managed_mount_paths.insert(tls.mount_path.clone());
+            if let Some(mount_path) = normalize_absolute_mount_path(&tls.mount_path) {
+                managed_mount_paths.insert(mount_path);
+            }
         }
 
         for volume_name in volume_names {
@@ -820,10 +854,14 @@ impl Tenant {
             }
         }
         for mount_path in mount_paths {
-            if managed_mount_paths.contains(mount_path) {
+            if let Some(managed_mount_path) = managed_mount_paths
+                .iter()
+                .find(|managed_mount_path| mount_paths_overlap(&mount_path, managed_mount_path))
+            {
                 return Err(invalid(format!(
-                    "spec.additionalVolumeMounts mountPath '{}' conflicts with an operator-managed mount",
-                    mount_path
+                    "spec.additionalVolumeMounts mountPath '{}' overlaps operator-managed mount '{}'",
+                    mount_path.display(),
+                    managed_mount_path.display()
                 )));
             }
         }
@@ -1027,7 +1065,7 @@ impl Tenant {
                         return Err(types::error::Error::WorkloadSecurityIncompatible {
                             name: self.name(),
                             message: format!(
-                                "image '{image}' uses a {} and its seccomp compatibility cannot be verified for RuntimeDefault in pool '{}'; pin a verified RustFS 1.0.0-beta.9 or later release tag (for example 1.0.0-beta.10), or verify the image and set metadata.annotations['{RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION}'] to the exact current resolved image reference; mutable references can change without changing the annotation, so a digest-qualified reference is strongly recommended",
+                                "image '{image}' uses a {} and its seccomp compatibility cannot be verified for RuntimeDefault in pool '{}'; pin a verified RustFS 1.0.0 or later release tag, or verify the image and set metadata.annotations['{RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION}'] to the exact current resolved image reference; mutable references can change without changing the annotation, so a digest-qualified reference is strongly recommended",
                                 reason.description(),
                                 pool.name
                             ),
@@ -2974,6 +3012,110 @@ mod tests {
     }
 
     #[test]
+    fn additional_volume_validation_rejects_parent_and_equivalent_mount_paths() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.additional_volumes = vec![
+            corev1::Volume {
+                name: "first".to_string(),
+                empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+                ..Default::default()
+            },
+            corev1::Volume {
+                name: "second".to_string(),
+                empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+                ..Default::default()
+            },
+        ];
+        tenant.spec.additional_volume_mounts = vec![corev1::VolumeMount {
+            name: "first".to_string(),
+            mount_path: "/etc/rustfs/../custom".to_string(),
+            ..Default::default()
+        }];
+
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("parent path components should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("must not contain '..'")
+        ));
+
+        tenant.spec.additional_volume_mounts = vec![
+            corev1::VolumeMount {
+                name: "first".to_string(),
+                mount_path: "/etc/rustfs/custom".to_string(),
+                ..Default::default()
+            },
+            corev1::VolumeMount {
+                name: "second".to_string(),
+                mount_path: "/etc//rustfs/./custom/".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("equivalent mount paths should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("duplicate or equivalent mountPath")
+        ));
+    }
+
+    #[test]
+    fn additional_volume_validation_rejects_managed_mount_ancestors_and_descendants() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.oidc = Some(OidcConfig {
+            extra_ca_cert_secret_ref: Some(OidcExtraCaCertSecretRef {
+                name: "validated-ca".to_string(),
+                key: "ca.crt".to_string(),
+            }),
+        });
+        tenant.spec.additional_volumes.push(corev1::Volume {
+            name: "custom".to_string(),
+            empty_dir: Some(corev1::EmptyDirVolumeSource::default()),
+            ..Default::default()
+        });
+        tenant
+            .spec
+            .additional_volume_mounts
+            .push(corev1::VolumeMount {
+                name: "custom".to_string(),
+                mount_path: "/var/run/rustfs/oidc-extra-ca/ca.pem".to_string(),
+                sub_path: Some("ca.pem".to_string()),
+                ..Default::default()
+            });
+
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("an OIDC CA file override should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("overlaps operator-managed mount '/var/run/rustfs/oidc-extra-ca'")
+        ));
+
+        tenant.spec.additional_volume_mounts[0].mount_path = "/data".to_string();
+        tenant.spec.additional_volume_mounts[0].sub_path = None;
+        let error = tenant
+            .validate_additional_volumes()
+            .expect_err("a data mount ancestor should be rejected");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidAdditionalVolumeSpec { message, .. }
+                if message.contains("overlaps operator-managed mount '/data/rustfs0'")
+        ));
+
+        tenant.spec.additional_volume_mounts[0].mount_path =
+            "/var/run/rustfs/oidc-extra-ca-backup".to_string();
+        tenant
+            .validate_additional_volumes()
+            .expect("a similarly named sibling path should remain valid");
+    }
+
+    #[test]
     fn additional_volume_order_does_not_trigger_statefulset_update() {
         let mut tenant = crate::tests::create_test_tenant(None, None);
         tenant.spec.additional_volumes = vec![
@@ -3714,7 +3856,7 @@ mod tests {
             .expect("Pod template should have spec");
         assert_eq!(
             pod_spec.containers[0].image.as_deref(),
-            Some("rustfs/rustfs:1.0.0-beta.10")
+            Some("rustfs/rustfs:1.0.0")
         );
 
         let security_context = pod_spec
