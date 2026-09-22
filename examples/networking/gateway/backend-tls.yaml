@@ -1,0 +1,51 @@
+# Copyright 2026 RustFS Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Optional companion to httproute.yaml, NOT included in the default overlay.
+# First configure Tenant.spec.tls (see chart examples/backend-tls.yaml).
+# Both listeners use the Tenant TLS configuration. The CA ConfigMap must exist
+# in rustfs-storage and contain ca.crt; the certificate must cover each hostname.
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: rustfs-api
+  namespace: rustfs-storage
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: rustfs-io
+  validation:
+    hostname: rustfs-io.rustfs-storage.svc.cluster.local
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: rustfs-backend-ca
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: rustfs-console
+  namespace: rustfs-storage
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: rustfs-console
+  validation:
+    hostname: rustfs-console.rustfs-storage.svc.cluster.local
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: rustfs-backend-ca

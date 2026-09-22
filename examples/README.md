@@ -2,6 +2,13 @@
 
 This directory contains example Tenant configurations for the RustFS Kubernetes Operator, covering various use cases from development to production.
 
+## Tenant networking
+
+[Networking examples](../docs/tenant-networking.md) provide ordinary Tenant, Ingress
+and HTTPRoute YAML, plus Kustomize overlays. They reference existing platform
+Gateways/certificates and do not require Helm. For one Helm release, see the
+[Tenant chart](../deploy/rustfs-tenant/README.md).
+
 ## Quick Start Guide
 
 **Choose the right example for your needs:**

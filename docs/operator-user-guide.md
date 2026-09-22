@@ -20,6 +20,10 @@ This guide is a technical manual for installing, configuring, and operating the 
 
 Chinese version: [operator-user-guide.zh-CN.md](operator-user-guide.zh-CN.md)
 
+For Tenant external access, see [Tenant networking](tenant-networking.md): native
+Kubernetes YAML/Kustomize and an optional separate Tenant Helm chart. The existing
+Tenant CRD is unchanged; these routes are managed by your deployment tooling.
+
 ## 1. Overview
 
 RustFS Operator manages RustFS object storage clusters on Kubernetes. Users describe the desired storage cluster with a namespaced `Tenant` custom resource, and the operator reconciles Kubernetes resources needed to run RustFS.

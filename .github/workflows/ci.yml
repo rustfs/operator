@@ -103,6 +103,7 @@ jobs:
         run: |
           set -euo pipefail
           helm lint deploy/rustfs-operator
+          helm lint deploy/rustfs-tenant
 
           # Default: cosiDriver disabled, nothing COSI-related should render.
           helm template test deploy/rustfs-operator > /tmp/helm-default.yaml

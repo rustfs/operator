@@ -121,6 +121,10 @@ if [[ ! "$cargo_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; th
   exit 1
 fi
 
+tenant_chart_version="$(awk '$1 == "version:" { gsub(/"/, "", $2); print $2; exit }' deploy/rustfs-tenant/Chart.yaml)"
+require_value "Tenant chart version" "$tenant_chart_version"
+require_equal "Tenant chart version" "$tenant_chart_version" "$cargo_version"
+
 require_equal "Helm chart version" "$chart_version" "$cargo_version"
 require_equal "Helm appVersion" "$app_version" "$cargo_version"
 require_equal "setup action Rust version" "$setup_version" "$toolchain_version"
