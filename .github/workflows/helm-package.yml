@@ -84,15 +84,18 @@ jobs:
         run: |
           set -eux
           helm package ./deploy/rustfs-operator \
-            --destination deploy/rustfs-operator/ \
+            --destination helm-packages/ \
             --version "${{ steps.version.outputs.chart_version }}" \
             --app-version "${{ steps.version.outputs.chart_version }}"
+          helm package ./deploy/rustfs-tenant \
+            --destination helm-packages/ \
+            --version "${{ steps.version.outputs.chart_version }}"
 
       - name: Upload helm package as artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helm-package
-          path: deploy/rustfs-operator/*.tgz
+          path: helm-packages/*.tgz
           retention-days: 1
 
   publish-helm-package:

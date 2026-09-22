@@ -174,6 +174,7 @@ Then use `http://127.0.0.1:19000` for the Tenant S3 API and `http://127.0.0.1:19
 |-----|---------|
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Quality gates, `make pre-commit`, PR rules. |
 | [examples/README.md](examples/README.md) | Tenant manifests and usage notes. |
+| [docs/tenant-networking.md](docs/tenant-networking.md) | Tenant networking with native YAML, Kustomize, or the optional Tenant chart. |
 | [deploy/README.md](deploy/README.md) | Helm and Kubernetes deployment entry point. |
 | [deploy/rustfs-operator/README.md](deploy/rustfs-operator/README.md) | Helm chart values and examples. |
 | [console-web/README.md](console-web/README.md) | Operator console frontend development and deployment. |

@@ -24,6 +24,10 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Added
 
+- Optional `rustfs-tenant` Helm chart for a Tenant and separate API/Console Ingress
+  or HTTPRoute resources, with backend TLS policies, native YAML/Kustomize examples,
+  and networking lifecycle documentation. Existing CRDs and controller behavior are unchanged.
+
 - Tenant `spec.oidc.extraCaCertSecretRef` for validated, reloadable custom CA trust used by
   RustFS OIDC outbound connections.
 - Tenant `spec.additionalVolumes` and `spec.additionalVolumeMounts` for Kubernetes-native file

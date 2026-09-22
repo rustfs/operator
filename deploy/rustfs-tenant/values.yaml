@@ -1,0 +1,78 @@
+# Copyright 2026 RustFS Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Install the RustFS Operator and CRD separately before using this chart.
+# This default pool is for development, not a highly available deployment.
+tenant:
+  metadata:
+    # Defaults to the Helm release name. Keep this stable across upgrades.
+    name: ""
+    labels: {}
+    annotations: {}
+  # Native Tenant.spec, passed through without tpl evaluation or env injection.
+  # The referenced Secret must already exist in the release namespace.
+  spec:
+    credsSecret:
+      name: rustfs-credentials
+    pools:
+      - name: pool-0
+        servers: 1
+        persistence:
+          volumesPerServer: 1
+          volumeClaimTemplate:
+            accessModes: [ReadWriteOnce]
+            resources:
+              requests:
+                storage: 10Gi
+
+# Ingress and HTTPRoute are alternative frontends for each endpoint.
+# All paths are / (Prefix), with no Host or URI rewriting.
+ingress:
+  api:
+    enabled: false
+    labels: {}
+    annotations: {}
+    ingressClassName: ""
+    hosts: []
+    # Native Ingress.spec.tls entries; Secrets are externally managed.
+    tls: []
+  console:
+    enabled: false
+    labels: {}
+    annotations: {}
+    ingressClassName: ""
+    hosts: []
+    tls: []
+
+httpRoute:
+  api:
+    enabled: false
+    labels: {}
+    annotations: {}
+    # Native HTTPRoute.spec.parentRefs. Reference an existing Gateway.
+    parentRefs: []
+    hostnames: []
+    # Native HTTPRoute rule timeouts; support depends on the Gateway controller.
+    timeouts: {}
+    # Optional native BackendTLSPolicy.spec.validation (Gateway API v1.4+).
+    # Set when the backend uses HTTPS; never disables certificate verification.
+    backendTLS: null
+  console:
+    enabled: false
+    labels: {}
+    annotations: {}
+    parentRefs: []
+    hostnames: []
+    timeouts: {}
+    backendTLS: null

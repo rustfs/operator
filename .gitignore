@@ -26,6 +26,7 @@ CONSOLE-INTEGRATION-SUMMARY.md
 SCRIPTS-UPDATE.md
 AGENTS.md
 docs/*
+!docs/tenant-networking.md
 !docs/operator-user-guide.md
 !docs/operator-user-guide.zh-CN.md
 .codex

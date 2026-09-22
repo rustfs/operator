@@ -1,6 +1,6 @@
 # RustFS Operator Deployment
 
-This directory contains the Helm chart for deploying the RustFS Kubernetes operator.
+This directory contains separate charts for installing the RustFS Operator and deploying Tenants.
 
 ## Quick Start
 
@@ -19,6 +19,15 @@ helm install rustfs-operator deploy/rustfs-operator/ \
   - RBAC resources
   - CRD installation
   - Example Tenant resources
+
+- **rustfs-tenant/** - Optional Tenant deployment chart with API/Console Ingress or HTTPRoute.
+  It requires an existing Operator; it does not change existing Tenant YAML or install a Gateway.
+
+## Tenant networking
+
+Use [plain Kubernetes YAML/Kustomize](../docs/tenant-networking.md) or the
+[separate Tenant chart](rustfs-tenant/README.md). All external endpoints are disabled
+by default in the chart. Existing deployments do not need to migrate.
 
 ## Documentation
 

@@ -10,6 +10,10 @@
 
 ## 📋 Code Quality Requirements
 
+Helm 3 must be on `PATH` for `cargo test --all` and `make pre-commit`: the Tenant
+chart contract tests render the chart and verify its backends against Operator
+Service generation. CI installs Helm before running these tests.
+
 ### 🔧 Code Formatting Rules
 
 **MANDATORY**: All code must be properly formatted before committing. This project enforces strict formatting standards to maintain code consistency and readability.
