@@ -62,7 +62,7 @@ jobs:
     permissions:
       actions: write
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: sm-standard-2
     outputs:
       should_skip: ${{ steps.skip_check.outputs.should_skip }}
     steps:
@@ -80,7 +80,7 @@ jobs:
     name: Test and Lint
     needs: skip-check
     if: needs.skip-check.outputs.should_skip != 'true'
-    runs-on: ubuntu-latest
+    runs-on: sm-standard-2
     timeout-minutes: 60
     steps:
       - name: Checkout repository
@@ -187,7 +187,7 @@ jobs:
     name: Docker Build
     needs: skip-check
     if: github.event_name != 'pull_request' && needs.skip-check.outputs.should_skip != 'true'
-    runs-on: ubuntu-latest
+    runs-on: dind-sm-standard-4
     timeout-minutes: 60
     steps:
       - name: Checkout repository
