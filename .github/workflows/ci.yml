@@ -187,7 +187,7 @@ jobs:
     name: Docker Build
     needs: skip-check
     if: github.event_name != 'pull_request' && needs.skip-check.outputs.should_skip != 'true'
-    runs-on: dind-sm-standard-4
+    runs-on: dind-sm-standard-2
     timeout-minutes: 60
     steps:
       - name: Checkout repository

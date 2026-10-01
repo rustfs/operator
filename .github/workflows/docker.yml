@@ -47,7 +47,7 @@ env:
 jobs:
   push-operator-images:
     name: Build and Push Operator Image
-    runs-on: dind-sm-standard-4
+    runs-on: dind-sm-standard-2
 
     steps:
       - name: Checkout code
