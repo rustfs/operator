@@ -17,6 +17,10 @@
 {{- if and .Values.console.enabled (ne (toString .Values.console.replicas) "1") -}}
 {{- fail "console.replicas must be 1 because Console sessions are stored in process" -}}
 {{- end -}}
+{{- if and .Values.console.enabled .Values.console.existingSecret .Values.console.jwtSecret -}}
+{{- fail "console.existingSecret and console.jwtSecret are mutually exclusive; set only one" -}}
+{{- end -}}
+{{- $consoleSecretName := .Values.console.existingSecret | default (printf "%s-console-secret" (include "rustfs-operator.fullname" .)) -}}
 {{- if .Values.console.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -46,7 +50,7 @@ spec:
         app.kubernetes.io/component: console
       annotations:
         # Force reload on secret changes
-        checksum/secret: {{ include (print $.Template.BasePath "/console-secret.yaml") . | sha256sum }}
+        checksum/secret: {{ include "rustfs-operator.consoleSecretChecksum" . }}
     spec:
       serviceAccountName: {{ include "rustfs-operator.consoleServiceAccountName" . }}
       {{- if $openShiftEnabled }}
@@ -73,7 +77,7 @@ spec:
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "rustfs-operator.fullname" . }}-console-secret
+                  name: {{ $consoleSecretName | quote }}
                   key: jwt-secret
           {{- with .Values.console.bindAddress }}
             - name: CONSOLE_BIND_ADDRESS

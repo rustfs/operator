@@ -662,6 +662,30 @@ Before rolling back to a release without server-side sessions, scale the Console
 Deployment to zero, perform the rollback, then restore one replica so the two
 cookie formats never overlap.
 
+### Console JWT secret
+
+The Console encrypts in-process session data with a `jwt-secret`. By default the
+chart generates a random secret on first install and stores it in
+`<release>-console-secret` in the operator namespace, reusing it across upgrades.
+To manage the secret value outside the chart, either set `console.jwtSecret` or
+reference an existing Secret:
+
+```yaml
+console:
+  existingSecret: my-console-jwt
+```
+
+The referenced Secret must live in the operator namespace and contain a
+`jwt-secret` key (generate one with `openssl rand -base64 32`). When
+`console.existingSecret` is set, the chart does not create its own Console Secret
+and the Console Deployment reads `JWT_SECRET` from the existing Secret.
+`console.existingSecret` and `console.jwtSecret` are mutually exclusive.
+
+> Note: externally managed Secrets do not automatically trigger a Console
+> restart when the value of that Secret changes. Rotate the Secret value and
+> restart the Console Deployment manually (e.g. `kubectl rollout restart`)
+> for the new `jwt-secret` to take effect.
+
 ### Backend CORS (when frontend is on a different host)
 
 If the frontend is served from another host (e.g. `https://ui.example.com`) and the API at `https://api.example.com`, set allowed origins on the console backend:
