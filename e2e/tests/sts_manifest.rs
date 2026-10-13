@@ -528,7 +528,11 @@ fn helm_template(args: &[&str]) -> Option<Output> {
 
 fn helm_template_chart(chart: &Path, args: &[&str]) -> Output {
     let mut command = Command::new("helm");
-    command.arg("template").arg("rustfs-operator").arg(chart);
+    command
+        .arg("template")
+        .arg("rustfs-operator")
+        .arg(chart)
+        .args(["--namespace", "default"]);
     command.args(args);
     command.output().expect("helm template command runs")
 }
