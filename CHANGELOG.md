@@ -45,6 +45,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Fixed
 
+- Use `docker.io/rustfs/operator` as the default Helm image repository for the Operator,
+  Console, and COSI driver, while preserving repository overrides through Helm values.
 - Reject multi-pool Tenants containing a single-node single-disk pool before applying pool workloads, matching RustFS startup constraints.
 - Reject additional volume mounts that overlap operator-managed data, logging, TLS, or OIDC paths.
 
