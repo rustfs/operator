@@ -40,7 +40,7 @@ operator:
   leaderElect:
 
   image:
-    repository: rustfs/operator
+    repository: docker.io/rustfs/operator
     # Defaults to Chart.appVersion so a released chart never selects a mutable image tag.
     tag: ""
     pullPolicy: IfNotPresent
@@ -224,7 +224,7 @@ console:
 
   image:
     # Console uses the same image as operator
-    repository: rustfs/operator
+    repository: docker.io/rustfs/operator
     tag: ""  # Defaults to operator.image.tag
     pullPolicy: IfNotPresent
 
@@ -364,7 +364,7 @@ cosiDriver:
 
   image:
     # The COSI driver binary ships in the same image as operator.
-    repository: rustfs/operator
+    repository: docker.io/rustfs/operator
     tag: ""  # Defaults to operator.image.tag
     pullPolicy: IfNotPresent
 

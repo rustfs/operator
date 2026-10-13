@@ -876,7 +876,7 @@ impl Tenant {
         };
         let validate_seccomp = |field_path: &str, type_: &str, localhost_profile: Option<&str>| {
             validate_declared_seccomp_profile(field_path, type_, localhost_profile)
-                .map_err(&invalid_profile)
+                .map_err(invalid_profile)
         };
         let validate_app_armor =
             |field_path: &str, type_: &str, localhost_profile: Option<&str>| {
@@ -894,7 +894,7 @@ impl Tenant {
             "spec.containerSecurityContext",
             self.spec.container_security_context.as_ref(),
         )
-        .map_err(&invalid_profile)?;
+        .map_err(invalid_profile)?;
 
         if let Some(profile) = self
             .spec
@@ -933,7 +933,7 @@ impl Tenant {
                 &format!("spec.pools[name={}].containerSecurityContext", pool.name),
                 pool.container_security_context.as_ref(),
             )
-            .map_err(&invalid_profile)?;
+            .map_err(invalid_profile)?;
 
             if let Some(profile) = pool
                 .security_context
