@@ -121,7 +121,7 @@ helm upgrade --install rustfs-operator deploy/rustfs-operator/ \
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `operator.replicas` | Number of operator replicas | `1` |
-| `operator.image.repository` | Operator image repository | `rustfs/operator` |
+| `operator.image.repository` | Operator image repository | `docker.io/rustfs/operator` |
 | `operator.image.tag` | Operator image tag; empty uses `Chart.appVersion` | `""` |
 | `operator.image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `operator.imagePullSecrets` | Image pull secrets | `[]` |
