@@ -961,7 +961,22 @@ The operator can create RustFS policies, users, and buckets after the Tenant wor
 
 Bucket versioning and Object Lock are declarative but conservative. `versioning: true` enables versioning. `versioning: false` keeps a never-versioned bucket unchanged or requests S3 `Suspended` after versioning has been enabled; omitting the field leaves versioning unmanaged unless Object Lock requires it. `objectLock: true` enables Object Lock after versioning is enabled. Object Lock cannot be disabled, and the Operator refuses `objectLock: false` or versioning suspension when the live bucket has Object Lock enabled. `objectLockConfiguration` manages the default retention rule: omit `state` for `Present`, specify `mode: Governance` or `Compliance` with `days`, or use `state: Absent` without `mode` and `days` to remove only the default rule. Omitting the entire field leaves a live default-retention rule unmanaged. The Operator adopts an identical live rule, but does not replace or remove a different rule unless its hash matches the last configuration recorded in status. Default retention applies to new object versions; it does not retroactively lock existing versions.
 
-Each bucket may also declare `lifecycle.state: Present` with one or more S3 lifecycle rules. The current schema supports expiration after a positive number of days and aborting incomplete multipart uploads after a positive number of days; every rule has a unique ID, an `Enabled` or `Disabled` status, and an explicit prefix filter (use `prefix: ""` for all objects). `lifecycle.state: Absent` requests deletion and cannot include rules. The Operator adopts an identical live configuration, but never replaces or deletes a different configuration without a matching ownership hash in `status.provisioning.buckets`. Omitting `lifecycle` performs no lifecycle API calls and leaves the live configuration untouched.
+Each bucket may also declare `lifecycle.state: Present` with one or more S3 lifecycle rules. The current schema supports expiration after a positive number of days, aborting incomplete multipart uploads after a positive number of days, `transition` of current versions after zero or more days, and `noncurrentVersionTransition` of noncurrent versions after zero or more days; every rule has a unique ID, an `Enabled` or `Disabled` status, and an explicit prefix filter (use `prefix: ""` for all objects). `lifecycle.state: Absent` requests deletion and cannot include rules. The Operator adopts an identical live configuration, but never replaces or deletes a different configuration without a matching ownership hash in `status.provisioning.buckets`. Omitting `lifecycle` performs no lifecycle API calls and leaves the live configuration untouched.
+
+Transition actions move data to a remote tier. `storageClass` is the name of a tier already registered in RustFS (for example with `rc ilm tier add`); tier names are uppercase, and `STANDARD` and `REDUCED_REDUNDANCY` are reserved. The Operator does not register tiers. Before applying a lifecycle with transition actions it checks that every referenced tier exists; while one is missing, the bucket stays `Pending` with a message naming the tier and the Operator retries, so the tier can be registered after the rule is added:
+
+```yaml
+lifecycle:
+  state: Present
+  rules:
+    - id: to-cold
+      status: Enabled
+      filter:
+        prefix: ""
+      transition:
+        days: 7
+        storageClass: COLD
+```
 
 Transient Kubernetes and RustFS admin/S3 failures (timeouts, 429, 5xx, connection errors, TLS not ready) leave provisioning items `Pending` and requeue instead of marking the Tenant `Failed`. Permanent 4xx configuration errors still fail and wait for a spec or object change.
 

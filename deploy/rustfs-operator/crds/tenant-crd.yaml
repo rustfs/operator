@@ -1277,19 +1277,53 @@ spec:
                                 maxLength: 255
                                 minLength: 1
                                 type: string
+                              noncurrentVersionTransition:
+                                description: |-
+                                  Moves noncurrent object versions to a remote tier `noncurrentDays` after they become
+                                  noncurrent. Only meaningful on versioned buckets.
+                                nullable: true
+                                properties:
+                                  noncurrentDays:
+                                    format: int32
+                                    minimum: 0.0
+                                    type: integer
+                                  storageClass:
+                                    minLength: 1
+                                    type: string
+                                required:
+                                - noncurrentDays
+                                - storageClass
+                                type: object
                               status:
                                 enum:
                                 - Enabled
                                 - Disabled
                                 type: string
+                              transition:
+                                description: |-
+                                  Moves current object versions to a remote tier after `days`. `storageClass` names a tier
+                                  registered in RustFS (uppercase); RustFS rejects a lifecycle that references an unknown tier.
+                                nullable: true
+                                properties:
+                                  days:
+                                    format: int32
+                                    minimum: 0.0
+                                    type: integer
+                                  storageClass:
+                                    minLength: 1
+                                    type: string
+                                required:
+                                - days
+                                - storageClass
+                                type: object
                             required:
                             - filter
                             - id
                             - status
                             type: object
                             x-kubernetes-validations:
-                            - message: lifecycle rule must configure expiration or abortIncompleteMultipartUpload
-                              rule: has(self.expiration) || has(self.abortIncompleteMultipartUpload)
+                            - message: lifecycle rule must configure expiration, abortIncompleteMultipartUpload, transition, or noncurrentVersionTransition
+                              rule: has(self.expiration) || has(self.abortIncompleteMultipartUpload) || has(self.transition) || has(self.noncurrentVersionTransition)
                           maxItems: 1000
                           type: array
                           x-kubernetes-list-map-keys:

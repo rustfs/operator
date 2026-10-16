@@ -430,8 +430,22 @@ mod tenant_provisioning_crd_tests {
             json!("Present lifecycle requires rules and Absent lifecycle forbids rules")
         );
         assert_eq!(
+            lifecycle["properties"]["rules"]["items"]["properties"]["transition"]["properties"]
+                ["days"]["minimum"]
+                .as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            lifecycle["properties"]["rules"]["items"]["properties"]["noncurrentVersionTransition"]
+                ["properties"]["noncurrentDays"]["minimum"]
+                .as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
             lifecycle["properties"]["rules"]["items"]["x-kubernetes-validations"][0]["message"],
-            json!("lifecycle rule must configure expiration or abortIncompleteMultipartUpload")
+            json!(
+                "lifecycle rule must configure expiration, abortIncompleteMultipartUpload, transition, or noncurrentVersionTransition"
+            )
         );
         let object_lock =
             &spec["properties"]["buckets"]["items"]["properties"]["objectLockConfiguration"];

@@ -17,8 +17,10 @@ use crate::sts::rustfs_client::{
     BucketLifecycleAbortIncompleteMultipartUpload as AdminLifecycleAbort,
     BucketLifecycleConfiguration as AdminLifecycleConfiguration,
     BucketLifecycleExpiration as AdminLifecycleExpiration,
+    BucketLifecycleNoncurrentVersionTransition as AdminLifecycleNoncurrentVersionTransition,
     BucketLifecycleRule as AdminLifecycleRule,
     BucketLifecycleRuleStatus as AdminLifecycleRuleStatus,
+    BucketLifecycleTransition as AdminLifecycleTransition,
     BucketObjectLockConfiguration as AdminObjectLockConfiguration,
     BucketObjectLockDefaultRetention as AdminObjectLockDefaultRetention,
     BucketObjectLockRetentionMode as AdminObjectLockRetentionMode,
@@ -2784,6 +2786,16 @@ async fn reconcile_bucket_lifecycle(
         ),
         LifecycleReconcileAction::Apply => {
             if let Some(configuration) = desired.as_ref() {
+                if let Some(waiting) =
+                    lifecycle_tiers_pending(run, client, previous, &base_item, configuration).await
+                {
+                    return finalize_bucket_lifecycle_status(
+                        waiting,
+                        previous,
+                        desired_hash,
+                        false,
+                    );
+                }
                 match client
                     .put_bucket_lifecycle_configuration(&bucket.name, configuration)
                     .await
@@ -2876,6 +2888,71 @@ async fn reconcile_bucket_lifecycle(
     finalize_bucket_lifecycle_status(item, previous, desired_hash, applied)
 }
 
+/// Transition rules name tiers that are registered outside the operator, often after the
+/// Tenant is provisioned. RustFS rejects a lifecycle that references an unknown tier with a
+/// generic 400, which would leave the bucket `Failed` until the spec changes, so a missing tier
+/// is reported as `Pending` and retried instead.
+async fn lifecycle_tiers_pending(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    previous: Option<&ProvisioningBucketStatus>,
+    base_item: &ProvisioningItemStatus,
+    configuration: &AdminLifecycleConfiguration,
+) -> Option<ProvisioningItemStatus> {
+    let referenced = configuration
+        .rules
+        .iter()
+        .flat_map(|rule| {
+            rule.transition
+                .iter()
+                .map(|transition| transition.storage_class.as_str())
+                .chain(
+                    rule.noncurrent_version_transition
+                        .iter()
+                        .map(|transition| transition.storage_class.as_str()),
+                )
+        })
+        .collect::<BTreeSet<_>>();
+    if referenced.is_empty() {
+        return None;
+    }
+
+    let registered = match client.list_tier_names().await {
+        Ok(names) => names,
+        Err(error) => {
+            return Some(bucket_item_from_admin_error(
+                run,
+                previous,
+                base_item,
+                Reason::BucketLifecycleApplyFailed,
+                error,
+                "failed to list RustFS tiers referenced by bucket lifecycle",
+            ));
+        }
+    };
+    let missing = referenced
+        .into_iter()
+        .filter(|name| !registered.contains(*name))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return None;
+    }
+
+    let message = format!(
+        "waiting for RustFS tier(s) {} referenced by bucket lifecycle",
+        missing.join(", ")
+    );
+    run.request_retry(message.clone());
+    Some(replace_bucket_item_state(
+        run,
+        previous,
+        base_item,
+        ProvisioningItemState::Pending,
+        Reason::ProvisioningPending,
+        message,
+    ))
+}
+
 fn lifecycle_configuration(
     spec: &BucketLifecycleSpec,
 ) -> Result<Option<AdminLifecycleConfiguration>, String> {
@@ -2924,9 +3001,13 @@ fn lifecycle_configuration(
                 rule.id
             ));
         }
-        if rule.expiration.is_none() && rule.abort_incomplete_multipart_upload.is_none() {
+        if rule.expiration.is_none()
+            && rule.abort_incomplete_multipart_upload.is_none()
+            && rule.transition.is_none()
+            && rule.noncurrent_version_transition.is_none()
+        {
             return Err(format!(
-                "bucket lifecycle rule '{}' must configure expiration or abortIncompleteMultipartUpload",
+                "bucket lifecycle rule '{}' must configure expiration, abortIncompleteMultipartUpload, transition, or noncurrentVersionTransition",
                 rule.id
             ));
         }
@@ -2951,6 +3032,29 @@ fn lifecycle_configuration(
             ));
         }
 
+        if let Some(transition) = rule.transition.as_ref() {
+            if transition.days < 0 {
+                return Err(format!(
+                    "bucket lifecycle rule '{}' transition.days must not be negative",
+                    rule.id
+                ));
+            }
+            validate_lifecycle_storage_class(&rule.id, "transition", &transition.storage_class)?;
+        }
+        if let Some(transition) = rule.noncurrent_version_transition.as_ref() {
+            if transition.noncurrent_days < 0 {
+                return Err(format!(
+                    "bucket lifecycle rule '{}' noncurrentVersionTransition.noncurrentDays must not be negative",
+                    rule.id
+                ));
+            }
+            validate_lifecycle_storage_class(
+                &rule.id,
+                "noncurrentVersionTransition",
+                &transition.storage_class,
+            )?;
+        }
+
         rules.push(AdminLifecycleRule {
             id: rule.id.clone(),
             status: match rule.status {
@@ -2967,9 +3071,54 @@ fn lifecycle_configuration(
                     days_after_initiation: value.days_after_initiation,
                 },
             ),
+            transition: rule
+                .transition
+                .as_ref()
+                .map(|value| AdminLifecycleTransition {
+                    days: value.days,
+                    storage_class: value.storage_class.clone(),
+                }),
+            noncurrent_version_transition: rule.noncurrent_version_transition.as_ref().map(
+                |value| AdminLifecycleNoncurrentVersionTransition {
+                    noncurrent_days: value.noncurrent_days,
+                    storage_class: value.storage_class.clone(),
+                },
+            ),
         });
     }
     Ok(Some(AdminLifecycleConfiguration { rules }))
+}
+
+/// Mirrors RustFS tier-name rules so a misspelled tier fails with a clear message instead of a
+/// generic `invalid tier` response from PutBucketLifecycleConfiguration.
+fn validate_lifecycle_storage_class(
+    rule_id: &str,
+    field: &str,
+    storage_class: &str,
+) -> Result<(), String> {
+    if storage_class.is_empty() {
+        return Err(format!(
+            "bucket lifecycle rule '{rule_id}' {field}.storageClass must name a RustFS tier"
+        ));
+    }
+    if !is_valid_xml_text(storage_class) {
+        return Err(format!(
+            "bucket lifecycle rule '{rule_id}' {field}.storageClass contains characters that cannot be represented in S3 XML"
+        ));
+    }
+    if storage_class != storage_class.to_uppercase() {
+        return Err(format!(
+            "bucket lifecycle rule '{rule_id}' {field}.storageClass '{storage_class}' must be uppercase like RustFS tier names"
+        ));
+    }
+    if storage_class.eq_ignore_ascii_case("STANDARD")
+        || storage_class.eq_ignore_ascii_case("REDUCED_REDUNDANCY")
+    {
+        return Err(format!(
+            "bucket lifecycle rule '{rule_id}' {field}.storageClass '{storage_class}' is a reserved storage class, not a tier"
+        ));
+    }
+    Ok(())
 }
 
 fn lifecycle_desired_hash(spec: &BucketLifecycleSpec) -> Option<String> {
@@ -3603,7 +3752,9 @@ fn reason_from_str(reason: &str) -> Reason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::v1alpha1::provisioning::ConfigMapKeyReference;
+    use crate::types::v1alpha1::provisioning::{
+        BucketLifecycleNoncurrentVersionTransition, ConfigMapKeyReference,
+    };
     use axum::{
         Router,
         body::Body,
@@ -3637,6 +3788,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct LifecycleCapture {
         live: Arc<Mutex<Option<String>>>,
+        tiers: Arc<Mutex<String>>,
+        tier_count: Arc<AtomicUsize>,
         put_body: Arc<Mutex<String>>,
         get_count: Arc<AtomicUsize>,
         put_count: Arc<AtomicUsize>,
@@ -3910,11 +4063,17 @@ mod tests {
         }
     }
 
+    async fn lifecycle_tier_handler(State(capture): State<LifecycleCapture>) -> Response {
+        capture.tier_count.fetch_add(1, Ordering::SeqCst);
+        (StatusCode::OK, capture.tiers.lock().await.clone()).into_response()
+    }
+
     async fn lifecycle_test_client(
         capture: LifecycleCapture,
     ) -> (RustfsAdminClient, tokio::task::JoinHandle<()>) {
         let router = Router::new()
             .route("/app-data", any(lifecycle_bucket_handler))
+            .route("/rustfs/admin/v3/tier", get(lifecycle_tier_handler))
             .with_state(capture);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -3945,6 +4104,22 @@ mod tests {
             }
         }))
         .expect("lifecycle bucket should deserialize")
+    }
+
+    fn transition_lifecycle_bucket(days: i32, storage_class: &str) -> ProvisioningBucket {
+        serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "lifecycle": {
+                "state": "Present",
+                "rules": [{
+                    "id": "to-cold",
+                    "status": "Enabled",
+                    "filter": {"prefix": ""},
+                    "transition": {"days": days, "storageClass": storage_class}
+                }]
+            }
+        }))
+        .expect("transition lifecycle bucket should deserialize")
     }
 
     fn absent_lifecycle_bucket() -> ProvisioningBucket {
@@ -6408,6 +6583,11 @@ mod tests {
         assert_eq!(capture.put_count.load(Ordering::SeqCst), 1);
         assert_eq!(capture.delete_count.load(Ordering::SeqCst), 0);
         assert_eq!(
+            capture.tier_count.load(Ordering::SeqCst),
+            0,
+            "rules without transitions must not query RustFS tiers"
+        );
+        assert_eq!(
             item.lifecycle_desired_hash,
             item.lifecycle_last_applied_hash
         );
@@ -6674,6 +6854,150 @@ mod tests {
 
         let zero_days = present_lifecycle_bucket(0);
         assert!(lifecycle_configuration(zero_days.lifecycle.as_ref().expect("lifecycle")).is_err());
+    }
+
+    #[test]
+    fn lifecycle_configuration_validates_transition_fields() {
+        let valid = transition_lifecycle_bucket(0, "COLD");
+        let configuration = lifecycle_configuration(valid.lifecycle.as_ref().expect("lifecycle"))
+            .expect("zero-day transition is valid")
+            .expect("Present lifecycle");
+        assert_eq!(
+            configuration.rules[0].transition,
+            Some(AdminLifecycleTransition {
+                days: 0,
+                storage_class: "COLD".to_string(),
+            })
+        );
+
+        for (days, storage_class) in [
+            (-1, "COLD"),
+            (1, ""),
+            (1, "cold"),
+            (1, "STANDARD"),
+            (1, "reduced_redundancy"),
+            (1, "BAD\u{0}TIER"),
+        ] {
+            let bucket = transition_lifecycle_bucket(days, storage_class);
+            assert!(
+                lifecycle_configuration(bucket.lifecycle.as_ref().expect("lifecycle")).is_err(),
+                "transition days={days} storageClass={storage_class:?} must be rejected"
+            );
+        }
+
+        let mut noncurrent = transition_lifecycle_bucket(1, "COLD");
+        let rule = &mut noncurrent.lifecycle.as_mut().expect("lifecycle").rules[0];
+        rule.transition = None;
+        rule.noncurrent_version_transition = Some(BucketLifecycleNoncurrentVersionTransition {
+            noncurrent_days: -1,
+            storage_class: "COLD".to_string(),
+        });
+        assert!(
+            lifecycle_configuration(noncurrent.lifecycle.as_ref().expect("lifecycle")).is_err()
+        );
+        let rule = &mut noncurrent.lifecycle.as_mut().expect("lifecycle").rules[0];
+        rule.noncurrent_version_transition = Some(BucketLifecycleNoncurrentVersionTransition {
+            noncurrent_days: 0,
+            storage_class: "COLD".to_string(),
+        });
+        assert!(
+            lifecycle_configuration(noncurrent.lifecycle.as_ref().expect("lifecycle")).is_ok(),
+            "RustFS accepts a zero-day noncurrent transition"
+        );
+        let rule = &mut noncurrent.lifecycle.as_mut().expect("lifecycle").rules[0];
+        rule.noncurrent_version_transition = Some(BucketLifecycleNoncurrentVersionTransition {
+            noncurrent_days: 7,
+            storage_class: "COLD".to_string(),
+        });
+        let configuration =
+            lifecycle_configuration(noncurrent.lifecycle.as_ref().expect("lifecycle"))
+                .expect("noncurrent transition is valid")
+                .expect("Present lifecycle");
+        assert_eq!(
+            configuration.rules[0].noncurrent_version_transition,
+            Some(AdminLifecycleNoncurrentVersionTransition {
+                noncurrent_days: 7,
+                storage_class: "COLD".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_bucket_lifecycle_is_applied_when_live_configuration_is_missing() {
+        let capture = LifecycleCapture::default();
+        *capture.tiers.lock().await = r#"[{"type":"s3","s3":{"name":"COLD"}}]"#.to_string();
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item =
+            reconcile_bucket(&mut run, &client, &transition_lifecycle_bucket(1, "COLD")).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.tier_count.load(Ordering::SeqCst), 1);
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 1);
+        let body = capture.put_body.lock().await;
+        assert!(body.contains(
+            "<Status>Enabled</Status><Transition><Days>1</Days><StorageClass>COLD</StorageClass></Transition>"
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn transition_bucket_lifecycle_waits_for_an_unregistered_tier() {
+        let capture = LifecycleCapture::default();
+        *capture.tiers.lock().await = r#"[{"type":"s3","s3":{"name":"WARM"}}]"#.to_string();
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item =
+            reconcile_bucket(&mut run, &client, &transition_lifecycle_bucket(1, "COLD")).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Pending.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("COLD"))
+        );
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 0);
+        assert!(run.retry.is_some(), "a missing tier must requeue");
+        assert!(item.lifecycle_last_applied_hash.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rustfs_shaped_live_transition_lifecycle_is_adopted_without_write() {
+        // Shape returned by RustFS GetBucketLifecycleConfiguration for an operator-applied rule.
+        let live = concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+            "<LifecycleConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+            "<Rule><Filter></Filter><ID>to-cold</ID><Status>Enabled</Status>",
+            "<Transition><Days>1</Days><StorageClass>COLD</StorageClass></Transition>",
+            "</Rule></LifecycleConfiguration>"
+        );
+        let capture = LifecycleCapture::default();
+        *capture.live.lock().await = Some(live.to_string());
+        let (client, server) = lifecycle_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item =
+            reconcile_bucket(&mut run, &client, &transition_lifecycle_bucket(1, "COLD")).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.put_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            item.lifecycle_desired_hash,
+            item.lifecycle_last_applied_hash
+        );
+        server.abort();
     }
 
     #[tokio::test]

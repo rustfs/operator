@@ -393,12 +393,26 @@ pub struct BucketLifecycleAbortIncompleteMultipartUpload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketLifecycleTransition {
+    pub days: i32,
+    pub storage_class: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketLifecycleNoncurrentVersionTransition {
+    pub noncurrent_days: i32,
+    pub storage_class: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketLifecycleRule {
     pub id: String,
     pub status: BucketLifecycleRuleStatus,
     pub prefix: String,
     pub expiration: Option<BucketLifecycleExpiration>,
     pub abort_incomplete_multipart_upload: Option<BucketLifecycleAbortIncompleteMultipartUpload>,
+    pub transition: Option<BucketLifecycleTransition>,
+    pub noncurrent_version_transition: Option<BucketLifecycleNoncurrentVersionTransition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,9 +446,27 @@ impl BucketLifecycleConfiguration {
             }
             xml.push_str("</Filter><ID>");
             xml.push_str(&escape_xml(&rule.id));
-            xml.push_str("</ID><Status>");
+            xml.push_str("</ID>");
+            // Element order follows RustFS's GetBucketLifecycleConfiguration response, which the
+            // ownership hash compares against after canonicalization.
+            if let Some(transition) = &rule.noncurrent_version_transition {
+                xml.push_str("<NoncurrentVersionTransition><NoncurrentDays>");
+                xml.push_str(&transition.noncurrent_days.to_string());
+                xml.push_str("</NoncurrentDays><StorageClass>");
+                xml.push_str(&escape_xml(&transition.storage_class));
+                xml.push_str("</StorageClass></NoncurrentVersionTransition>");
+            }
+            xml.push_str("<Status>");
             xml.push_str(rule.status.as_str());
-            xml.push_str("</Status></Rule>");
+            xml.push_str("</Status>");
+            if let Some(transition) = &rule.transition {
+                xml.push_str("<Transition><Days>");
+                xml.push_str(&transition.days.to_string());
+                xml.push_str("</Days><StorageClass>");
+                xml.push_str(&escape_xml(&transition.storage_class));
+                xml.push_str("</StorageClass></Transition>");
+            }
+            xml.push_str("</Rule>");
         }
         xml.push_str("</LifecycleConfiguration>");
         xml
@@ -1393,6 +1425,8 @@ mod tests {
                     prefix: "logs/<".to_string(),
                     expiration: Some(BucketLifecycleExpiration { days: 30 }),
                     abort_incomplete_multipart_upload: None,
+                    transition: None,
+                    noncurrent_version_transition: None,
                 },
                 BucketLifecycleRule {
                     id: "a".to_string(),
@@ -1404,6 +1438,8 @@ mod tests {
                             days_after_initiation: 1,
                         },
                     ),
+                    transition: None,
+                    noncurrent_version_transition: None,
                 },
             ],
         };
@@ -1424,6 +1460,8 @@ mod tests {
                     prefix: "logs/".to_string(),
                     expiration: Some(BucketLifecycleExpiration { days: 30 }),
                     abort_incomplete_multipart_upload: None,
+                    transition: None,
+                    noncurrent_version_transition: None,
                 },
                 BucketLifecycleRule {
                     id: "cleanup-incomplete-uploads".to_string(),
@@ -1435,6 +1473,8 @@ mod tests {
                             days_after_initiation: 1,
                         },
                     ),
+                    transition: None,
+                    noncurrent_version_transition: None,
                 },
             ],
         };
@@ -1452,6 +1492,79 @@ mod tests {
             canonicalize_bucket_lifecycle_xml(&configuration.to_xml()).unwrap(),
             canonicalize_bucket_lifecycle_xml(rustfs_get_fixture).unwrap()
         );
+    }
+
+    #[test]
+    fn lifecycle_xml_with_transitions_matches_rustfs_get_response_shape() {
+        let configuration = BucketLifecycleConfiguration {
+            rules: vec![
+                BucketLifecycleRule {
+                    id: "to-cold".to_string(),
+                    status: BucketLifecycleRuleStatus::Enabled,
+                    prefix: "logs/".to_string(),
+                    expiration: Some(BucketLifecycleExpiration { days: 30 }),
+                    abort_incomplete_multipart_upload: None,
+                    transition: Some(BucketLifecycleTransition {
+                        days: 1,
+                        storage_class: "COLD".to_string(),
+                    }),
+                    noncurrent_version_transition: None,
+                },
+                BucketLifecycleRule {
+                    id: "noncurrent-to-cold".to_string(),
+                    status: BucketLifecycleRuleStatus::Enabled,
+                    prefix: String::new(),
+                    expiration: None,
+                    abort_incomplete_multipart_upload: None,
+                    transition: None,
+                    noncurrent_version_transition: Some(
+                        BucketLifecycleNoncurrentVersionTransition {
+                            noncurrent_days: 7,
+                            storage_class: "COLD".to_string(),
+                        },
+                    ),
+                },
+            ],
+        };
+        // RustFS re-serializes stored rules in this element order regardless of the order sent.
+        let rustfs_get_fixture = concat!(
+            "<LifecycleConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+            "<Rule><Filter></Filter><ID>noncurrent-to-cold</ID>",
+            "<NoncurrentVersionTransition><NoncurrentDays>7</NoncurrentDays>",
+            "<StorageClass>COLD</StorageClass></NoncurrentVersionTransition>",
+            "<Status>Enabled</Status></Rule>",
+            "<Rule><Expiration><Days>30</Days></Expiration>",
+            "<Filter><Prefix>logs/</Prefix></Filter><ID>to-cold</ID><Status>Enabled</Status>",
+            "<Transition><Days>1</Days><StorageClass>COLD</StorageClass></Transition>",
+            "</Rule></LifecycleConfiguration>"
+        );
+
+        assert_eq!(
+            canonicalize_bucket_lifecycle_xml(&configuration.to_xml()).unwrap(),
+            canonicalize_bucket_lifecycle_xml(rustfs_get_fixture).unwrap()
+        );
+    }
+
+    #[test]
+    fn lifecycle_xml_transition_allows_zero_days_and_escapes_storage_class() {
+        let configuration = BucketLifecycleConfiguration {
+            rules: vec![BucketLifecycleRule {
+                id: "now".to_string(),
+                status: BucketLifecycleRuleStatus::Enabled,
+                prefix: String::new(),
+                expiration: None,
+                abort_incomplete_multipart_upload: None,
+                transition: Some(BucketLifecycleTransition {
+                    days: 0,
+                    storage_class: "A&B".to_string(),
+                }),
+                noncurrent_version_transition: None,
+            }],
+        };
+
+        assert!(configuration.to_xml().contains(
+            "<Status>Enabled</Status><Transition><Days>0</Days><StorageClass>A&amp;B</StorageClass></Transition></Rule>"
+        ));
     }
 
     #[test]
@@ -1482,8 +1595,8 @@ mod tests {
         );
         let live = concat!(
             "<LifecycleConfiguration><Rule><Filter></Filter><ID>all</ID>",
-            "<Status>Enabled</Status><Transition><Days>7</Days>",
-            "<StorageClass>WARM</StorageClass></Transition></Rule></LifecycleConfiguration>"
+            "<NoncurrentVersionExpiration><NoncurrentDays>7</NoncurrentDays>",
+            "</NoncurrentVersionExpiration><Status>Enabled</Status></Rule></LifecycleConfiguration>"
         );
 
         assert_ne!(

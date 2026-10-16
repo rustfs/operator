@@ -157,6 +157,14 @@ export interface BucketLifecycleRule {
   abortIncompleteMultipartUpload?: {
     daysAfterInitiation: number
   }
+  transition?: {
+    days: number
+    storageClass: string
+  }
+  noncurrentVersionTransition?: {
+    noncurrentDays: number
+    storageClass: string
+  }
 }
 
 export interface ProvisioningItemStatus {
