@@ -13,6 +13,8 @@
 // limitations under the License.
 
 //! Internal helper duties: shared credential parsing, signature/hash utilities, and parsers.
+use std::collections::BTreeSet;
+
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -148,6 +150,33 @@ pub(super) fn extract_canned_policy_document(body: &str) -> Result<String, Rustf
     let policy = value.get("policy").unwrap_or(&value);
 
     serde_json::to_string(policy).map_err(|_| RustfsClientError::InvalidPolicyDocument)
+}
+
+/// Parses `GET /rustfs/admin/v3/tier`, an array of `{"type": "<t>", "<t>": {"name": ..}}`
+/// entries where the backend object is keyed by the tier type.
+pub(super) fn parse_tier_names(body: &str) -> Result<BTreeSet<String>, RustfsClientError> {
+    let tiers = match serde_json::from_str::<Value>(body)
+        .map_err(|_| RustfsClientError::ParseResponseFailed)?
+    {
+        Value::Null => return Ok(BTreeSet::new()),
+        Value::Array(tiers) => tiers,
+        _ => return Err(RustfsClientError::ParseResponseFailed),
+    };
+    tiers
+        .iter()
+        .map(|tier| {
+            let tier_type = tier
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or(RustfsClientError::ParseResponseFailed)?;
+            tier.get(tier_type)
+                .and_then(|backend| backend.get("name"))
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or(RustfsClientError::ParseResponseFailed)
+        })
+        .collect()
 }
 
 pub(super) fn sha256_hex(payload: &[u8]) -> String {

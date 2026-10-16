@@ -208,9 +208,33 @@ pub struct BucketLifecycleAbortIncompleteMultipartUpload {
     pub days_after_initiation: i32,
 }
 
+/// Moves current object versions to a remote tier after `days`. `storageClass` names a tier
+/// registered in RustFS (uppercase); RustFS rejects a lifecycle that references an unknown tier.
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-#[x_kube(validation = Rule::new("has(self.expiration) || has(self.abortIncompleteMultipartUpload)").message("lifecycle rule must configure expiration or abortIncompleteMultipartUpload"))]
+pub struct BucketLifecycleTransition {
+    #[schemars(range(min = 0))]
+    pub days: i32,
+
+    #[schemars(length(min = 1))]
+    pub storage_class: String,
+}
+
+/// Moves noncurrent object versions to a remote tier `noncurrentDays` after they become
+/// noncurrent. Only meaningful on versioned buckets.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketLifecycleNoncurrentVersionTransition {
+    #[schemars(range(min = 0))]
+    pub noncurrent_days: i32,
+
+    #[schemars(length(min = 1))]
+    pub storage_class: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("has(self.expiration) || has(self.abortIncompleteMultipartUpload) || has(self.transition) || has(self.noncurrentVersionTransition)").message("lifecycle rule must configure expiration, abortIncompleteMultipartUpload, transition, or noncurrentVersionTransition"))]
 pub struct BucketLifecycleRule {
     #[schemars(length(min = 1, max = MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH))]
     pub id: String,
@@ -224,6 +248,12 @@ pub struct BucketLifecycleRule {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abort_incomplete_multipart_upload: Option<BucketLifecycleAbortIncompleteMultipartUpload>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<BucketLifecycleTransition>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noncurrent_version_transition: Option<BucketLifecycleNoncurrentVersionTransition>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
@@ -455,6 +485,40 @@ mod tests {
                 .rules
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn bucket_lifecycle_deserializes_transition_actions() {
+        let bucket: super::ProvisioningBucket = serde_json::from_value(serde_json::json!({
+            "name": "app-data",
+            "lifecycle": {
+                "state": "Present",
+                "rules": [{
+                    "id": "to-cold",
+                    "status": "Enabled",
+                    "filter": {"prefix": ""},
+                    "transition": {"days": 1, "storageClass": "COLD"},
+                    "noncurrentVersionTransition": {"noncurrentDays": 7, "storageClass": "COLD"}
+                }]
+            }
+        }))
+        .expect("transition lifecycle should deserialize");
+        let rule = &bucket.lifecycle.expect("lifecycle is present").rules[0];
+        assert_eq!(
+            rule.transition,
+            Some(super::BucketLifecycleTransition {
+                days: 1,
+                storage_class: "COLD".to_string(),
+            })
+        );
+        assert_eq!(
+            rule.noncurrent_version_transition,
+            Some(super::BucketLifecycleNoncurrentVersionTransition {
+                noncurrent_days: 7,
+                storage_class: "COLD".to_string(),
+            })
+        );
+        assert!(rule.expiration.is_none());
     }
 
     #[test]

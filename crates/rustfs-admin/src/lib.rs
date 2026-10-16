@@ -34,8 +34,9 @@ mod pool_ops;
 mod s3_ops;
 pub use s3_ops::{
     BucketLifecycleAbortIncompleteMultipartUpload, BucketLifecycleConfiguration,
-    BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleStatus,
-    BucketObjectLockConfiguration, BucketObjectLockDefaultRetention, BucketObjectLockRetentionMode,
+    BucketLifecycleExpiration, BucketLifecycleNoncurrentVersionTransition, BucketLifecycleRule,
+    BucketLifecycleRuleStatus, BucketLifecycleTransition, BucketObjectLockConfiguration,
+    BucketObjectLockDefaultRetention, BucketObjectLockRetentionMode,
     BucketObjectLockRetentionPeriod, BucketVersioningState, BucketVersioningUpdate,
     canonicalize_bucket_lifecycle_xml,
 };
@@ -54,6 +55,7 @@ const LIST_CANNED_POLICIES_PATH: &str = "/rustfs/admin/v3/list-canned-policies";
 const ADD_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/add-canned-policy";
 const INFO_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/info-canned-policy";
 const SERVER_INFO_PATH: &str = "/rustfs/admin/v3/info";
+const LIST_TIERS_PATH: &str = "/rustfs/admin/v3/tier";
 const POOLS_LIST_PATH: &str = "/rustfs/admin/v3/pools/list";
 const POOLS_STATUS_PATH: &str = "/rustfs/admin/v3/pools/status";
 const POOLS_DECOMMISSION_PATH: &str = "/rustfs/admin/v3/pools/decommission";
@@ -557,8 +559,45 @@ impl RustfsAdminClient {
 
 #[cfg(test)]
 mod tests {
-    use super::helpers::build_canonical_query;
+    use super::helpers::{build_canonical_query, parse_tier_names};
     use super::{RustfsClientError, StatusCode};
+
+    #[test]
+    fn tier_names_are_read_from_the_backend_object_and_secrets_are_ignored() {
+        // Shape of GET /rustfs/admin/v3/tier from RustFS 1.0.2-preview.2 (credentials replaced).
+        let body = r#"[
+            {"type":"s3","s3":{"name":"COLD","endpoint":"https://s3.example.com","accessKey":"AK","secretKey":"SK","bucket":"cold","prefix":"hot/","region":"us-1","storageClass":""}},
+            {"type":"rustfs","rustfs":{"name":"ARCHIVE","endpoint":"https://archive.example.com","accessKey":"AK","secretKey":"SK","bucket":"archive"}}
+        ]"#;
+
+        let names = parse_tier_names(body).expect("tier list parses");
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec!["ARCHIVE".to_string(), "COLD".to_string()]
+        );
+        assert!(parse_tier_names("[]").expect("empty list").is_empty());
+        assert!(parse_tier_names("null").expect("null list").is_empty());
+    }
+
+    #[test]
+    fn tier_list_without_a_backend_name_is_rejected() {
+        for body in [
+            r#"{"type":"s3"}"#,
+            r#"[{"s3":{"name":"COLD"}}]"#,
+            r#"[{"type":"s3","s3":{}}]"#,
+            r#"[{"type":"s3","s3":{"name":""}}]"#,
+            r#"[{"type":"s3","minio":{"name":"COLD"}}]"#,
+            "not json",
+        ] {
+            assert!(
+                matches!(
+                    parse_tier_names(body),
+                    Err(RustfsClientError::ParseResponseFailed)
+                ),
+                "{body} must be rejected"
+            );
+        }
+    }
 
     #[test]
     fn canonical_query_uses_sigv4_uri_encoding_and_encoded_sort_order() {

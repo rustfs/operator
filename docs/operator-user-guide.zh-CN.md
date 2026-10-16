@@ -905,7 +905,22 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user �
 
 Bucket 版本控制和 Object Lock 采用声明式但保守的调和策略。`versioning: true` 启用版本控制。`versioning: false` 会让从未启用版本控制的 bucket 保持原状，或在版本控制已启用后请求 S3 `Suspended`；省略该字段时保持现状，除非 Object Lock 要求先启用版本控制。`objectLock: true` 会在版本控制启用后开启 Object Lock。Object Lock 不可关闭；当线上 bucket 已启用 Object Lock 时，Operator 会拒绝 `objectLock: false` 或暂停版本控制。`objectLockConfiguration` 管理默认保留规则：省略 `state` 等同于 `Present`，此时必须设置 `mode: Governance` 或 `Compliance` 以及 `days`；`state: Absent` 必须省略 `mode` 和 `days`，仅移除默认规则。完全省略 `objectLockConfiguration` 时，不管理已有默认保留规则。Operator 可以接管与声明完全相同的线上规则，但只有线上配置哈希仍与 status 中最后一次应用的配置一致时，才会替换或移除不同规则。默认保留策略只作用于之后创建的对象版本，不会追溯锁定已有版本。
 
-每个 bucket 还可以通过 `lifecycle.state: Present` 声明一个或多个 S3 生命周期规则。当前 schema 支持按正整数天数过期对象，以及按正整数天数清理未完成的分片上传；每条规则必须有唯一 ID、`Enabled` 或 `Disabled` 状态，并显式指定 prefix filter（`prefix: ""` 表示全部对象）。`lifecycle.state: Absent` 表示请求删除，且不能包含规则。Operator 可以接管与声明完全相同的现有配置，但没有 `status.provisioning.buckets` 中匹配的所有权哈希时，不会覆盖或删除不同的现有配置。省略 `lifecycle` 时不会调用 Lifecycle API，也不会改动现有配置。
+每个 bucket 还可以通过 `lifecycle.state: Present` 声明一个或多个 S3 生命周期规则。当前 schema 支持按正整数天数过期对象、按正整数天数清理未完成的分片上传、通过 `transition` 在零天或更多天后迁移当前版本，以及通过 `noncurrentVersionTransition` 在零天或更多天后迁移非当前版本；每条规则必须有唯一 ID、`Enabled` 或 `Disabled` 状态，并显式指定 prefix filter（`prefix: ""` 表示全部对象）。`lifecycle.state: Absent` 表示请求删除，且不能包含规则。Operator 可以接管与声明完全相同的现有配置，但没有 `status.provisioning.buckets` 中匹配的所有权哈希时，不会覆盖或删除不同的现有配置。省略 `lifecycle` 时不会调用 Lifecycle API，也不会改动现有配置。
+
+迁移类操作会把数据移动到远程层（tier）。`storageClass` 是 RustFS 中已注册的 tier 名称（例如通过 `rc ilm tier add` 注册）；tier 名称必须为大写，`STANDARD` 和 `REDUCED_REDUNDANCY` 为保留名称。Operator 不负责注册 tier。在应用包含迁移操作的生命周期配置之前，Operator 会检查所有被引用的 tier 是否存在；如果有 tier 尚未注册，bucket 会保持 `Pending` 状态并在消息中列出该 tier，Operator 会持续重试，因此可以在添加规则之后再注册 tier：
+
+```yaml
+lifecycle:
+  state: Present
+  rules:
+    - id: to-cold
+      status: Enabled
+      filter:
+        prefix: ""
+      transition:
+        days: 7
+        storageClass: COLD
+```
 
 Kubernetes 或 RustFS 管理/S3 API 的瞬时失败（超时、429、5xx、连接错误、TLS 未就绪）会把 provisioning 条目保持为 `Pending` 并重新入队，而不会把 Tenant 标为 `Failed`。永久性 4xx 配置错误仍会失败并等待 spec 或对象变更。
 

@@ -56,11 +56,12 @@ use crate::console::models::topology::{
 };
 use crate::types::v1alpha1::provisioning::{
     BucketAnonymousAccess, BucketLifecycleAbortIncompleteMultipartUpload,
-    BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleFilter,
-    BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState,
-    BucketObjectLockConfiguration, BucketObjectLockConfigurationState,
-    BucketObjectLockRetentionMode, ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket,
-    ProvisioningDeletionPolicy, ProvisioningPolicy, ProvisioningUser, UserCredentialsSecretRef,
+    BucketLifecycleExpiration, BucketLifecycleNoncurrentVersionTransition, BucketLifecycleRule,
+    BucketLifecycleRuleFilter, BucketLifecycleRuleStatus, BucketLifecycleSpec,
+    BucketLifecycleState, BucketLifecycleTransition, BucketObjectLockConfiguration,
+    BucketObjectLockConfigurationState, BucketObjectLockRetentionMode, ConfigMapKeyReference,
+    PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy, ProvisioningPolicy,
+    ProvisioningUser, UserCredentialsSecretRef,
 };
 use crate::types::v1alpha1::status::provisioning::{
     BucketVersioningStatus, ProvisioningBucketStatus, ProvisioningItemState,
@@ -143,6 +144,8 @@ use crate::types::v1alpha1::status::provisioning::{
         BucketLifecycleRuleFilter,
         BucketLifecycleExpiration,
         BucketLifecycleAbortIncompleteMultipartUpload,
+        BucketLifecycleTransition,
+        BucketLifecycleNoncurrentVersionTransition,
         CreateTenantRequest,
         CreatePoolRequest,
         PoolInfo,
@@ -792,6 +795,8 @@ mod tests {
         assert!(schemas.contains_key("ProvisioningStatus"));
         assert!(schemas.contains_key("ProvisioningBucketStatus"));
         assert!(schemas.contains_key("BucketLifecycleSpec"));
+        assert!(schemas.contains_key("BucketLifecycleTransition"));
+        assert!(schemas.contains_key("BucketLifecycleNoncurrentVersionTransition"));
         assert!(schemas.contains_key("BucketObjectLockConfiguration"));
         assert!(schemas.contains_key("UserCredentialsSecretRef"));
         assert_eq!(

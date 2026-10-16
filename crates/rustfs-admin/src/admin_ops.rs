@@ -16,17 +16,17 @@
 //!   - user CRUD and policy queries/expression on `/rustfs/admin/v3/*`
 //!   - only admin protocol semantics live here; transport/signing is delegated.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::helpers::{
     body_mentions_not_found, build_canonical_query, extract_canned_policy_document,
-    is_absent_resource,
+    is_absent_resource, parse_tier_names,
 };
 use super::{
     ADD_CANNED_POLICY_PATH, ADD_USER_PATH, ADMIN_SIGNING_SERVICE, INFO_CANNED_POLICY_PATH,
-    JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, REMOVE_USER_PATH, RustfsAdminClient,
-    RustfsClientError, RustfsServerInfo, RustfsServerInfoResponse, RustfsUserInfo,
-    SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
+    JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, LIST_TIERS_PATH, REMOVE_USER_PATH,
+    RustfsAdminClient, RustfsClientError, RustfsServerInfo, RustfsServerInfoResponse,
+    RustfsUserInfo, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -173,6 +173,15 @@ impl RustfsAdminClient {
                     .map_err(|_| RustfsClientError::ParseResponseFailed)
             })
             .collect()
+    }
+
+    /// Names of the remote tiers registered in RustFS. Only names are kept; the response also
+    /// carries tier endpoints and credentials, which are dropped while parsing.
+    pub async fn list_tier_names(&self) -> Result<BTreeSet<String>, RustfsClientError> {
+        let body = self
+            .send_admin_request("GET", LIST_TIERS_PATH, "", "", None)
+            .await?;
+        parse_tier_names(&body)
     }
 
     pub async fn server_info(&self) -> Result<RustfsServerInfo, RustfsClientError> {

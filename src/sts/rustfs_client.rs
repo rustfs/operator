@@ -22,8 +22,9 @@ use crate::cluster_dns;
 
 pub use rustfs_admin::{
     BucketLifecycleAbortIncompleteMultipartUpload, BucketLifecycleConfiguration,
-    BucketLifecycleExpiration, BucketLifecycleRule, BucketLifecycleRuleStatus,
-    BucketObjectLockConfiguration, BucketObjectLockDefaultRetention, BucketObjectLockRetentionMode,
+    BucketLifecycleExpiration, BucketLifecycleNoncurrentVersionTransition, BucketLifecycleRule,
+    BucketLifecycleRuleStatus, BucketLifecycleTransition, BucketObjectLockConfiguration,
+    BucketObjectLockDefaultRetention, BucketObjectLockRetentionMode,
     BucketObjectLockRetentionPeriod, BucketVersioningState, BucketVersioningUpdate,
     CreateBucketResult, RustfsClientError, RustfsCredentials, RustfsErasureBackend,
     RustfsErasureSetInfo, RustfsPoolDecommissionInfo, RustfsPoolListItem, RustfsPoolStatus,
