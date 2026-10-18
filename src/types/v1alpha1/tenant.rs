@@ -19,7 +19,7 @@ use crate::types::v1alpha1::network::NetworkConfig;
 use crate::types::v1alpha1::pool::{Pool, validate_pool_collection};
 use crate::types::v1alpha1::pool_lifecycle::PoolLifecycleSpec;
 use crate::types::v1alpha1::provisioning::{
-    ProvisioningBucket, ProvisioningPolicy, ProvisioningUser,
+    ProvisioningBucket, ProvisioningPolicy, ProvisioningTier, ProvisioningUser,
 };
 use crate::types::v1alpha1::security_context::PodSecurityContextOverride;
 use crate::types::v1alpha1::tls::TlsConfig;
@@ -44,6 +44,7 @@ pub(crate) const MAX_TENANT_POOLS: u32 = 32;
 pub(crate) const MAX_TENANT_POLICIES: u32 = 256;
 pub(crate) const MAX_TENANT_USERS: u32 = 256;
 pub(crate) const MAX_TENANT_BUCKETS: u32 = 1024;
+pub(crate) const MAX_TENANT_TIERS: u32 = 64;
 pub(crate) const RUSTFS_TENANT_LABEL: &str = "rustfs.tenant";
 
 /// Reference to one key in a namespaced Kubernetes Secret.
@@ -283,6 +284,15 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buckets: Vec<ProvisioningBucket>,
 
+    /// Remote storage tiers that bucket lifecycle transitions can reference by name.
+    /// Tiers are reconciled before buckets.
+    #[schemars(
+        length(max = MAX_TENANT_TIERS),
+        extend("x-kubernetes-list-type" = "map", "x-kubernetes-list-map-keys" = ["name"])
+    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<ProvisioningTier>,
+
     /// Encryption / KMS configuration for server-side encryption.
     /// When enabled, the operator injects KMS environment variables and mounts
     /// secrets into RustFS pods so the in-process `rustfs-kms` library is configured.
@@ -343,6 +353,9 @@ impl TenantSpec {
             }
             for user in &self.users {
                 insert(user.credentials_secret_name());
+            }
+            for tier in &self.tiers {
+                insert(&tier.creds_secret.name);
             }
         }
 
@@ -640,6 +653,13 @@ mod tests {
                     "policies": ["readwrite"]
                 }
             ],
+            "tiers": [{
+                "name": "COLD",
+                "type": "S3",
+                "endpoint": "https://s3.example.com",
+                "bucket": "cold",
+                "credsSecret": { "name": "cold-tier-creds" }
+            }],
             "tls": {
                 "certManager": {
                     "secretName": "default-tls",
@@ -676,6 +696,7 @@ mod tests {
             spec.referenced_secret_names(),
             BTreeSet::from([
                 "admin-creds".to_string(),
+                "cold-tier-creds".to_string(),
                 "default-ca".to_string(),
                 "default-tls".to_string(),
                 "env-secret".to_string(),

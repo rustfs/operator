@@ -34,11 +34,17 @@ pub struct ProvisioningStatus {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buckets: Vec<ProvisioningBucketStatus>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<ProvisioningItemStatus>,
 }
 
 impl ProvisioningStatus {
     pub fn is_empty(&self) -> bool {
-        self.policies.is_empty() && self.users.is_empty() && self.buckets.is_empty()
+        self.policies.is_empty()
+            && self.users.is_empty()
+            && self.buckets.is_empty()
+            && self.tiers.is_empty()
     }
 }
 

@@ -104,6 +104,7 @@ function provisioningGroups(tenant: TenantDetailsResponse) {
   return [
     { type: "Policy", items: provisioning.policies ?? [] },
     { type: "User", items: provisioning.users ?? [] },
+    { type: "Tier", items: provisioning.tiers ?? [] },
     { type: "Bucket", items: provisioning.buckets ?? [] },
   ].filter((group) => group.items.length > 0)
 }
