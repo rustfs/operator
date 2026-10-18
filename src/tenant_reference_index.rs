@@ -348,6 +348,16 @@ mod tests {
             policies: vec!["readwrite".to_string()],
             ..Default::default()
         });
+        tenant
+            .spec
+            .tiers
+            .push(crate::types::v1alpha1::provisioning::ProvisioningTier {
+                name: "COLD".to_string(),
+                creds_secret: crate::types::v1alpha1::provisioning::TierCredentialsSecretRef {
+                    name: "cold-tier-credentials".to_string(),
+                },
+                ..Default::default()
+            });
         tenant.spec.encryption = Some(EncryptionConfig {
             kms_secret: Some(local_ref("vault-token")),
             local: Some(LocalKmsConfig {
@@ -404,6 +414,7 @@ mod tests {
             "oidc-extra-ca",
             "provisioned-user-credentials",
             "legacy-user",
+            "cold-tier-credentials",
             "vault-token",
             "local-master-key",
             "external-ca",

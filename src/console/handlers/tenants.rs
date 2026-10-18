@@ -327,6 +327,7 @@ fn tenant_from_create_request(req: CreateTenantRequest) -> Result<Tenant> {
             policies: req.policies.unwrap_or_default(),
             users: req.users.unwrap_or_default(),
             buckets: req.buckets.unwrap_or_default(),
+            tiers: req.tiers.unwrap_or_default(),
             security_context,
             ..Default::default()
         },
@@ -501,6 +502,11 @@ pub async fn update_tenant(
     if let Some(buckets) = req.buckets {
         tenant.spec.buckets = buckets;
         updated_fields.push("buckets".to_string());
+    }
+
+    if let Some(tiers) = req.tiers {
+        tenant.spec.tiers = tiers;
+        updated_fields.push("tiers".to_string());
     }
 
     if updated_fields.is_empty() {
@@ -997,6 +1003,7 @@ spec:
             policies: None,
             users: None,
             buckets: None,
+            tiers: None,
             security_context: None,
         }
     }

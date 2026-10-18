@@ -55,7 +55,7 @@ const LIST_CANNED_POLICIES_PATH: &str = "/rustfs/admin/v3/list-canned-policies";
 const ADD_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/add-canned-policy";
 const INFO_CANNED_POLICY_PATH: &str = "/rustfs/admin/v3/info-canned-policy";
 const SERVER_INFO_PATH: &str = "/rustfs/admin/v3/info";
-const LIST_TIERS_PATH: &str = "/rustfs/admin/v3/tier";
+const TIER_PATH: &str = "/rustfs/admin/v3/tier";
 const POOLS_LIST_PATH: &str = "/rustfs/admin/v3/pools/list";
 const POOLS_STATUS_PATH: &str = "/rustfs/admin/v3/pools/status";
 const POOLS_DECOMMISSION_PATH: &str = "/rustfs/admin/v3/pools/decommission";
@@ -118,6 +118,24 @@ pub enum CreateBucketResult {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RustfsUserInfo {
     pub policy_names: Vec<String>,
+}
+
+/// Non-secret settings of an S3-style remote tier (`s3`, `rustfs` and `minio` backends).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RustfsTierConfig {
+    pub tier_type: String,
+    pub name: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub prefix: String,
+    pub region: String,
+}
+
+/// Remote tier listed by `GET /rustfs/admin/v3/tier`. The secret key is never kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustfsTier {
+    pub config: RustfsTierConfig,
+    pub access_key: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
@@ -217,6 +235,7 @@ pub enum RustfsClientError {
     },
     TenantSecretLookupFailed,
     InvalidPolicyName,
+    InvalidTierName,
     InvalidPolicyDocument,
     TenantTlsRequired,
     TenantTlsNotReady,
@@ -257,6 +276,7 @@ impl std::fmt::Display for RustfsClientError {
                 write!(f, "failed to load tenant credential secret")
             }
             Self::InvalidPolicyName => write!(f, "invalid policy name"),
+            Self::InvalidTierName => write!(f, "invalid tier name"),
             Self::InvalidPolicyDocument => write!(f, "failed to parse canned policy response"),
             Self::TenantTlsRequired => write!(f, "STS requires a TLS-enabled tenant"),
             Self::TenantTlsNotReady => write!(f, "tenant TLS status is not ready"),
@@ -305,6 +325,11 @@ impl RustfsClientError {
         matches!(self, Self::UnexpectedStatus { status, .. } if *status == StatusCode::NOT_FOUND)
     }
 
+    /// Whether RustFS answered HTTP 409, e.g. a tier whose remote prefix already holds objects.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::UnexpectedStatus { status, .. } if *status == StatusCode::CONFLICT)
+    }
+
     /// Network, timeout, and retryable upstream failures. Permanent configuration and
     /// 4xx semantic errors are not transient.
     pub fn is_transient(&self) -> bool {
@@ -326,6 +351,7 @@ impl RustfsClientError {
             | Self::EmptyCredentialValue { .. }
             | Self::InvalidCredentialValue { .. }
             | Self::InvalidPolicyName
+            | Self::InvalidTierName
             | Self::InvalidPolicyDocument
             | Self::TenantTlsRequired
             | Self::TenantTlsClientCertificateRequired
@@ -559,7 +585,16 @@ impl RustfsAdminClient {
 
 #[cfg(test)]
 mod tests {
-    use super::helpers::{build_canonical_query, parse_tier_names};
+    use super::helpers::{build_canonical_query, parse_tiers};
+    use super::{RustfsTier, RustfsTierConfig};
+    use std::collections::BTreeSet;
+
+    fn parse_tier_names(body: &str) -> Result<BTreeSet<String>, RustfsClientError> {
+        Ok(parse_tiers(body)?
+            .into_iter()
+            .map(|tier| tier.config.name)
+            .collect())
+    }
     use super::{RustfsClientError, StatusCode};
 
     #[test]
@@ -577,6 +612,44 @@ mod tests {
         );
         assert!(parse_tier_names("[]").expect("empty list").is_empty());
         assert!(parse_tier_names("null").expect("null list").is_empty());
+    }
+
+    #[test]
+    fn tier_settings_are_read_without_the_secret_key() {
+        let body = r#"[
+            {"type":"s3","s3":{"name":"COLD","endpoint":"https://gateway.example.com","accessKey":"AK","secretKey":"REDACTED","bucket":"cold","prefix":"rustfs/","region":"us-1","storageClass":""}},
+            {"type":"minio","minio":{"name":"ARCHIVE","endpoint":"https://minio.example.com","accessKey":"AK2","secretKey":"REDACTED","bucket":"archive"}}
+        ]"#;
+
+        let tiers = parse_tiers(body).expect("tier list parses");
+        assert_eq!(
+            tiers,
+            vec![
+                RustfsTier {
+                    config: RustfsTierConfig {
+                        tier_type: "s3".to_string(),
+                        name: "COLD".to_string(),
+                        endpoint: "https://gateway.example.com".to_string(),
+                        bucket: "cold".to_string(),
+                        prefix: "rustfs/".to_string(),
+                        region: "us-1".to_string(),
+                    },
+                    access_key: "AK".to_string(),
+                },
+                RustfsTier {
+                    config: RustfsTierConfig {
+                        tier_type: "minio".to_string(),
+                        name: "ARCHIVE".to_string(),
+                        endpoint: "https://minio.example.com".to_string(),
+                        bucket: "archive".to_string(),
+                        prefix: String::new(),
+                        region: String::new(),
+                    },
+                    access_key: "AK2".to_string(),
+                },
+            ]
+        );
+        assert!(!format!("{tiers:?}").contains("REDACTED"));
     }
 
     #[test]

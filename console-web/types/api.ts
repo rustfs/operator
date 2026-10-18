@@ -134,6 +134,20 @@ export interface ProvisioningBucket {
   deletionPolicy?: ProvisioningDeletionPolicy
 }
 
+export interface ProvisioningTier {
+  name: string
+  type: "S3" | "RustFS" | "MinIO"
+  endpoint: string
+  bucket: string
+  prefix?: string
+  region?: string
+  credsSecret: {
+    name: string
+  }
+  force?: boolean
+  deletionPolicy?: ProvisioningDeletionPolicy
+}
+
 export interface BucketObjectLockConfiguration {
   state?: "Present" | "Absent"
   mode?: "Governance" | "Compliance"
@@ -198,6 +212,7 @@ export interface ProvisioningStatus {
   policies?: ProvisioningItemStatus[]
   users?: ProvisioningItemStatus[]
   buckets?: ProvisioningBucketStatus[]
+  tiers?: ProvisioningItemStatus[]
 }
 
 export interface CreatePoolRequest {
@@ -225,6 +240,7 @@ export interface CreateTenantRequest {
   policies?: ProvisioningPolicy[]
   users?: ProvisioningUser[]
   buckets?: ProvisioningBucket[]
+  tiers?: ProvisioningTier[]
   security_context?: CreateSecurityContextRequest
 }
 
@@ -238,6 +254,7 @@ export interface UpdateTenantRequest {
   policies?: ProvisioningPolicy[]
   users?: ProvisioningUser[]
   buckets?: ProvisioningBucket[]
+  tiers?: ProvisioningTier[]
   logging?: {
     logType: string
     volumeSize?: string
