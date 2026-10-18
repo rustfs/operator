@@ -13,7 +13,6 @@
 // limitations under the License.
 
 //! Internal helper duties: shared credential parsing, signature/hash utilities, and parsers.
-use std::collections::BTreeSet;
 
 use hmac::{Hmac, Mac};
 use reqwest::StatusCode;
@@ -21,7 +20,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::form_urlencoded;
 
-use super::RustfsClientError;
+use super::{RustfsClientError, RustfsTier, RustfsTierConfig};
 
 /// Encode an `application/x-www-form-urlencoded` request body.
 pub(super) fn build_form_body(params: &[(&str, &str)]) -> String {
@@ -54,7 +53,7 @@ pub(super) fn build_canonical_query(params: &[(&str, &str)]) -> String {
         .join("&")
 }
 
-fn uri_encode(value: &str) -> String {
+pub(super) fn uri_encode(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
 
     let mut encoded = String::with_capacity(value.len());
@@ -153,12 +152,13 @@ pub(super) fn extract_canned_policy_document(body: &str) -> Result<String, Rustf
 }
 
 /// Parses `GET /rustfs/admin/v3/tier`, an array of `{"type": "<t>", "<t>": {"name": ..}}`
-/// entries where the backend object is keyed by the tier type.
-pub(super) fn parse_tier_names(body: &str) -> Result<BTreeSet<String>, RustfsClientError> {
+/// entries where the backend object is keyed by the tier type. `secretKey` is dropped and
+/// never leaves this function.
+pub(super) fn parse_tiers(body: &str) -> Result<Vec<RustfsTier>, RustfsClientError> {
     let tiers = match serde_json::from_str::<Value>(body)
         .map_err(|_| RustfsClientError::ParseResponseFailed)?
     {
-        Value::Null => return Ok(BTreeSet::new()),
+        Value::Null => return Ok(Vec::new()),
         Value::Array(tiers) => tiers,
         _ => return Err(RustfsClientError::ParseResponseFailed),
     };
@@ -169,12 +169,31 @@ pub(super) fn parse_tier_names(body: &str) -> Result<BTreeSet<String>, RustfsCli
                 .get("type")
                 .and_then(Value::as_str)
                 .ok_or(RustfsClientError::ParseResponseFailed)?;
-            tier.get(tier_type)
-                .and_then(|backend| backend.get("name"))
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
-                .map(ToOwned::to_owned)
-                .ok_or(RustfsClientError::ParseResponseFailed)
+            let backend = tier
+                .get(tier_type)
+                .ok_or(RustfsClientError::ParseResponseFailed)?;
+            let field = |key: &str| {
+                backend
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let name = field("name");
+            if name.is_empty() {
+                return Err(RustfsClientError::ParseResponseFailed);
+            }
+            Ok(RustfsTier {
+                config: RustfsTierConfig {
+                    tier_type: tier_type.to_string(),
+                    name,
+                    endpoint: field("endpoint"),
+                    bucket: field("bucket"),
+                    prefix: field("prefix"),
+                    region: field("region"),
+                },
+                access_key: field("accessKey"),
+            })
         })
         .collect()
 }

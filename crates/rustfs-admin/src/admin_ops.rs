@@ -20,13 +20,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::helpers::{
     body_mentions_not_found, build_canonical_query, extract_canned_policy_document,
-    is_absent_resource, parse_tier_names,
+    is_absent_resource, parse_tiers, uri_encode,
 };
 use super::{
     ADD_CANNED_POLICY_PATH, ADD_USER_PATH, ADMIN_SIGNING_SERVICE, INFO_CANNED_POLICY_PATH,
-    JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, LIST_TIERS_PATH, REMOVE_USER_PATH,
-    RustfsAdminClient, RustfsClientError, RustfsServerInfo, RustfsServerInfoResponse,
-    RustfsUserInfo, SERVER_INFO_PATH, SET_POLICY_PATH, USER_INFO_PATH,
+    JSON_CONTENT_TYPE, LIST_CANNED_POLICIES_PATH, REMOVE_USER_PATH, RustfsAdminClient,
+    RustfsClientError, RustfsServerInfo, RustfsServerInfoResponse, RustfsTier, RustfsTierConfig,
+    RustfsUserInfo, SERVER_INFO_PATH, SET_POLICY_PATH, TIER_PATH, USER_INFO_PATH,
 };
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -175,13 +175,94 @@ impl RustfsAdminClient {
             .collect()
     }
 
-    /// Names of the remote tiers registered in RustFS. Only names are kept; the response also
-    /// carries tier endpoints and credentials, which are dropped while parsing.
+    /// Names of the remote tiers registered in RustFS.
     pub async fn list_tier_names(&self) -> Result<BTreeSet<String>, RustfsClientError> {
+        Ok(self
+            .list_tiers()
+            .await?
+            .into_iter()
+            .map(|tier| tier.config.name)
+            .collect())
+    }
+
+    /// Remote tiers registered in RustFS. Secret keys in the response are dropped while parsing.
+    pub async fn list_tiers(&self) -> Result<Vec<RustfsTier>, RustfsClientError> {
         let body = self
-            .send_admin_request("GET", LIST_TIERS_PATH, "", "", None)
+            .send_admin_request("GET", TIER_PATH, "", "", None)
             .await?;
-        parse_tier_names(&body)
+        parse_tiers(&body)
+    }
+
+    /// Register an S3-style remote tier. Without `force`, RustFS rejects a remote prefix that
+    /// already holds objects with HTTP 409.
+    pub async fn add_tier(
+        &self,
+        config: &RustfsTierConfig,
+        access_key: &str,
+        secret_key: &str,
+        force: bool,
+    ) -> Result<(), RustfsClientError> {
+        if config.name.trim().is_empty() || config.tier_type.trim().is_empty() {
+            return Err(RustfsClientError::InvalidTierName);
+        }
+        if access_key.trim().is_empty() {
+            return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
+        }
+        if secret_key.is_empty() {
+            return Err(RustfsClientError::EmptyCredentialValue { key: "secretkey" });
+        }
+
+        let mut body = serde_json::Map::new();
+        body.insert("type".to_string(), Value::from(config.tier_type.as_str()));
+        body.insert("name".to_string(), Value::from(config.name.as_str()));
+        body.insert(
+            config.tier_type.clone(),
+            serde_json::json!({
+                "name": config.name,
+                "endpoint": config.endpoint,
+                "accessKey": access_key,
+                "secretKey": secret_key,
+                "bucket": config.bucket,
+                "prefix": config.prefix,
+                "region": config.region,
+            }),
+        );
+        let body = Value::Object(body).to_string();
+        let query = build_canonical_query(&[("force", if force { "true" } else { "false" })]);
+
+        self.send_admin_request("PUT", TIER_PATH, &query, &body, Some(JSON_CONTENT_TYPE))
+            .await
+            .map(|_| ())
+    }
+
+    /// Replace the credentials of a registered tier. RustFS only allows credentials to change
+    /// on an existing tier; endpoint, bucket and prefix are fixed at registration.
+    pub async fn edit_tier_credentials(
+        &self,
+        tier_name: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<(), RustfsClientError> {
+        if tier_name.trim().is_empty() {
+            return Err(RustfsClientError::InvalidTierName);
+        }
+        if access_key.trim().is_empty() {
+            return Err(RustfsClientError::InvalidCredentialValue { key: "accesskey" });
+        }
+        if secret_key.is_empty() {
+            return Err(RustfsClientError::EmptyCredentialValue { key: "secretkey" });
+        }
+
+        let body = serde_json::json!({
+            "access": access_key,
+            "secret": secret_key,
+        })
+        .to_string();
+        let path = format!("{TIER_PATH}/{}", uri_encode(tier_name));
+
+        self.send_admin_request("POST", &path, "", &body, Some(JSON_CONTENT_TYPE))
+            .await
+            .map(|_| ())
     }
 
     pub async fn server_info(&self) -> Result<RustfsServerInfo, RustfsClientError> {

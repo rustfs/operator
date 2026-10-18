@@ -3188,6 +3188,76 @@ spec:
               serviceAccountName:
                 nullable: true
                 type: string
+              tiers:
+                description: |-
+                  Remote storage tiers that bucket lifecycle transitions can reference by name.
+                  Tiers are reconciled before buckets.
+                items:
+                  description: Remote storage tier registered in RustFS for bucket lifecycle transitions.
+                  properties:
+                    bucket:
+                      description: Remote bucket that receives transitioned objects.
+                      minLength: 1
+                      type: string
+                    credsSecret:
+                      description: |-
+                        Secret with `accesskey` and `secretkey` for the remote bucket. Updating the Secret
+                        rotates the tier credentials in RustFS.
+                      properties:
+                        name:
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    deletionPolicy:
+                      enum:
+                      - Retain
+                      type: string
+                    endpoint:
+                      description: Remote S3 endpoint URL, for example `https://gateway.storjshare.io`.
+                      minLength: 1
+                      type: string
+                    force:
+                      description: |-
+                        Register the tier even when the remote prefix already holds objects, for example a
+                        prefix written by this Tenant before a restore. RustFS refuses such a prefix otherwise.
+                      type: boolean
+                    name:
+                      description: Tier name, referenced as `storageClass` by bucket lifecycle transitions.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                      x-kubernetes-validations:
+                      - message: tier name must be uppercase
+                        rule: self == self.upperAscii()
+                      - message: tier name must not be a reserved storage class
+                        rule: self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'
+                    prefix:
+                      description: Object prefix inside the remote bucket.
+                      type: string
+                    region:
+                      type: string
+                    type:
+                      description: Remote backend of a tier. All three use the S3 API with static credentials.
+                      enum:
+                      - S3
+                      - RustFS
+                      - MinIO
+                      type: string
+                  required:
+                  - bucket
+                  - credsSecret
+                  - endpoint
+                  - name
+                  - type
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               tls:
                 nullable: true
                 properties:
@@ -4003,6 +4073,56 @@ spec:
                     nullable: true
                     type: string
                   policies:
+                    items:
+                      properties:
+                        desiredHash:
+                          nullable: true
+                          type: string
+                        lastAppliedAccessKeyHash:
+                          nullable: true
+                          type: string
+                        lastAppliedGeneration:
+                          format: int64
+                          nullable: true
+                          type: integer
+                        lastAppliedHash:
+                          nullable: true
+                          type: string
+                        lastTransitionTime:
+                          nullable: true
+                          type: string
+                        message:
+                          nullable: true
+                          type: string
+                        name:
+                          type: string
+                        objectLock:
+                          nullable: true
+                          type: boolean
+                        observedSecretName:
+                          nullable: true
+                          type: string
+                        observedSecretResourceVersion:
+                          nullable: true
+                          type: string
+                        policies:
+                          items:
+                            type: string
+                          type: array
+                        reason:
+                          type: string
+                        region:
+                          nullable: true
+                          type: string
+                        state:
+                          type: string
+                      required:
+                      - name
+                      - reason
+                      - state
+                      type: object
+                    type: array
+                  tiers:
                     items:
                       properties:
                         desiredHash:
