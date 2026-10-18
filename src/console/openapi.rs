@@ -61,7 +61,8 @@ use crate::types::v1alpha1::provisioning::{
     BucketLifecycleState, BucketLifecycleTransition, BucketObjectLockConfiguration,
     BucketObjectLockConfigurationState, BucketObjectLockRetentionMode, ConfigMapKeyReference,
     PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy, ProvisioningPolicy,
-    ProvisioningUser, UserCredentialsSecretRef,
+    ProvisioningTier, ProvisioningTierType, ProvisioningUser, TierCredentialsSecretRef,
+    UserCredentialsSecretRef,
 };
 use crate::types::v1alpha1::status::provisioning::{
     BucketVersioningStatus, ProvisioningBucketStatus, ProvisioningItemState,
@@ -130,6 +131,9 @@ use crate::types::v1alpha1::status::provisioning::{
         ProvisioningUser,
         UserCredentialsSecretRef,
         ProvisioningBucket,
+        ProvisioningTier,
+        ProvisioningTierType,
+        TierCredentialsSecretRef,
         ProvisioningDeletionPolicy,
         PolicyDocumentSource,
         ConfigMapKeyReference,
@@ -799,6 +803,19 @@ mod tests {
         assert!(schemas.contains_key("BucketLifecycleNoncurrentVersionTransition"));
         assert!(schemas.contains_key("BucketObjectLockConfiguration"));
         assert!(schemas.contains_key("UserCredentialsSecretRef"));
+        assert!(schemas.contains_key("ProvisioningTier"));
+        assert!(schemas.contains_key("ProvisioningTierType"));
+        assert!(schemas.contains_key("TierCredentialsSecretRef"));
+        assert_eq!(
+            spec.pointer("/components/schemas/UpdateTenantRequest/properties/tiers/items/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/ProvisioningTier")
+        );
+        assert_eq!(
+            spec.pointer("/components/schemas/ProvisioningStatus/properties/tiers/items/$ref")
+                .and_then(Value::as_str),
+            Some("#/components/schemas/ProvisioningItemStatus")
+        );
         assert_eq!(
             spec.pointer("/components/schemas/TenantDetailsResponse/properties/provisioning/$ref")
                 .and_then(Value::as_str),

@@ -191,6 +191,9 @@ pub enum Reason {
     BucketPolicyConflict,
     BucketLifecycleApplyFailed,
     BucketLifecycleConflict,
+    TierSecretInvalid,
+    TierApplyFailed,
+    TierConflict,
     KubernetesApiError,
     StatusPatchFailed,
     ObservedGenerationStale,
@@ -275,6 +278,9 @@ impl Reason {
             Self::BucketPolicyConflict => "BucketPolicyConflict",
             Self::BucketLifecycleApplyFailed => "BucketLifecycleApplyFailed",
             Self::BucketLifecycleConflict => "BucketLifecycleConflict",
+            Self::TierSecretInvalid => "TierSecretInvalid",
+            Self::TierApplyFailed => "TierApplyFailed",
+            Self::TierConflict => "TierConflict",
             Self::KubernetesApiError => "KubernetesApiError",
             Self::StatusPatchFailed => "StatusPatchFailed",
             Self::ObservedGenerationStale => "ObservedGenerationStale",
@@ -562,6 +568,9 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "BucketPolicyConflict"
             | "BucketLifecycleApplyFailed"
             | "BucketLifecycleConflict"
+            | "TierSecretInvalid"
+            | "TierApplyFailed"
+            | "TierConflict"
     )
 }
 
@@ -683,6 +692,9 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         "BucketLifecycleConflict" => {
             vec!["inspectLiveBucketLifecycle", "updateBucketSpec"]
         }
+        "TierSecretInvalid" => vec!["fixTierSecret"],
+        "TierApplyFailed" => vec!["fixTierSpec", "inspectOperatorLogs"],
+        "TierConflict" => vec!["inspectLiveTier", "updateTierSpec"],
         "KubernetesApiError" => vec!["retry", "inspectOperatorLogs"],
         "ObservedGenerationStale" => vec!["waitForReconcile"],
         _ => Vec::new(),
@@ -799,6 +811,13 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("BucketLifecycleConflict"),
             vec!["inspectLiveBucketLifecycle", "updateBucketSpec"]
+        );
+        for reason in ["TierSecretInvalid", "TierApplyFailed", "TierConflict"] {
+            assert!(is_blocked_reason(reason), "{reason} must block");
+        }
+        assert_eq!(
+            next_actions_for_reason("TierConflict"),
+            vec!["inspectLiveTier", "updateTierSpec"]
         );
     }
 

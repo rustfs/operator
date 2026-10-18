@@ -952,35 +952,65 @@ spec:
 
 ### 7.8 Bootstrap Provisioning
 
-The operator can create RustFS policies, users, and buckets after the Tenant workload is ready. Configure:
+The operator can create RustFS policies, users, remote tiers, and buckets after the Tenant workload is ready. Configure:
 
 - `spec.credsSecret` for RustFS admin credentials.
 - `spec.policies` for canned policies sourced from ConfigMaps.
 - `spec.users` for regular users. Each user must have at least one direct policy mapping.
+- `spec.tiers` for remote storage tiers that bucket lifecycle transitions move data to.
 - `spec.buckets` for buckets, versioning, Object Lock and default retention, canned anonymous access (`Private`, `Download`, `Upload`, `Public`), or a custom bucket policy ConfigMap. Non-private `anonymous` values and `policy` are mutually exclusive. Explicit `anonymous: Private` without `policy` removes a bucket policy previously applied by the Operator; it reports a conflict instead of deleting an unowned live policy. For compatibility, legacy `Private` plus `policy` configurations keep the custom policy. When both fields are omitted, the Operator does not change a live bucket policy and retains its ownership record for a later explicit `Private` transition.
 
 Bucket versioning and Object Lock are declarative but conservative. `versioning: true` enables versioning. `versioning: false` keeps a never-versioned bucket unchanged or requests S3 `Suspended` after versioning has been enabled; omitting the field leaves versioning unmanaged unless Object Lock requires it. `objectLock: true` enables Object Lock after versioning is enabled. Object Lock cannot be disabled, and the Operator refuses `objectLock: false` or versioning suspension when the live bucket has Object Lock enabled. `objectLockConfiguration` manages the default retention rule: omit `state` for `Present`, specify `mode: Governance` or `Compliance` with `days`, or use `state: Absent` without `mode` and `days` to remove only the default rule. Omitting the entire field leaves a live default-retention rule unmanaged. The Operator adopts an identical live rule, but does not replace or remove a different rule unless its hash matches the last configuration recorded in status. Default retention applies to new object versions; it does not retroactively lock existing versions.
 
 Each bucket may also declare `lifecycle.state: Present` with one or more S3 lifecycle rules. The current schema supports expiration after a positive number of days, aborting incomplete multipart uploads after a positive number of days, `transition` of current versions after zero or more days, and `noncurrentVersionTransition` of noncurrent versions after zero or more days; every rule has a unique ID, an `Enabled` or `Disabled` status, and an explicit prefix filter (use `prefix: ""` for all objects). `lifecycle.state: Absent` requests deletion and cannot include rules. The Operator adopts an identical live configuration, but never replaces or deletes a different configuration without a matching ownership hash in `status.provisioning.buckets`. Omitting `lifecycle` performs no lifecycle API calls and leaves the live configuration untouched.
 
-Transition actions move data to a remote tier. `storageClass` is the name of a tier already registered in RustFS (for example with `rc ilm tier add`); tier names are uppercase, and `STANDARD` and `REDUCED_REDUNDANCY` are reserved. The Operator does not register tiers. Before applying a lifecycle with transition actions it checks that every referenced tier exists; while one is missing, the bucket stays `Pending` with a message naming the tier and the Operator retries, so the tier can be registered after the rule is added:
+Transition actions move data to a remote tier. `storageClass` is a tier name: a tier declared in `spec.tiers`, or one registered in RustFS by other means (for example with `rc ilm tier add`). Tier names are uppercase, and `STANDARD` and `REDUCED_REDUNDANCY` are reserved. Before applying a lifecycle with transition actions the Operator checks that every referenced tier exists; while one is missing, the bucket stays `Pending` with a message naming the tier and the Operator retries, so the tier can be registered after the rule is added.
+
+`spec.tiers` registers S3-compatible remote tiers (`type: S3`, `RustFS`, or `MinIO`). Tiers are reconciled before buckets, so a lifecycle rule can reference a tier declared in the same Tenant. Each tier sets the remote `endpoint` and `bucket`, an optional `prefix` and `region`, and `credsSecret`, a Secret in the Tenant namespace with `accesskey` and `secretkey`. RustFS does not return a tier's secret key, so the Operator records the Secret's `resourceVersion` in `status.provisioning.tiers` and updates the tier credentials when the Secret changes, when `credsSecret` points to another Secret, or when the access key listed by RustFS differs from the Secret. RustFS cannot change the type, endpoint, bucket, prefix, or region of a registered tier: a live tier with the same name and different settings is reported as `TierConflict` and left untouched, while one with matching settings is adopted. RustFS refuses to register a tier whose remote prefix already holds objects; set `force: true` only when that prefix belongs to this Tenant, for example after a restore. Tiers removed from the spec are retained in RustFS.
 
 ```yaml
-lifecycle:
-  state: Present
-  rules:
-    - id: to-cold
-      status: Enabled
-      filter:
-        prefix: ""
-      transition:
-        days: 7
-        storageClass: COLD
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cold-tier
+  namespace: storage
+type: Opaque
+stringData:
+  accesskey: <remote access key>
+  secretkey: <remote secret key>
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
+spec:
+  # credsSecret and pools as in the full example below
+  tiers:
+    - name: COLD
+      type: S3
+      endpoint: https://s3.example.com
+      bucket: rustfs-cold
+      prefix: rustfs-a/
+      credsSecret:
+        name: cold-tier
+  buckets:
+    - name: app-data
+      lifecycle:
+        state: Present
+        rules:
+          - id: to-cold
+            status: Enabled
+            filter:
+              prefix: ""
+            transition:
+              days: 7
+              storageClass: COLD
 ```
 
 Transient Kubernetes and RustFS admin/S3 failures (timeouts, 429, 5xx, connection errors, TLS not ready) leave provisioning items `Pending` and requeue instead of marking the Tenant `Failed`. Permanent 4xx configuration errors still fail and wait for a spec or object change.
 
-ConfigMaps and user Secrets must live in the Tenant namespace. The Operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object.
+ConfigMaps, user Secrets, and tier Secrets must live in the Tenant namespace. The Operator indexes references from Tenant specs, so creating or updating a referenced object enqueues every referencing Tenant without requiring or mutating labels or requiring write access to that object.
 
 Policy documents are parsed by RustFS. Use S3 ARN resource patterns such as `arn:aws:s3:::bucket` and `arn:aws:s3:::bucket/*`; for all buckets, use `arn:aws:s3:::*`. A bare `Resource: "*"` is not accepted by RustFS policy parsing.
 

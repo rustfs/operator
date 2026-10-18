@@ -146,11 +146,51 @@ mod tenant_provisioning_crd_tests {
             MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS, MAX_POLICIES_PER_USER,
         },
         tenant::{
-            MAX_TENANT_BUCKETS, MAX_TENANT_POLICIES, MAX_TENANT_POOLS, MAX_TENANT_USERS, Tenant,
+            MAX_TENANT_BUCKETS, MAX_TENANT_POLICIES, MAX_TENANT_POOLS, MAX_TENANT_TIERS,
+            MAX_TENANT_USERS, Tenant,
         },
     };
     use kube::CustomResourceExt;
     use serde_json::json;
+
+    #[test]
+    fn tenant_crd_declares_tiers_with_rustfs_name_rules() {
+        let crd = serde_json::to_value(Tenant::crd()).expect("Tenant CRD serializes");
+        let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"];
+        let tiers = &schema["properties"]["spec"]["properties"]["tiers"];
+
+        assert_eq!(tiers["x-kubernetes-list-type"], json!("map"));
+        assert_eq!(tiers["x-kubernetes-list-map-keys"], json!(["name"]));
+        assert_eq!(tiers["maxItems"], json!(MAX_TENANT_TIERS));
+        let tier = &tiers["items"];
+        assert_eq!(
+            tier["required"],
+            json!(["bucket", "credsSecret", "endpoint", "name", "type"])
+        );
+        assert_eq!(
+            tier["properties"]["type"]["enum"],
+            json!(["S3", "RustFS", "MinIO"])
+        );
+        assert_eq!(
+            tier["properties"]["deletionPolicy"]["enum"],
+            json!(["Retain"])
+        );
+        assert_eq!(
+            tier["properties"]["name"]["x-kubernetes-validations"],
+            json!([
+                {"message": "tier name must be uppercase", "rule": "self == self.upperAscii()"},
+                {
+                    "message": "tier name must not be a reserved storage class",
+                    "rule": "self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'"
+                }
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["status"]["properties"]["provisioning"]["properties"]["tiers"]["items"]
+                ["properties"]["observedSecretResourceVersion"]["type"],
+            json!("string")
+        );
+    }
 
     #[test]
     fn tenant_crd_includes_provisioning_spec_status_and_bounded_list_rules() {

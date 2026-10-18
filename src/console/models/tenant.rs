@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::types::v1alpha1::{
-    provisioning::{ProvisioningBucket, ProvisioningPolicy, ProvisioningUser},
+    provisioning::{ProvisioningBucket, ProvisioningPolicy, ProvisioningTier, ProvisioningUser},
     status::{
         ConditionStatus, ConditionType, CurrentState, Reason, Status, canonical_filter_state,
         canonical_state, certificate, next_actions_for_reason, primary_condition, provisioning,
@@ -158,6 +158,7 @@ pub struct CreateTenantRequest {
     pub policies: Option<Vec<ProvisioningPolicy>>,
     pub users: Option<Vec<ProvisioningUser>>,
     pub buckets: Option<Vec<ProvisioningBucket>>,
+    pub tiers: Option<Vec<ProvisioningTier>>,
     /// Optional legacy Pod security context form fields.
     pub security_context: Option<CreateSecurityContextRequest>,
 }
@@ -212,6 +213,9 @@ pub struct UpdateTenantRequest {
 
     /// Replace bucket provisioning declarations.
     pub buckets: Option<Vec<ProvisioningBucket>>,
+
+    /// Replace remote tier provisioning declarations.
+    pub tiers: Option<Vec<ProvisioningTier>>,
 }
 
 /// Key/value environment variable
