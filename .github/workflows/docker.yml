@@ -43,6 +43,9 @@ env:
   GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/operator
   QUAY_IMAGE: quay.io/rustfs/operator
   DOCKER_PLATFORMS: linux/amd64,linux/arm64
+  # Official SemVer 2.0.0 pattern (ERE). A malformed release tag once published
+  # an image tagged "0.07" that no chart could pull.
+  SEMVER_RE: '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
 
 jobs:
   push-operator-images:
@@ -79,6 +82,13 @@ jobs:
 
           if [ -z "$VERSION" ]; then
             echo "Version is empty"
+            exit 1
+          fi
+
+          # Fail fast on tags that are not valid semver (e.g. "0.07") instead
+          # of publishing an image tag that can never be resolved.
+          if ! grep -qE "$SEMVER_RE" <<< "$VERSION"; then
+            echo "::error::Version '$VERSION' is not valid semver (expected e.g. 1.2.3 or 1.2.3-rc.1). Fix the release tag and re-run."
             exit 1
           fi
 
