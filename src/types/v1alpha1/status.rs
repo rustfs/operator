@@ -189,8 +189,13 @@ pub enum Reason {
     BucketObjectLockConfigurationConflict,
     BucketPolicyApplyFailed,
     BucketPolicyConflict,
+    BucketEncryptionApplyFailed,
+    BucketEncryptionConflict,
     BucketLifecycleApplyFailed,
     BucketLifecycleConflict,
+    TierSecretInvalid,
+    TierApplyFailed,
+    TierConflict,
     KubernetesApiError,
     StatusPatchFailed,
     ObservedGenerationStale,
@@ -273,8 +278,13 @@ impl Reason {
             Self::BucketObjectLockConfigurationConflict => "BucketObjectLockConfigurationConflict",
             Self::BucketPolicyApplyFailed => "BucketPolicyApplyFailed",
             Self::BucketPolicyConflict => "BucketPolicyConflict",
+            Self::BucketEncryptionApplyFailed => "BucketEncryptionApplyFailed",
+            Self::BucketEncryptionConflict => "BucketEncryptionConflict",
             Self::BucketLifecycleApplyFailed => "BucketLifecycleApplyFailed",
             Self::BucketLifecycleConflict => "BucketLifecycleConflict",
+            Self::TierSecretInvalid => "TierSecretInvalid",
+            Self::TierApplyFailed => "TierApplyFailed",
+            Self::TierConflict => "TierConflict",
             Self::KubernetesApiError => "KubernetesApiError",
             Self::StatusPatchFailed => "StatusPatchFailed",
             Self::ObservedGenerationStale => "ObservedGenerationStale",
@@ -560,8 +570,13 @@ pub fn is_blocked_reason(reason: &str) -> bool {
             | "BucketObjectLockConfigurationConflict"
             | "BucketPolicyApplyFailed"
             | "BucketPolicyConflict"
+            | "BucketEncryptionApplyFailed"
+            | "BucketEncryptionConflict"
             | "BucketLifecycleApplyFailed"
             | "BucketLifecycleConflict"
+            | "TierSecretInvalid"
+            | "TierApplyFailed"
+            | "TierConflict"
     )
 }
 
@@ -679,10 +694,17 @@ pub fn next_actions_for_reason(reason: &str) -> Vec<&'static str> {
         }
         "BucketPolicyApplyFailed" => vec!["fixBucketPolicy", "inspectOperatorLogs"],
         "BucketPolicyConflict" => vec!["inspectLiveBucketPolicy", "updateBucketSpec"],
+        "BucketEncryptionApplyFailed" => vec!["fixBucketEncryption", "inspectOperatorLogs"],
+        "BucketEncryptionConflict" => {
+            vec!["inspectLiveBucketEncryption", "updateBucketSpec"]
+        }
         "BucketLifecycleApplyFailed" => vec!["fixBucketLifecycle", "inspectOperatorLogs"],
         "BucketLifecycleConflict" => {
             vec!["inspectLiveBucketLifecycle", "updateBucketSpec"]
         }
+        "TierSecretInvalid" => vec!["fixTierSecret"],
+        "TierApplyFailed" => vec!["fixTierSpec", "inspectOperatorLogs"],
+        "TierConflict" => vec!["inspectLiveTier", "updateTierSpec"],
         "KubernetesApiError" => vec!["retry", "inspectOperatorLogs"],
         "ObservedGenerationStale" => vec!["waitForReconcile"],
         _ => Vec::new(),
@@ -799,6 +821,23 @@ mod tests {
         assert_eq!(
             next_actions_for_reason("BucketLifecycleConflict"),
             vec!["inspectLiveBucketLifecycle", "updateBucketSpec"]
+        );
+        assert!(is_blocked_reason("BucketEncryptionApplyFailed"));
+        assert!(is_blocked_reason("BucketEncryptionConflict"));
+        assert_eq!(
+            next_actions_for_reason("BucketEncryptionApplyFailed"),
+            vec!["fixBucketEncryption", "inspectOperatorLogs"]
+        );
+        assert_eq!(
+            next_actions_for_reason("BucketEncryptionConflict"),
+            vec!["inspectLiveBucketEncryption", "updateBucketSpec"]
+        );
+        for reason in ["TierSecretInvalid", "TierApplyFailed", "TierConflict"] {
+            assert!(is_blocked_reason(reason), "{reason} must block");
+        }
+        assert_eq!(
+            next_actions_for_reason("TierConflict"),
+            vec!["inspectLiveTier", "updateTierSpec"]
         );
     }
 

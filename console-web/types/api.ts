@@ -130,7 +130,22 @@ export interface ProvisioningBucket {
   objectLockConfiguration?: BucketObjectLockConfiguration
   anonymous?: "Private" | "Download" | "Upload" | "Public"
   policy?: PolicyDocumentSource
+  encryption?: BucketEncryptionSpec
   lifecycle?: BucketLifecycleSpec
+  deletionPolicy?: ProvisioningDeletionPolicy
+}
+
+export interface ProvisioningTier {
+  name: string
+  type: "S3" | "RustFS" | "MinIO"
+  endpoint: string
+  bucket: string
+  prefix?: string
+  region?: string
+  credsSecret: {
+    name: string
+  }
+  force?: boolean
   deletionPolicy?: ProvisioningDeletionPolicy
 }
 
@@ -138,6 +153,12 @@ export interface BucketObjectLockConfiguration {
   state?: "Present" | "Absent"
   mode?: "Governance" | "Compliance"
   days?: number
+}
+
+export interface BucketEncryptionSpec {
+  state?: "Present" | "Absent"
+  mode?: "SSE-S3" | "SSE-KMS"
+  kmsKeyId?: string
 }
 
 export interface BucketLifecycleSpec {
@@ -190,6 +211,8 @@ export interface ProvisioningBucketStatus extends ProvisioningItemStatus {
   versioning?: "Unversioned" | "Enabled" | "Suspended" | null
   objectLockConfigurationDesiredHash?: string | null
   objectLockConfigurationLastAppliedHash?: string | null
+  encryptionDesiredHash?: string | null
+  encryptionLastAppliedHash?: string | null
 }
 
 export interface ProvisioningStatus {
@@ -198,6 +221,7 @@ export interface ProvisioningStatus {
   policies?: ProvisioningItemStatus[]
   users?: ProvisioningItemStatus[]
   buckets?: ProvisioningBucketStatus[]
+  tiers?: ProvisioningItemStatus[]
 }
 
 export interface CreatePoolRequest {
@@ -225,6 +249,7 @@ export interface CreateTenantRequest {
   policies?: ProvisioningPolicy[]
   users?: ProvisioningUser[]
   buckets?: ProvisioningBucket[]
+  tiers?: ProvisioningTier[]
   security_context?: CreateSecurityContextRequest
 }
 
@@ -238,6 +263,7 @@ export interface UpdateTenantRequest {
   policies?: ProvisioningPolicy[]
   users?: ProvisioningUser[]
   buckets?: ProvisioningBucket[]
+  tiers?: ProvisioningTier[]
   logging?: {
     logType: string
     volumeSize?: string

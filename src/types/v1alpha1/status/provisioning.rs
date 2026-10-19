@@ -34,11 +34,17 @@ pub struct ProvisioningStatus {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buckets: Vec<ProvisioningBucketStatus>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<ProvisioningItemStatus>,
 }
 
 impl ProvisioningStatus {
     pub fn is_empty(&self) -> bool {
-        self.policies.is_empty() && self.users.is_empty() && self.buckets.is_empty()
+        self.policies.is_empty()
+            && self.users.is_empty()
+            && self.buckets.is_empty()
+            && self.tiers.is_empty()
     }
 }
 
@@ -147,6 +153,12 @@ pub struct ProvisioningBucketStatus {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_lock_configuration_last_applied_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_desired_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_last_applied_hash: Option<String>,
 }
 
 impl ProvisioningBucketStatus {
@@ -158,6 +170,8 @@ impl ProvisioningBucketStatus {
             versioning: None,
             object_lock_configuration_desired_hash: None,
             object_lock_configuration_last_applied_hash: None,
+            encryption_desired_hash: None,
+            encryption_last_applied_hash: None,
         }
     }
 }

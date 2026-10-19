@@ -896,35 +896,67 @@ spec:
 
 ### 7.8 初始化 Provisioning
 
-Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user 和 bucket。需要配置：
+Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user、远程 tier 和 bucket。需要配置：
 
 - `spec.credsSecret`：RustFS 管理员凭据。
 - `spec.policies`：从 ConfigMap 读取 policy document。
 - `spec.users`：普通用户。每个 user 必须至少直接绑定一个 policy。
+- `spec.tiers`：bucket 生命周期迁移操作使用的远程存储层（tier）。
 - `spec.buckets`：bucket、版本控制、Object Lock 及默认保留策略、匿名访问（`Private` / `Download` / `Upload` / `Public`），或来自 ConfigMap 的自定义 bucket policy。非 `Private` 的 `anonymous` 值与 `policy` 互斥。未设置 `policy` 时，显式设置 `anonymous: Private` 会删除此前由 Operator 应用的 bucket policy；若现有 policy 不归 Operator 管理，则报告冲突而不删除。为兼容旧对象，`Private` 与 `policy` 同时存在时继续以自定义 policy 为准。两者都省略时，Operator 不会改写已有 bucket policy，并会保留所有权记录供后续显式切换为 `Private` 时校验。
 
 Bucket 版本控制和 Object Lock 采用声明式但保守的调和策略。`versioning: true` 启用版本控制。`versioning: false` 会让从未启用版本控制的 bucket 保持原状，或在版本控制已启用后请求 S3 `Suspended`；省略该字段时保持现状，除非 Object Lock 要求先启用版本控制。`objectLock: true` 会在版本控制启用后开启 Object Lock。Object Lock 不可关闭；当线上 bucket 已启用 Object Lock 时，Operator 会拒绝 `objectLock: false` 或暂停版本控制。`objectLockConfiguration` 管理默认保留规则：省略 `state` 等同于 `Present`，此时必须设置 `mode: Governance` 或 `Compliance` 以及 `days`；`state: Absent` 必须省略 `mode` 和 `days`，仅移除默认规则。完全省略 `objectLockConfiguration` 时，不管理已有默认保留规则。Operator 可以接管与声明完全相同的线上规则，但只有线上配置哈希仍与 status 中最后一次应用的配置一致时，才会替换或移除不同规则。默认保留策略只作用于之后创建的对象版本，不会追溯锁定已有版本。
 
+Bucket 默认加密通过 `encryption` 声明。`mode: SSE-S3` 写入 S3 `AES256`；`mode: SSE-KMS` 写入 `aws:kms`，可选 `kmsKeyId`（省略时 RustFS 使用默认 KMS key），并要求 Tenant 设置 `spec.encryption.enabled`。默认加密只作用于设置之后写入的对象，不会重新加密已有对象。`state: Absent`（不能包含 `mode` 和 `kmsKeyId`）表示移除该配置。Operator 可以接管与声明一致的线上配置，但只有线上配置哈希与 `status.provisioning.buckets` 中最后记录的配置一致时，才会替换或移除不同的配置。省略 `encryption` 时不会调用加密 API，也不会改动现有配置。
+
 每个 bucket 还可以通过 `lifecycle.state: Present` 声明一个或多个 S3 生命周期规则。当前 schema 支持按正整数天数过期对象、按正整数天数清理未完成的分片上传、通过 `transition` 在零天或更多天后迁移当前版本，以及通过 `noncurrentVersionTransition` 在零天或更多天后迁移非当前版本；每条规则必须有唯一 ID、`Enabled` 或 `Disabled` 状态，并显式指定 prefix filter（`prefix: ""` 表示全部对象）。`lifecycle.state: Absent` 表示请求删除，且不能包含规则。Operator 可以接管与声明完全相同的现有配置，但没有 `status.provisioning.buckets` 中匹配的所有权哈希时，不会覆盖或删除不同的现有配置。省略 `lifecycle` 时不会调用 Lifecycle API，也不会改动现有配置。
 
-迁移类操作会把数据移动到远程层（tier）。`storageClass` 是 RustFS 中已注册的 tier 名称（例如通过 `rc ilm tier add` 注册）；tier 名称必须为大写，`STANDARD` 和 `REDUCED_REDUNDANCY` 为保留名称。Operator 不负责注册 tier。在应用包含迁移操作的生命周期配置之前，Operator 会检查所有被引用的 tier 是否存在；如果有 tier 尚未注册，bucket 会保持 `Pending` 状态并在消息中列出该 tier，Operator 会持续重试，因此可以在添加规则之后再注册 tier：
+迁移类操作会把数据移动到远程层（tier）。`storageClass` 是 tier 名称：可以是 `spec.tiers` 中声明的 tier，也可以是通过其他方式（例如 `rc ilm tier add`）在 RustFS 中注册的 tier。tier 名称必须为大写，`STANDARD` 和 `REDUCED_REDUNDANCY` 为保留名称。在应用包含迁移操作的生命周期配置之前，Operator 会检查所有被引用的 tier 是否存在；如果有 tier 尚未注册，bucket 会保持 `Pending` 状态并在消息中列出该 tier，Operator 会持续重试，因此可以在添加规则之后再注册 tier。
+
+`spec.tiers` 用于注册兼容 S3 的远程 tier（`type: S3`、`RustFS` 或 `MinIO`）。tier 会先于 bucket 调和，因此生命周期规则可以引用同一 Tenant 中声明的 tier。每个 tier 需要设置远程 `endpoint` 和 `bucket`，可选的 `prefix` 和 `region`，以及 `credsSecret`：位于 Tenant namespace、包含 `accesskey` 和 `secretkey` 的 Secret。RustFS 不会返回 tier 的 secret key，因此 Operator 会在 `status.provisioning.tiers` 中记录 Secret 的 `resourceVersion`，并在 Secret 变更、`credsSecret` 指向另一个 Secret，或 RustFS 列出的 access key 与 Secret 不一致时更新 tier 凭据。RustFS 不能修改已注册 tier 的类型、endpoint、bucket、prefix 或 region：同名但配置不同的现有 tier 会报告为 `TierConflict` 且不会被改动；配置一致的现有 tier 会被接管。如果远程 prefix 中已有对象，RustFS 会拒绝注册该 tier；仅当该 prefix 属于此 Tenant 时（例如恢复之后）才设置 `force: true`。从 spec 中移除的 tier 会保留在 RustFS 中。
 
 ```yaml
-lifecycle:
-  state: Present
-  rules:
-    - id: to-cold
-      status: Enabled
-      filter:
-        prefix: ""
-      transition:
-        days: 7
-        storageClass: COLD
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cold-tier
+  namespace: storage
+type: Opaque
+stringData:
+  accesskey: <remote access key>
+  secretkey: <remote secret key>
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: rustfs-a
+  namespace: storage
+spec:
+  # credsSecret 和 pools 参见下方完整示例
+  tiers:
+    - name: COLD
+      type: S3
+      endpoint: https://s3.example.com
+      bucket: rustfs-cold
+      prefix: rustfs-a/
+      credsSecret:
+        name: cold-tier
+  buckets:
+    - name: app-data
+      lifecycle:
+        state: Present
+        rules:
+          - id: to-cold
+            status: Enabled
+            filter:
+              prefix: ""
+            transition:
+              days: 7
+              storageClass: COLD
 ```
 
 Kubernetes 或 RustFS 管理/S3 API 的瞬时失败（超时、429、5xx、连接错误、TLS 未就绪）会把 provisioning 条目保持为 `Pending` 并重新入队，而不会把 Tenant 标为 `Failed`。永久性 4xx 配置错误仍会失败并等待 spec 或对象变更。
 
-ConfigMap 和 user Secret 必须位于 Tenant namespace。Operator 会从 Tenant spec 建立反向引用索引，因此被引用资源的创建或更新会触发所有引用它的 Tenant reconcile；无需要求或修改资源标签，也不需要对这些资源拥有写权限。
+ConfigMap、user Secret 和 tier Secret 必须位于 Tenant namespace。Operator 会从 Tenant spec 建立反向引用索引，因此被引用资源的创建或更新会触发所有引用它的 Tenant reconcile；无需要求或修改资源标签，也不需要对这些资源拥有写权限。
 
 Policy document 由 RustFS 解析。请使用 `arn:aws:s3:::bucket` 和 `arn:aws:s3:::bucket/*` 这类 S3 ARN resource 写法；如需匹配所有 bucket，请使用 `arn:aws:s3:::*`。RustFS policy parser 不接受裸 `Resource: "*"`。
 
@@ -995,6 +1027,8 @@ spec:
       objectLockConfiguration:
         mode: Compliance
         days: 30
+      encryption:
+        mode: SSE-S3
       anonymous: Download
       lifecycle:
         state: Present

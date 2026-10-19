@@ -146,11 +146,51 @@ mod tenant_provisioning_crd_tests {
             MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS, MAX_POLICIES_PER_USER,
         },
         tenant::{
-            MAX_TENANT_BUCKETS, MAX_TENANT_POLICIES, MAX_TENANT_POOLS, MAX_TENANT_USERS, Tenant,
+            MAX_TENANT_BUCKETS, MAX_TENANT_POLICIES, MAX_TENANT_POOLS, MAX_TENANT_TIERS,
+            MAX_TENANT_USERS, Tenant,
         },
     };
     use kube::CustomResourceExt;
     use serde_json::json;
+
+    #[test]
+    fn tenant_crd_declares_tiers_with_rustfs_name_rules() {
+        let crd = serde_json::to_value(Tenant::crd()).expect("Tenant CRD serializes");
+        let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"];
+        let tiers = &schema["properties"]["spec"]["properties"]["tiers"];
+
+        assert_eq!(tiers["x-kubernetes-list-type"], json!("map"));
+        assert_eq!(tiers["x-kubernetes-list-map-keys"], json!(["name"]));
+        assert_eq!(tiers["maxItems"], json!(MAX_TENANT_TIERS));
+        let tier = &tiers["items"];
+        assert_eq!(
+            tier["required"],
+            json!(["bucket", "credsSecret", "endpoint", "name", "type"])
+        );
+        assert_eq!(
+            tier["properties"]["type"]["enum"],
+            json!(["S3", "RustFS", "MinIO"])
+        );
+        assert_eq!(
+            tier["properties"]["deletionPolicy"]["enum"],
+            json!(["Retain"])
+        );
+        assert_eq!(
+            tier["properties"]["name"]["x-kubernetes-validations"],
+            json!([
+                {"message": "tier name must be uppercase", "rule": "self == self.upperAscii()"},
+                {
+                    "message": "tier name must not be a reserved storage class",
+                    "rule": "self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'"
+                }
+            ])
+        );
+        assert_eq!(
+            schema["properties"]["status"]["properties"]["provisioning"]["properties"]["tiers"]["items"]
+                ["properties"]["observedSecretResourceVersion"]["type"],
+            json!("string")
+        );
+    }
 
     #[test]
     fn tenant_crd_includes_provisioning_spec_status_and_bounded_list_rules() {
@@ -465,6 +505,28 @@ mod tenant_provisioning_crd_tests {
             object_lock["x-kubernetes-validations"][0]["message"],
             json!("Present object lock configuration requires mode and days; Absent forbids them")
         );
+        let encryption = &spec["properties"]["buckets"]["items"]["properties"]["encryption"];
+        assert_eq!(
+            encryption["properties"]["mode"]["enum"],
+            json!(["SSE-S3", "SSE-KMS", null])
+        );
+        assert_eq!(
+            encryption["properties"]["kmsKeyId"]["pattern"],
+            json!("^[A-Za-z0-9._:/+=@-]+$")
+        );
+        let encryption_messages: Vec<_> = encryption["x-kubernetes-validations"]
+            .as_array()
+            .expect("encryption validations are present")
+            .iter()
+            .map(|validation| validation["message"].clone())
+            .collect();
+        assert_eq!(
+            encryption_messages,
+            vec![
+                json!("Present bucket encryption requires mode; Absent forbids mode and kmsKeyId"),
+                json!("kmsKeyId requires mode SSE-KMS"),
+            ]
+        );
         let bucket_validations = spec["properties"]["buckets"]["items"]["x-kubernetes-validations"]
             .as_array()
             .expect("bucket validations are present");
@@ -490,6 +552,10 @@ mod tenant_provisioning_crd_tests {
         );
         assert_eq!(
             bucket_status["properties"]["objectLockConfigurationLastAppliedHash"]["nullable"],
+            json!(true)
+        );
+        assert_eq!(
+            bucket_status["properties"]["encryptionLastAppliedHash"]["nullable"],
             json!(true)
         );
     }

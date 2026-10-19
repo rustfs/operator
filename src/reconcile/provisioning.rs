@@ -14,6 +14,8 @@
 
 use crate::context::{self, Context};
 use crate::sts::rustfs_client::{
+    BucketEncryptionAlgorithm as AdminEncryptionAlgorithm,
+    BucketEncryptionConfiguration as AdminEncryptionConfiguration,
     BucketLifecycleAbortIncompleteMultipartUpload as AdminLifecycleAbort,
     BucketLifecycleConfiguration as AdminLifecycleConfiguration,
     BucketLifecycleExpiration as AdminLifecycleExpiration,
@@ -25,15 +27,17 @@ use crate::sts::rustfs_client::{
     BucketObjectLockDefaultRetention as AdminObjectLockDefaultRetention,
     BucketObjectLockRetentionMode as AdminObjectLockRetentionMode,
     BucketObjectLockRetentionPeriod as AdminObjectLockRetentionPeriod, BucketVersioningState,
-    BucketVersioningUpdate, CreateBucketResult, RustfsAdminClient, RustfsClientError,
-    canonicalize_bucket_lifecycle_xml,
+    BucketVersioningUpdate, CreateBucketResult, RustfsAdminClient, RustfsClientError, RustfsTier,
+    RustfsTierConfig, canonicalize_bucket_lifecycle_xml,
 };
 use crate::types::v1alpha1::provisioning::{
-    BucketAnonymousAccess, BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState,
+    BucketAnonymousAccess, BucketEncryptionMode, BucketEncryptionSpec, BucketEncryptionState,
+    BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState,
     BucketObjectLockConfigurationState, BucketObjectLockRetentionMode,
-    MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULES,
-    MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS, PolicyDocumentSource, ProvisioningBucket,
-    ProvisioningPolicy, ProvisioningUser, duplicate_user_credentials_secret_names,
+    MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH, MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH,
+    MAX_BUCKET_LIFECYCLE_RULES, MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS, PolicyDocumentSource,
+    ProvisioningBucket, ProvisioningPolicy, ProvisioningTier, ProvisioningUser,
+    duplicate_user_credentials_secret_names,
 };
 use crate::types::v1alpha1::status::Reason;
 use crate::types::v1alpha1::status::provisioning::{
@@ -105,6 +109,14 @@ struct ProvisioningRun<'a> {
 
 #[derive(Clone)]
 struct UserCredentials {
+    access_key: String,
+    secret_key: String,
+    secret_name: String,
+    resource_version: Option<String>,
+}
+
+#[derive(Clone)]
+struct TierCredentials {
     access_key: String,
     secret_key: String,
     secret_name: String,
@@ -194,6 +206,10 @@ impl ProvisioningRun<'_> {
         self.previous_bucket_status(name).map(AsRef::as_ref)
     }
 
+    fn previous_tier(&self, name: &str) -> Option<&ProvisioningItemStatus> {
+        self.previous.tiers.iter().find(|item| item.name == name)
+    }
+
     fn push_policy(&mut self, item: ProvisioningItemStatus) {
         self.log_item_transition("policy", self.previous_policy(&item.name), &item);
         if item.state == ProvisioningItemState::Failed.as_str() {
@@ -223,6 +239,15 @@ impl ProvisioningRun<'_> {
                 .push((reason_from_str(&item.reason), item_message(&item)));
         }
         self.status.buckets.push(item);
+    }
+
+    fn push_tier(&mut self, item: ProvisioningItemStatus) {
+        self.log_item_transition("tier", self.previous_tier(&item.name), &item);
+        if item.state == ProvisioningItemState::Failed.as_str() {
+            self.failures
+                .push((reason_from_str(&item.reason), item_message(&item)));
+        }
+        self.status.tiers.push(item);
     }
 
     fn log_item_transition(
@@ -370,6 +395,7 @@ impl ProvisioningRun<'_> {
                 .buckets
                 .iter()
                 .any(|item| is_pending(&item.state))
+            || self.status.tiers.iter().any(|item| is_pending(&item.state))
     }
 
     fn first_pending_message(&self) -> String {
@@ -378,6 +404,13 @@ impl ProvisioningRun<'_> {
             .iter()
             .find(|item| item.state == ProvisioningItemState::Pending.as_str())
             .map(item_message)
+            .or_else(|| {
+                self.status
+                    .tiers
+                    .iter()
+                    .find(|item| item.state == ProvisioningItemState::Pending.as_str())
+                    .map(item_message)
+            })
             .or_else(|| {
                 self.status.buckets.iter().find_map(|item| {
                     (item.state == ProvisioningItemState::Pending.as_str())
@@ -482,6 +515,19 @@ impl ProvisioningRun<'_> {
             }
             self.push_bucket(item);
         }
+        for tier in &self.tenant.spec.tiers {
+            let mut item = self.item(
+                self.previous_tier(&tier.name),
+                &tier.name,
+                state.clone(),
+                reason,
+                message,
+            );
+            if let Some(previous) = self.previous_tier(&tier.name) {
+                copy_tier_ownership(&mut item, previous);
+            }
+            self.push_tier(item);
+        }
     }
 
     fn fail_all_active(&mut self, reason: Reason, message: &str) {
@@ -509,6 +555,13 @@ impl ProvisioningRun<'_> {
                 self.status.buckets.push(self.retained_bucket(previous));
             }
         }
+
+        let tiers = desired_names(self.tenant.spec.tiers.iter().map(|tier| &tier.name));
+        for previous in &self.previous.tiers {
+            if !tiers.contains(&previous.name) {
+                self.status.tiers.push(self.retained_item(previous));
+            }
+        }
     }
 
     fn prepare_status(&mut self, phase: ProvisioningPhase) {
@@ -516,6 +569,7 @@ impl ProvisioningRun<'_> {
         self.status.policies.sort_by(|a, b| a.name.cmp(&b.name));
         self.status.users.sort_by(|a, b| a.name.cmp(&b.name));
         self.status.buckets.sort_by(|a, b| a.name.cmp(&b.name));
+        self.status.tiers.sort_by(|a, b| a.name.cmp(&b.name));
         if !self.status.is_empty() {
             self.status.observed_generation = self.tenant.metadata.generation;
             self.status.phase = Some(phase);
@@ -652,6 +706,7 @@ pub(super) async fn reconcile_provisioning(
             },
         };
     }
+    reconcile_tiers(&mut run, &client).await;
     reconcile_buckets(&mut run, &client).await;
     run.finish()
 }
@@ -2030,6 +2085,360 @@ fn validate_user_secret_key(secret_key: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn reconcile_tiers(run: &mut ProvisioningRun<'_>, client: &RustfsAdminClient) {
+    let tiers = run.tenant.spec.tiers.clone();
+    if tiers.is_empty() {
+        return;
+    }
+
+    let live = match client.list_tiers().await {
+        Ok(live) => live,
+        Err(error) => {
+            let error = SpecLoadError {
+                reason: Reason::TierApplyFailed,
+                message: format!("failed to list RustFS tiers: {error}"),
+                transient: error.is_transient(),
+            };
+            for tier in &tiers {
+                let previous = run.previous_tier(&tier.name).cloned();
+                let mut item =
+                    run.item_from_spec_error(previous.as_ref(), &tier.name, error.clone());
+                if let Some(previous) = previous.as_ref() {
+                    copy_tier_ownership(&mut item, previous);
+                }
+                run.push_tier(item);
+            }
+            return;
+        }
+    };
+
+    for tier in &tiers {
+        let credentials = load_tier_secret(run, tier).await;
+        let live_tier = live.iter().find(|live| live.config.name == tier.name);
+        let item = reconcile_tier(run, client, tier, live_tier, credentials).await;
+        run.push_tier(item);
+    }
+}
+
+async fn reconcile_tier(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    tier: &ProvisioningTier,
+    live: Option<&RustfsTier>,
+    credentials: Result<TierCredentials, SpecLoadError>,
+) -> ProvisioningItemStatus {
+    let previous = run.previous_tier(&tier.name).cloned();
+    let generation = run.tenant.metadata.generation;
+    if let Err(message) = validate_tier_name(&tier.name) {
+        let item = run.item(
+            previous.as_ref(),
+            &tier.name,
+            ProvisioningItemState::Failed,
+            Reason::TierApplyFailed,
+            message,
+        );
+        return finalize_tier_item(item, previous.as_ref(), None, None, generation);
+    }
+
+    let desired = tier_config(tier);
+    let desired_hash = tier_config_hash(&desired);
+    let credentials = match credentials {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            let item = run.item_from_spec_error(previous.as_ref(), &tier.name, error);
+            return finalize_tier_item(
+                item,
+                previous.as_ref(),
+                Some(desired_hash),
+                None,
+                generation,
+            );
+        }
+    };
+
+    let ready = |run: &ProvisioningRun<'_>, message: &str| {
+        run.item(
+            previous.as_ref(),
+            &tier.name,
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured,
+            message,
+        )
+    };
+    let (item, applied) = match live {
+        None => match client
+            .add_tier(
+                &desired,
+                &credentials.access_key,
+                &credentials.secret_key,
+                tier.force,
+            )
+            .await
+        {
+            Ok(()) => (ready(run, "RustFS tier was registered"), true),
+            Err(error) if error.is_conflict() => (
+                run.item(
+                    previous.as_ref(),
+                    &tier.name,
+                    ProvisioningItemState::Failed,
+                    Reason::TierConflict,
+                    format!(
+                        "RustFS refused to register the tier because remote bucket '{}' prefix '{}' is in use; set force: true only if this prefix belongs to this Tenant: {error}",
+                        desired.bucket, desired.prefix
+                    ),
+                ),
+                false,
+            ),
+            Err(error) => (
+                run.item_from_admin_error(
+                    previous.as_ref(),
+                    &tier.name,
+                    Reason::TierApplyFailed,
+                    error,
+                    format!("failed to register RustFS tier '{}'", tier.name),
+                ),
+                false,
+            ),
+        },
+        Some(live) => {
+            let differences = tier_config_differences(&live.config, &desired);
+            if !differences.is_empty() {
+                (
+                    run.item(
+                        previous.as_ref(),
+                        &tier.name,
+                        ProvisioningItemState::Failed,
+                        Reason::TierConflict,
+                        format!(
+                            "live RustFS tier differs from spec in {}; RustFS cannot change these fields of a registered tier",
+                            differences.join(", ")
+                        ),
+                    ),
+                    false,
+                )
+            } else if tier_credentials_need_apply(previous.as_ref(), &credentials, &live.access_key)
+            {
+                match client
+                    .edit_tier_credentials(
+                        &tier.name,
+                        &credentials.access_key,
+                        &credentials.secret_key,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        let message = if previous
+                            .as_ref()
+                            .and_then(|item| item.last_applied_hash.as_ref())
+                            .is_none()
+                        {
+                            "Existing RustFS tier matches spec and was adopted with the Secret credentials"
+                        } else {
+                            "RustFS tier credentials were updated from the Secret"
+                        };
+                        (ready(run, message), true)
+                    }
+                    Err(error) => (
+                        run.item_from_admin_error(
+                            previous.as_ref(),
+                            &tier.name,
+                            Reason::TierApplyFailed,
+                            error,
+                            format!("failed to update credentials of RustFS tier '{}'", tier.name),
+                        ),
+                        false,
+                    ),
+                }
+            } else {
+                (ready(run, "RustFS tier matches spec"), false)
+            }
+        }
+    };
+
+    finalize_tier_item(
+        item,
+        previous.as_ref(),
+        Some(desired_hash),
+        applied.then_some(&credentials),
+        generation,
+    )
+}
+
+fn tier_config(tier: &ProvisioningTier) -> RustfsTierConfig {
+    RustfsTierConfig {
+        tier_type: tier.tier_type.rustfs_type().to_string(),
+        name: tier.name.clone(),
+        endpoint: tier.endpoint.clone(),
+        bucket: tier.bucket.clone(),
+        prefix: tier.prefix.clone(),
+        region: tier.region.clone(),
+    }
+}
+
+fn tier_config_hash(config: &RustfsTierConfig) -> String {
+    hash_document(
+        &serde_json::json!([
+            config.tier_type,
+            config.endpoint,
+            config.bucket,
+            config.prefix,
+            config.region,
+        ])
+        .to_string(),
+    )
+}
+
+fn tier_config_differences(
+    live: &RustfsTierConfig,
+    desired: &RustfsTierConfig,
+) -> Vec<&'static str> {
+    [
+        ("type", &live.tier_type, &desired.tier_type),
+        ("endpoint", &live.endpoint, &desired.endpoint),
+        ("bucket", &live.bucket, &desired.bucket),
+        ("prefix", &live.prefix, &desired.prefix),
+        ("region", &live.region, &desired.region),
+    ]
+    .into_iter()
+    .filter_map(|(field, live, desired)| (live != desired).then_some(field))
+    .collect()
+}
+
+/// Credentials cannot be read back from RustFS, so the Secret version applied last is the
+/// ownership record; the listed access key still reveals out-of-band changes.
+fn tier_credentials_need_apply(
+    previous: Option<&ProvisioningItemStatus>,
+    credentials: &TierCredentials,
+    live_access_key: &str,
+) -> bool {
+    let live_access_key_listed = !live_access_key.is_empty() && live_access_key != "REDACTED";
+    if live_access_key_listed && live_access_key != credentials.access_key {
+        return true;
+    }
+    let (Some(previous), Some(resource_version)) =
+        (previous, credentials.resource_version.as_deref())
+    else {
+        return true;
+    };
+    previous.observed_secret_resource_version.as_deref() != Some(resource_version)
+        || previous.observed_secret_name.as_deref() != Some(credentials.secret_name.as_str())
+        || previous.last_applied_access_key_hash.as_deref()
+            != Some(access_key_hash(&credentials.access_key).as_str())
+}
+
+fn finalize_tier_item(
+    mut item: ProvisioningItemStatus,
+    previous: Option<&ProvisioningItemStatus>,
+    desired_hash: Option<String>,
+    applied_credentials: Option<&TierCredentials>,
+    generation: Option<i64>,
+) -> ProvisioningItemStatus {
+    if let Some(previous) = previous {
+        copy_tier_ownership(&mut item, previous);
+    }
+    if let Some(credentials) = applied_credentials {
+        item.observed_secret_resource_version = credentials.resource_version.clone();
+        item.observed_secret_name = Some(credentials.secret_name.clone());
+        item.last_applied_access_key_hash = Some(access_key_hash(&credentials.access_key));
+    }
+    if item.state == ProvisioningItemState::Ready.as_str() {
+        let changed = applied_credentials.is_some()
+            || item.last_applied_hash != desired_hash
+            || item.last_applied_generation.is_none();
+        item.last_applied_hash = desired_hash.clone();
+        if changed {
+            item.last_applied_generation = generation;
+        }
+    }
+    item.desired_hash = desired_hash;
+    item
+}
+
+fn copy_tier_ownership(item: &mut ProvisioningItemStatus, previous: &ProvisioningItemStatus) {
+    item.desired_hash = previous.desired_hash.clone();
+    item.last_applied_hash = previous.last_applied_hash.clone();
+    item.last_applied_generation = previous.last_applied_generation;
+    item.observed_secret_resource_version = previous.observed_secret_resource_version.clone();
+    item.observed_secret_name = previous.observed_secret_name.clone();
+    item.last_applied_access_key_hash = previous.last_applied_access_key_hash.clone();
+}
+
+/// Mirrors the RustFS tier name checks; the name is also sent as an S3 XML storage class.
+fn validate_tier_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("tier name must not be empty".to_string());
+    }
+    if !is_valid_xml_text(name) {
+        return Err(format!(
+            "tier name '{name}' contains characters that cannot be used as an S3 storage class"
+        ));
+    }
+    if name != name.to_uppercase() {
+        return Err(format!("tier name '{name}' must be uppercase"));
+    }
+    if name.eq_ignore_ascii_case("STANDARD") || name.eq_ignore_ascii_case("REDUCED_REDUNDANCY") {
+        return Err(format!(
+            "tier name '{name}' is a reserved storage class and cannot name a tier"
+        ));
+    }
+    Ok(())
+}
+
+async fn load_tier_secret(
+    run: &ProvisioningRun<'_>,
+    tier: &ProvisioningTier,
+) -> Result<TierCredentials, SpecLoadError> {
+    let secret_name = tier.creds_secret.name.as_str();
+    let invalid = |message: String| SpecLoadError {
+        reason: Reason::TierSecretInvalid,
+        message,
+        transient: false,
+    };
+    let secret: Secret = run
+        .ctx
+        .get(secret_name, run.namespace)
+        .await
+        .map_err(|error| {
+            if context::is_kube_not_found(&error) {
+                invalid(format!("tier Secret '{secret_name}' was not found"))
+            } else {
+                SpecLoadError {
+                    reason: Reason::TierSecretInvalid,
+                    message: format!("failed to read tier Secret '{secret_name}': {error}"),
+                    transient: context::is_transient_kube_error(&error),
+                }
+            }
+        })?;
+    let data = secret
+        .data
+        .as_ref()
+        .ok_or_else(|| invalid(format!("tier Secret '{secret_name}' has no data")))?;
+
+    Ok(TierCredentials {
+        access_key: read_tier_secret_value(data, "accesskey", secret_name).map_err(invalid)?,
+        secret_key: read_tier_secret_value(data, "secretkey", secret_name).map_err(invalid)?,
+        secret_name: secret_name.to_string(),
+        resource_version: secret.metadata.resource_version,
+    })
+}
+
+fn read_tier_secret_value(
+    data: &BTreeMap<String, ByteString>,
+    key: &'static str,
+    secret_name: &str,
+) -> Result<String, String> {
+    let raw = data
+        .get(key)
+        .ok_or_else(|| format!("tier Secret '{secret_name}' is missing '{key}'"))?;
+    let value = String::from_utf8(raw.0.clone())
+        .map_err(|_| format!("tier Secret '{secret_name}' key '{key}' must be valid UTF-8"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("tier Secret '{secret_name}' key '{key}' is empty"));
+    }
+    Ok(value.to_string())
+}
+
 async fn reconcile_buckets(run: &mut ProvisioningRun<'_>, client: &RustfsAdminClient) {
     let buckets = run.tenant.spec.buckets.clone();
     for bucket in &buckets {
@@ -2050,6 +2459,10 @@ async fn reconcile_bucket(
         .object_lock_configuration
         .as_ref()
         .and_then(object_lock_configuration_desired_hash);
+    status.encryption_desired_hash = bucket
+        .encryption
+        .as_ref()
+        .and_then(bucket_encryption_desired_hash);
     if status.state != ProvisioningItemState::Ready.as_str() {
         status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
         return status;
@@ -2070,6 +2483,12 @@ async fn reconcile_bucket(
     let observed_object_lock = status.object_lock;
     status.item = reconcile_bucket_policy_configuration(run, client, bucket, status.item).await;
     status.object_lock = observed_object_lock;
+    if status.state != ProvisioningItemState::Ready.as_str() {
+        status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
+        return status;
+    }
+
+    status = reconcile_bucket_encryption(run, client, bucket, previous.as_ref(), status).await;
     if status.state != ProvisioningItemState::Ready.as_str() {
         status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
         return status;
@@ -2586,6 +3005,11 @@ fn validate_bucket_configuration(bucket: &ProvisioningBucket) -> Result<(), (Rea
     {
         return Err((Reason::BucketLifecycleApplyFailed, message));
     }
+    if let Some(spec) = bucket.encryption.as_ref()
+        && let Err(message) = bucket_encryption_configuration(spec)
+    {
+        return Err((Reason::BucketEncryptionApplyFailed, message));
+    }
     Ok(())
 }
 
@@ -2682,6 +3106,262 @@ fn copy_bucket_control_status(
         source.object_lock_configuration_desired_hash.clone();
     target.object_lock_configuration_last_applied_hash =
         source.object_lock_configuration_last_applied_hash.clone();
+    target.encryption_desired_hash = source.encryption_desired_hash.clone();
+    target.encryption_last_applied_hash = source.encryption_last_applied_hash.clone();
+}
+
+async fn reconcile_bucket_encryption(
+    run: &mut ProvisioningRun<'_>,
+    client: &RustfsAdminClient,
+    bucket: &ProvisioningBucket,
+    previous: Option<&ProvisioningBucketStatus>,
+    mut status: ProvisioningBucketStatus,
+) -> ProvisioningBucketStatus {
+    let Some(spec) = bucket.encryption.as_ref() else {
+        return status;
+    };
+    let desired = match bucket_encryption_configuration(spec) {
+        Ok(desired) => desired,
+        Err(message) => {
+            status.item = replace_bucket_item_state(
+                run,
+                previous,
+                &status.item,
+                ProvisioningItemState::Failed,
+                Reason::BucketEncryptionApplyFailed,
+                message,
+            );
+            return status;
+        }
+    };
+    if desired
+        .as_ref()
+        .is_some_and(|desired| desired.algorithm == AdminEncryptionAlgorithm::AwsKms)
+        && !run
+            .tenant
+            .spec
+            .encryption
+            .as_ref()
+            .is_some_and(|encryption| encryption.enabled)
+    {
+        status.item = replace_bucket_item_state(
+            run,
+            previous,
+            &status.item,
+            ProvisioningItemState::Failed,
+            Reason::BucketEncryptionApplyFailed,
+            "SSE-KMS bucket encryption requires spec.encryption.enabled on the Tenant",
+        );
+        return status;
+    }
+
+    let live = match client.get_bucket_encryption(&bucket.name).await {
+        Ok(live) => live,
+        Err(error) => {
+            status.item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &status.item,
+                Reason::BucketEncryptionApplyFailed,
+                error,
+                "failed to read RustFS bucket encryption",
+            );
+            return status;
+        }
+    };
+    let live_hash = live
+        .as_ref()
+        .map(|configuration| hash_document(&configuration.to_xml()));
+    let last_applied_hash = previous.and_then(|item| item.encryption_last_applied_hash.as_deref());
+
+    let Some(desired) = desired else {
+        status.encryption_desired_hash = None;
+        let Some(live_hash) = live_hash else {
+            status.encryption_last_applied_hash = None;
+            status.item.message = Some(append_bucket_message(
+                &status.item,
+                "RustFS bucket encryption is absent",
+            ));
+            return status;
+        };
+        if last_applied_hash != Some(live_hash.as_str()) {
+            status.item = replace_bucket_item_state(
+                run,
+                previous,
+                &status.item,
+                ProvisioningItemState::Failed,
+                Reason::BucketEncryptionConflict,
+                bucket_encryption_conflict_message(last_applied_hash, "delete"),
+            );
+            return status;
+        }
+        if let Err(error) = client.delete_bucket_encryption(&bucket.name).await {
+            status.item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &status.item,
+                Reason::BucketEncryptionApplyFailed,
+                error,
+                "failed to remove RustFS bucket encryption",
+            );
+            return status;
+        }
+        status.encryption_last_applied_hash = None;
+        status.item.message = Some(append_bucket_message(
+            &status.item,
+            "RustFS bucket encryption was removed",
+        ));
+        return status;
+    };
+
+    if let Some(live) = live.as_ref()
+        && bucket_encryption_matches(&desired, live)
+    {
+        status.encryption_last_applied_hash = live_hash;
+        status.item.message = Some(append_bucket_message(
+            &status.item,
+            "RustFS bucket encryption matches spec",
+        ));
+        return status;
+    }
+    if let Some(live_hash) = live_hash.as_deref()
+        && last_applied_hash != Some(live_hash)
+    {
+        status.item = replace_bucket_item_state(
+            run,
+            previous,
+            &status.item,
+            ProvisioningItemState::Failed,
+            Reason::BucketEncryptionConflict,
+            bucket_encryption_conflict_message(last_applied_hash, "replace"),
+        );
+        return status;
+    }
+
+    if let Err(error) = client.put_bucket_encryption(&bucket.name, &desired).await {
+        status.item = bucket_item_from_admin_error(
+            run,
+            previous,
+            &status.item,
+            Reason::BucketEncryptionApplyFailed,
+            error,
+            "failed to apply RustFS bucket encryption",
+        );
+        return status;
+    }
+    let verified = match client.get_bucket_encryption(&bucket.name).await {
+        Ok(Some(verified)) if bucket_encryption_matches(&desired, &verified) => verified,
+        Ok(_) => {
+            status.item = replace_bucket_item_state(
+                run,
+                previous,
+                &status.item,
+                ProvisioningItemState::Failed,
+                Reason::BucketEncryptionApplyFailed,
+                "RustFS bucket encryption did not match spec after update",
+            );
+            return status;
+        }
+        Err(error) => {
+            status.item = bucket_item_from_admin_error(
+                run,
+                previous,
+                &status.item,
+                Reason::BucketEncryptionApplyFailed,
+                error,
+                "failed to verify RustFS bucket encryption after update",
+            );
+            return status;
+        }
+    };
+    // Ownership is the verified live document: RustFS fills in the default KMS key for SSE-KMS.
+    status.encryption_last_applied_hash = Some(hash_document(&verified.to_xml()));
+    status.item.message = Some(append_bucket_message(
+        &status.item,
+        "RustFS bucket encryption was applied",
+    ));
+    status
+}
+
+fn bucket_encryption_conflict_message(last_applied_hash: Option<&str>, action: &str) -> String {
+    if last_applied_hash.is_some() {
+        format!(
+            "Live RustFS bucket encryption changed since the operator last applied it; refusing to {action} it"
+        )
+    } else {
+        format!(
+            "Live RustFS bucket encryption is not owned by this status; refusing to {action} it"
+        )
+    }
+}
+
+/// `Ok(None)` is a valid `Absent` spec.
+fn bucket_encryption_configuration(
+    spec: &BucketEncryptionSpec,
+) -> Result<Option<AdminEncryptionConfiguration>, String> {
+    match spec.state() {
+        BucketEncryptionState::Absent => {
+            if spec.mode.is_some() || spec.kms_key_id.is_some() {
+                return Err(
+                    "Absent bucket encryption must not contain mode or kmsKeyId".to_string()
+                );
+            }
+            Ok(None)
+        }
+        BucketEncryptionState::Present => {
+            let algorithm = match spec.mode {
+                Some(BucketEncryptionMode::SseS3) => AdminEncryptionAlgorithm::Aes256,
+                Some(BucketEncryptionMode::SseKms) => AdminEncryptionAlgorithm::AwsKms,
+                None => return Err("Present bucket encryption must contain a mode".to_string()),
+            };
+            if let Some(key_id) = spec.kms_key_id.as_deref() {
+                if algorithm != AdminEncryptionAlgorithm::AwsKms {
+                    return Err("bucket encryption kmsKeyId requires mode SSE-KMS".to_string());
+                }
+                if !is_valid_kms_key_id(key_id) {
+                    return Err(format!(
+                        "bucket encryption kmsKeyId must contain between 1 and {MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH} characters from [A-Za-z0-9._:/+=@-]"
+                    ));
+                }
+            }
+            Ok(Some(AdminEncryptionConfiguration {
+                algorithm,
+                kms_master_key_id: spec.kms_key_id.clone(),
+                bucket_key_enabled: false,
+            }))
+        }
+    }
+}
+
+fn is_valid_kms_key_id(key_id: &str) -> bool {
+    !key_id.is_empty()
+        && key_id.len() <= MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH as usize
+        && key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/+=@-".contains(&byte))
+}
+
+fn bucket_encryption_desired_hash(spec: &BucketEncryptionSpec) -> Option<String> {
+    bucket_encryption_configuration(spec)
+        .ok()
+        .flatten()
+        .map(|configuration| hash_document(&configuration.to_xml()))
+}
+
+/// SSE-KMS without `kmsKeyId` accepts whatever default key RustFS recorded.
+fn bucket_encryption_matches(
+    desired: &AdminEncryptionConfiguration,
+    live: &AdminEncryptionConfiguration,
+) -> bool {
+    desired.algorithm == live.algorithm
+        && desired.bucket_key_enabled == live.bucket_key_enabled
+        && match desired.kms_master_key_id.as_deref() {
+            Some(key_id) => live.kms_master_key_id.as_deref() == Some(key_id),
+            None => {
+                desired.algorithm == AdminEncryptionAlgorithm::AwsKms
+                    || live.kms_master_key_id.is_none()
+            }
+        }
 }
 
 async fn reconcile_bucket_lifecycle(
@@ -3553,6 +4233,7 @@ fn has_active_spec(tenant: &Tenant) -> bool {
     !tenant.spec.policies.is_empty()
         || !tenant.spec.users.is_empty()
         || !tenant.spec.buckets.is_empty()
+        || !tenant.spec.tiers.is_empty()
 }
 
 fn desired_names<'a>(names: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
@@ -3743,8 +4424,13 @@ fn reason_from_str(reason: &str) -> Reason {
         "BucketObjectLockConfigurationConflict" => Reason::BucketObjectLockConfigurationConflict,
         "BucketPolicyApplyFailed" => Reason::BucketPolicyApplyFailed,
         "BucketPolicyConflict" => Reason::BucketPolicyConflict,
+        "BucketEncryptionApplyFailed" => Reason::BucketEncryptionApplyFailed,
+        "BucketEncryptionConflict" => Reason::BucketEncryptionConflict,
         "BucketLifecycleApplyFailed" => Reason::BucketLifecycleApplyFailed,
         "BucketLifecycleConflict" => Reason::BucketLifecycleConflict,
+        "TierSecretInvalid" => Reason::TierSecretInvalid,
+        "TierApplyFailed" => Reason::TierApplyFailed,
+        "TierConflict" => Reason::TierConflict,
         _ => Reason::ProvisioningFailed,
     }
 }
@@ -3802,8 +4488,10 @@ mod tests {
         existing: bool,
         ignore_versioning_put: bool,
         ignore_object_lock_put: bool,
+        ignore_encryption_put: bool,
         versioning: Arc<Mutex<BucketVersioningState>>,
         object_lock: Arc<Mutex<Option<AdminObjectLockConfiguration>>>,
+        encryption: Arc<Mutex<Option<AdminEncryptionConfiguration>>>,
         requests: Arc<Mutex<Vec<String>>>,
         put_requests: Arc<Mutex<Vec<BucketControlPutRequest>>>,
         create_object_lock_header: Arc<Mutex<Option<String>>>,
@@ -3823,8 +4511,10 @@ mod tests {
                 existing: false,
                 ignore_versioning_put: false,
                 ignore_object_lock_put: false,
+                ignore_encryption_put: false,
                 versioning: Arc::new(Mutex::new(BucketVersioningState::Unversioned)),
                 object_lock: Arc::new(Mutex::new(None)),
+                encryption: Arc::new(Mutex::new(None)),
                 requests: Arc::new(Mutex::new(Vec::new())),
                 put_requests: Arc::new(Mutex::new(Vec::new())),
                 create_object_lock_header: Arc::new(Mutex::new(None)),
@@ -3980,6 +4670,49 @@ mod tests {
                         Some(AdminObjectLockConfiguration { default_retention });
                 }
                 StatusCode::OK.into_response()
+            }
+            (axum::http::Method::GET, "encryption=") => {
+                match capture.encryption.lock().await.clone() {
+                    // RustFS omits the namespace on GetBucketEncryption.
+                    Some(configuration) => (
+                        StatusCode::OK,
+                        configuration
+                            .to_xml()
+                            .replace(" xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"", ""),
+                    )
+                        .into_response(),
+                    // RustFS answers a missing configuration with 400, not 404.
+                    None => (
+                        StatusCode::BAD_REQUEST,
+                        "<Error><Code>ServerSideEncryptionConfigurationNotFoundError</Code><Message>The server-side encryption configuration was not found.</Message></Error>",
+                    )
+                        .into_response(),
+                }
+            }
+            (axum::http::Method::PUT, "encryption=") => {
+                let body = capture_bucket_control_put(&capture, &query, request).await;
+                let kms = body.contains("<SSEAlgorithm>aws:kms</SSEAlgorithm>");
+                let kms_master_key_id = body
+                    .split_once("<KMSMasterKeyID>")
+                    .and_then(|(_, tail)| tail.split_once("</KMSMasterKeyID>"))
+                    .map(|(key, _)| key.to_string())
+                    .or_else(|| kms.then(|| "rustfs-default-key".to_string()));
+                if !capture.ignore_encryption_put {
+                    *capture.encryption.lock().await = Some(AdminEncryptionConfiguration {
+                        algorithm: if kms {
+                            AdminEncryptionAlgorithm::AwsKms
+                        } else {
+                            AdminEncryptionAlgorithm::Aes256
+                        },
+                        kms_master_key_id,
+                        bucket_key_enabled: false,
+                    });
+                }
+                StatusCode::OK.into_response()
+            }
+            (axum::http::Method::DELETE, "encryption=") => {
+                *capture.encryption.lock().await = None;
+                StatusCode::NO_CONTENT.into_response()
             }
             _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         }
@@ -6235,6 +6968,408 @@ mod tests {
         server.abort();
     }
 
+    fn sse_s3() -> AdminEncryptionConfiguration {
+        AdminEncryptionConfiguration {
+            algorithm: AdminEncryptionAlgorithm::Aes256,
+            kms_master_key_id: None,
+            bucket_key_enabled: false,
+        }
+    }
+
+    fn encryption_bucket(encryption: serde_json::Value) -> ProvisioningBucket {
+        serde_json::from_value(serde_json::json!({
+            "name": "secure-bucket",
+            "encryption": encryption
+        }))
+        .expect("encryption bucket should deserialize")
+    }
+
+    fn previous_encryption_owner(hash: String) -> ProvisioningBucketStatus {
+        let mut previous = ProvisioningBucketStatus::new(ProvisioningItemStatus::new(
+            "secure-bucket",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        ));
+        previous.encryption_last_applied_hash = Some(hash);
+        previous
+    }
+
+    async fn requests_for(capture: &BucketControlCapture, request: &str) -> usize {
+        capture
+            .requests
+            .lock()
+            .await
+            .iter()
+            .filter(|logged| logged.as_str() == request)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn sse_s3_bucket_encryption_is_applied_to_a_new_bucket_and_owned() {
+        let capture = BucketControlCapture::default();
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-S3"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("RustFS bucket encryption was applied"))
+        );
+        assert_eq!(capture.encryption.lock().await.clone(), Some(sse_s3()));
+        let owned = Some(hash_document(&sse_s3().to_xml()));
+        assert_eq!(item.encryption_desired_hash, owned);
+        assert_eq!(item.encryption_last_applied_hash, owned);
+        let put_requests = capture.put_requests.lock().await;
+        let put = put_requests
+            .iter()
+            .find(|request| request.query == "encryption=")
+            .expect("encryption PUT is captured");
+        assert_eq!(put.body, sse_s3().to_xml());
+        assert!(put.content_md5.is_some());
+        assert!(put.authorization.as_deref().is_some_and(|authorization| {
+            authorization.contains(
+                "SignedHeaders=content-md5;content-type;host;x-amz-content-sha256;x-amz-date",
+            )
+        }));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matching_live_bucket_encryption_is_adopted_without_a_write() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(sse_s3()))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-S3"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(
+            item.encryption_last_applied_hash,
+            Some(hash_document(&sse_s3().to_xml()))
+        );
+        assert_eq!(requests_for(&capture, "PUT encryption=").await, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn omitted_bucket_encryption_makes_no_encryption_calls() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(sse_s3()))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket: ProvisioningBucket =
+            serde_json::from_value(serde_json::json!({"name": "secure-bucket"}))
+                .expect("bucket should deserialize");
+
+        let item = reconcile_bucket(&mut run, &client, &bucket).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert!(
+            !capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request.ends_with("encryption="))
+        );
+        assert_eq!(capture.encryption.lock().await.clone(), Some(sse_s3()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unowned_live_bucket_encryption_is_not_replaced_or_removed() {
+        let foreign = AdminEncryptionConfiguration {
+            algorithm: AdminEncryptionAlgorithm::AwsKms,
+            kms_master_key_id: Some("foreign-key".to_string()),
+            bucket_key_enabled: false,
+        };
+        for spec in [
+            serde_json::json!({"mode": "SSE-S3"}),
+            serde_json::json!({"state": "Absent"}),
+        ] {
+            let capture = BucketControlCapture {
+                existing: true,
+                encryption: Arc::new(Mutex::new(Some(foreign.clone()))),
+                ..Default::default()
+            };
+            let (client, server) = bucket_control_test_client(capture.clone()).await;
+            let ctx = empty_kube_context();
+            let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+            let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+            let mut run = empty_run(&ctx, &tenant);
+
+            let item = reconcile_bucket(&mut run, &client, &encryption_bucket(spec.clone())).await;
+
+            assert_eq!(item.state, ProvisioningItemState::Failed.as_str(), "{spec}");
+            assert_eq!(item.reason, Reason::BucketEncryptionConflict.as_str());
+            assert!(
+                item.message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("not owned by this status"))
+            );
+            assert_eq!(requests_for(&capture, "PUT encryption=").await, 0);
+            assert_eq!(requests_for(&capture, "DELETE encryption=").await, 0);
+            assert_eq!(
+                capture.encryption.lock().await.clone(),
+                Some(foreign.clone())
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_bucket_encryption_follows_a_spec_change_to_sse_kms() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(sse_s3()))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let mut tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        tenant.spec.encryption = Some(crate::types::v1alpha1::encryption::EncryptionConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous
+            .buckets
+            .push(previous_encryption_owner(hash_document(&sse_s3().to_xml())));
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-KMS"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        let applied = AdminEncryptionConfiguration {
+            algorithm: AdminEncryptionAlgorithm::AwsKms,
+            kms_master_key_id: Some("rustfs-default-key".to_string()),
+            bucket_key_enabled: false,
+        };
+        assert_eq!(
+            capture.encryption.lock().await.clone(),
+            Some(applied.clone())
+        );
+        assert_eq!(
+            item.encryption_last_applied_hash,
+            Some(hash_document(&applied.to_xml()))
+        );
+        assert_ne!(
+            item.encryption_desired_hash,
+            item.encryption_last_applied_hash
+        );
+        drop(run);
+
+        // The RustFS-chosen default key is adopted on the next pass without another write.
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous.buckets.push(item.clone());
+        let again = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-KMS"})),
+        )
+        .await;
+        assert_eq!(again.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(requests_for(&capture, "PUT encryption=").await, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn absent_bucket_encryption_removes_only_an_owned_configuration() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(sse_s3()))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous
+            .buckets
+            .push(previous_encryption_owner(hash_document(&sse_s3().to_xml())));
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"state": "Absent"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.encryption.lock().await.clone(), None);
+        assert_eq!(item.encryption_desired_hash, None);
+        assert_eq!(item.encryption_last_applied_hash, None);
+        assert_eq!(requests_for(&capture, "DELETE encryption=").await, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn changed_owned_bucket_encryption_is_a_conflict() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(AdminEncryptionConfiguration {
+                bucket_key_enabled: true,
+                ..sse_s3()
+            }))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous
+            .buckets
+            .push(previous_encryption_owner(hash_document(&sse_s3().to_xml())));
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-S3"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketEncryptionConflict.as_str());
+        assert!(
+            item.message.as_deref().is_some_and(
+                |message| message.contains("changed since the operator last applied it")
+            )
+        );
+        assert_eq!(
+            item.encryption_last_applied_hash,
+            Some(hash_document(&sse_s3().to_xml()))
+        );
+        assert_eq!(requests_for(&capture, "PUT encryption=").await, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sse_kms_bucket_encryption_requires_tenant_kms() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-KMS", "kmsKeyId": "app-key"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketEncryptionApplyFailed.as_str());
+        assert!(
+            !capture
+                .requests
+                .lock()
+                .await
+                .iter()
+                .any(|request| request.ends_with("encryption="))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn bucket_encryption_update_is_verified_after_a_success_response() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ignore_encryption_put: true,
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-S3"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketEncryptionApplyFailed.as_str());
+        assert_eq!(item.encryption_last_applied_hash, None);
+        server.abort();
+    }
+
+    #[test]
+    fn bucket_encryption_spec_is_validated_before_any_call() {
+        let spec = |value: serde_json::Value| -> BucketEncryptionSpec {
+            serde_json::from_value(value).expect("encryption spec deserializes")
+        };
+        assert_eq!(
+            bucket_encryption_configuration(&spec(serde_json::json!({"mode": "SSE-S3"}))),
+            Ok(Some(sse_s3()))
+        );
+        assert_eq!(
+            bucket_encryption_configuration(&spec(serde_json::json!({"state": "Absent"}))),
+            Ok(None)
+        );
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"state": "Absent", "mode": "SSE-S3"}),
+            serde_json::json!({"mode": "SSE-S3", "kmsKeyId": "app-key"}),
+            serde_json::json!({"mode": "SSE-KMS", "kmsKeyId": "app key"}),
+            serde_json::json!({"mode": "SSE-KMS", "kmsKeyId": "app<key>"}),
+            serde_json::json!({"mode": "SSE-KMS", "kmsKeyId": ""}),
+        ] {
+            assert!(
+                bucket_encryption_configuration(&spec(invalid.clone())).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
+        let bucket = encryption_bucket(serde_json::json!({"state": "Absent", "mode": "SSE-S3"}));
+        assert!(matches!(
+            validate_bucket_configuration(&bucket),
+            Err((Reason::BucketEncryptionApplyFailed, _))
+        ));
+    }
+
     #[tokio::test]
     async fn matching_live_object_lock_configuration_is_adopted_without_a_write() {
         let live = AdminObjectLockConfiguration {
@@ -7304,6 +8439,638 @@ mod tests {
         match run.finish().outcome {
             ProvisioningOutcome::Retry { persist_status, .. } => assert!(persist_status),
             _ => panic!("pending referenced policy must requeue instead of failing the user"),
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TierCapture {
+        tiers: Arc<Mutex<String>>,
+        add_status: Arc<AtomicUsize>,
+        list_status: Arc<AtomicUsize>,
+        adds: Arc<Mutex<Vec<(String, Value)>>>,
+        edits: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    async fn tier_admin_handler(
+        State(capture): State<TierCapture>,
+        request: Request<Body>,
+    ) -> Response {
+        let method = request.method().clone();
+        let path = request.uri().path().to_string();
+        let query = request.uri().query().unwrap_or("").to_string();
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .expect("tier request body");
+        let json = || serde_json::from_slice::<Value>(&body).expect("tier body is JSON");
+        match method {
+            axum::http::Method::GET => {
+                let status = capture.list_status.load(Ordering::SeqCst);
+                if status != 0 {
+                    return StatusCode::from_u16(status as u16)
+                        .expect("configured test status is valid")
+                        .into_response();
+                }
+                (StatusCode::OK, capture.tiers.lock().await.clone()).into_response()
+            }
+            axum::http::Method::PUT => {
+                let added = json();
+                capture.adds.lock().await.push((query, added.clone()));
+                let status = capture.add_status.load(Ordering::SeqCst);
+                if status != 0 {
+                    return StatusCode::from_u16(status as u16)
+                        .expect("configured test status is valid")
+                        .into_response();
+                }
+                let tier_type = added["type"].as_str().expect("tier type").to_string();
+                let mut backend = added[&tier_type].clone();
+                backend["secretKey"] = Value::from("REDACTED");
+                let mut tiers: Vec<Value> =
+                    serde_json::from_str(&capture.tiers.lock().await).unwrap_or_default();
+                tiers.push(serde_json::json!({"type": tier_type, tier_type.clone(): backend}));
+                *capture.tiers.lock().await = Value::from(tiers).to_string();
+                StatusCode::OK.into_response()
+            }
+            axum::http::Method::POST => {
+                capture.edits.lock().await.push((path, json()));
+                StatusCode::OK.into_response()
+            }
+            _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        }
+    }
+
+    async fn tier_test_client(
+        capture: TierCapture,
+        lifecycle: Option<LifecycleCapture>,
+    ) -> (RustfsAdminClient, tokio::task::JoinHandle<()>) {
+        let mut router = Router::new()
+            .route("/rustfs/admin/v3/tier", any(tier_admin_handler))
+            .route("/rustfs/admin/v3/tier/:name", any(tier_admin_handler))
+            .with_state(capture);
+        if let Some(lifecycle) = lifecycle {
+            router = router.merge(
+                Router::new()
+                    .route("/app-data", any(lifecycle_bucket_handler))
+                    .with_state(lifecycle),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        (
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret"),
+            server,
+        )
+    }
+
+    fn cold_tier() -> ProvisioningTier {
+        serde_json::from_value(serde_json::json!({
+            "name": "COLD",
+            "type": "S3",
+            "endpoint": "https://gateway.example.com",
+            "bucket": "cold",
+            "prefix": "tenant-a/",
+            "credsSecret": {"name": "cold-tier"}
+        }))
+        .expect("tier should deserialize")
+    }
+
+    fn live_cold_tier(prefix: &str, access_key: &str) -> String {
+        serde_json::json!([{
+            "type": "s3",
+            "s3": {
+                "name": "COLD",
+                "endpoint": "https://gateway.example.com",
+                "accessKey": access_key,
+                "secretKey": "REDACTED",
+                "bucket": "cold",
+                "prefix": prefix,
+                "region": "",
+                "storageClass": ""
+            }
+        }])
+        .to_string()
+    }
+
+    fn tier_credentials(resource_version: &str) -> TierCredentials {
+        TierCredentials {
+            access_key: "tier-access".to_string(),
+            secret_key: "tier-secret".to_string(),
+            secret_name: "cold-tier".to_string(),
+            resource_version: Some(resource_version.to_string()),
+        }
+    }
+
+    fn owned_tier_status(resource_version: &str) -> ProvisioningItemStatus {
+        let mut item = ProvisioningItemStatus::new(
+            "COLD",
+            ProvisioningItemState::Ready,
+            Reason::ProvisioningConfigured.as_str(),
+        );
+        let hash = tier_config_hash(&tier_config(&cold_tier()));
+        item.desired_hash = Some(hash.clone());
+        item.last_applied_hash = Some(hash);
+        item.last_applied_generation = Some(2);
+        item.observed_secret_resource_version = Some(resource_version.to_string());
+        item.observed_secret_name = Some("cold-tier".to_string());
+        item.last_applied_access_key_hash = Some(access_key_hash("tier-access"));
+        item
+    }
+
+    fn tier_test_tenant(previous: Option<ProvisioningItemStatus>) -> Tenant {
+        Tenant {
+            metadata: ObjectMeta {
+                name: Some("tenant-a".to_string()),
+                namespace: Some("storage".to_string()),
+                generation: Some(3),
+                ..Default::default()
+            },
+            spec: crate::types::v1alpha1::tenant::TenantSpec {
+                tiers: vec![cold_tier()],
+                ..Default::default()
+            },
+            status: Some(crate::types::v1alpha1::status::Status {
+                provisioning: ProvisioningStatus {
+                    tiers: previous.into_iter().collect(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn tier_run<'a>(ctx: &'a Context, tenant: &'a Tenant) -> ProvisioningRun<'a> {
+        let mut run = empty_run(ctx, tenant);
+        run.previous = tenant
+            .status
+            .as_ref()
+            .map(|status| status.provisioning.clone())
+            .unwrap_or_default();
+        run
+    }
+
+    fn tier_secret_kube_context(resource_version: &'static str) -> Context {
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| async move {
+            assert_eq!(request.method(), http::Method::GET);
+            assert_eq!(
+                request.uri().path(),
+                "/api/v1/namespaces/storage/secrets/cold-tier"
+            );
+            let secret = Secret {
+                metadata: ObjectMeta {
+                    name: Some("cold-tier".to_string()),
+                    namespace: Some("storage".to_string()),
+                    resource_version: Some(resource_version.to_string()),
+                    ..Default::default()
+                },
+                data: Some(BTreeMap::from([
+                    ("accesskey".to_string(), ByteString(b"tier-access".to_vec())),
+                    (
+                        "secretkey".to_string(),
+                        ByteString(b"tier-secret\n".to_vec()),
+                    ),
+                ])),
+                ..Default::default()
+            };
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(KubeBody::from(
+                        serde_json::to_vec(&secret).expect("Secret should serialize"),
+                    ))
+                    .expect("response should build"),
+            )
+        });
+        Context::new(Client::new(kube_service, "default"))
+    }
+
+    #[tokio::test]
+    async fn missing_tier_is_registered_with_secret_credentials() {
+        let capture = TierCapture::default();
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            None,
+            Ok(tier_credentials("5")),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        let adds = capture.adds.lock().await.clone();
+        assert_eq!(adds.len(), 1);
+        assert_eq!(adds[0].0, "force=false");
+        assert_eq!(
+            adds[0].1,
+            serde_json::json!({
+                "type": "s3",
+                "name": "COLD",
+                "s3": {
+                    "name": "COLD",
+                    "endpoint": "https://gateway.example.com",
+                    "accessKey": "tier-access",
+                    "secretKey": "tier-secret",
+                    "bucket": "cold",
+                    "prefix": "tenant-a/",
+                    "region": ""
+                }
+            })
+        );
+        assert!(capture.edits.lock().await.is_empty());
+        assert_eq!(item.observed_secret_resource_version.as_deref(), Some("5"));
+        assert_eq!(item.observed_secret_name.as_deref(), Some("cold-tier"));
+        assert_eq!(item.last_applied_hash, item.desired_hash);
+        assert_eq!(item.last_applied_generation, Some(3));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn owned_tier_with_unchanged_secret_is_not_rewritten() {
+        let capture = TierCapture::default();
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(Some(owned_tier_status("5")));
+        let mut run = tier_run(&ctx, &tenant);
+        let live = parse_live_tier(&live_cold_tier("tenant-a/", "tier-access"));
+
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            Some(&live),
+            Ok(tier_credentials("5")),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert!(capture.adds.lock().await.is_empty());
+        assert!(capture.edits.lock().await.is_empty());
+        assert_eq!(item.last_applied_generation, Some(2));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rotated_tier_secret_only_updates_credentials() {
+        let capture = TierCapture::default();
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(Some(owned_tier_status("5")));
+        let mut run = tier_run(&ctx, &tenant);
+        let live = parse_live_tier(&live_cold_tier("tenant-a/", "tier-access"));
+
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            Some(&live),
+            Ok(tier_credentials("6")),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert!(capture.adds.lock().await.is_empty());
+        assert_eq!(
+            capture.edits.lock().await.clone(),
+            vec![(
+                "/rustfs/admin/v3/tier/COLD".to_string(),
+                serde_json::json!({"access": "tier-access", "secret": "tier-secret"})
+            )]
+        );
+        assert_eq!(item.observed_secret_resource_version.as_deref(), Some("6"));
+        assert_eq!(item.last_applied_generation, Some(3));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_tier_is_adopted_once_and_out_of_band_access_key_is_corrected() {
+        let capture = TierCapture::default();
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+        let live = parse_live_tier(&live_cold_tier("tenant-a/", "tier-access"));
+
+        let adopted = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            Some(&live),
+            Ok(tier_credentials("5")),
+        )
+        .await;
+
+        assert_eq!(adopted.state, ProvisioningItemState::Ready.as_str());
+        assert!(
+            adopted
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("adopted"))
+        );
+        assert_eq!(capture.edits.lock().await.len(), 1);
+
+        let tenant = tier_test_tenant(Some(adopted));
+        let mut run = tier_run(&ctx, &tenant);
+        let changed = parse_live_tier(&live_cold_tier("tenant-a/", "someone-else"));
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            Some(&changed),
+            Ok(tier_credentials("5")),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.edits.lock().await.len(), 2);
+        assert!(capture.adds.lock().await.is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn live_tier_with_different_settings_fails_without_writes() {
+        let capture = TierCapture::default();
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(Some(owned_tier_status("5")));
+        let mut run = tier_run(&ctx, &tenant);
+        let live = parse_live_tier(&live_cold_tier("other/", "tier-access"));
+
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            Some(&live),
+            Ok(tier_credentials("6")),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::TierConflict.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("prefix"))
+        );
+        assert!(capture.adds.lock().await.is_empty());
+        assert!(capture.edits.lock().await.is_empty());
+        assert_eq!(item.observed_secret_resource_version.as_deref(), Some("5"));
+        assert!(run.retry.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn non_empty_remote_prefix_is_a_conflict_unless_forced() {
+        let capture = TierCapture::default();
+        capture.add_status.store(409, Ordering::SeqCst);
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            None,
+            Ok(tier_credentials("5")),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::TierConflict.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("force: true"))
+        );
+        assert!(item.observed_secret_resource_version.is_none());
+
+        capture.add_status.store(0, Ordering::SeqCst);
+        let mut forced = cold_tier();
+        forced.force = true;
+        let item =
+            reconcile_tier(&mut run, &client, &forced, None, Ok(tier_credentials("5"))).await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(capture.adds.lock().await[1].0, "force=true");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tier_name_and_secret_errors_fail_before_rustfs_writes() {
+        let capture = TierCapture::default();
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+
+        let mut lowercase = cold_tier();
+        lowercase.name = "cold".to_string();
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &lowercase,
+            None,
+            Ok(tier_credentials("5")),
+        )
+        .await;
+        assert_eq!(item.reason, Reason::TierApplyFailed.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("uppercase"))
+        );
+
+        let item = reconcile_tier(
+            &mut run,
+            &client,
+            &cold_tier(),
+            None,
+            Err(SpecLoadError {
+                reason: Reason::TierSecretInvalid,
+                message: "tier Secret 'cold-tier' was not found".to_string(),
+                transient: false,
+            }),
+        )
+        .await;
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::TierSecretInvalid.as_str());
+        assert!(capture.adds.lock().await.is_empty());
+        assert!(capture.edits.lock().await.is_empty());
+        server.abort();
+    }
+
+    #[test]
+    fn redacted_live_access_key_falls_back_to_the_secret_version() {
+        let previous = owned_tier_status("5");
+        for live_access_key in ["", "REDACTED"] {
+            assert!(!tier_credentials_need_apply(
+                Some(&previous),
+                &tier_credentials("5"),
+                live_access_key
+            ));
+            assert!(tier_credentials_need_apply(
+                Some(&previous),
+                &tier_credentials("6"),
+                live_access_key
+            ));
+        }
+        assert!(tier_credentials_need_apply(
+            Some(&previous),
+            &tier_credentials("5"),
+            "someone-else"
+        ));
+    }
+
+    #[test]
+    fn tier_names_follow_rustfs_rules() {
+        assert!(validate_tier_name("COLD_1").is_ok());
+        assert!(validate_tier_name("ÄRCHIV").is_ok());
+        for name in ["", "Cold", "STANDARD", "REDUCED_REDUNDANCY", "BAD\u{1}"] {
+            assert!(
+                validate_tier_name(name).is_err(),
+                "{name:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn tier_secret_values_are_trimmed_and_required() {
+        let data = BTreeMap::from([
+            ("accesskey".to_string(), ByteString(b" key \n".to_vec())),
+            ("secretkey".to_string(), ByteString(b"  ".to_vec())),
+            ("binary".to_string(), ByteString(vec![0xff])),
+        ]);
+
+        assert_eq!(
+            read_tier_secret_value(&data, "accesskey", "cold-tier").as_deref(),
+            Ok("key")
+        );
+        assert!(
+            read_tier_secret_value(&data, "secretkey", "cold-tier")
+                .is_err_and(|message| message.contains("is empty"))
+        );
+        assert!(
+            read_tier_secret_value(&data, "binary", "cold-tier")
+                .is_err_and(|message| message.contains("UTF-8"))
+        );
+        assert!(
+            read_tier_secret_value(&data, "missing", "cold-tier")
+                .is_err_and(|message| message.contains("missing 'missing'"))
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_tier_list_failure_keeps_ownership_and_retries() {
+        let capture = TierCapture::default();
+        capture.list_status.store(503, Ordering::SeqCst);
+        let (client, server) = tier_test_client(capture.clone(), None).await;
+        let ctx = empty_kube_context();
+        let tenant = tier_test_tenant(Some(owned_tier_status("5")));
+        let mut run = tier_run(&ctx, &tenant);
+
+        reconcile_tiers(&mut run, &client).await;
+
+        let item = &run.status.tiers[0];
+        assert_eq!(item.state, ProvisioningItemState::Pending.as_str());
+        assert_eq!(item.observed_secret_resource_version.as_deref(), Some("5"));
+        assert!(item.last_applied_hash.is_some());
+        assert!(run.retry.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn spec_tier_is_registered_before_a_bucket_lifecycle_references_it() {
+        let capture = TierCapture::default();
+        *capture.tiers.lock().await = "[]".to_string();
+        let lifecycle = LifecycleCapture {
+            tiers: capture.tiers.clone(),
+            ..Default::default()
+        };
+        let (client, server) = tier_test_client(capture.clone(), Some(lifecycle.clone())).await;
+        let ctx = tier_secret_kube_context("7");
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+
+        reconcile_tiers(&mut run, &client).await;
+        let bucket =
+            reconcile_bucket(&mut run, &client, &transition_lifecycle_bucket(1, "COLD")).await;
+
+        assert_eq!(
+            run.status.tiers[0].state,
+            ProvisioningItemState::Ready.as_str()
+        );
+        assert_eq!(
+            run.status.tiers[0]
+                .observed_secret_resource_version
+                .as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            capture.adds.lock().await[0].1["s3"]["secretKey"],
+            "tier-secret"
+        );
+        assert_eq!(bucket.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(lifecycle.put_count.load(Ordering::SeqCst), 1);
+        assert!(run.retry.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn removed_tier_is_retained_with_its_ownership() {
+        let ctx = empty_kube_context();
+        let mut tenant = tier_test_tenant(Some(owned_tier_status("5")));
+        tenant.spec.tiers.clear();
+        tenant.spec.buckets = vec![ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        }];
+        let mut run = tier_run(&ctx, &tenant);
+
+        run.prepare_status(ProvisioningPhase::Ready);
+
+        assert_eq!(run.status.tiers.len(), 1);
+        assert_eq!(
+            run.status.tiers[0].state,
+            ProvisioningItemState::Retained.as_str()
+        );
+        assert_eq!(
+            run.status.tiers[0]
+                .observed_secret_resource_version
+                .as_deref(),
+            Some("5")
+        );
+        assert!(has_active_spec(&tier_test_tenant(None)));
+    }
+
+    fn parse_live_tier(body: &str) -> RustfsTier {
+        let tier: Value = serde_json::from_str::<Vec<Value>>(body).expect("tier list")[0].clone();
+        RustfsTier {
+            config: RustfsTierConfig {
+                tier_type: tier["type"].as_str().expect("type").to_string(),
+                name: tier["s3"]["name"].as_str().expect("name").to_string(),
+                endpoint: tier["s3"]["endpoint"]
+                    .as_str()
+                    .expect("endpoint")
+                    .to_string(),
+                bucket: tier["s3"]["bucket"].as_str().expect("bucket").to_string(),
+                prefix: tier["s3"]["prefix"].as_str().expect("prefix").to_string(),
+                region: tier["s3"]["region"].as_str().expect("region").to_string(),
+            },
+            access_key: tier["s3"]["accessKey"]
+                .as_str()
+                .expect("accessKey")
+                .to_string(),
         }
     }
 }

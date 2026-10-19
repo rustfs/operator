@@ -30,6 +30,9 @@ pub(crate) const MAX_BUCKET_NAME_LENGTH: u32 = 63;
 pub(crate) const MAX_BUCKET_LIFECYCLE_RULES: u32 = 1_000;
 pub(crate) const MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH: u32 = 255;
 pub(crate) const MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS: u32 = 36_500;
+pub(crate) const MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH: u32 = 1024;
+pub(crate) const MAX_PROVISIONING_TIER_NAME_LENGTH: u32 = 253;
+pub(crate) const MAX_TIER_CREDENTIALS_SECRET_NAME_LENGTH: u32 = 253;
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -124,6 +127,80 @@ pub(crate) fn duplicate_user_credentials_secret_names(
         .collect()
 }
 
+/// Remote backend of a tier. All three use the S3 API with static credentials.
+#[derive(
+    Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq,
+)]
+pub enum ProvisioningTierType {
+    #[default]
+    #[serde(rename = "S3")]
+    S3,
+    #[serde(rename = "RustFS")]
+    RustFS,
+    #[serde(rename = "MinIO")]
+    MinIO,
+}
+
+impl ProvisioningTierType {
+    /// Backend type as named by the RustFS tier admin API.
+    pub const fn rustfs_type(self) -> &'static str {
+        match self {
+            Self::S3 => "s3",
+            Self::RustFS => "rustfs",
+            Self::MinIO => "minio",
+        }
+    }
+}
+
+/// Reference to a tier credentials Secret in the Tenant namespace.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TierCredentialsSecretRef {
+    #[schemars(length(min = 1, max = MAX_TIER_CREDENTIALS_SECRET_NAME_LENGTH))]
+    pub name: String,
+}
+
+/// Remote storage tier registered in RustFS for bucket lifecycle transitions.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisioningTier {
+    /// Tier name, referenced as `storageClass` by bucket lifecycle transitions.
+    #[schemars(length(min = 1, max = MAX_PROVISIONING_TIER_NAME_LENGTH))]
+    #[x_kube(validation = Rule::new("self == self.upperAscii()").message("tier name must be uppercase"))]
+    #[x_kube(validation = Rule::new("self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'").message("tier name must not be a reserved storage class"))]
+    pub name: String,
+
+    #[serde(rename = "type")]
+    pub tier_type: ProvisioningTierType,
+
+    /// Remote S3 endpoint URL, for example `https://gateway.storjshare.io`.
+    #[schemars(length(min = 1))]
+    pub endpoint: String,
+
+    /// Remote bucket that receives transitioned objects.
+    #[schemars(length(min = 1))]
+    pub bucket: String,
+
+    /// Object prefix inside the remote bucket.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
+
+    /// Secret with `accesskey` and `secretkey` for the remote bucket. Updating the Secret
+    /// rotates the tier credentials in RustFS.
+    pub creds_secret: TierCredentialsSecretRef,
+
+    /// Register the tier even when the remote prefix already holds objects, for example a
+    /// prefix written by this Tenant before a restore. RustFS refuses such a prefix otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+
+    #[serde(default, skip_serializing_if = "is_retain")]
+    pub deletion_policy: ProvisioningDeletionPolicy,
+}
+
 #[derive(
     Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, Default, PartialEq, Eq,
 )]
@@ -184,6 +261,51 @@ impl BucketObjectLockConfiguration {
     pub(crate) fn state(&self) -> BucketObjectLockConfigurationState {
         self.state
             .unwrap_or(BucketObjectLockConfigurationState::Present)
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum BucketEncryptionState {
+    Present,
+    Absent,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+pub enum BucketEncryptionMode {
+    #[serde(rename = "SSE-S3")]
+    SseS3,
+    #[serde(rename = "SSE-KMS")]
+    SseKms,
+}
+
+/// Default server-side encryption applied by RustFS to new objects in the bucket.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("(!has(self.state) || self.state == 'Present') ? has(self.mode) : !has(self.mode) && !has(self.kmsKeyId)").message("Present bucket encryption requires mode; Absent forbids mode and kmsKeyId"))]
+#[x_kube(validation = Rule::new("!has(self.kmsKeyId) || (has(self.mode) && self.mode == 'SSE-KMS')").message("kmsKeyId requires mode SSE-KMS"))]
+pub struct BucketEncryptionSpec {
+    /// Omission is equivalent to `Present`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<BucketEncryptionState>,
+
+    /// `SSE-S3` stores S3 `AES256`; `SSE-KMS` stores `aws:kms` and requires
+    /// `spec.encryption.enabled` on the Tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<BucketEncryptionMode>,
+
+    /// KMS key for `SSE-KMS`. Omission uses the RustFS default KMS key.
+    #[schemars(
+        length(min = 1, max = MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH),
+        regex(pattern = r"^[A-Za-z0-9._:/+=@-]+$")
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms_key_id: Option<String>,
+}
+
+impl BucketEncryptionSpec {
+    pub(crate) fn state(&self) -> BucketEncryptionState {
+        self.state.unwrap_or(BucketEncryptionState::Present)
     }
 }
 
@@ -316,6 +438,11 @@ pub struct ProvisioningBucket {
     /// `anonymous`; legacy `Private` plus `policy` configurations keep the custom policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyDocumentSource>,
+
+    /// Default bucket encryption. Omission leaves the live configuration unmanaged; `Absent`
+    /// removes only a configuration previously owned by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<BucketEncryptionSpec>,
 
     /// Declarative S3 bucket lifecycle configuration. Omission leaves the live lifecycle
     /// configuration unmanaged; `Absent` removes only a configuration previously owned by the
@@ -519,6 +646,35 @@ mod tests {
             })
         );
         assert!(rule.expiration.is_none());
+    }
+
+    #[test]
+    fn tier_deserializes_issue_yaml_shape_and_omits_defaults() {
+        let tier: super::ProvisioningTier = serde_json::from_value(serde_json::json!({
+            "name": "STORJ",
+            "type": "S3",
+            "endpoint": "https://gateway.storjshare.io",
+            "bucket": "rustfs-ilm",
+            "prefix": "tenant-a/",
+            "credsSecret": {"name": "storj-tier"}
+        }))
+        .expect("tier should deserialize");
+
+        assert_eq!(tier.tier_type, super::ProvisioningTierType::S3);
+        assert_eq!(tier.tier_type.rustfs_type(), "s3");
+        assert!(tier.region.is_empty());
+        assert!(!tier.force);
+        let value = serde_json::to_value(&tier).expect("tier serializes");
+        assert!(value.get("region").is_none());
+        assert!(value.get("force").is_none());
+        assert!(value.get("deletionPolicy").is_none());
+        assert_eq!(value["type"], "S3");
+
+        for (name, rustfs_type) in [("RustFS", "rustfs"), ("MinIO", "minio")] {
+            let tier_type: super::ProvisioningTierType =
+                serde_json::from_value(serde_json::json!(name)).expect("tier type deserializes");
+            assert_eq!(tier_type.rustfs_type(), rustfs_type);
+        }
     }
 
     #[test]

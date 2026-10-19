@@ -39,7 +39,11 @@ All notable changes to RustFS Operator are documented in this file. The format i
 - Declarative Tenant bucket lifecycle rules with drift-aware ownership and explicit removal.
 - Bucket lifecycle `transition` and `noncurrentVersionTransition` actions that move objects to a
   remote tier registered in RustFS.
+- Tenant `spec.tiers` for declarative S3, RustFS, and MinIO remote tiers with Secret-sourced
+  credentials, rotation on Secret updates, and conflict reporting for immutable tier settings.
 - Declarative Tenant bucket versioning and Object Lock default retention with drift-aware ownership.
+- Declarative default bucket encryption (`SSE-S3` or `SSE-KMS`) with drift-aware ownership and
+  explicit removal.
 - Helm chart `cosiDriver.enabled` to deploy the RustFS COSI (`rustfs.objectstorage.k8s.io`)
   driver alongside the upstream provisioner sidecar, with dedicated ServiceAccount/RBAC.
 - Seven built-in RustFS Grafana dashboards, published by default as sidecar-discoverable
