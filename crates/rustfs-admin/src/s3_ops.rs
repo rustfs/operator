@@ -14,6 +14,7 @@
 
 //! S3 boundary:
 //!   - bucket lifecycle methods (create/lookup features)
+//!   - default bucket encryption (`?encryption`)
 //!   - request semantics for S3-style object storage operations.
 
 use super::helpers::{
@@ -140,6 +141,52 @@ impl BucketObjectLockConfiguration {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketEncryptionAlgorithm {
+    /// SSE-S3 (`AES256`).
+    Aes256,
+    /// SSE-KMS (`aws:kms`).
+    AwsKms,
+}
+
+impl BucketEncryptionAlgorithm {
+    const fn as_s3_str(self) -> &'static str {
+        match self {
+            Self::Aes256 => "AES256",
+            Self::AwsKms => "aws:kms",
+        }
+    }
+}
+
+/// Default bucket encryption (`ServerSideEncryptionConfiguration` with a single rule).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketEncryptionConfiguration {
+    pub algorithm: BucketEncryptionAlgorithm,
+    pub kms_master_key_id: Option<String>,
+    pub bucket_key_enabled: bool,
+}
+
+impl BucketEncryptionConfiguration {
+    pub fn to_xml(&self) -> String {
+        let mut xml = format!(
+            "<ServerSideEncryptionConfiguration xmlns=\"{S3_XML_NAMESPACE}\"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>"
+        );
+        xml.push_str(self.algorithm.as_s3_str());
+        xml.push_str("</SSEAlgorithm>");
+        if let Some(key_id) = &self.kms_master_key_id {
+            xml.push_str("<KMSMasterKeyID>");
+            xml.push_str(&escape_xml(key_id));
+            xml.push_str("</KMSMasterKeyID>");
+        }
+        xml.push_str("</ApplyServerSideEncryptionByDefault>");
+        if self.bucket_key_enabled {
+            xml.push_str("<BucketKeyEnabled>true</BucketKeyEnabled>");
+        }
+        xml.push_str("</Rule></ServerSideEncryptionConfiguration>");
+        xml
+    }
+}
+
 #[derive(Debug)]
 struct StrictXmlElement {
     name: String,
@@ -254,6 +301,58 @@ fn parse_bucket_object_lock_xml(
 
     Ok(BucketObjectLockConfiguration {
         default_retention: Some(BucketObjectLockDefaultRetention { mode, period }),
+    })
+}
+
+fn parse_bucket_encryption_xml(
+    xml: &str,
+) -> Result<BucketEncryptionConfiguration, RustfsClientError> {
+    let invalid = || RustfsClientError::InvalidBucketEncryptionResponse;
+    let root = parse_strict_configuration_xml(xml, "ServerSideEncryptionConfiguration")
+        .map_err(|()| invalid())?;
+    root.validate_children(&["Rule"]).map_err(|()| invalid())?;
+    let rule = root
+        .child("Rule")
+        .map_err(|()| invalid())?
+        .ok_or_else(invalid)?;
+    rule.validate_children(&["ApplyServerSideEncryptionByDefault", "BucketKeyEnabled"])
+        .map_err(|()| invalid())?;
+    let by_default = rule
+        .child("ApplyServerSideEncryptionByDefault")
+        .map_err(|()| invalid())?
+        .ok_or_else(invalid)?;
+    by_default
+        .validate_children(&["SSEAlgorithm", "KMSMasterKeyID"])
+        .map_err(|()| invalid())?;
+    let algorithm = match by_default
+        .child("SSEAlgorithm")
+        .map_err(|()| invalid())?
+        .ok_or_else(invalid)?
+        .leaf_text()
+        .map_err(|()| invalid())?
+    {
+        "AES256" => BucketEncryptionAlgorithm::Aes256,
+        "aws:kms" => BucketEncryptionAlgorithm::AwsKms,
+        _ => return Err(invalid()),
+    };
+    let kms_master_key_id = match by_default.child("KMSMasterKeyID").map_err(|()| invalid())? {
+        Some(key_id) if key_id.text.trim().is_empty() && key_id.children.is_empty() => None,
+        Some(key_id) => Some(key_id.leaf_text().map_err(|()| invalid())?.to_string()),
+        None => None,
+    };
+    let bucket_key_enabled = match rule.child("BucketKeyEnabled").map_err(|()| invalid())? {
+        Some(enabled) => match enabled.leaf_text().map_err(|()| invalid())? {
+            "true" => true,
+            "false" => false,
+            _ => return Err(invalid()),
+        },
+        None => false,
+    };
+
+    Ok(BucketEncryptionConfiguration {
+        algorithm,
+        kms_master_key_id,
+        bucket_key_enabled,
     })
 }
 
@@ -1034,6 +1133,139 @@ impl RustfsAdminClient {
             .map(|configuration| configuration.is_some())
     }
 
+    pub async fn get_bucket_encryption(
+        &self,
+        bucket: &str,
+    ) -> Result<Option<BucketEncryptionConfiguration>, RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let query = build_canonical_query(&[("encryption", "")]);
+        let signed = self.sign_request("GET", &path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+        let response = self
+            .http_client
+            .get(format!(
+                "{}{}?{query}",
+                self.base_url.trim_end_matches('/'),
+                path
+            ))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            let body = read_bucket_configuration_response(response, || {
+                RustfsClientError::InvalidBucketEncryptionResponse
+            })
+            .await?;
+            return parse_bucket_encryption_xml(&body).map(Some);
+        }
+
+        // RustFS answers a missing configuration with 400 ServerSideEncryptionConfigurationNotFoundError.
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if is_absent_resource(status, &body) {
+            return Ok(None);
+        }
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
+    }
+
+    pub async fn put_bucket_encryption(
+        &self,
+        bucket: &str,
+        configuration: &BucketEncryptionConfiguration,
+    ) -> Result<(), RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let query = build_canonical_query(&[("encryption", "")]);
+        let body = configuration.to_xml();
+        let content_md5 = content_md5(&body);
+        let signed = self.sign_request_with_extra_headers(
+            "PUT",
+            &path,
+            &query,
+            &body,
+            ADMIN_SIGNING_SERVICE,
+            &[
+                ("content-md5", content_md5.as_str()),
+                ("content-type", "application/xml"),
+            ],
+        )?;
+        let host = self.host()?;
+        let response = self
+            .http_client
+            .put(format!(
+                "{}{}?{query}",
+                self.base_url.trim_end_matches('/'),
+                path
+            ))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .header("content-md5", content_md5)
+            .header("content-type", "application/xml")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(RustfsClientError::unexpected_response(response).await)
+        }
+    }
+
+    pub async fn delete_bucket_encryption(&self, bucket: &str) -> Result<(), RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let query = build_canonical_query(&[("encryption", "")]);
+        let signed = self.sign_request("DELETE", &path, &query, "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+        let response = self
+            .http_client
+            .delete(format!(
+                "{}{}?{query}",
+                self.base_url.trim_end_matches('/'),
+                path
+            ))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let status = response.status();
+        let (body, truncated) = RustfsClientError::limited_response_body(response).await;
+        if is_absent_resource(status, &body) {
+            return Ok(());
+        }
+        Err(RustfsClientError::unexpected_status_with_limited_body(
+            status, &body, truncated,
+        ))
+    }
+
     pub async fn put_bucket_policy(
         &self,
         bucket: &str,
@@ -1413,6 +1645,68 @@ mod tests {
             parse_bucket_object_lock_xml(unknown),
             Err(RustfsClientError::InvalidObjectLockConfigurationResponse)
         ));
+    }
+
+    #[test]
+    fn bucket_encryption_xml_matches_rustfs_get_response_shape() {
+        // GetBucketEncryption body from RustFS 1.0.2-preview.2 after `PUT ?encryption` with AES256.
+        let rustfs_get = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+        let sse_s3 = BucketEncryptionConfiguration {
+            algorithm: BucketEncryptionAlgorithm::Aes256,
+            kms_master_key_id: None,
+            bucket_key_enabled: false,
+        };
+        assert_eq!(parse_bucket_encryption_xml(rustfs_get).unwrap(), sse_s3);
+        assert_eq!(
+            sse_s3.to_xml(),
+            "<ServerSideEncryptionConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+        );
+        assert_eq!(
+            parse_bucket_encryption_xml(&sse_s3.to_xml()).unwrap(),
+            sse_s3
+        );
+
+        let sse_kms = BucketEncryptionConfiguration {
+            algorithm: BucketEncryptionAlgorithm::AwsKms,
+            kms_master_key_id: Some("app-key".to_string()),
+            bucket_key_enabled: true,
+        };
+        assert!(
+            sse_kms
+                .to_xml()
+                .contains("<KMSMasterKeyID>app-key</KMSMasterKeyID>")
+        );
+        assert_eq!(
+            parse_bucket_encryption_xml(&sse_kms.to_xml()).unwrap(),
+            sse_kms
+        );
+    }
+
+    #[test]
+    fn bucket_encryption_xml_rejects_unknown_ambiguous_or_missing_fields() {
+        for xml in [
+            "<ServerSideEncryptionConfiguration/>",
+            "<ServerSideEncryptionConfiguration><Rule/></ServerSideEncryptionConfiguration>",
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES128</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>",
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>",
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault><BlockedEncryptionTypes/></Rule></ServerSideEncryptionConfiguration>",
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault><BucketKeyEnabled>yes</BucketKeyEnabled></Rule></ServerSideEncryptionConfiguration>",
+            "<VersioningConfiguration/>",
+        ] {
+            assert!(
+                matches!(
+                    parse_bucket_encryption_xml(xml),
+                    Err(RustfsClientError::InvalidBucketEncryptionResponse)
+                ),
+                "{xml} must be rejected"
+            );
+        }
+        let empty_key = parse_bucket_encryption_xml(
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm><KMSMasterKeyID></KMSMasterKeyID></ApplyServerSideEncryptionByDefault><BucketKeyEnabled>false</BucketKeyEnabled></Rule></ServerSideEncryptionConfiguration>",
+        )
+        .unwrap();
+        assert_eq!(empty_key.kms_master_key_id, None);
+        assert!(!empty_key.bucket_key_enabled);
     }
 
     #[test]

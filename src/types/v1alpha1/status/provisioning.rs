@@ -153,6 +153,12 @@ pub struct ProvisioningBucketStatus {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_lock_configuration_last_applied_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_desired_hash: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_last_applied_hash: Option<String>,
 }
 
 impl ProvisioningBucketStatus {
@@ -164,6 +170,8 @@ impl ProvisioningBucketStatus {
             versioning: None,
             object_lock_configuration_desired_hash: None,
             object_lock_configuration_last_applied_hash: None,
+            encryption_desired_hash: None,
+            encryption_last_applied_hash: None,
         }
     }
 }

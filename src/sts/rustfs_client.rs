@@ -21,6 +21,7 @@ use crate::Tenant;
 use crate::cluster_dns;
 
 pub use rustfs_admin::{
+    BucketEncryptionAlgorithm, BucketEncryptionConfiguration,
     BucketLifecycleAbortIncompleteMultipartUpload, BucketLifecycleConfiguration,
     BucketLifecycleExpiration, BucketLifecycleNoncurrentVersionTransition, BucketLifecycleRule,
     BucketLifecycleRuleStatus, BucketLifecycleTransition, BucketObjectLockConfiguration,

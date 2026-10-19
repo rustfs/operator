@@ -130,6 +130,7 @@ export interface ProvisioningBucket {
   objectLockConfiguration?: BucketObjectLockConfiguration
   anonymous?: "Private" | "Download" | "Upload" | "Public"
   policy?: PolicyDocumentSource
+  encryption?: BucketEncryptionSpec
   lifecycle?: BucketLifecycleSpec
   deletionPolicy?: ProvisioningDeletionPolicy
 }
@@ -152,6 +153,12 @@ export interface BucketObjectLockConfiguration {
   state?: "Present" | "Absent"
   mode?: "Governance" | "Compliance"
   days?: number
+}
+
+export interface BucketEncryptionSpec {
+  state?: "Present" | "Absent"
+  mode?: "SSE-S3" | "SSE-KMS"
+  kmsKeyId?: string
 }
 
 export interface BucketLifecycleSpec {
@@ -204,6 +211,8 @@ export interface ProvisioningBucketStatus extends ProvisioningItemStatus {
   versioning?: "Unversioned" | "Enabled" | "Suspended" | null
   objectLockConfigurationDesiredHash?: string | null
   objectLockConfigurationLastAppliedHash?: string | null
+  encryptionDesiredHash?: string | null
+  encryptionLastAppliedHash?: string | null
 }
 
 export interface ProvisioningStatus {
