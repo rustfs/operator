@@ -55,14 +55,14 @@ use crate::console::models::topology::{
     TopologyOverviewResponse, TopologyPod, TopologyPool, TopologyTenant, TopologyTenantSummary,
 };
 use crate::types::v1alpha1::provisioning::{
-    BucketAnonymousAccess, BucketLifecycleAbortIncompleteMultipartUpload,
-    BucketLifecycleExpiration, BucketLifecycleNoncurrentVersionTransition, BucketLifecycleRule,
-    BucketLifecycleRuleFilter, BucketLifecycleRuleStatus, BucketLifecycleSpec,
-    BucketLifecycleState, BucketLifecycleTransition, BucketObjectLockConfiguration,
-    BucketObjectLockConfigurationState, BucketObjectLockRetentionMode, ConfigMapKeyReference,
-    PolicyDocumentSource, ProvisioningBucket, ProvisioningDeletionPolicy, ProvisioningPolicy,
-    ProvisioningTier, ProvisioningTierType, ProvisioningUser, TierCredentialsSecretRef,
-    UserCredentialsSecretRef,
+    BucketAnonymousAccess, BucketEncryptionMode, BucketEncryptionSpec, BucketEncryptionState,
+    BucketLifecycleAbortIncompleteMultipartUpload, BucketLifecycleExpiration,
+    BucketLifecycleNoncurrentVersionTransition, BucketLifecycleRule, BucketLifecycleRuleFilter,
+    BucketLifecycleRuleStatus, BucketLifecycleSpec, BucketLifecycleState,
+    BucketLifecycleTransition, BucketObjectLockConfiguration, BucketObjectLockConfigurationState,
+    BucketObjectLockRetentionMode, ConfigMapKeyReference, PolicyDocumentSource, ProvisioningBucket,
+    ProvisioningDeletionPolicy, ProvisioningPolicy, ProvisioningTier, ProvisioningTierType,
+    ProvisioningUser, TierCredentialsSecretRef, UserCredentialsSecretRef,
 };
 use crate::types::v1alpha1::status::provisioning::{
     BucketVersioningStatus, ProvisioningBucketStatus, ProvisioningItemState,
@@ -141,6 +141,9 @@ use crate::types::v1alpha1::status::provisioning::{
         BucketObjectLockConfiguration,
         BucketObjectLockConfigurationState,
         BucketObjectLockRetentionMode,
+        BucketEncryptionSpec,
+        BucketEncryptionState,
+        BucketEncryptionMode,
         BucketLifecycleSpec,
         BucketLifecycleState,
         BucketLifecycleRule,
@@ -802,6 +805,7 @@ mod tests {
         assert!(schemas.contains_key("BucketLifecycleTransition"));
         assert!(schemas.contains_key("BucketLifecycleNoncurrentVersionTransition"));
         assert!(schemas.contains_key("BucketObjectLockConfiguration"));
+        assert!(schemas.contains_key("BucketEncryptionSpec"));
         assert!(schemas.contains_key("UserCredentialsSecretRef"));
         assert!(schemas.contains_key("ProvisioningTier"));
         assert!(schemas.contains_key("ProvisioningTierType"));
@@ -851,6 +855,13 @@ mod tests {
             )
             .and_then(Value::as_str),
             Some("#/components/schemas/BucketObjectLockConfiguration")
+        );
+        assert_eq!(
+            spec.pointer(
+                "/components/schemas/ProvisioningBucket/properties/encryption/oneOf/1/$ref",
+            )
+            .and_then(Value::as_str),
+            Some("#/components/schemas/BucketEncryptionSpec")
         );
         assert_eq!(
             spec.pointer("/components/schemas/ProvisioningStatus/properties/buckets/items/$ref")

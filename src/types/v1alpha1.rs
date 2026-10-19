@@ -506,6 +506,28 @@ mod tenant_provisioning_crd_tests {
             object_lock["x-kubernetes-validations"][0]["message"],
             json!("Present object lock configuration requires mode and days; Absent forbids them")
         );
+        let encryption = &spec["properties"]["buckets"]["items"]["properties"]["encryption"];
+        assert_eq!(
+            encryption["properties"]["mode"]["enum"],
+            json!(["SSE-S3", "SSE-KMS", null])
+        );
+        assert_eq!(
+            encryption["properties"]["kmsKeyId"]["pattern"],
+            json!("^[A-Za-z0-9._:/+=@-]+$")
+        );
+        let encryption_messages: Vec<_> = encryption["x-kubernetes-validations"]
+            .as_array()
+            .expect("encryption validations are present")
+            .iter()
+            .map(|validation| validation["message"].clone())
+            .collect();
+        assert_eq!(
+            encryption_messages,
+            vec![
+                json!("Present bucket encryption requires mode; Absent forbids mode and kmsKeyId"),
+                json!("kmsKeyId requires mode SSE-KMS"),
+            ]
+        );
         let bucket_validations = spec["properties"]["buckets"]["items"]["x-kubernetes-validations"]
             .as_array()
             .expect("bucket validations are present");
@@ -531,6 +553,10 @@ mod tenant_provisioning_crd_tests {
         );
         assert_eq!(
             bucket_status["properties"]["objectLockConfigurationLastAppliedHash"]["nullable"],
+            json!(true)
+        );
+        assert_eq!(
+            bucket_status["properties"]["encryptionLastAppliedHash"]["nullable"],
             json!(true)
         );
     }
