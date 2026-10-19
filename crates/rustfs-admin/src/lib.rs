@@ -33,6 +33,7 @@ mod pool_ops;
 #[path = "s3_ops.rs"]
 mod s3_ops;
 pub use s3_ops::{
+    BucketEncryptionAlgorithm, BucketEncryptionConfiguration,
     BucketLifecycleAbortIncompleteMultipartUpload, BucketLifecycleConfiguration,
     BucketLifecycleExpiration, BucketLifecycleNoncurrentVersionTransition, BucketLifecycleRule,
     BucketLifecycleRuleStatus, BucketLifecycleTransition, BucketObjectLockConfiguration,
@@ -257,6 +258,7 @@ pub enum RustfsClientError {
     },
     InvalidBucketVersioningResponse,
     InvalidObjectLockConfigurationResponse,
+    InvalidBucketEncryptionResponse,
     InvalidLifecycleConfigurationResponse,
     ParseResponseFailed,
     SigningFailed,
@@ -308,6 +310,9 @@ impl std::fmt::Display for RustfsClientError {
             }
             Self::InvalidObjectLockConfigurationResponse => {
                 write!(f, "invalid bucket Object Lock configuration response")
+            }
+            Self::InvalidBucketEncryptionResponse => {
+                write!(f, "invalid bucket encryption configuration response")
             }
             Self::ParseResponseFailed => write!(f, "failed to parse AssumeRole response"),
             Self::SigningFailed => write!(f, "failed to compute request signature"),
@@ -361,6 +366,7 @@ impl RustfsClientError {
             | Self::RequestBuildFailed
             | Self::InvalidBucketVersioningResponse
             | Self::InvalidObjectLockConfigurationResponse
+            | Self::InvalidBucketEncryptionResponse
             | Self::InvalidLifecycleConfigurationResponse
             | Self::SigningFailed => false,
         }

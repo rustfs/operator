@@ -101,6 +101,7 @@ pub(super) fn body_mentions_not_found(body: &str) -> bool {
         || body.contains("nosuchpolicy")
         || body.contains("no such policy")
         || body.contains("objectlockconfigurationnotfound")
+        || body.contains("serversideencryptionconfigurationnotfound")
         || body.contains("nosuchbucketpolicy")
         || body.contains("no such bucket policy")
         || body.contains("not found")
