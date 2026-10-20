@@ -748,6 +748,12 @@ impl RustfsAdminClient {
             return Err(RustfsClientError::RequestBuildFailed);
         }
 
+        // RustFS takes the bucket's exclusive locks before it finds an existing
+        // bucket, so a repeated PUT times out with 503 while objects are written.
+        if self.bucket_exists(bucket).await? {
+            return Ok(CreateBucketResult::AlreadyOwnedByYou);
+        }
+
         let path = format!("/{bucket}");
         let body = create_bucket_body(region);
         let content_type = (!body.is_empty()).then_some("application/xml");
@@ -805,6 +811,27 @@ impl RustfsAdminClient {
         Err(RustfsClientError::unexpected_status_with_limited_body(
             status, &body, truncated,
         ))
+    }
+
+    /// Report whether HeadBucket succeeds with these credentials. Any other
+    /// response is left for CreateBucket to classify.
+    async fn bucket_exists(&self, bucket: &str) -> Result<bool, RustfsClientError> {
+        let path = format!("/{bucket}");
+        let signed = self.sign_request("HEAD", &path, "", "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .head(format!("{}{}", self.base_url.trim_end_matches('/'), path))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        Ok(response.status().is_success())
     }
 
     /// Delete a bucket. Missing buckets are treated as success (idempotent).
