@@ -3761,7 +3761,7 @@ mod tests {
         extract::State,
         http::{Request, StatusCode},
         response::{IntoResponse, Response},
-        routing::{any, get, put},
+        routing::{any, get, head, put},
     };
     use http_body_util::BodyExt;
     use k8s_openapi::ByteString;
@@ -6531,6 +6531,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn existing_bucket_skips_create_bucket() {
+        let router = Router::new().route(
+            "/app-data",
+            head(|| async { StatusCode::OK }).put(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        };
+
+        let item = ensure_bucket(&mut run, &client, &bucket).await;
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(
+            item.message.as_deref(),
+            Some("RustFS bucket already exists")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_bucket_is_created() {
+        let router = Router::new().route(
+            "/app-data",
+            head(|| async { StatusCode::NOT_FOUND }).put(|| async { StatusCode::OK }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let ctx = empty_kube_context();
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut run = empty_run(&ctx, &tenant);
+        let bucket = ProvisioningBucket {
+            name: "app-data".to_string(),
+            ..Default::default()
+        };
+
+        let item = ensure_bucket(&mut run, &client, &bucket).await;
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(item.message.as_deref(), Some("RustFS bucket was created"));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn create_bucket_400_fails_without_retry() {
         let router = Router::new().route("/app-data", put(|| async { StatusCode::BAD_REQUEST }));
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -7076,6 +7143,7 @@ mod tests {
         let router = Router::new().route(
             "/app-data",
             put(|| async { StatusCode::OK })
+                .head(|| async { StatusCode::NOT_FOUND })
                 .get(move |req: Request<Body>| {
                     let live_policy = route_live_policy.clone();
                     async move {
