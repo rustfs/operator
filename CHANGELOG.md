@@ -47,6 +47,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Fixed
 
+- Check an existing Tenant bucket with HeadBucket before CreateBucket, so a bucket under
+  continuous writes no longer stays Pending on RustFS lock-timeout 503 responses.
 - Use `docker.io/rustfs/operator` as the default Helm image repository for the Operator,
   Console, and COSI driver, while preserving repository overrides through Helm values.
 - Reject multi-pool Tenants containing a single-node single-disk pool before applying pool workloads, matching RustFS startup constraints.
