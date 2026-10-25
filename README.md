@@ -2,7 +2,7 @@
 
 A Kubernetes operator for [RustFS](https://rustfs.com/) object storage, written in Rust with [kube-rs](https://github.com/kube-rs/kube). It reconciles a **`Tenant` custom resource** (`rustfs.com/v1alpha1`), validates referenced credential and KMS Secrets, and applies ServiceAccounts, Services, and StatefulSets so RustFS runs inside your cluster, from single-node single-disk development tenants to erasure-coded distributed clusters.
 
-**Status:** v0.0.6 — under active development.
+**Status:** v0.0.8 — under active development.
 
 ## Features
 

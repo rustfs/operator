@@ -16,7 +16,7 @@ apiVersion: v2
 name: rustfs-tenant
 description: A RustFS Tenant with optional S3 and Console ingress resources
 type: application
-version: 0.0.6
+version: 0.0.8
 home: https://rustfs.com
 sources:
   - https://github.com/rustfs/operator

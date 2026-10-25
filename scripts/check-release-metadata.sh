@@ -133,6 +133,13 @@ require_equal "Docker Rust version" "$docker_rust_version" "$toolchain_version"
 require_equal "Cargo.lock Operator version" "$root_lock_version" "$cargo_version"
 require_equal "e2e/Cargo.lock Operator version" "$e2e_lock_version" "$cargo_version"
 
+if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+  release_version="${GITHUB_REF_NAME:-}"
+  release_version="${release_version#v}"
+  require_value "release tag version" "$release_version"
+  require_equal "release tag version" "$release_version" "$cargo_version"
+fi
+
 grep -Fq 'ENV RUSTFS_OPERATOR_VERSION=${VERSION}' Dockerfile || {
   echo "release metadata check failed: Docker does not pass VERSION to the Rust build" >&2
   exit 1

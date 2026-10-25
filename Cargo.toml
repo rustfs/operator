@@ -1,6 +1,6 @@
 [package]
 name = "operator"
-version = "0.0.6"
+version = "0.0.8"
 edition = "2024"
 repository = "https://github.com/rustfs/operator"
 license = "Apache-2.0"

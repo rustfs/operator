@@ -16,6 +16,7 @@ name: Continuous Integration
 on:
   push:
     branches: [ main ]
+    tags: [ "[0-9]*", "v[0-9]*" ]
     paths-ignore:
       - "**.md"
       - "**.txt"

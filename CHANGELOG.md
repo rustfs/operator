@@ -47,6 +47,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Fixed
 
+- Update source release metadata to `0.0.8` so source Helm installs select the
+  `0.0.8` Operator and Console images, and verify release tags and chart images in CI.
 - Use `docker.io/rustfs/operator` as the default Helm image repository for the Operator,
   Console, and COSI driver, while preserving repository overrides through Helm values.
 - Reject multi-pool Tenants containing a single-node single-disk pool before applying pool workloads, matching RustFS startup constraints.
