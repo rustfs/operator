@@ -41,6 +41,12 @@ rand = "0.8"
 snafu = { version = "0.8.9", features = ["futures"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
+[dev-dependencies]
+axum = "0.7"
+http = "1.2"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
 [build-dependencies]
 tonic-build = "0.12"
 protoc-bin-vendored = "3"
