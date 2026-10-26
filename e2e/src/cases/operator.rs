@@ -30,6 +30,13 @@ pub fn cases() -> Vec<CaseSpec> {
             "operator/status",
             "operator",
         ),
+        CaseSpec::new(
+            Suite::Operator,
+            "operator_live_sse_s3_bucket_encrypts_new_objects",
+            "Provision an SSE-S3 bucket with the master key from a Secret and verify new objects are stored AES256-encrypted and read back intact.",
+            "operator/provisioning",
+            "operator",
+        ),
     ]
 }
 
@@ -49,6 +56,7 @@ mod tests {
             vec![
                 "operator_live_tenant_is_ready_and_observed",
                 "operator_live_status_subresource_enforces_cas_and_pruning",
+                "operator_live_sse_s3_bucket_encrypts_new_objects",
             ]
         );
     }
