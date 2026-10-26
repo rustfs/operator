@@ -2121,6 +2121,21 @@ async fn ensure_bucket(
         return annotate_bucket_item(item, bucket);
     }
 
+    // RustFS takes the bucket's exclusive locks before it finds an existing
+    // bucket, so a repeated CreateBucket times out with 503 while objects are written.
+    if matches!(client.bucket_exists(&bucket.name).await, Ok(true)) {
+        return annotate_bucket_item(
+            run.item(
+                previous.as_ref(),
+                &bucket.name,
+                ProvisioningItemState::Ready,
+                Reason::ProvisioningConfigured,
+                "RustFS bucket already exists",
+            ),
+            bucket,
+        );
+    }
+
     let create_result = match client
         .create_bucket(
             &bucket.name,

@@ -748,12 +748,6 @@ impl RustfsAdminClient {
             return Err(RustfsClientError::RequestBuildFailed);
         }
 
-        // RustFS takes the bucket's exclusive locks before it finds an existing
-        // bucket, so a repeated PUT times out with 503 while objects are written.
-        if self.bucket_exists(bucket).await? {
-            return Ok(CreateBucketResult::AlreadyOwnedByYou);
-        }
-
         let path = format!("/{bucket}");
         let body = create_bucket_body(region);
         let content_type = (!body.is_empty()).then_some("application/xml");
@@ -813,9 +807,13 @@ impl RustfsAdminClient {
         ))
     }
 
-    /// Report whether HeadBucket succeeds with these credentials. Any other
-    /// response is left for CreateBucket to classify.
-    async fn bucket_exists(&self, bucket: &str) -> Result<bool, RustfsClientError> {
+    /// Report whether HeadBucket succeeds with these credentials. Success proves
+    /// access, not ownership; callers that need ownership must use CreateBucket.
+    pub async fn bucket_exists(&self, bucket: &str) -> Result<bool, RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
         let path = format!("/{bucket}");
         let signed = self.sign_request("HEAD", &path, "", "", None, ADMIN_SIGNING_SERVICE)?;
         let host = self.host()?;

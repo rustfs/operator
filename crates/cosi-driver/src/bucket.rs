@@ -459,4 +459,126 @@ mod tests {
         ));
         assert!(authorize_delete(false, Some(BucketProofState::Ready), "b").is_ok());
     }
+
+    /// HeadBucket success proves access, not ownership. A readable bucket owned by
+    /// another account must stay a name conflict: no proof survives and delete is refused.
+    #[tokio::test]
+    async fn readable_bucket_owned_by_another_account_is_a_name_conflict() {
+        use axum::{Router, http::StatusCode, routing::any};
+        use http_body_util::BodyExt;
+        use kube::client::Body as KubeBody;
+        use std::convert::Infallible;
+        use std::sync::{Arc, Mutex};
+
+        let s3_requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = s3_requests.clone();
+        let router = Router::new().route(
+            "/cosi-bucket",
+            any(move |method: axum::http::Method| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().unwrap().push(method.to_string());
+                    match method.as_str() {
+                        "HEAD" => (StatusCode::OK, String::new()),
+                        "PUT" => (
+                            StatusCode::CONFLICT,
+                            "<Error><Code>BucketAlreadyExists</Code></Error>".to_string(),
+                        ),
+                        _ => (StatusCode::NO_CONTENT, String::new()),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("test server should bind");
+        let addr = listener.local_addr().expect("listener should have address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("test server should serve")
+        });
+
+        let config_maps = Arc::new(Mutex::new(HashMap::<String, ConfigMap>::new()));
+        let store = config_maps.clone();
+        let kube_service = tower::service_fn(move |request: http::Request<KubeBody>| {
+            let store = store.clone();
+            async move {
+                let method = request.method().clone();
+                let path = request.uri().path().to_string();
+                let body = request
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("request body should read")
+                    .to_bytes();
+                let name = path.rsplit('/').next().unwrap_or_default().to_string();
+                let not_found = || {
+                    http::Response::builder()
+                        .status(404)
+                        .body(KubeBody::from(
+                            br#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}"#.to_vec(),
+                        ))
+                        .expect("response should build")
+                };
+                let json = |cm: &ConfigMap| {
+                    http::Response::builder()
+                        .body(KubeBody::from(
+                            serde_json::to_vec(cm).expect("ConfigMap should serialize"),
+                        ))
+                        .expect("response should build")
+                };
+                let response = match method.as_str() {
+                    "POST" => {
+                        let mut cm: ConfigMap =
+                            serde_json::from_slice(&body).expect("ConfigMap should parse");
+                        cm.metadata.resource_version = Some("1".to_string());
+                        let cm_name = cm.metadata.name.clone().expect("ConfigMap needs a name");
+                        store.lock().unwrap().insert(cm_name, cm.clone());
+                        json(&cm)
+                    }
+                    "PUT" => {
+                        let cm: ConfigMap =
+                            serde_json::from_slice(&body).expect("ConfigMap should parse");
+                        store.lock().unwrap().insert(name, cm.clone());
+                        json(&cm)
+                    }
+                    "GET" => match store.lock().unwrap().get(&name) {
+                        Some(cm) => json(cm),
+                        None => not_found(),
+                    },
+                    "DELETE" => match store.lock().unwrap().remove(&name) {
+                        Some(_) => http::Response::builder()
+                            .body(KubeBody::from(
+                                br#"{"kind":"Status","apiVersion":"v1","status":"Success"}"#
+                                    .to_vec(),
+                            ))
+                            .expect("response should build"),
+                        None => not_found(),
+                    },
+                    other => panic!("unexpected Kubernetes request: {other} {path}"),
+                };
+                Ok::<_, Infallible>(response)
+            }
+        });
+        let kube = Client::new(kube_service, "cosi-system");
+        let client =
+            RustfsAdminClient::new_with_base_url(format!("http://{addr}"), "access", "secret");
+        let p = params(&[]);
+
+        let err = create_bucket(&kube, &client, &p, "cosi-bucket")
+            .await
+            .expect_err("a bucket owned by another account must not be created");
+        assert!(matches!(err, BucketError::NameConflict { .. }));
+        assert!(
+            config_maps.lock().unwrap().is_empty(),
+            "the pending ownership proof must be removed"
+        );
+
+        delete_bucket(&kube, &client, &p, "cosi-bucket")
+            .await
+            .expect_err("deleting a bucket without a Ready proof must be refused");
+        assert_eq!(*s3_requests.lock().unwrap(), vec!["PUT".to_string()]);
+        server.abort();
+    }
 }

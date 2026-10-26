@@ -2582,7 +2582,10 @@ dependencies = [
 name = "rustfs-cosi-driver"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "hex",
+ "http",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "prost",
@@ -2598,6 +2601,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]
