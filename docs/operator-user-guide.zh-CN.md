@@ -906,7 +906,7 @@ Operator 可以在 Tenant workload Ready 后自动创建 RustFS policy、user、
 
 Bucket 版本控制和 Object Lock 采用声明式但保守的调和策略。`versioning: true` 启用版本控制。`versioning: false` 会让从未启用版本控制的 bucket 保持原状，或在版本控制已启用后请求 S3 `Suspended`；省略该字段时保持现状，除非 Object Lock 要求先启用版本控制。`objectLock: true` 会在版本控制启用后开启 Object Lock。Object Lock 不可关闭；当线上 bucket 已启用 Object Lock 时，Operator 会拒绝 `objectLock: false` 或暂停版本控制。`objectLockConfiguration` 管理默认保留规则：省略 `state` 等同于 `Present`，此时必须设置 `mode: Governance` 或 `Compliance` 以及 `days`；`state: Absent` 必须省略 `mode` 和 `days`，仅移除默认规则。完全省略 `objectLockConfiguration` 时，不管理已有默认保留规则。Operator 可以接管与声明完全相同的线上规则，但只有线上配置哈希仍与 status 中最后一次应用的配置一致时，才会替换或移除不同规则。默认保留策略只作用于之后创建的对象版本，不会追溯锁定已有版本。
 
-Bucket 默认加密通过 `encryption` 声明。`mode: SSE-S3` 写入 S3 `AES256`；`mode: SSE-KMS` 写入 `aws:kms`，可选 `kmsKeyId`（省略时 RustFS 使用默认 KMS key），并要求 Tenant 设置 `spec.encryption.enabled`。默认加密只作用于设置之后写入的对象，不会重新加密已有对象。`state: Absent`（不能包含 `mode` 和 `kmsKeyId`）表示移除该配置。Operator 可以接管与声明一致的线上配置，但只有线上配置哈希与 `status.provisioning.buckets` 中最后记录的配置一致时，才会替换或移除不同的配置。省略 `encryption` 时不会调用加密 API，也不会改动现有配置。
+Bucket 默认加密通过 `encryption` 声明。`mode: SSE-S3` 写入 S3 `AES256`，并要求 RustFS 具备 SSE-S3 密钥：Tenant 设置 `spec.encryption.enabled`，或在 `spec.env` 中提供 `RUSTFS_SSE_S3_MASTER_KEY`（base64 编码的 32 字节密钥，直接设置或来自 Secret key），Operator 会在应用 bucket 默认加密前校验该密钥。`mode: SSE-KMS` 写入 `aws:kms`，要求设置 `spec.encryption.enabled`，并使用 `kmsKeyId`；省略时使用 Tenant 的 `spec.encryption.defaultKeyId`。任一 key 变更时，Operator 会重新应用其拥有的配置。默认加密只作用于设置之后写入的对象，不会重新加密已有对象。`state: Absent`（不能包含 `mode` 和 `kmsKeyId`）表示移除该配置。Operator 可以接管与声明一致的线上配置，但只有线上配置哈希与 `status.provisioning.buckets` 中最后记录的配置一致时，才会替换或移除不同的配置。省略 `encryption` 时不会调用加密 API，也不会改动现有配置。
 
 每个 bucket 还可以通过 `lifecycle.state: Present` 声明一个或多个 S3 生命周期规则。当前 schema 支持按正整数天数过期对象、按正整数天数清理未完成的分片上传、通过 `transition` 在零天或更多天后迁移当前版本，以及通过 `noncurrentVersionTransition` 在零天或更多天后迁移非当前版本；每条规则必须有唯一 ID、`Enabled` 或 `Disabled` 状态，并显式指定 prefix filter（`prefix: ""` 表示全部对象）。`lifecycle.state: Absent` 表示请求删除，且不能包含规则。Operator 可以接管与声明完全相同的现有配置，但没有 `status.provisioning.buckets` 中匹配的所有权哈希时，不会覆盖或删除不同的现有配置。省略 `lifecycle` 时不会调用 Lifecycle API，也不会改动现有配置。
 
@@ -995,6 +995,15 @@ stringData:
   accesskey: appuser01
   secretkey: appuser01secret
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-sse-s3
+  namespace: storage
+stringData:
+  # openssl rand -base64 32
+  master-key: REPLACE_WITH_BASE64_32_BYTE_KEY
+---
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:
@@ -1008,6 +1017,12 @@ spec:
       servers: 1
       persistence:
         volumesPerServer: 4
+  env:
+    - name: RUSTFS_SSE_S3_MASTER_KEY
+      valueFrom:
+        secretKeyRef:
+          name: rustfs-sse-s3
+          key: master-key
   policies:
     - name: app-readwrite
       document:
