@@ -177,13 +177,14 @@ mod tenant_provisioning_crd_tests {
         );
         assert_eq!(
             tier["properties"]["name"]["x-kubernetes-validations"],
-            json!([
-                {"message": "tier name must be uppercase", "rule": "self == self.upperAscii()"},
-                {
-                    "message": "tier name must not be a reserved storage class",
-                    "rule": "self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'"
-                }
-            ])
+            json!([{
+                "message": "tier name must not be a reserved storage class",
+                "rule": "self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'"
+            }])
+        );
+        assert_eq!(
+            tier["properties"]["name"]["pattern"],
+            json!("^[A-Z0-9_-]+$")
         );
         assert_eq!(
             schema["properties"]["status"]["properties"]["provisioning"]["properties"]["tiers"]["items"]

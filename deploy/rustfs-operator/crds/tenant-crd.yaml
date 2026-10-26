@@ -3225,13 +3225,14 @@ spec:
                         prefix written by this Tenant before a restore. RustFS refuses such a prefix otherwise.
                       type: boolean
                     name:
-                      description: Tier name, referenced as `storageClass` by bucket lifecycle transitions.
+                      description: |-
+                        Tier name, referenced as `storageClass` by bucket lifecycle transitions. Uppercase ASCII
+                        letters, digits, `_` and `-` only: RustFS looks up a tier by the raw URL path segment.
                       maxLength: 253
                       minLength: 1
+                      pattern: ^[A-Z0-9_-]+$
                       type: string
                       x-kubernetes-validations:
-                      - message: tier name must be uppercase
-                        rule: self == self.upperAscii()
                       - message: tier name must not be a reserved storage class
                         rule: self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'
                     prefix:

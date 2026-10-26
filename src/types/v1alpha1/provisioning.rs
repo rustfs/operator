@@ -163,9 +163,12 @@ pub struct TierCredentialsSecretRef {
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisioningTier {
-    /// Tier name, referenced as `storageClass` by bucket lifecycle transitions.
-    #[schemars(length(min = 1, max = MAX_PROVISIONING_TIER_NAME_LENGTH))]
-    #[x_kube(validation = Rule::new("self == self.upperAscii()").message("tier name must be uppercase"))]
+    /// Tier name, referenced as `storageClass` by bucket lifecycle transitions. Uppercase ASCII
+    /// letters, digits, `_` and `-` only: RustFS looks up a tier by the raw URL path segment.
+    #[schemars(
+        length(min = 1, max = MAX_PROVISIONING_TIER_NAME_LENGTH),
+        regex(pattern = r"^[A-Z0-9_-]+$")
+    )]
     #[x_kube(validation = Rule::new("self != 'STANDARD' && self != 'REDUCED_REDUNDANCY'").message("tier name must not be a reserved storage class"))]
     pub name: String,
 
