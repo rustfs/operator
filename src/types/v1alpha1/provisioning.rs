@@ -292,12 +292,12 @@ pub struct BucketEncryptionSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<BucketEncryptionState>,
 
-    /// `SSE-S3` stores S3 `AES256`; `SSE-KMS` stores `aws:kms` and requires
-    /// `spec.encryption.enabled` on the Tenant.
+    /// `SSE-S3` stores S3 `AES256` and requires Tenant KMS or `RUSTFS_SSE_S3_MASTER_KEY` in
+    /// `spec.env`; `SSE-KMS` stores `aws:kms` and requires `spec.encryption.enabled` on the Tenant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<BucketEncryptionMode>,
 
-    /// KMS key for `SSE-KMS`. Omission uses the RustFS default KMS key.
+    /// KMS key for `SSE-KMS`. Omission uses the Tenant `spec.encryption.defaultKeyId`.
     #[schemars(
         length(min = 1, max = MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH),
         regex(pattern = r"^[A-Za-z0-9._:/+=@-]+$")

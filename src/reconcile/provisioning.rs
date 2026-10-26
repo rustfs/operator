@@ -46,8 +46,9 @@ use crate::types::v1alpha1::status::provisioning::{
     ProvisioningUserOwnershipStatus, ProvisioningUserStatus,
 };
 use crate::types::v1alpha1::tenant::Tenant;
+use base64::Engine as _;
 use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, EnvVarSource, Secret};
 use kube::Api;
 use kube::api::{Patch, PatchParams};
 use serde_json::Value;
@@ -58,6 +59,7 @@ use tracing::{info, warn};
 
 const CHECKPOINT_CONFLICT_RETRY: Duration = Duration::from_secs(2);
 const CHECKPOINT_TRANSIENT_RETRY: Duration = Duration::from_secs(10);
+const SSE_S3_MASTER_KEY_ENV: &str = "RUSTFS_SSE_S3_MASTER_KEY";
 
 pub(super) struct ProvisioningReconcileResult {
     pub status: ProvisioningStatus,
@@ -2468,7 +2470,7 @@ async fn reconcile_bucket(
     status.encryption_desired_hash = bucket
         .encryption
         .as_ref()
-        .and_then(bucket_encryption_desired_hash);
+        .and_then(|spec| bucket_encryption_desired_hash(run.tenant, spec));
     if status.state != ProvisioningItemState::Ready.as_str() {
         status.lifecycle_desired_hash = bucket.lifecycle.as_ref().and_then(lifecycle_desired_hash);
         return status;
@@ -3126,7 +3128,9 @@ async fn reconcile_bucket_encryption(
     let Some(spec) = bucket.encryption.as_ref() else {
         return status;
     };
-    let desired = match bucket_encryption_configuration(spec) {
+    let desired = match bucket_encryption_configuration(spec)
+        .and_then(|desired| resolve_bucket_encryption(run.tenant, desired))
+    {
         Ok(desired) => desired,
         Err(message) => {
             status.item = replace_bucket_item_state(
@@ -3142,22 +3146,12 @@ async fn reconcile_bucket_encryption(
     };
     if desired
         .as_ref()
-        .is_some_and(|desired| desired.algorithm == AdminEncryptionAlgorithm::AwsKms)
-        && !run
-            .tenant
-            .spec
-            .encryption
-            .as_ref()
-            .is_some_and(|encryption| encryption.enabled)
+        .is_some_and(|desired| desired.algorithm == AdminEncryptionAlgorithm::Aes256)
+        && let Err(error) = check_sse_s3_provider(run).await
     {
-        status.item = replace_bucket_item_state(
-            run,
-            previous,
-            &status.item,
-            ProvisioningItemState::Failed,
-            Reason::BucketEncryptionApplyFailed,
-            "SSE-KMS bucket encryption requires spec.encryption.enabled on the Tenant",
-        );
+        let mut item = run.item_from_spec_error(previous, &status.item.name, error);
+        copy_bucket_configuration_status(&mut item, &status.item);
+        status.item = item;
         return status;
     }
 
@@ -3220,9 +3214,7 @@ async fn reconcile_bucket_encryption(
         return status;
     };
 
-    if let Some(live) = live.as_ref()
-        && bucket_encryption_matches(&desired, live)
-    {
+    if live.as_ref() == Some(&desired) {
         status.encryption_last_applied_hash = live_hash;
         status.item.message = Some(append_bucket_message(
             &status.item,
@@ -3256,7 +3248,7 @@ async fn reconcile_bucket_encryption(
         return status;
     }
     let verified = match client.get_bucket_encryption(&bucket.name).await {
-        Ok(Some(verified)) if bucket_encryption_matches(&desired, &verified) => verified,
+        Ok(Some(verified)) if verified == desired => verified,
         Ok(_) => {
             status.item = replace_bucket_item_state(
                 run,
@@ -3280,7 +3272,6 @@ async fn reconcile_bucket_encryption(
             return status;
         }
     };
-    // Ownership is the verified live document: RustFS fills in the default KMS key for SSE-KMS.
     status.encryption_last_applied_hash = Some(hash_document(&verified.to_xml()));
     status.item.message = Some(append_bucket_message(
         &status.item,
@@ -3347,27 +3338,151 @@ fn is_valid_kms_key_id(key_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:/+=@-".contains(&byte))
 }
 
-fn bucket_encryption_desired_hash(spec: &BucketEncryptionSpec) -> Option<String> {
+/// SSE-KMS requires Tenant KMS. Without `kmsKeyId` it names the Tenant's `defaultKeyId`, the key
+/// RustFS records for such a request, so a changed default key is a spec change.
+fn resolve_bucket_encryption(
+    tenant: &Tenant,
+    desired: Option<AdminEncryptionConfiguration>,
+) -> Result<Option<AdminEncryptionConfiguration>, String> {
+    let Some(mut desired) = desired else {
+        return Ok(None);
+    };
+    if desired.algorithm != AdminEncryptionAlgorithm::AwsKms {
+        return Ok(Some(desired));
+    }
+    let Some(encryption) = tenant
+        .spec
+        .encryption
+        .as_ref()
+        .filter(|encryption| encryption.enabled)
+    else {
+        return Err(
+            "SSE-KMS bucket encryption requires spec.encryption.enabled on the Tenant".to_string(),
+        );
+    };
+    if desired.kms_master_key_id.is_none() {
+        let Some(default_key_id) = encryption
+            .default_key_id
+            .as_deref()
+            .filter(|key_id| !key_id.is_empty())
+        else {
+            return Err(
+                "SSE-KMS bucket encryption without kmsKeyId requires spec.encryption.defaultKeyId on the Tenant"
+                    .to_string(),
+            );
+        };
+        if !is_valid_kms_key_id(default_key_id) {
+            return Err(format!(
+                "Tenant spec.encryption.defaultKeyId must contain between 1 and {MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH} characters from [A-Za-z0-9._:/+=@-] to be used as a bucket default"
+            ));
+        }
+        desired.kms_master_key_id = Some(default_key_id.to_string());
+    }
+    Ok(Some(desired))
+}
+
+/// Without Tenant KMS, RustFS encrypts SSE-S3 objects with `RUSTFS_SSE_S3_MASTER_KEY` and
+/// rejects every upload under an SSE-S3 bucket default when that key is missing or invalid.
+async fn check_sse_s3_provider(run: &ProvisioningRun<'_>) -> Result<(), SpecLoadError> {
+    if run
+        .tenant
+        .spec
+        .encryption
+        .as_ref()
+        .is_some_and(|encryption| encryption.enabled)
+    {
+        return Ok(());
+    }
+    let invalid = |message: String| SpecLoadError {
+        reason: Reason::BucketEncryptionApplyFailed,
+        message,
+        transient: false,
+    };
+    let Some(env) = run
+        .tenant
+        .spec
+        .env
+        .iter()
+        .find(|env| env.name == SSE_S3_MASTER_KEY_ENV)
+    else {
+        return Err(invalid(format!(
+            "SSE-S3 bucket encryption requires spec.encryption.enabled or {SSE_S3_MASTER_KEY_ENV} in spec.env on the Tenant"
+        )));
+    };
+    let value = match (env.value.as_deref(), env.value_from.as_ref()) {
+        (Some(value), None) => value.to_string(),
+        (
+            None,
+            Some(EnvVarSource {
+                secret_key_ref: Some(selector),
+                ..
+            }),
+        ) => read_sse_s3_master_key_secret(run, &selector.name, &selector.key).await?,
+        _ => {
+            return Err(invalid(format!(
+                "{SSE_S3_MASTER_KEY_ENV} in spec.env must be set by value or from a Secret key"
+            )));
+        }
+    };
+    match base64::engine::general_purpose::STANDARD.decode(value.trim()) {
+        Ok(key) if key.len() == 32 => Ok(()),
+        _ => Err(invalid(format!(
+            "{SSE_S3_MASTER_KEY_ENV} must be a base64-encoded 32-byte key for SSE-S3 bucket encryption"
+        ))),
+    }
+}
+
+async fn read_sse_s3_master_key_secret(
+    run: &ProvisioningRun<'_>,
+    secret_name: &str,
+    key: &str,
+) -> Result<String, SpecLoadError> {
+    let invalid = |message: String| SpecLoadError {
+        reason: Reason::BucketEncryptionApplyFailed,
+        message,
+        transient: false,
+    };
+    let secret: Secret = run
+        .ctx
+        .get(secret_name, run.namespace)
+        .await
+        .map_err(|error| {
+            if context::is_kube_not_found(&error) {
+                invalid(format!(
+                    "{SSE_S3_MASTER_KEY_ENV} Secret '{secret_name}' was not found"
+                ))
+            } else {
+                SpecLoadError {
+                    reason: Reason::BucketEncryptionApplyFailed,
+                    message: format!(
+                        "failed to read {SSE_S3_MASTER_KEY_ENV} Secret '{secret_name}': {error}"
+                    ),
+                    transient: context::is_transient_kube_error(&error),
+                }
+            }
+        })?;
+    let raw = secret
+        .data
+        .as_ref()
+        .and_then(|data| data.get(key))
+        .ok_or_else(|| {
+            invalid(format!(
+                "{SSE_S3_MASTER_KEY_ENV} Secret '{secret_name}' has no key '{key}'"
+            ))
+        })?;
+    String::from_utf8(raw.0.clone()).map_err(|_| {
+        invalid(format!(
+            "{SSE_S3_MASTER_KEY_ENV} Secret '{secret_name}' key '{key}' must be valid UTF-8"
+        ))
+    })
+}
+
+fn bucket_encryption_desired_hash(tenant: &Tenant, spec: &BucketEncryptionSpec) -> Option<String> {
     bucket_encryption_configuration(spec)
+        .and_then(|desired| resolve_bucket_encryption(tenant, desired))
         .ok()
         .flatten()
         .map(|configuration| hash_document(&configuration.to_xml()))
-}
-
-/// SSE-KMS without `kmsKeyId` accepts whatever default key RustFS recorded.
-fn bucket_encryption_matches(
-    desired: &AdminEncryptionConfiguration,
-    live: &AdminEncryptionConfiguration,
-) -> bool {
-    desired.algorithm == live.algorithm
-        && desired.bucket_key_enabled == live.bucket_key_enabled
-        && match desired.kms_master_key_id.as_deref() {
-            Some(key_id) => live.kms_master_key_id.as_deref() == Some(key_id),
-            None => {
-                desired.algorithm == AdminEncryptionAlgorithm::AwsKms
-                    || live.kms_master_key_id.is_none()
-            }
-        }
 }
 
 async fn reconcile_bucket_lifecycle(
@@ -4505,6 +4620,7 @@ mod tests {
     };
     use http_body_util::BodyExt;
     use k8s_openapi::ByteString;
+    use k8s_openapi::api::core::v1::{EnvVar, SecretKeySelector};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::{Client, client::Body as KubeBody};
     use std::convert::Infallible;
@@ -7038,6 +7154,94 @@ mod tests {
         .expect("encryption bucket should deserialize")
     }
 
+    // base64 of the 32 bytes "0123456789abcdef0123456789abcdef".
+    const SSE_S3_TEST_MASTER_KEY: &str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+
+    fn sse_s3_master_key_env(value: Option<&str>, secret_key: Option<&str>) -> EnvVar {
+        EnvVar {
+            name: "RUSTFS_SSE_S3_MASTER_KEY".to_string(),
+            value: value.map(str::to_string),
+            value_from: secret_key.map(|key| EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: "sse-s3".to_string(),
+                    key: key.to_string(),
+                    optional: Some(false),
+                }),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn sse_s3_tenant() -> Tenant {
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let mut tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        tenant
+            .spec
+            .env
+            .push(sse_s3_master_key_env(Some(SSE_S3_TEST_MASTER_KEY), None));
+        tenant
+    }
+
+    fn kms_tenant(default_key_id: Option<&str>) -> Tenant {
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let mut tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        tenant.spec.encryption = Some(crate::types::v1alpha1::encryption::EncryptionConfig {
+            enabled: true,
+            default_key_id: default_key_id.map(str::to_string),
+            ..Default::default()
+        });
+        tenant
+    }
+
+    fn sse_kms(key_id: &str) -> AdminEncryptionConfiguration {
+        AdminEncryptionConfiguration {
+            algorithm: AdminEncryptionAlgorithm::AwsKms,
+            kms_master_key_id: Some(key_id.to_string()),
+            bucket_key_enabled: false,
+        }
+    }
+
+    fn sse_s3_secret_kube_context(key: &'static str, value: &'static str) -> Context {
+        let kube_service = service_fn(move |request: http::Request<KubeBody>| async move {
+            assert_eq!(request.method(), http::Method::GET);
+            assert_eq!(
+                request.uri().path(),
+                "/api/v1/namespaces/storage/secrets/sse-s3"
+            );
+            let secret = Secret {
+                metadata: ObjectMeta {
+                    name: Some("sse-s3".to_string()),
+                    namespace: Some("storage".to_string()),
+                    ..Default::default()
+                },
+                data: Some(BTreeMap::from([(
+                    key.to_string(),
+                    ByteString(value.as_bytes().to_vec()),
+                )])),
+                ..Default::default()
+            };
+            Ok::<_, Infallible>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(KubeBody::from(
+                        serde_json::to_vec(&secret).expect("Secret should serialize"),
+                    ))
+                    .expect("response should build"),
+            )
+        });
+        Context::new(Client::new(kube_service, "default"))
+    }
+
+    async fn encryption_requests(capture: &BucketControlCapture) -> usize {
+        capture
+            .requests
+            .lock()
+            .await
+            .iter()
+            .filter(|request| request.ends_with("encryption="))
+            .count()
+    }
+
     fn previous_encryption_owner(hash: String) -> ProvisioningBucketStatus {
         let mut previous = ProvisioningBucketStatus::new(ProvisioningItemStatus::new(
             "secure-bucket",
@@ -7063,8 +7267,7 @@ mod tests {
         let capture = BucketControlCapture::default();
         let (client, server) = bucket_control_test_client(capture.clone()).await;
         let ctx = empty_kube_context();
-        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
-        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let tenant = sse_s3_tenant();
         let mut run = empty_run(&ctx, &tenant);
 
         let item = reconcile_bucket(
@@ -7108,8 +7311,7 @@ mod tests {
         };
         let (client, server) = bucket_control_test_client(capture.clone()).await;
         let ctx = empty_kube_context();
-        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
-        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let tenant = sse_s3_tenant();
         let mut run = empty_run(&ctx, &tenant);
 
         let item = reconcile_bucket(
@@ -7177,8 +7379,7 @@ mod tests {
             };
             let (client, server) = bucket_control_test_client(capture.clone()).await;
             let ctx = empty_kube_context();
-            let user = provisioning_user("app-user", "app-user-secret", "readwrite");
-            let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+            let tenant = sse_s3_tenant();
             let mut run = empty_run(&ctx, &tenant);
 
             let item = reconcile_bucket(&mut run, &client, &encryption_bucket(spec.clone())).await;
@@ -7209,12 +7410,7 @@ mod tests {
         };
         let (client, server) = bucket_control_test_client(capture.clone()).await;
         let ctx = empty_kube_context();
-        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
-        let mut tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
-        tenant.spec.encryption = Some(crate::types::v1alpha1::encryption::EncryptionConfig {
-            enabled: true,
-            ..Default::default()
-        });
+        let tenant = kms_tenant(Some("rustfs-default-key"));
         let mut run = empty_run(&ctx, &tenant);
         run.previous
             .buckets
@@ -7241,13 +7437,13 @@ mod tests {
             item.encryption_last_applied_hash,
             Some(hash_document(&applied.to_xml()))
         );
-        assert_ne!(
+        assert_eq!(
             item.encryption_desired_hash,
             item.encryption_last_applied_hash
         );
         drop(run);
 
-        // The RustFS-chosen default key is adopted on the next pass without another write.
+        // The default key is not written again on the next pass.
         let mut run = empty_run(&ctx, &tenant);
         run.previous.buckets.push(item.clone());
         let again = reconcile_bucket(
@@ -7304,8 +7500,7 @@ mod tests {
         };
         let (client, server) = bucket_control_test_client(capture.clone()).await;
         let ctx = empty_kube_context();
-        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
-        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let tenant = sse_s3_tenant();
         let mut run = empty_run(&ctx, &tenant);
         run.previous
             .buckets
@@ -7374,8 +7569,7 @@ mod tests {
         };
         let (client, server) = bucket_control_test_client(capture.clone()).await;
         let ctx = empty_kube_context();
-        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
-        let tenant = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let tenant = sse_s3_tenant();
         let mut run = empty_run(&ctx, &tenant);
 
         let item = reconcile_bucket(
@@ -7388,6 +7582,246 @@ mod tests {
         assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
         assert_eq!(item.reason, Reason::BucketEncryptionApplyFailed.as_str());
         assert_eq!(item.encryption_last_applied_hash, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sse_s3_bucket_encryption_requires_an_encryption_provider() {
+        let user = provisioning_user("app-user", "app-user-secret", "readwrite");
+        let without_provider = provisioning_test_tenant(user, ProvisioningStatus::default());
+        let mut invalid_key = sse_s3_tenant();
+        invalid_key.spec.env = vec![sse_s3_master_key_env(Some("c2hvcnQ="), None)];
+        for (tenant, expected) in [
+            (
+                without_provider,
+                "requires spec.encryption.enabled or RUSTFS_SSE_S3_MASTER_KEY",
+            ),
+            (invalid_key, "must be a base64-encoded 32-byte key"),
+        ] {
+            let capture = BucketControlCapture {
+                existing: true,
+                ..Default::default()
+            };
+            let (client, server) = bucket_control_test_client(capture.clone()).await;
+            let ctx = empty_kube_context();
+            let mut run = empty_run(&ctx, &tenant);
+
+            let item = reconcile_bucket(
+                &mut run,
+                &client,
+                &encryption_bucket(serde_json::json!({"mode": "SSE-S3"})),
+            )
+            .await;
+
+            assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+            assert_eq!(item.reason, Reason::BucketEncryptionApplyFailed.as_str());
+            assert!(
+                item.message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(expected)),
+                "{:?}",
+                item.message
+            );
+            assert_eq!(encryption_requests(&capture).await, 0);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_s3_bucket_encryption_accepts_tenant_kms_or_a_secret_master_key() {
+        let mut from_secret = sse_s3_tenant();
+        from_secret.spec.env = vec![sse_s3_master_key_env(None, Some("master-key"))];
+        for (tenant, ctx) in [
+            (kms_tenant(None), empty_kube_context()),
+            (
+                from_secret,
+                sse_s3_secret_kube_context("master-key", SSE_S3_TEST_MASTER_KEY),
+            ),
+        ] {
+            let capture = BucketControlCapture {
+                existing: true,
+                ..Default::default()
+            };
+            let (client, server) = bucket_control_test_client(capture.clone()).await;
+            let mut run = empty_run(&ctx, &tenant);
+
+            let item = reconcile_bucket(
+                &mut run,
+                &client,
+                &encryption_bucket(serde_json::json!({"mode": "SSE-S3"})),
+            )
+            .await;
+
+            assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+            assert_eq!(capture.encryption.lock().await.clone(), Some(sse_s3()));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_s3_master_key_secret_without_the_key_fails_before_any_call() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = sse_s3_secret_kube_context("other-key", SSE_S3_TEST_MASTER_KEY);
+        let mut tenant = sse_s3_tenant();
+        tenant.spec.env = vec![sse_s3_master_key_env(None, Some("master-key"))];
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-S3"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("has no key 'master-key'"))
+        );
+        assert_eq!(encryption_requests(&capture).await, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn removing_an_explicit_kms_key_applies_the_tenant_default_key() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(sse_kms("old-explicit-key")))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let tenant = kms_tenant(Some("rustfs-default-key"));
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous
+            .buckets
+            .push(previous_encryption_owner(hash_document(
+                &sse_kms("old-explicit-key").to_xml(),
+            )));
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-KMS"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(
+            capture.encryption.lock().await.clone(),
+            Some(sse_kms("rustfs-default-key"))
+        );
+        let put_requests = capture.put_requests.lock().await;
+        let put = put_requests
+            .iter()
+            .find(|request| request.query == "encryption=")
+            .expect("encryption PUT is captured");
+        assert_eq!(put.body, sse_kms("rustfs-default-key").to_xml());
+        assert_eq!(
+            item.encryption_last_applied_hash,
+            Some(hash_document(&sse_kms("rustfs-default-key").to_xml()))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tenant_default_kms_key_change_is_applied_to_an_owned_bucket() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(sse_kms("old-default-key")))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let tenant = kms_tenant(Some("new-default-key"));
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous
+            .buckets
+            .push(previous_encryption_owner(hash_document(
+                &sse_kms("old-default-key").to_xml(),
+            )));
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-KMS"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(
+            capture.encryption.lock().await.clone(),
+            Some(sse_kms("new-default-key"))
+        );
+        assert_eq!(requests_for(&capture, "PUT encryption=").await, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn external_kms_key_change_is_a_conflict_that_keeps_the_ownership_record() {
+        let capture = BucketControlCapture {
+            existing: true,
+            encryption: Arc::new(Mutex::new(Some(sse_kms("foreign-key")))),
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let tenant = kms_tenant(Some("rustfs-default-key"));
+        let owned = hash_document(&sse_kms("rustfs-default-key").to_xml());
+        let mut run = empty_run(&ctx, &tenant);
+        run.previous
+            .buckets
+            .push(previous_encryption_owner(owned.clone()));
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-KMS"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketEncryptionConflict.as_str());
+        assert_eq!(item.encryption_last_applied_hash, Some(owned));
+        assert_eq!(requests_for(&capture, "PUT encryption=").await, 0);
+        assert_eq!(
+            capture.encryption.lock().await.clone(),
+            Some(sse_kms("foreign-key"))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sse_kms_without_a_key_requires_the_tenant_default_key() {
+        let capture = BucketControlCapture {
+            existing: true,
+            ..Default::default()
+        };
+        let (client, server) = bucket_control_test_client(capture.clone()).await;
+        let ctx = empty_kube_context();
+        let tenant = kms_tenant(None);
+        let mut run = empty_run(&ctx, &tenant);
+
+        let item = reconcile_bucket(
+            &mut run,
+            &client,
+            &encryption_bucket(serde_json::json!({"mode": "SSE-KMS"})),
+        )
+        .await;
+
+        assert_eq!(item.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(item.reason, Reason::BucketEncryptionApplyFailed.as_str());
+        assert!(
+            item.message
+                .as_deref()
+                .is_some_and(|message| message.contains("spec.encryption.defaultKeyId"))
+        );
+        assert_eq!(encryption_requests(&capture).await, 0);
         server.abort();
     }
 

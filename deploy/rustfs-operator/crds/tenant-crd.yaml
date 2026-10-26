@@ -1242,7 +1242,7 @@ spec:
                       nullable: true
                       properties:
                         kmsKeyId:
-                          description: KMS key for `SSE-KMS`. Omission uses the RustFS default KMS key.
+                          description: KMS key for `SSE-KMS`. Omission uses the Tenant `spec.encryption.defaultKeyId`.
                           maxLength: 1024
                           minLength: 1
                           nullable: true
@@ -1250,8 +1250,8 @@ spec:
                           type: string
                         mode:
                           description: |-
-                            `SSE-S3` stores S3 `AES256`; `SSE-KMS` stores `aws:kms` and requires
-                            `spec.encryption.enabled` on the Tenant.
+                            `SSE-S3` stores S3 `AES256` and requires Tenant KMS or `RUSTFS_SSE_S3_MASTER_KEY` in
+                            `spec.env`; `SSE-KMS` stores `aws:kms` and requires `spec.encryption.enabled` on the Tenant.
                           enum:
                           - SSE-S3
                           - SSE-KMS

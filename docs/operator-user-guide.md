@@ -962,7 +962,7 @@ The operator can create RustFS policies, users, remote tiers, and buckets after 
 
 Bucket versioning and Object Lock are declarative but conservative. `versioning: true` enables versioning. `versioning: false` keeps a never-versioned bucket unchanged or requests S3 `Suspended` after versioning has been enabled; omitting the field leaves versioning unmanaged unless Object Lock requires it. `objectLock: true` enables Object Lock after versioning is enabled. Object Lock cannot be disabled, and the Operator refuses `objectLock: false` or versioning suspension when the live bucket has Object Lock enabled. `objectLockConfiguration` manages the default retention rule: omit `state` for `Present`, specify `mode: Governance` or `Compliance` with `days`, or use `state: Absent` without `mode` and `days` to remove only the default rule. Omitting the entire field leaves a live default-retention rule unmanaged. The Operator adopts an identical live rule, but does not replace or remove a different rule unless its hash matches the last configuration recorded in status. Default retention applies to new object versions; it does not retroactively lock existing versions.
 
-Bucket default encryption is declared with `encryption`. `mode: SSE-S3` stores S3 `AES256`; `mode: SSE-KMS` stores `aws:kms` with an optional `kmsKeyId` (RustFS uses its default KMS key when omitted) and requires `spec.encryption.enabled` on the Tenant. Default encryption applies to objects written after it is set; it does not re-encrypt existing objects. `state: Absent` without `mode` and `kmsKeyId` removes the configuration. The Operator adopts a matching live configuration, but never replaces or removes a different one unless its hash matches the configuration last recorded in `status.provisioning.buckets`. Omitting `encryption` performs no encryption API calls and leaves the live configuration untouched.
+Bucket default encryption is declared with `encryption`. `mode: SSE-S3` stores S3 `AES256` and requires an SSE-S3 key for RustFS: either `spec.encryption.enabled` on the Tenant, or `RUSTFS_SSE_S3_MASTER_KEY` in `spec.env`, a base64-encoded 32-byte key set by value or from a Secret key, which the Operator validates before applying the bucket default. `mode: SSE-KMS` stores `aws:kms`, requires `spec.encryption.enabled`, and uses `kmsKeyId` or, when it is omitted, the Tenant `spec.encryption.defaultKeyId`; changing either key re-applies an owned configuration. Default encryption applies to objects written after it is set; it does not re-encrypt existing objects. `state: Absent` without `mode` and `kmsKeyId` removes the configuration. The Operator adopts a matching live configuration, but never replaces or removes a different one unless its hash matches the configuration last recorded in `status.provisioning.buckets`. Omitting `encryption` performs no encryption API calls and leaves the live configuration untouched.
 
 Each bucket may also declare `lifecycle.state: Present` with one or more S3 lifecycle rules. The current schema supports expiration after a positive number of days, aborting incomplete multipart uploads after a positive number of days, `transition` of current versions after zero or more days, and `noncurrentVersionTransition` of noncurrent versions after zero or more days; every rule has a unique ID, an `Enabled` or `Disabled` status, and an explicit prefix filter (use `prefix: ""` for all objects). `lifecycle.state: Absent` requests deletion and cannot include rules. The Operator adopts an identical live configuration, but never replaces or deletes a different configuration without a matching ownership hash in `status.provisioning.buckets`. Omitting `lifecycle` performs no lifecycle API calls and leaves the live configuration untouched.
 
@@ -1051,6 +1051,15 @@ stringData:
   accesskey: appuser01
   secretkey: appuser01secret
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rustfs-sse-s3
+  namespace: storage
+stringData:
+  # openssl rand -base64 32
+  master-key: REPLACE_WITH_BASE64_32_BYTE_KEY
+---
 apiVersion: rustfs.com/v1alpha1
 kind: Tenant
 metadata:
@@ -1064,6 +1073,12 @@ spec:
       servers: 1
       persistence:
         volumesPerServer: 4
+  env:
+    - name: RUSTFS_SSE_S3_MASTER_KEY
+      valueFrom:
+        secretKeyRef:
+          name: rustfs-sse-s3
+          key: master-key
   policies:
     - name: app-readwrite
       document:
