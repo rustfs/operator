@@ -2365,13 +2365,12 @@ fn validate_tier_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("tier name must not be empty".to_string());
     }
-    if !is_valid_xml_text(name) {
+    if !name.bytes().all(|byte| {
+        byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+    }) {
         return Err(format!(
-            "tier name '{name}' contains characters that cannot be used as an S3 storage class"
+            "tier name '{name}' must contain only uppercase ASCII letters, digits, '_' and '-'"
         ));
-    }
-    if name != name.to_uppercase() {
-        return Err(format!("tier name '{name}' must be uppercase"));
     }
     if name.eq_ignore_ascii_case("STANDARD") || name.eq_ignore_ascii_case("REDUCED_REDUNDANCY") {
         return Err(format!(
@@ -2419,6 +2418,8 @@ async fn load_tier_secret(
     })
 }
 
+const MIN_TIER_CREDENTIAL_LENGTH: usize = 8;
+
 fn read_tier_secret_value(
     data: &BTreeMap<String, ByteString>,
     key: &'static str,
@@ -2432,6 +2433,11 @@ fn read_tier_secret_value(
     let value = value.trim();
     if value.is_empty() {
         return Err(format!("tier Secret '{secret_name}' key '{key}' is empty"));
+    }
+    if value.len() < MIN_TIER_CREDENTIAL_LENGTH {
+        return Err(format!(
+            "tier Secret '{secret_name}' key '{key}' must be at least {MIN_TIER_CREDENTIAL_LENGTH} characters"
+        ));
     }
     Ok(value.to_string())
 }
@@ -3298,6 +3304,8 @@ async fn reconcile_bucket_lifecycle(
 /// Tenant is provisioned. RustFS rejects a lifecycle that references an unknown tier with a
 /// generic 400, which would leave the bucket `Failed` until the spec changes, so a missing tier
 /// is reported as `Pending` and retried instead.
+/// A referenced tier declared in `spec.tiers` must also be `Ready` in the current run; its
+/// failure or pending state is propagated to the bucket before any lifecycle write.
 async fn lifecycle_tiers_pending(
     run: &mut ProvisioningRun<'_>,
     client: &RustfsAdminClient,
@@ -3321,6 +3329,52 @@ async fn lifecycle_tiers_pending(
         .collect::<BTreeSet<_>>();
     if referenced.is_empty() {
         return None;
+    }
+
+    // A tier declared in spec.tiers must be Ready in this run: a live tier with the same name
+    // may point at a different remote destination than the one the Tenant declares.
+    let blocked = referenced
+        .iter()
+        .filter_map(|name| {
+            run.status
+                .tiers
+                .iter()
+                .find(|tier| tier.name == *name)
+                .filter(|tier| tier.state != ProvisioningItemState::Ready.as_str())
+        })
+        .map(|tier| (tier.name.clone(), tier.state.clone(), tier.reason.clone()))
+        .collect::<Vec<_>>();
+    if !blocked.is_empty() {
+        let failed = blocked
+            .iter()
+            .any(|(_, state, _)| state == ProvisioningItemState::Failed.as_str());
+        let message = format!(
+            "bucket lifecycle references declared tier(s) that are not Ready: {}",
+            blocked
+                .iter()
+                .map(|(name, state, reason)| format!("{name} ({state}: {reason})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if failed {
+            return Some(replace_bucket_item_state(
+                run,
+                previous,
+                base_item,
+                ProvisioningItemState::Failed,
+                Reason::BucketLifecycleApplyFailed,
+                message,
+            ));
+        }
+        run.request_retry(message.clone());
+        return Some(replace_bucket_item_state(
+            run,
+            previous,
+            base_item,
+            ProvisioningItemState::Pending,
+            Reason::ProvisioningPending,
+            message,
+        ));
     }
 
     let registered = match client.list_tier_names().await {
@@ -8210,8 +8264,17 @@ mod tests {
     #[test]
     fn tier_names_follow_rustfs_rules() {
         assert!(validate_tier_name("COLD_1").is_ok());
-        assert!(validate_tier_name("ÄRCHIV").is_ok());
-        for name in ["", "Cold", "STANDARD", "REDUCED_REDUNDANCY", "BAD\u{1}"] {
+        assert!(validate_tier_name("STORJ-2").is_ok());
+        for name in [
+            "",
+            "Cold",
+            "STANDARD",
+            "REDUCED_REDUNDANCY",
+            "BAD\u{1}",
+            "ÄRCHIV",
+            "COLD TIER",
+            "COLD/1",
+        ] {
             assert!(
                 validate_tier_name(name).is_err(),
                 "{name:?} must be rejected"
@@ -8222,14 +8285,22 @@ mod tests {
     #[test]
     fn tier_secret_values_are_trimmed_and_required() {
         let data = BTreeMap::from([
-            ("accesskey".to_string(), ByteString(b" key \n".to_vec())),
+            (
+                "accesskey".to_string(),
+                ByteString(b" 8charkey \n".to_vec()),
+            ),
             ("secretkey".to_string(), ByteString(b"  ".to_vec())),
             ("binary".to_string(), ByteString(vec![0xff])),
+            ("short".to_string(), ByteString(b" 7-chars\n".to_vec())),
         ]);
 
         assert_eq!(
             read_tier_secret_value(&data, "accesskey", "cold-tier").as_deref(),
-            Ok("key")
+            Ok("8charkey")
+        );
+        assert!(
+            read_tier_secret_value(&data, "short", "cold-tier")
+                .is_err_and(|message| message.contains("at least 8 characters"))
         );
         assert!(
             read_tier_secret_value(&data, "secretkey", "cold-tier")
@@ -8298,6 +8369,88 @@ mod tests {
         assert_eq!(bucket.state, ProvisioningItemState::Ready.as_str());
         assert_eq!(lifecycle.put_count.load(Ordering::SeqCst), 1);
         assert!(run.retry.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn conflicting_declared_tier_blocks_the_bucket_lifecycle() {
+        let capture = TierCapture::default();
+        *capture.tiers.lock().await = live_cold_tier("another-tenant/", "tier-access");
+        let lifecycle = LifecycleCapture {
+            tiers: capture.tiers.clone(),
+            ..Default::default()
+        };
+        let (client, server) = tier_test_client(capture.clone(), Some(lifecycle.clone())).await;
+        let ctx = tier_secret_kube_context("7");
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+
+        reconcile_tiers(&mut run, &client).await;
+        let bucket =
+            reconcile_bucket(&mut run, &client, &transition_lifecycle_bucket(0, "COLD")).await;
+
+        assert_eq!(run.status.tiers[0].reason, Reason::TierConflict.as_str());
+        assert!(capture.adds.lock().await.is_empty());
+        assert!(capture.edits.lock().await.is_empty());
+        assert_eq!(bucket.state, ProvisioningItemState::Failed.as_str());
+        assert_eq!(bucket.reason, Reason::BucketLifecycleApplyFailed.as_str());
+        assert!(
+            bucket
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("COLD (Failed: TierConflict)"))
+        );
+        assert_eq!(lifecycle.put_count.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn pending_declared_tier_keeps_the_bucket_lifecycle_pending() {
+        let capture = TierCapture::default();
+        capture.list_status.store(503, Ordering::SeqCst);
+        let lifecycle = LifecycleCapture {
+            tiers: capture.tiers.clone(),
+            ..Default::default()
+        };
+        let (client, server) = tier_test_client(capture.clone(), Some(lifecycle.clone())).await;
+        let ctx = tier_secret_kube_context("7");
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+
+        reconcile_tiers(&mut run, &client).await;
+        let bucket =
+            reconcile_bucket(&mut run, &client, &transition_lifecycle_bucket(1, "COLD")).await;
+
+        assert_eq!(
+            run.status.tiers[0].state,
+            ProvisioningItemState::Pending.as_str()
+        );
+        assert_eq!(bucket.state, ProvisioningItemState::Pending.as_str());
+        assert_eq!(bucket.reason, Reason::ProvisioningPending.as_str());
+        assert_eq!(lifecycle.put_count.load(Ordering::SeqCst), 0);
+        assert!(run.retry.is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn undeclared_tier_still_only_needs_to_be_registered() {
+        let capture = TierCapture::default();
+        *capture.tiers.lock().await = r#"[{"type":"s3","s3":{"name":"WARM"}}]"#.to_string();
+        let lifecycle = LifecycleCapture {
+            tiers: capture.tiers.clone(),
+            ..Default::default()
+        };
+        let (client, server) = tier_test_client(capture.clone(), Some(lifecycle.clone())).await;
+        let ctx = tier_secret_kube_context("7");
+        let tenant = tier_test_tenant(None);
+        let mut run = tier_run(&ctx, &tenant);
+
+        reconcile_tiers(&mut run, &client).await;
+        let bucket =
+            reconcile_bucket(&mut run, &client, &transition_lifecycle_bucket(1, "WARM")).await;
+
+        assert_eq!(bucket.state, ProvisioningItemState::Ready.as_str());
+        assert_eq!(lifecycle.put_count.load(Ordering::SeqCst), 1);
         server.abort();
     }
 
