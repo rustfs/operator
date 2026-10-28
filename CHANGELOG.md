@@ -42,6 +42,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 - Tenant `spec.tiers` for declarative S3, RustFS, and MinIO remote tiers with Secret-sourced
   credentials, rotation on Secret updates, and conflict reporting for immutable tier settings.
 - Declarative Tenant bucket versioning and Object Lock default retention with drift-aware ownership.
+- Declarative default bucket encryption (`SSE-S3` or `SSE-KMS`) with drift-aware ownership,
+  explicit removal, and validation of the Tenant SSE-S3 master key or KMS default key.
 - Helm chart `cosiDriver.enabled` to deploy the RustFS COSI (`rustfs.objectstorage.k8s.io`)
   driver alongside the upstream provisioner sidecar, with dedicated ServiceAccount/RBAC.
 - Seven built-in RustFS Grafana dashboards, published by default as sidecar-discoverable

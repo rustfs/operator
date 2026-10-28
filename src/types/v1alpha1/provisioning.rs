@@ -30,6 +30,7 @@ pub(crate) const MAX_BUCKET_NAME_LENGTH: u32 = 63;
 pub(crate) const MAX_BUCKET_LIFECYCLE_RULES: u32 = 1_000;
 pub(crate) const MAX_BUCKET_LIFECYCLE_RULE_ID_LENGTH: u32 = 255;
 pub(crate) const MAX_BUCKET_OBJECT_LOCK_RETENTION_DAYS: u32 = 36_500;
+pub(crate) const MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH: u32 = 1024;
 pub(crate) const MAX_PROVISIONING_TIER_NAME_LENGTH: u32 = 253;
 pub(crate) const MAX_TIER_CREDENTIALS_SECRET_NAME_LENGTH: u32 = 253;
 
@@ -266,6 +267,51 @@ impl BucketObjectLockConfiguration {
     }
 }
 
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum BucketEncryptionState {
+    Present,
+    Absent,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, ToSchema, PartialEq, Eq)]
+pub enum BucketEncryptionMode {
+    #[serde(rename = "SSE-S3")]
+    SseS3,
+    #[serde(rename = "SSE-KMS")]
+    SseKms,
+}
+
+/// Default server-side encryption applied by RustFS to new objects in the bucket.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("(!has(self.state) || self.state == 'Present') ? has(self.mode) : !has(self.mode) && !has(self.kmsKeyId)").message("Present bucket encryption requires mode; Absent forbids mode and kmsKeyId"))]
+#[x_kube(validation = Rule::new("!has(self.kmsKeyId) || (has(self.mode) && self.mode == 'SSE-KMS')").message("kmsKeyId requires mode SSE-KMS"))]
+pub struct BucketEncryptionSpec {
+    /// Omission is equivalent to `Present`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<BucketEncryptionState>,
+
+    /// `SSE-S3` stores S3 `AES256` and requires Tenant KMS or `RUSTFS_SSE_S3_MASTER_KEY` in
+    /// `spec.env`; `SSE-KMS` stores `aws:kms` and requires `spec.encryption.enabled` on the Tenant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<BucketEncryptionMode>,
+
+    /// KMS key for `SSE-KMS`. Omission uses the Tenant `spec.encryption.defaultKeyId`.
+    #[schemars(
+        length(min = 1, max = MAX_BUCKET_ENCRYPTION_KMS_KEY_ID_LENGTH),
+        regex(pattern = r"^[A-Za-z0-9._:/+=@-]+$")
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kms_key_id: Option<String>,
+}
+
+impl BucketEncryptionSpec {
+    pub(crate) fn state(&self) -> BucketEncryptionState {
+        self.state.unwrap_or(BucketEncryptionState::Present)
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, ToSchema, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BucketLifecycleRuleFilter {
@@ -395,6 +441,11 @@ pub struct ProvisioningBucket {
     /// `anonymous`; legacy `Private` plus `policy` configurations keep the custom policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyDocumentSource>,
+
+    /// Default bucket encryption. Omission leaves the live configuration unmanaged; `Absent`
+    /// removes only a configuration previously owned by the operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<BucketEncryptionSpec>,
 
     /// Declarative S3 bucket lifecycle configuration. Omission leaves the live lifecycle
     /// configuration unmanaged; `Absent` removes only a configuration previously owned by the
