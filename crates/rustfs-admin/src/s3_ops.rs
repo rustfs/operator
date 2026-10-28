@@ -807,6 +807,31 @@ impl RustfsAdminClient {
         ))
     }
 
+    /// Report whether HeadBucket succeeds with these credentials. Success proves
+    /// access, not ownership; callers that need ownership must use CreateBucket.
+    pub async fn bucket_exists(&self, bucket: &str) -> Result<bool, RustfsClientError> {
+        if bucket.trim().is_empty() {
+            return Err(RustfsClientError::RequestBuildFailed);
+        }
+
+        let path = format!("/{bucket}");
+        let signed = self.sign_request("HEAD", &path, "", "", None, ADMIN_SIGNING_SERVICE)?;
+        let host = self.host()?;
+
+        let response = self
+            .http_client
+            .head(format!("{}{}", self.base_url.trim_end_matches('/'), path))
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.payload_hash)
+            .header("authorization", &signed.authorization)
+            .header("host", host)
+            .send()
+            .await
+            .map_err(|_| RustfsClientError::RequestFailed)?;
+
+        Ok(response.status().is_success())
+    }
+
     /// Delete a bucket. Missing buckets are treated as success (idempotent).
     pub async fn delete_bucket(&self, bucket: &str) -> Result<(), RustfsClientError> {
         if bucket.trim().is_empty() {

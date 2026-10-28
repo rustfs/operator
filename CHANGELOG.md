@@ -49,6 +49,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Fixed
 
+- Check an existing Tenant bucket with HeadBucket before CreateBucket, so a bucket under
+  continuous writes no longer stays Pending on RustFS lock-timeout 503 responses.
 - Update source release metadata to `0.0.8` so source Helm installs select the
   `0.0.8` Operator and Console images, and verify release tags and chart images in CI.
 - Use `docker.io/rustfs/operator` as the default Helm image repository for the Operator,
