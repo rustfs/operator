@@ -29,6 +29,7 @@ use hyper_util::server::conn::auto::Builder as HyperBuilder;
 use hyper_util::service::TowerToHyperService;
 use k8s_openapi::api::apps::v1 as appsv1;
 use k8s_openapi::api::core::v1 as corev1;
+use k8s_openapi::api::policy::v1 as policyv1;
 use k8s_openapi::api::rbac::v1 as rbacv1;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
@@ -289,6 +290,10 @@ async fn run_controller(
         )
         .owns(
             Api::<appsv1::StatefulSet>::all(client.clone()),
+            watcher::Config::default(),
+        )
+        .owns(
+            Api::<policyv1::PodDisruptionBudget>::all(client.clone()),
             watcher::Config::default(),
         );
 

@@ -56,6 +56,11 @@ rules:
     resources: ["statefulsets", "replicasets", "deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
+  # PodDisruptionBudgets for tenant pools
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+
   # cert-manager Certificate orchestration and readiness watches
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]

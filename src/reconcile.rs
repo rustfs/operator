@@ -31,6 +31,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 mod phases;
+mod pod_disruption_budget;
 mod pool_lifecycle;
 mod provisioning;
 mod tls;
@@ -113,7 +114,7 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
 
     let lifecycle_decisions = reconcile_pool_lifecycle(&ctx, &latest_tenant, &ns).await?;
 
-    let summary = reconcile_pool_statefulsets(
+    let mut summary = reconcile_pool_statefulsets(
         &ctx,
         &latest_tenant,
         &ns,
@@ -122,6 +123,14 @@ pub async fn reconcile_rustfs(tenant: Arc<Tenant>, ctx: Arc<Context>) -> Result<
         &removed_pool_cleanup,
     )
     .await?;
+    let budget_requeue = pod_disruption_budget::reconcile_pod_disruption_budgets(
+        &ctx,
+        &latest_tenant,
+        &ns,
+        summary.workloads_settled(),
+    )
+    .await?;
+    summary.set_pod_disruption_budget_requeue_after(budget_requeue);
     finalize_tenant_status(&ctx, &latest_tenant, summary, tls_plan, pod_cleanup_outcome).await
 }
 

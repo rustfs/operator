@@ -449,7 +449,7 @@ async fn reconcile_single_pool_lifecycle(
     }
 }
 
-async fn rustfs_admin_client(
+pub(super) async fn rustfs_admin_client(
     ctx: &Context,
     tenant: &Tenant,
 ) -> Result<RustfsAdminClient, RustfsClientError> {
@@ -510,7 +510,7 @@ async fn find_rustfs_pool(
         })
 }
 
-fn expected_pool_cmd_line(
+pub(super) fn expected_pool_cmd_line(
     tenant: &Tenant,
     namespace: &str,
     pool: &Pool,
@@ -536,7 +536,7 @@ fn expected_pool_cmd_line(
     Ok(tenant.rustfs_pool_volume_spec(pool, scheme, namespace, cluster_domain))
 }
 
-fn same_cmd_line(left: &str, right: &str) -> bool {
+pub(super) fn same_cmd_line(left: &str, right: &str) -> bool {
     left.trim() == right.trim()
 }
 
