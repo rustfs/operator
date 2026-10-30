@@ -720,7 +720,7 @@ Operator 为每个 Pool 创建一个 PodDisruptionBudget，名称与该 Pool 的
 - 一台服务器持有该纠删集的 `k` 块盘时，它下线会带走 `k` 块盘，因此该纠删集可容忍 `floor(冗余盘数 / k)` 台服务器不可用；
 - 取 Pool 内所有纠删集中的最小值。RustFS 只报告一个标准校验盘数，因此 Operator 取该值与每个 Pool 按纠删集大小自动计算的校验盘数中的较小值。
 
-无法在保持写仲裁的情况下失去一台服务器的 Pool（例如单服务器或双服务器 Pool）不会创建 PodDisruptionBudget。只有当所有 Pool 都完成滚动更新、全部就绪且没有进行退役，并且 RustFS 报告该 Pool 的所有磁盘在线时，才会创建或更新 PodDisruptionBudget；否则保留现有 PodDisruptionBudget 并稍后重试。节点 drain 在驱逐下一个 Pod 会低于 `minAvailable` 时停止。设置 `spec.disablePodDisruptionBudget: true` 会删除 Operator 创建的 PodDisruptionBudget；Operator 之外创建的 PodDisruptionBudget 不受影响。
+无法在保持写仲裁的情况下失去一台服务器的 Pool（例如单服务器或双服务器 Pool）不会创建 PodDisruptionBudget。只有当所有 Pool 都完成滚动更新、全部就绪且没有进行退役，并且 RustFS 报告该 Pool 的所有磁盘在线时，才会创建或更新 PodDisruptionBudget；否则保留现有 PodDisruptionBudget 并稍后重试。节点 drain 在驱逐下一个 Pod 会低于 `minAvailable` 时停止。设置 `spec.disablePodDisruptionBudget: true` 会删除 Operator 创建的 PodDisruptionBudget；Operator 之外创建的 PodDisruptionBudget 不受影响。升级前请删除自行创建的、选择 Pool Pod 的 PodDisruptionBudget：Kubernetes 会拒绝驱逐被多个 PodDisruptionBudget 选中的 Pod，同名的 PodDisruptionBudget 会阻塞 reconcile。
 
 ### 7.5 TLS
 
