@@ -53,8 +53,28 @@ pub(super) struct PoolReconcileSummary {
     any_lifecycle_failed: bool,
     any_lifecycle_canceled: bool,
     lifecycle_requeue_after: Option<Duration>,
+    pod_disruption_budget_requeue_after: Option<Duration>,
     total_replicas: i32,
     ready_replicas: i32,
+}
+
+impl PoolReconcileSummary {
+    /// Every pool is rolled out and ready, and no pool lifecycle work is pending.
+    pub(super) fn workloads_settled(&self) -> bool {
+        !self.any_updating
+            && !self.any_degraded
+            && !self.any_lifecycle_reconciling
+            && !self.any_removed_pool_cleanup_reconciling
+            && !self.any_lifecycle_decommissioned
+            && !self.any_lifecycle_failed
+            && !self.any_lifecycle_canceled
+            && self.total_replicas > 0
+            && self.ready_replicas == self.total_replicas
+    }
+
+    pub(super) fn set_pod_disruption_budget_requeue_after(&mut self, after: Option<Duration>) {
+        self.pod_disruption_budget_requeue_after = after;
+    }
 }
 
 const REMOVED_POOL_CLEANUP_REQUEUE_INTERVAL: Duration = Duration::from_secs(10);
@@ -964,8 +984,11 @@ fn reconcile_requeue_after(
     };
 
     earliest_requeue_after(
-        earliest_requeue_after(lifecycle_requeue, updating_requeue),
-        pod_cleanup_requeue,
+        earliest_requeue_after(
+            earliest_requeue_after(lifecycle_requeue, updating_requeue),
+            pod_cleanup_requeue,
+        ),
+        summary.pod_disruption_budget_requeue_after,
     )
 }
 

@@ -287,6 +287,7 @@ mod tests {
                 drives_per_set: vec![4],
             }),
             pools: Some(pools),
+            servers: Vec::new(),
         };
 
         let metrics = storage_metrics_from_info(&info);
