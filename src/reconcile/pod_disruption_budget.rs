@@ -47,6 +47,24 @@ pub(super) async fn reconcile_pod_disruption_budgets(
     namespace: &str,
     workloads_settled: bool,
 ) -> Result<Option<Duration>, Error> {
+    reconcile_budgets_with_layouts(
+        ctx,
+        tenant,
+        namespace,
+        workloads_settled,
+        read_pool_layouts(ctx, tenant),
+    )
+    .await
+}
+
+/// `read_layouts` is awaited only when budgets are enabled and every pool is settled.
+async fn reconcile_budgets_with_layouts(
+    ctx: &Context,
+    tenant: &Tenant,
+    namespace: &str,
+    workloads_settled: bool,
+    read_layouts: impl Future<Output = Result<PoolLayouts, String>>,
+) -> Result<Option<Duration>, Error> {
     let existing = list_owned_budgets(ctx, tenant, namespace).await?;
     let disabled = tenant.spec.disable_pod_disruption_budget == Some(true);
     let desired_names = tenant
@@ -65,7 +83,7 @@ pub(super) async fn reconcile_pod_disruption_budgets(
         return Ok(None);
     }
 
-    let layouts = match read_pool_layouts(ctx, tenant).await {
+    let layouts = match read_layouts.await {
         Ok(layouts) => layouts,
         Err(message) => {
             warn!(
@@ -345,6 +363,13 @@ async fn delete_budget(
 mod tests {
     use super::*;
     use crate::sts::rustfs_client::{RustfsDriveInfo, RustfsServerProperties};
+    use http::{Method, Request, Response, StatusCode};
+    use http_body_util::BodyExt;
+    use kube::{Client, client::Body};
+    use serde_json::{Value, json};
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+    use tower::service_fn;
 
     fn info(servers: usize, volumes: usize, set_size: usize) -> RustfsServerInfo {
         // RustFS expands `pod-{0...N}/rustfs{0...V}` with the server varying fastest.
@@ -440,5 +465,277 @@ mod tests {
             Some("t-p-0.t-hl.ns.svc:9000")
         );
         assert_eq!(endpoint_host("/data/rustfs0"), None);
+    }
+
+    const BUDGETS_PATH: &str = "/apis/policy/v1/namespaces/default/poddisruptionbudgets";
+
+    #[derive(Debug)]
+    struct KubeCall {
+        method: Method,
+        path: String,
+        body: Option<Value>,
+    }
+
+    type KubeCalls = Arc<Mutex<Vec<KubeCall>>>;
+
+    fn tenant_with_pools(servers: i32, pools: &[&str]) -> Tenant {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let mut template = tenant.spec.pools[0].clone();
+        template.servers = servers;
+        template.persistence.volumes_per_server = 1;
+        tenant.spec.pools = pools
+            .iter()
+            .map(|name| Pool {
+                name: (*name).to_string(),
+                ..template.clone()
+            })
+            .collect();
+        tenant
+    }
+
+    fn existing_budget(tenant: &Tenant, pool: &str, owned: bool) -> PodDisruptionBudget {
+        PodDisruptionBudget {
+            metadata: metav1::ObjectMeta {
+                name: Some(format!("{}-{pool}", tenant.name())),
+                namespace: Some("default".to_string()),
+                uid: Some(format!("{pool}-budget-uid")),
+                labels: Some(BTreeMap::from([(
+                    RUSTFS_TENANT_LABEL.to_string(),
+                    tenant.name(),
+                )])),
+                owner_references: owned.then(|| vec![tenant.new_owner_ref()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn mock_kube(existing: Vec<PodDisruptionBudget>) -> (Context, KubeCalls) {
+        let calls = KubeCalls::default();
+        let service = service_fn({
+            let calls = Arc::clone(&calls);
+            move |request: Request<Body>| {
+                let calls = Arc::clone(&calls);
+                let existing = existing.clone();
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+                    let bytes = request
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("request body should be readable")
+                        .to_bytes();
+                    let body = (!bytes.is_empty()).then(|| {
+                        serde_json::from_slice::<Value>(&bytes).expect("request body is JSON")
+                    });
+                    let response = match method {
+                        Method::GET if path == BUDGETS_PATH => json!({
+                            "apiVersion": "policy/v1",
+                            "kind": "PodDisruptionBudgetList",
+                            "metadata": {},
+                            "items": existing
+                        }),
+                        Method::PATCH if path.starts_with(BUDGETS_PATH) => {
+                            body.clone().expect("apply carries the budget")
+                        }
+                        Method::DELETE if path.starts_with(BUDGETS_PATH) => json!({
+                            "apiVersion": "v1",
+                            "kind": "Status",
+                            "status": "Success"
+                        }),
+                        _ => panic!("unexpected Kubernetes request: {method} {path}"),
+                    };
+                    calls
+                        .lock()
+                        .expect("calls lock")
+                        .push(KubeCall { method, path, body });
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Body::from(
+                                serde_json::to_vec(&response).expect("response serializes"),
+                            ))
+                            .expect("response builds"),
+                    )
+                }
+            }
+        });
+        (Context::new(Client::new(service, "default")), calls)
+    }
+
+    fn layouts_for(ctx: &Context, tenant: &Tenant, parity: usize) -> PoolLayouts {
+        let pool = &tenant.spec.pools[0];
+        let servers = usize::try_from(pool.servers).expect("servers");
+        let cmd_line = expected_pool_cmd_line(tenant, "default", pool, ctx.cluster_domain())
+            .expect("pool cmdline");
+        PoolLayouts {
+            info: info(servers, 1, servers),
+            pools: vec![
+                serde_json::from_value(json!({
+                    "id": 0,
+                    "cmdline": cmd_line,
+                    "lastUpdate": "",
+                    "status": "active"
+                }))
+                .expect("pool list item"),
+            ],
+            parity,
+        }
+    }
+
+    async fn layouts_never_read() -> Result<PoolLayouts, String> {
+        panic!("the erasure layout must not be read")
+    }
+
+    fn requests(calls: &KubeCalls) -> Vec<(Method, String)> {
+        calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .map(|call| (call.method.clone(), call.path.clone()))
+            .collect()
+    }
+
+    fn budget_path(name: &str) -> String {
+        format!("{BUDGETS_PATH}/{name}")
+    }
+
+    #[tokio::test]
+    async fn settled_pool_gets_a_budget_from_its_layout() {
+        let tenant = tenant_with_pools(4, &["pool-0"]);
+        let (ctx, calls) = mock_kube(Vec::new());
+        let layouts = layouts_for(&ctx, &tenant, 2);
+
+        let requeue =
+            reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+                .await
+                .expect("reconcile");
+
+        assert_eq!(requeue, None);
+        let calls = calls.lock().expect("calls lock");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].method, Method::PATCH);
+        assert_eq!(calls[1].path, budget_path("test-tenant-pool-0"));
+        let budget: PodDisruptionBudget =
+            serde_json::from_value(calls[1].body.clone().expect("budget")).expect("budget");
+        let spec = budget.spec.expect("spec");
+        assert_eq!(spec.min_available, Some(IntOrString::Int(3)));
+        assert_eq!(
+            spec.selector.and_then(|selector| selector.match_labels),
+            Some(tenant.pool_selector_labels(&tenant.spec.pools[0]))
+        );
+        assert!(object_owned_by_tenant(&budget.metadata, &tenant));
+    }
+
+    #[tokio::test]
+    async fn pool_without_spare_servers_loses_its_budget() {
+        let tenant = tenant_with_pools(2, &["pool-0"]);
+        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)]);
+        let layouts = layouts_for(&ctx, &tenant, 1);
+
+        reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+            .await
+            .expect("reconcile");
+
+        assert_eq!(
+            requests(&calls),
+            vec![
+                (Method::GET, BUDGETS_PATH.to_string()),
+                (Method::DELETE, budget_path("test-tenant-pool-0")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn disabling_deletes_only_budgets_owned_by_the_tenant() {
+        let mut tenant = tenant_with_pools(4, &["pool-0", "pool-1"]);
+        tenant.spec.disable_pod_disruption_budget = Some(true);
+        let (ctx, calls) = mock_kube(vec![
+            existing_budget(&tenant, "pool-0", true),
+            existing_budget(&tenant, "pool-1", false),
+        ]);
+
+        let requeue =
+            reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, layouts_never_read())
+                .await
+                .expect("reconcile");
+
+        assert_eq!(requeue, None);
+        assert_eq!(
+            requests(&calls),
+            vec![
+                (Method::GET, BUDGETS_PATH.to_string()),
+                (Method::DELETE, budget_path("test-tenant-pool-0")),
+            ]
+        );
+        let calls = calls.lock().expect("calls lock");
+        assert_eq!(
+            calls[1]
+                .body
+                .as_ref()
+                .map(|body| &body["preconditions"]["uid"]),
+            Some(&json!("pool-0-budget-uid"))
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_pool_budget_is_deleted_while_pools_are_not_settled() {
+        let tenant = tenant_with_pools(4, &["pool-0"]);
+        let (ctx, calls) = mock_kube(vec![
+            existing_budget(&tenant, "pool-0", true),
+            existing_budget(&tenant, "pool-1", true),
+        ]);
+
+        let requeue =
+            reconcile_budgets_with_layouts(&ctx, &tenant, "default", false, layouts_never_read())
+                .await
+                .expect("reconcile");
+
+        assert_eq!(requeue, None);
+        assert_eq!(
+            requests(&calls),
+            vec![
+                (Method::GET, BUDGETS_PATH.to_string()),
+                (Method::DELETE, budget_path("test-tenant-pool-1")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_layout_keeps_existing_budgets_and_retries() {
+        let tenant = tenant_with_pools(4, &["pool-0"]);
+        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)]);
+
+        let requeue = reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async {
+            Err("RustFS is not reachable".to_string())
+        })
+        .await
+        .expect("reconcile");
+
+        assert_eq!(requeue, Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL));
+        assert_eq!(
+            requests(&calls),
+            vec![(Method::GET, BUDGETS_PATH.to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_drive_keeps_the_pool_budget_and_retries() {
+        let tenant = tenant_with_pools(4, &["pool-0"]);
+        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)]);
+        let mut layouts = layouts_for(&ctx, &tenant, 2);
+        layouts.info.servers[2].drives[0].state = "offline".to_string();
+
+        let requeue =
+            reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+                .await
+                .expect("reconcile");
+
+        assert_eq!(requeue, Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL));
+        assert_eq!(
+            requests(&calls),
+            vec![(Method::GET, BUDGETS_PATH.to_string())]
+        );
     }
 }
