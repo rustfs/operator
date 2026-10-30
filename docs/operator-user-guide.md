@@ -643,6 +643,7 @@ Useful Tenant-level fields:
 | `lifecycle` | Kubernetes container lifecycle hooks. |
 | `podManagementPolicy` | StatefulSet pod management policy. |
 | `podDeletionPolicyWhenNodeIsDown` | Node-down pod deletion behavior. |
+| `disablePodDisruptionBudget` | Set to `true` to stop creating per-pool PodDisruptionBudgets and delete the ones the operator created. |
 | `securityContext` | Pod SecurityContext overrides for all RustFS Pools. |
 | `containerSecurityContext` | RustFS container SecurityContext overrides for all Pools. |
 | `hostUsers` | Optional Pod `hostUsers`. `false` isolates the user namespace (`restricted-v3`). An OpenShift empty security-context pair also defaults this to `false`. |
@@ -766,6 +767,16 @@ Multi-pool Tenants cannot contain a single-node single-disk pool. The Operator r
 - `DeleteBothStatefulSetAndDeploymentPod`: Longhorn-compatible force delete for both StatefulSet and Deployment pods.
 
 Force deletion can have data consistency implications. Use it only when the storage backend and operational procedure are designed for that failure mode. Force deletion requires the Node object to be deleted or marked with an effective `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate, so volume detach fencing is explicit. Before using force policies, confirm the node is powered off or otherwise isolated; deleting the Node object is treated as that operational assertion.
+
+#### Pod disruption budgets
+
+The Operator creates one PodDisruptionBudget per pool, named after the pool StatefulSet and selecting the pool Pods. `minAvailable` is the pool's server count minus the number of servers that can be unavailable at once while every erasure set keeps write quorum. It is computed from the drive placement RustFS reports through the admin API:
+
+- an erasure set of `d` drives with standard parity `p` keeps write quorum while `d - p` drives are online, or `d - p + 1` when data and parity drives are equal;
+- a server that holds `k` drives of one set takes `k` drives down with it, so the set tolerates `floor(spare drives / k)` unavailable servers;
+- the smallest value across the pool's sets is used. RustFS reports a single standard parity, so the Operator uses the lower of that value and the automatic parity of each pool's set size.
+
+Pools that cannot lose a server without losing write quorum, such as single-server pools or two-server pools, get no PodDisruptionBudget. Budgets are created and updated only while every pool is rolled out, ready, and not decommissioning, and only when RustFS reports every drive of the pool online; otherwise the existing budgets are kept and the Operator retries. A node drain stops when evicting the next Pod would go below `minAvailable`. Set `spec.disablePodDisruptionBudget: true` to delete the operator-created budgets; PodDisruptionBudgets created outside the Operator are not touched.
 
 ### 7.5 TLS
 

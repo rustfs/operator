@@ -144,6 +144,15 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_deletion_policy_when_node_is_down: Option<k8s::PodDeletionPolicyWhenNodeIsDown>,
 
+    /// Disables the PodDisruptionBudgets the operator creates for each pool.
+    ///
+    /// By default every pool that can lose a server without losing write quorum gets a
+    /// PodDisruptionBudget named after its StatefulSet, with `minAvailable` derived from the
+    /// erasure layout reported by RustFS. Setting this to `true` deletes those budgets;
+    /// PodDisruptionBudgets created outside the operator are left untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_pod_disruption_budget: Option<bool>,
+
     /// Additional RustFS container environment variables.
     ///
     /// `RUSTFS_KMS_*` is reserved; configure KMS through `spec.encryption`.

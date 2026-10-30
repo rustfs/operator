@@ -46,6 +46,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
   driver alongside the upstream provisioner sidecar, with dedicated ServiceAccount/RBAC.
 - Seven built-in RustFS Grafana dashboards, published by default as sidecar-discoverable
   ConfigMaps with configurable labels and namespace.
+- Per-pool PodDisruptionBudgets with `minAvailable` derived from the erasure layout RustFS
+  reports, so node drains keep write quorum; opt out with `spec.disablePodDisruptionBudget`.
 
 ### Fixed
 

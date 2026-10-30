@@ -26,10 +26,10 @@ pub use rustfs_admin::{
     BucketLifecycleRuleStatus, BucketLifecycleTransition, BucketObjectLockConfiguration,
     BucketObjectLockDefaultRetention, BucketObjectLockRetentionMode,
     BucketObjectLockRetentionPeriod, BucketVersioningState, BucketVersioningUpdate,
-    CreateBucketResult, RustfsClientError, RustfsCredentials, RustfsErasureBackend,
-    RustfsErasureSetInfo, RustfsPoolDecommissionInfo, RustfsPoolListItem, RustfsPoolStatus,
-    RustfsServerInfo, RustfsServerUsage, RustfsTier, RustfsTierConfig, RustfsUserInfo,
-    canonicalize_bucket_lifecycle_xml,
+    CreateBucketResult, RustfsClientError, RustfsCredentials, RustfsDriveInfo,
+    RustfsErasureBackend, RustfsErasureSetInfo, RustfsPoolDecommissionInfo, RustfsPoolListItem,
+    RustfsPoolStatus, RustfsServerInfo, RustfsServerProperties, RustfsServerUsage, RustfsTier,
+    RustfsTierConfig, RustfsUserInfo, canonicalize_bucket_lifecycle_xml,
 };
 
 /// Tenant-aware wrapper around the kube-agnostic RustFS admin client.

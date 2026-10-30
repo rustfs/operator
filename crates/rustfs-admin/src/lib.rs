@@ -169,6 +169,29 @@ pub struct RustfsServerInfo {
     pub backend: Option<RustfsErasureBackend>,
     #[serde(default)]
     pub pools: Option<BTreeMap<String, BTreeMap<String, RustfsErasureSetInfo>>>,
+    #[serde(default)]
+    pub servers: Vec<RustfsServerProperties>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+pub struct RustfsServerProperties {
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub drives: Vec<RustfsDriveInfo>,
+}
+
+/// Erasure placement of one drive as reported by `/rustfs/admin/v3/info`.
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq)]
+pub struct RustfsDriveInfo {
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub pool_index: Option<i32>,
+    #[serde(default)]
+    pub set_index: Option<i32>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
