@@ -603,6 +603,7 @@ ConfigMap 更新投射到 Pod。需要让更新进入运行中的 Pod 时，请�
 | `lifecycle` | Kubernetes 容器 lifecycle hook。 |
 | `podManagementPolicy` | StatefulSet pod management policy。 |
 | `podDeletionPolicyWhenNodeIsDown` | 节点 NotReady/Unknown 时的 Pod 删除策略。 |
+| `disablePodDisruptionBudget` | 设为 `true` 时不再为各 Pool 创建 PodDisruptionBudget，并删除 Operator 已创建的 PodDisruptionBudget。 |
 | `securityContext` | 所有 RustFS Pool 的 Pod SecurityContext 覆盖。 |
 | `containerSecurityContext` | 所有 Pool 的 RustFS 容器 SecurityContext 覆盖。 |
 | `hostUsers` | 可选的 Pod `hostUsers`。`false` 会隔离用户命名空间（`restricted-v3`）。OpenShift 空 securityContext 对也会默认渲染为 `false`。 |
@@ -710,6 +711,16 @@ Operator 会自动管理以下环境变量：
 - `DeleteBothStatefulSetAndDeploymentPod`：Longhorn 兼容模式，同时处理 StatefulSet 和 Deployment Pod。
 
 强制删除可能影响数据一致性。只有当存储后端和运维流程明确支持该故障处理方式时才应启用。强制删除要求 Node 对象已删除，或 Node 带有对目标 Pod 生效且未被该 Pod tolerate 的 `node.kubernetes.io/out-of-service` taint，确保 volume detach fencing 是显式的。启用 force 类策略前，必须先确认节点已经关机或被隔离；删除 Node 对象会被视为这一运维断言。
+
+#### Pod disruption budget
+
+Operator 为每个 Pool 创建一个 PodDisruptionBudget，名称与该 Pool 的 StatefulSet 相同，选择该 Pool 的 Pod。`minAvailable` 等于 Pool 的服务器数减去在所有纠删集保持写仲裁的前提下可以同时不可用的服务器数，依据 RustFS admin API 报告的磁盘分布计算：
+
+- 一个有 `d` 块盘、标准校验盘数为 `p` 的纠删集，在线盘数不少于 `d - p` 时保持写仲裁；数据盘与校验盘数量相等时需要 `d - p + 1`；
+- 一台服务器持有该纠删集的 `k` 块盘时，它下线会带走 `k` 块盘，因此该纠删集可容忍 `floor(冗余盘数 / k)` 台服务器不可用；
+- 取 Pool 内所有纠删集中的最小值。RustFS 只报告一个标准校验盘数，因此 Operator 取该值与每个 Pool 按纠删集大小自动计算的校验盘数中的较小值。
+
+无法在保持写仲裁的情况下失去一台服务器的 Pool（例如单服务器或双服务器 Pool）不会创建 PodDisruptionBudget。只有当所有 Pool 都完成滚动更新、全部就绪且没有进行退役，并且 RustFS 报告该 Pool 的所有磁盘在线时，才会创建或更新 PodDisruptionBudget；否则保留现有 PodDisruptionBudget 并稍后重试。节点 drain 在驱逐下一个 Pod 会低于 `minAvailable` 时停止。设置 `spec.disablePodDisruptionBudget: true` 会删除 Operator 创建的 PodDisruptionBudget；Operator 之外创建的 PodDisruptionBudget 不受影响。
 
 ### 7.5 TLS
 
