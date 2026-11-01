@@ -770,13 +770,26 @@ Force deletion can have data consistency implications. Use it only when the stor
 
 #### Pod disruption budgets
 
-The Operator creates one PodDisruptionBudget per pool, named after the pool StatefulSet and selecting the pool Pods. `minAvailable` is the pool's server count minus the number of servers that can be unavailable at once while every erasure set keeps write quorum. It is computed from the drive placement RustFS reports through the admin API:
+The Operator creates one PodDisruptionBudget per pool, named after the pool StatefulSet and selecting the pool Pods. `minAvailable` is the pool's server count minus the number of servers that can be unavailable at once while every erasure set keeps write quorum for the `STANDARD` storage class. It is computed from the drive placement RustFS reports through the admin API:
 
 - an erasure set of `d` drives with standard parity `p` keeps write quorum while `d - p` drives are online, or `d - p + 1` when data and parity drives are equal;
 - a server that holds `k` drives of one set takes `k` drives down with it, so the set tolerates `floor(spare drives / k)` unavailable servers;
-- the smallest value across the pool's sets is used. RustFS reports a single standard parity, so the Operator uses the lower of that value and the automatic parity of each pool's set size.
+- the smallest value across the pool's sets is used;
+- `p` is the standard parity RustFS reports. When pools resolve different parities, RustFS reports none and every set uses the automatic parity for its size, as RustFS does.
 
-Pools that cannot lose a server without losing write quorum, such as single-server pools or two-server pools, get no PodDisruptionBudget. Budgets are created and updated only while every pool is rolled out, ready, and not decommissioning, and only when RustFS reports every drive of the pool online; otherwise the existing budgets are kept and the Operator retries. A node drain stops when evicting the next Pod would go below `minAvailable`. Set `spec.disablePodDisruptionBudget: true` to delete the operator-created budgets; PodDisruptionBudgets created outside the Operator are not touched. Remove any PodDisruptionBudget of your own that selects pool Pods before upgrading: Kubernetes rejects evictions of a Pod selected by more than one budget, and a budget with the same name blocks the reconcile.
+Offline drives count against the allowance, because a Pod stays Ready while some of its drives are offline. When offline drives use up the allowance, `minAvailable` equals the server count and no Pod of the pool can be evicted until the drives are back. The Operator re-reads the layout every 60 seconds while drives are offline. If RustFS cannot report the layout, existing budgets are set to the server count in the same way.
+
+The budgets cover objects written with the `STANDARD` storage class at its current parity. Objects written with `REDUCED_REDUNDANCY` (EC:1 by default) or with a lower standard parity before a configuration change can become unreadable while a drain keeps the pool at `minAvailable`.
+
+Pools that cannot lose a server without losing write quorum, such as single-server pools or two-server pools, get no PodDisruptionBudget. Budgets are created and updated only while every pool is rolled out, ready, and not decommissioning. A node drain stops when evicting the next Pod would go below `minAvailable`.
+
+The Operator only changes and deletes budgets that the Tenant owns. If a PodDisruptionBudget with the same name already exists without the Tenant as its owner, the Operator leaves it unchanged and records a `PodDisruptionBudgetConflict` warning event. Set `spec.disablePodDisruptionBudget: true` to delete the operator-created budgets.
+
+Upgrading an Operator release without PodDisruptionBudget support:
+
+1. Upgrade the chart, so the CRD gains `disablePodDisruptionBudget` and the ClusterRole gains `policy/poddisruptionbudgets` permissions.
+2. To keep managing budgets yourself, set `spec.disablePodDisruptionBudget: true` on those Tenants before the new Operator image starts.
+3. Otherwise remove your own PodDisruptionBudgets that select pool Pods. Kubernetes rejects the eviction of a Pod that more than one budget selects, so a drain cannot evict any Pod of the pool while both exist.
 
 ### 7.5 TLS
 
