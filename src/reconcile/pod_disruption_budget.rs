@@ -16,7 +16,7 @@
 
 use super::pool_lifecycle::{expected_pool_cmd_line, rustfs_admin_client, same_cmd_line};
 use super::{Error, context_result, object_owned_by_tenant};
-use crate::context::Context;
+use crate::context::{self, Context, is_kube_not_found};
 use crate::sts::rustfs_client::{RustfsPoolListItem, RustfsServerInfo};
 use crate::types::v1alpha1::pool::Pool;
 use crate::types::v1alpha1::tenant::{RUSTFS_TENANT_LABEL, Tenant};
@@ -24,23 +24,25 @@ use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec}
 use k8s_openapi::apimachinery::pkg::apis::meta::v1 as metav1;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::ResourceExt;
-use kube::api::{DeleteParams, ListParams, Preconditions};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Preconditions};
+use kube::runtime::events::EventType;
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
 
-/// How long to wait before retrying when RustFS cannot report a usable layout yet.
+/// How long to wait before re-reading the layout while it is unknown or drives are offline.
 pub(super) const POD_DISRUPTION_BUDGET_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
 const DRIVE_STATE_OK: &str = "ok";
+const FIELD_MANAGER: &str = "rustfs-operator";
 
 /// Reconciles one PodDisruptionBudget per pool.
 ///
 /// Budgets of pools removed from the spec, and all budgets when
 /// `spec.disablePodDisruptionBudget` is set, are deleted right away. Budgets are created or
 /// updated only while every pool is settled (no rollout, decommission or unready Pods), because
-/// the erasure layout is read from the running RustFS cluster. Returns a requeue interval when
-/// the layout could not be read and the budgets may be stale.
+/// the erasure layout is read from the running RustFS cluster. Returns a requeue interval while
+/// the layout is unknown or drives are offline, so budgets follow drive recovery.
 pub(super) async fn reconcile_pod_disruption_budgets(
     ctx: &Context,
     tenant: &Tenant,
@@ -83,54 +85,68 @@ async fn reconcile_budgets_with_layouts(
         return Ok(None);
     }
 
-    let layouts = match read_layouts.await {
-        Ok(layouts) => layouts,
-        Err(message) => {
-            warn!(
-                tenant = %tenant.name(),
-                namespace = %namespace,
-                message = %message,
-                "cannot read RustFS erasure layout; keeping existing PodDisruptionBudgets"
-            );
-            return Ok(Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL));
-        }
-    };
+    let layouts = read_layouts.await.inspect_err(|message| {
+        warn!(
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            message = %message,
+            "cannot read RustFS erasure layout; existing PodDisruptionBudgets block evictions"
+        );
+    });
 
     let mut requeue = None;
     for pool in &tenant.spec.pools {
         let name = budget_name(tenant, pool);
-        let min_available = match pool_min_available(ctx, tenant, namespace, pool, &layouts) {
-            Ok(min_available) => min_available,
-            Err(message) => {
-                warn!(
-                    tenant = %tenant.name(),
-                    namespace = %namespace,
-                    pool = %pool.name,
-                    message = %message,
-                    "cannot derive PodDisruptionBudget from RustFS erasure layout; keeping the existing one"
-                );
-                requeue = Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL);
-                continue;
-            }
-        };
+        let owned = existing.iter().find(|budget| budget.name_any() == name);
+        let allowance = layouts
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|layouts| pool_allowance(ctx, tenant, namespace, pool, layouts));
 
-        match min_available {
-            Some(min_available) => {
-                let budget = new_pool_budget(tenant, namespace, pool, min_available);
-                context_result(ctx.apply(&budget, namespace).await, ctx, tenant).await?;
-            }
-            None => {
+        let min_available = match allowance {
+            Ok(PoolAllowance::NoBudget) => {
                 debug!(
                     tenant = %tenant.name(),
                     namespace = %namespace,
                     pool = %pool.name,
                     "pool cannot lose a server without losing write quorum; no PodDisruptionBudget"
                 );
-                if let Some(budget) = existing.iter().find(|budget| budget.name_any() == name) {
+                if let Some(budget) = owned {
                     delete_budget(ctx, tenant, namespace, budget).await?;
                 }
+                continue;
             }
-        }
+            Ok(PoolAllowance::Budget {
+                min_available,
+                degraded,
+            }) => {
+                if degraded {
+                    requeue = Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL);
+                }
+                min_available
+            }
+            Err(message) => {
+                requeue = Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL);
+                if layouts.is_ok() {
+                    warn!(
+                        tenant = %tenant.name(),
+                        namespace = %namespace,
+                        pool = %pool.name,
+                        message = %message,
+                        "cannot derive PodDisruptionBudget from RustFS erasure layout; an existing one blocks evictions"
+                    );
+                }
+                // The remaining fault tolerance is unknown, so an existing budget allows no
+                // eviction until RustFS reports the pool again.
+                if owned.is_none() {
+                    continue;
+                }
+                pool.servers
+            }
+        };
+
+        let budget = new_pool_budget(tenant, namespace, pool, min_available);
+        ensure_budget(ctx, tenant, namespace, &budget).await?;
     }
 
     Ok(requeue)
@@ -139,7 +155,8 @@ async fn reconcile_budgets_with_layouts(
 struct PoolLayouts {
     info: RustfsServerInfo,
     pools: Vec<RustfsPoolListItem>,
-    parity: usize,
+    /// Standard parity of every pool; RustFS omits it when pools resolve different parities.
+    parity: Option<usize>,
 }
 
 async fn read_pool_layouts(ctx: &Context, tenant: &Tenant) -> Result<PoolLayouts, String> {
@@ -158,9 +175,12 @@ async fn read_pool_layouts(ctx: &Context, tenant: &Tenant) -> Result<PoolLayouts
         .backend
         .as_ref()
         .and_then(|backend| backend.standard_sc_parity)
-        .ok_or_else(|| "RustFS server info has no standard storage class parity".to_string())?;
-    let parity = usize::try_from(parity)
-        .map_err(|_| format!("RustFS standard storage class parity {parity} is out of range"))?;
+        .map(|parity| {
+            usize::try_from(parity).map_err(|_| {
+                format!("RustFS standard storage class parity {parity} is out of range")
+            })
+        })
+        .transpose()?;
 
     Ok(PoolLayouts {
         info,
@@ -169,14 +189,21 @@ async fn read_pool_layouts(ctx: &Context, tenant: &Tenant) -> Result<PoolLayouts
     })
 }
 
-/// `Ok(None)` means the pool cannot tolerate losing any server.
-fn pool_min_available(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolAllowance {
+    /// The pool cannot lose a server even with every drive online.
+    NoBudget,
+    /// `degraded` is set while some drives of the pool are offline.
+    Budget { min_available: i32, degraded: bool },
+}
+
+fn pool_allowance(
     ctx: &Context,
     tenant: &Tenant,
     namespace: &str,
     pool: &Pool,
     layouts: &PoolLayouts,
-) -> Result<Option<i32>, String> {
+) -> Result<PoolAllowance, String> {
     let cmd_line = expected_pool_cmd_line(tenant, namespace, pool, ctx.cluster_domain())?;
     let pool_id = layouts
         .pools
@@ -191,16 +218,32 @@ fn pool_min_available(
         .ok_or_else(|| "pool has invalid servers or volumesPerServer".to_string())?;
     let sets = pool_erasure_sets(&layouts.info, pool_id, expected_drives)?;
 
-    let losses = tolerated_server_losses(&sets, layouts.parity);
-    if losses == 0 {
-        return Ok(None);
+    if tolerated_server_losses(&sets, layouts.parity, DriveScope::All) == 0 {
+        return Ok(PoolAllowance::NoBudget);
     }
+    // Pods with offline drives stay Ready, so offline drives reduce the allowance directly; once
+    // they consume it, `minAvailable` equals the server count and no eviction is allowed.
+    let losses = tolerated_server_losses(&sets, layouts.parity, DriveScope::Online);
     let losses = i32::try_from(losses).unwrap_or(i32::MAX);
-    Ok(Some(pool.servers.saturating_sub(losses).max(1)))
+    let degraded = sets
+        .values()
+        .flat_map(BTreeMap::values)
+        .any(|drives| drives.online < drives.total);
+
+    Ok(PoolAllowance::Budget {
+        min_available: pool.servers.saturating_sub(losses).max(1),
+        degraded,
+    })
 }
 
-/// Drive count per server for every erasure set of a pool, keyed by set index.
-type ErasureSets = BTreeMap<i32, BTreeMap<String, usize>>;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ServerDrives {
+    total: usize,
+    online: usize,
+}
+
+/// Drives per server for every erasure set of a pool, keyed by set index.
+type ErasureSets = BTreeMap<i32, BTreeMap<String, ServerDrives>>;
 
 fn pool_erasure_sets(
     info: &RustfsServerInfo,
@@ -218,12 +261,6 @@ fn pool_erasure_sets(
         {
             continue;
         }
-        if drive.state != DRIVE_STATE_OK {
-            return Err(format!(
-                "drive '{}' is in state '{}'",
-                drive.endpoint, drive.state
-            ));
-        }
         let set_index = drive
             .set_index
             .filter(|index| *index >= 0)
@@ -231,11 +268,13 @@ fn pool_erasure_sets(
         let host = endpoint_host(&drive.endpoint)
             .ok_or_else(|| format!("drive endpoint '{}' has no host", drive.endpoint))?;
 
-        *sets
+        let server = sets
             .entry(set_index)
             .or_default()
             .entry(host.to_string())
-            .or_default() += 1;
+            .or_default();
+        server.total += 1;
+        server.online += usize::from(drive.state == DRIVE_STATE_OK);
         drives += 1;
     }
 
@@ -247,21 +286,39 @@ fn pool_erasure_sets(
     Ok(sets)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriveScope {
+    All,
+    Online,
+}
+
 /// Number of servers of a pool that may be down at once while every erasure set keeps write
-/// quorum.
+/// quorum for the STANDARD storage class.
 ///
-/// RustFS reports one standard parity for the whole cluster, while automatic parity is
-/// resolved per pool from its set size, so the smaller of the two is used.
-fn tolerated_server_losses(sets: &ErasureSets, reported_parity: usize) -> usize {
+/// `reported_parity` is the parity RustFS reports for all pools; without it, every set uses the
+/// automatic parity for its size, which is how RustFS resolves pools with different parities.
+fn tolerated_server_losses(
+    sets: &ErasureSets,
+    reported_parity: Option<usize>,
+    scope: DriveScope,
+) -> usize {
     sets.values()
         .map(|servers| {
-            let drives = servers.values().sum::<usize>();
-            let parity = reported_parity.min(default_parity_count(drives));
+            let drives = servers.values().map(|server| server.total).sum::<usize>();
+            let available = match scope {
+                DriveScope::All => drives,
+                DriveScope::Online => servers.values().map(|server| server.online).sum(),
+            };
+            let parity = reported_parity.unwrap_or_else(|| default_parity_count(drives));
             let data = drives.saturating_sub(parity);
             let write_quorum = data + usize::from(data == parity);
-            let spare_drives = drives.saturating_sub(write_quorum);
-            let drives_per_server = servers.values().copied().max().unwrap_or(1).max(1);
-            spare_drives / drives_per_server
+            let drives_per_server = servers
+                .values()
+                .map(|server| server.total)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            available.saturating_sub(write_quorum) / drives_per_server
         })
         .min()
         .unwrap_or(0)
@@ -316,6 +373,65 @@ fn new_pool_budget(
     }
 }
 
+/// Creates the budget, or updates it when the Tenant owns it. A budget with the same name that
+/// the Tenant does not own is left unchanged, including one created concurrently.
+async fn ensure_budget(
+    ctx: &Context,
+    tenant: &Tenant,
+    namespace: &str,
+    budget: &PodDisruptionBudget,
+) -> Result<(), Error> {
+    let api: Api<PodDisruptionBudget> = Api::namespaced(ctx.client.clone(), namespace);
+    let name = budget.name_any();
+
+    let current = match ctx.get::<PodDisruptionBudget>(&name, namespace).await {
+        Ok(current) => current,
+        Err(error) if is_kube_not_found(&error) => {
+            let params = PostParams {
+                field_manager: Some(FIELD_MANAGER.to_string()),
+                ..Default::default()
+            };
+            match api.create(&params, budget).await {
+                Ok(_) => return Ok(()),
+                Err(kube::Error::Api(response)) if response.code == 409 => {
+                    context_result(ctx.get(&name, namespace).await, ctx, tenant).await?
+                }
+                Err(source) => {
+                    return context_result(Err(context::Error::Kube { source }), ctx, tenant).await;
+                }
+            }
+        }
+        Err(error) => return context_result(Err(error), ctx, tenant).await,
+    };
+
+    if !object_owned_by_tenant(&current.metadata, tenant) {
+        warn!(
+            tenant = %tenant.name(),
+            namespace = %namespace,
+            budget = %name,
+            "PodDisruptionBudget is not owned by the Tenant; leaving it unchanged"
+        );
+        let _ = ctx
+            .record(
+                tenant,
+                EventType::Warning,
+                "PodDisruptionBudgetConflict",
+                &format!(
+                    "PodDisruptionBudget '{name}' exists and is not owned by this Tenant; it is left unchanged"
+                ),
+            )
+            .await;
+        return Ok(());
+    }
+
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+    let result = api
+        .patch(&name, &params, &Patch::Apply(budget))
+        .await
+        .map_err(|source| context::Error::Kube { source });
+    context_result(result, ctx, tenant).await.map(drop)
+}
+
 async fn list_owned_budgets(
     ctx: &Context,
     tenant: &Tenant,
@@ -354,7 +470,7 @@ async fn delete_budget(
         .delete_with_params::<PodDisruptionBudget>(&budget.name_any(), namespace, &params)
         .await
     {
-        Err(error) if crate::context::is_kube_not_found(&error) => Ok(()),
+        Err(error) if is_kube_not_found(&error) => Ok(()),
         result => context_result(result, ctx, tenant).await,
     }
 }
@@ -371,42 +487,62 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tower::service_fn;
 
-    fn info(servers: usize, volumes: usize, set_size: usize) -> RustfsServerInfo {
-        // RustFS expands `pod-{0...N}/rustfs{0...V}` with the server varying fastest.
-        let endpoints = (0..volumes)
-            .flat_map(|volume| {
-                (0..servers).map(move |server| {
-                    (
-                        server,
-                        format!("http://t-p-{server}.t-hl.ns.svc:9000/data/rustfs{volume}"),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
+    /// Drives of one pool; RustFS expands `pod-{0...N}/rustfs{0...V}` with the server varying
+    /// fastest and cuts the list into consecutive sets.
+    fn pool_servers(
+        pool: i32,
+        servers: usize,
+        volumes: usize,
+        set_size: usize,
+    ) -> Vec<RustfsServerProperties> {
         let mut properties = (0..servers)
             .map(|server| RustfsServerProperties {
-                endpoint: format!("t-p-{server}.t-hl.ns.svc:9000"),
+                endpoint: format!("t-p{pool}-{server}.t-hl.ns.svc:9000"),
                 drives: Vec::new(),
             })
             .collect::<Vec<_>>();
-        for (index, (server, endpoint)) in endpoints.into_iter().enumerate() {
-            properties[server].drives.push(RustfsDriveInfo {
-                endpoint,
-                state: DRIVE_STATE_OK.to_string(),
-                pool_index: Some(0),
-                set_index: Some(i32::try_from(index / set_size).unwrap()),
-            });
+        for volume in 0..volumes {
+            for server in 0..servers {
+                let index = volume * servers + server;
+                properties[server].drives.push(RustfsDriveInfo {
+                    endpoint: format!(
+                        "http://t-p{pool}-{server}.t-hl.ns.svc:9000/data/rustfs{volume}"
+                    ),
+                    state: DRIVE_STATE_OK.to_string(),
+                    pool_index: Some(pool),
+                    set_index: Some(i32::try_from(index / set_size).expect("set index")),
+                });
+            }
         }
+        properties
+    }
+
+    fn info(servers: usize, volumes: usize, set_size: usize) -> RustfsServerInfo {
         RustfsServerInfo {
-            servers: properties,
+            servers: pool_servers(0, servers, volumes, set_size),
             ..Default::default()
         }
     }
 
+    fn sets(servers: usize, volumes: usize, set_size: usize) -> ErasureSets {
+        pool_erasure_sets(&info(servers, volumes, set_size), 0, servers * volumes).expect("layout")
+    }
+
     fn losses(servers: usize, volumes: usize, set_size: usize, parity: usize) -> usize {
-        let sets = pool_erasure_sets(&info(servers, volumes, set_size), 0, servers * volumes)
-            .expect("layout");
-        tolerated_server_losses(&sets, parity)
+        tolerated_server_losses(
+            &sets(servers, volumes, set_size),
+            Some(parity),
+            DriveScope::All,
+        )
+    }
+
+    fn take_drive_offline(sets: &mut ErasureSets) {
+        let server = sets
+            .values_mut()
+            .flat_map(BTreeMap::values_mut)
+            .next()
+            .expect("a server");
+        server.online -= 1;
     }
 
     #[test]
@@ -437,17 +573,50 @@ mod tests {
     }
 
     #[test]
-    fn reported_parity_is_capped_by_automatic_parity_of_the_pool() {
-        // Pool 0 reports EC:4; a pool of 3 drives resolves automatic parity to 1.
-        assert_eq!(losses(3, 1, 3, 4), 1);
+    fn missing_parity_uses_the_automatic_parity_of_each_set() {
+        // RustFS omits the scalar parity when pools resolve different automatic parities.
+        let auto = |servers, set_size| {
+            tolerated_server_losses(&sets(servers, 1, set_size), None, DriveScope::All)
+        };
+        assert_eq!(auto(4, 4), 1);
+        assert_eq!(auto(8, 8), 3);
     }
 
     #[test]
-    fn layout_rejects_missing_or_unhealthy_drives() {
+    fn offline_drives_reduce_the_allowance() {
+        // 8 x 2 in one set of 16 with EC:4: write quorum 12, two servers may go with all
+        // drives online, one server once a drive is offline.
+        let mut layout = sets(8, 2, 16);
+        take_drive_offline(&mut layout);
+        assert_eq!(
+            tolerated_server_losses(&layout, Some(4), DriveScope::All),
+            2
+        );
+        assert_eq!(
+            tolerated_server_losses(&layout, Some(4), DriveScope::Online),
+            1
+        );
+
+        let mut layout = sets(3, 1, 3);
+        take_drive_offline(&mut layout);
+        assert_eq!(
+            tolerated_server_losses(&layout, Some(1), DriveScope::Online),
+            0
+        );
+    }
+
+    #[test]
+    fn layout_counts_offline_drives_and_rejects_missing_ones() {
         let mut layout = info(3, 1, 3);
         assert!(pool_erasure_sets(&layout, 0, 4).is_err());
         layout.servers[1].drives[0].state = "offline".to_string();
-        assert!(pool_erasure_sets(&layout, 0, 3).is_err());
+        let sets = pool_erasure_sets(&layout, 0, 3).expect("offline drives are counted");
+        let online = sets
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(|server| server.online)
+            .sum::<usize>();
+        assert_eq!(online, 2);
     }
 
     #[test]
@@ -478,15 +647,16 @@ mod tests {
 
     type KubeCalls = Arc<Mutex<Vec<KubeCall>>>;
 
-    fn tenant_with_pools(servers: i32, pools: &[&str]) -> Tenant {
+    fn tenant_with_pools(servers: &[i32]) -> Tenant {
         let mut tenant = crate::tests::create_test_tenant(None, None);
         let mut template = tenant.spec.pools[0].clone();
-        template.servers = servers;
         template.persistence.volumes_per_server = 1;
-        tenant.spec.pools = pools
+        tenant.spec.pools = servers
             .iter()
-            .map(|name| Pool {
-                name: (*name).to_string(),
+            .enumerate()
+            .map(|(index, servers)| Pool {
+                name: format!("pool-{index}"),
+                servers: *servers,
                 ..template.clone()
             })
             .collect();
@@ -510,13 +680,30 @@ mod tests {
         }
     }
 
-    fn mock_kube(existing: Vec<PodDisruptionBudget>) -> (Context, KubeCalls) {
+    fn status(code: u16, reason: &str) -> Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "Status",
+            "status": "Failure",
+            "reason": reason,
+            "code": code
+        })
+    }
+
+    /// Kubernetes API with `existing` budgets. `created_concurrently` appears under its name
+    /// when the Operator tries to create it, so the create returns 409.
+    fn mock_kube(
+        existing: Vec<PodDisruptionBudget>,
+        created_concurrently: Option<PodDisruptionBudget>,
+    ) -> (Context, KubeCalls) {
         let calls = KubeCalls::default();
+        let stored = Arc::new(Mutex::new(existing));
         let service = service_fn({
             let calls = Arc::clone(&calls);
             move |request: Request<Body>| {
                 let calls = Arc::clone(&calls);
-                let existing = existing.clone();
+                let stored = Arc::clone(&stored);
+                let created_concurrently = created_concurrently.clone();
                 async move {
                     let method = request.method().clone();
                     let path = request.uri().path().to_string();
@@ -529,21 +716,48 @@ mod tests {
                     let body = (!bytes.is_empty()).then(|| {
                         serde_json::from_slice::<Value>(&bytes).expect("request body is JSON")
                     });
-                    let response = match method {
-                        Method::GET if path == BUDGETS_PATH => json!({
-                            "apiVersion": "policy/v1",
-                            "kind": "PodDisruptionBudgetList",
-                            "metadata": {},
-                            "items": existing
-                        }),
-                        Method::PATCH if path.starts_with(BUDGETS_PATH) => {
-                            body.clone().expect("apply carries the budget")
+                    let name = path
+                        .strip_prefix(BUDGETS_PATH)
+                        .and_then(|rest| rest.strip_prefix('/'))
+                        .map(str::to_string);
+                    let find = |name: &str| {
+                        stored
+                            .lock()
+                            .expect("budgets lock")
+                            .iter()
+                            .find(|budget| budget.name_any() == name)
+                            .cloned()
+                    };
+                    let (code, response) = match (&method, name.as_deref()) {
+                        (&Method::GET, None) if path == BUDGETS_PATH => (
+                            200,
+                            json!({
+                                "apiVersion": "policy/v1",
+                                "kind": "PodDisruptionBudgetList",
+                                "metadata": {},
+                                "items": *stored.lock().expect("budgets lock")
+                            }),
+                        ),
+                        (&Method::GET, Some(name)) => match find(name) {
+                            Some(budget) => (200, json!(budget)),
+                            None => (404, status(404, "NotFound")),
+                        },
+                        (&Method::POST, None) if path == BUDGETS_PATH => match created_concurrently
+                        {
+                            Some(budget) => {
+                                stored.lock().expect("budgets lock").push(budget);
+                                (409, status(409, "AlreadyExists"))
+                            }
+                            None => (200, body.clone().expect("create carries the budget")),
+                        },
+                        (&Method::PATCH, Some(_)) => {
+                            (200, body.clone().expect("apply carries the budget"))
                         }
-                        Method::DELETE if path.starts_with(BUDGETS_PATH) => json!({
-                            "apiVersion": "v1",
-                            "kind": "Status",
-                            "status": "Success"
-                        }),
+                        (&Method::DELETE, Some(_)) => (
+                            200,
+                            json!({"apiVersion": "v1", "kind": "Status", "status": "Success"}),
+                        ),
+                        (&Method::POST, _) if path.ends_with("/events") => (200, json!({})),
                         _ => panic!("unexpected Kubernetes request: {method} {path}"),
                     };
                     calls
@@ -552,7 +766,7 @@ mod tests {
                         .push(KubeCall { method, path, body });
                     Ok::<_, Infallible>(
                         Response::builder()
-                            .status(StatusCode::OK)
+                            .status(StatusCode::from_u16(code).expect("status code"))
                             .body(Body::from(
                                 serde_json::to_vec(&response).expect("response serializes"),
                             ))
@@ -564,22 +778,35 @@ mod tests {
         (Context::new(Client::new(service, "default")), calls)
     }
 
-    fn layouts_for(ctx: &Context, tenant: &Tenant, parity: usize) -> PoolLayouts {
-        let pool = &tenant.spec.pools[0];
-        let servers = usize::try_from(pool.servers).expect("servers");
-        let cmd_line = expected_pool_cmd_line(tenant, "default", pool, ctx.cluster_domain())
-            .expect("pool cmdline");
-        PoolLayouts {
-            info: info(servers, 1, servers),
-            pools: vec![
+    fn layouts_for(ctx: &Context, tenant: &Tenant, parity: Option<usize>) -> PoolLayouts {
+        let mut servers = Vec::new();
+        let mut pools = Vec::new();
+        for (index, pool) in tenant.spec.pools.iter().enumerate() {
+            let count = usize::try_from(pool.servers).expect("servers");
+            servers.extend(pool_servers(
+                i32::try_from(index).expect("pool index"),
+                count,
+                1,
+                count,
+            ));
+            let cmd_line = expected_pool_cmd_line(tenant, "default", pool, ctx.cluster_domain())
+                .expect("pool cmdline");
+            pools.push(
                 serde_json::from_value(json!({
-                    "id": 0,
+                    "id": index,
                     "cmdline": cmd_line,
                     "lastUpdate": "",
                     "status": "active"
                 }))
                 .expect("pool list item"),
-            ],
+            );
+        }
+        PoolLayouts {
+            info: RustfsServerInfo {
+                servers,
+                ..Default::default()
+            },
+            pools,
             parity,
         }
     }
@@ -597,15 +824,33 @@ mod tests {
             .collect()
     }
 
+    fn written_min_available(calls: &KubeCalls, method: Method) -> Vec<(String, IntOrString)> {
+        calls
+            .lock()
+            .expect("calls lock")
+            .iter()
+            .filter(|call| call.method == method && call.path.starts_with(BUDGETS_PATH))
+            .map(|call| {
+                let budget: PodDisruptionBudget =
+                    serde_json::from_value(call.body.clone().expect("budget")).expect("budget");
+                let min_available = budget
+                    .spec
+                    .and_then(|spec| spec.min_available)
+                    .expect("minAvailable");
+                (budget.metadata.name.expect("name"), min_available)
+            })
+            .collect()
+    }
+
     fn budget_path(name: &str) -> String {
         format!("{BUDGETS_PATH}/{name}")
     }
 
     #[tokio::test]
     async fn settled_pool_gets_a_budget_from_its_layout() {
-        let tenant = tenant_with_pools(4, &["pool-0"]);
-        let (ctx, calls) = mock_kube(Vec::new());
-        let layouts = layouts_for(&ctx, &tenant, 2);
+        let tenant = tenant_with_pools(&[4]);
+        let (ctx, calls) = mock_kube(Vec::new(), None);
+        let layouts = layouts_for(&ctx, &tenant, Some(2));
 
         let requeue =
             reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
@@ -613,12 +858,17 @@ mod tests {
                 .expect("reconcile");
 
         assert_eq!(requeue, None);
+        assert_eq!(
+            requests(&calls),
+            vec![
+                (Method::GET, BUDGETS_PATH.to_string()),
+                (Method::GET, budget_path("test-tenant-pool-0")),
+                (Method::POST, BUDGETS_PATH.to_string()),
+            ]
+        );
         let calls = calls.lock().expect("calls lock");
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[1].method, Method::PATCH);
-        assert_eq!(calls[1].path, budget_path("test-tenant-pool-0"));
         let budget: PodDisruptionBudget =
-            serde_json::from_value(calls[1].body.clone().expect("budget")).expect("budget");
+            serde_json::from_value(calls[2].body.clone().expect("budget")).expect("budget");
         let spec = budget.spec.expect("spec");
         assert_eq!(spec.min_available, Some(IntOrString::Int(3)));
         assert_eq!(
@@ -629,10 +879,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_budget_is_updated_with_server_side_apply() {
+        let tenant = tenant_with_pools(&[4]);
+        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)], None);
+        let layouts = layouts_for(&ctx, &tenant, Some(2));
+
+        reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+            .await
+            .expect("reconcile");
+
+        assert_eq!(
+            written_min_available(&calls, Method::PATCH),
+            vec![("test-tenant-pool-0".to_string(), IntOrString::Int(3))]
+        );
+    }
+
+    #[tokio::test]
+    async fn heterogeneous_pool_parity_from_the_admin_response() {
+        let tenant = tenant_with_pools(&[4, 8]);
+        let (ctx, calls) = mock_kube(Vec::new(), None);
+        let mut layouts = layouts_for(&ctx, &tenant, None);
+        // RustFS 1.0.0 reports no scalar standard parity when pools resolve different ones.
+        let response = json!({
+            "backend": {
+                "backendType": "Erasure",
+                "onlineDisks": 12,
+                "offlineDisks": 0,
+                "standardSCParity": null,
+                "rrSCParity": 1,
+                "totalSets": [1, 1],
+                "totalDrivesPerSet": [4, 8]
+            },
+            "servers": []
+        });
+        let parsed: RustfsServerInfo = serde_json::from_value(response).expect("admin info parses");
+        layouts.parity = parsed
+            .backend
+            .and_then(|backend| backend.standard_sc_parity)
+            .map(|parity| usize::try_from(parity).expect("parity"));
+
+        reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+            .await
+            .expect("reconcile");
+
+        // 4 drives resolve EC:2 (write quorum 3), 8 drives EC:4 (write quorum 5).
+        assert_eq!(
+            written_min_available(&calls, Method::POST),
+            vec![
+                ("test-tenant-pool-0".to_string(), IntOrString::Int(3)),
+                ("test-tenant-pool-1".to_string(), IntOrString::Int(5)),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn pool_without_spare_servers_loses_its_budget() {
-        let tenant = tenant_with_pools(2, &["pool-0"]);
-        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)]);
-        let layouts = layouts_for(&ctx, &tenant, 1);
+        let tenant = tenant_with_pools(&[2]);
+        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)], None);
+        let layouts = layouts_for(&ctx, &tenant, Some(1));
 
         reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
             .await
@@ -649,12 +953,15 @@ mod tests {
 
     #[tokio::test]
     async fn disabling_deletes_only_budgets_owned_by_the_tenant() {
-        let mut tenant = tenant_with_pools(4, &["pool-0", "pool-1"]);
+        let mut tenant = tenant_with_pools(&[4, 4]);
         tenant.spec.disable_pod_disruption_budget = Some(true);
-        let (ctx, calls) = mock_kube(vec![
-            existing_budget(&tenant, "pool-0", true),
-            existing_budget(&tenant, "pool-1", false),
-        ]);
+        let (ctx, calls) = mock_kube(
+            vec![
+                existing_budget(&tenant, "pool-0", true),
+                existing_budget(&tenant, "pool-1", false),
+            ],
+            None,
+        );
 
         let requeue =
             reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, layouts_never_read())
@@ -681,11 +988,14 @@ mod tests {
 
     #[tokio::test]
     async fn removed_pool_budget_is_deleted_while_pools_are_not_settled() {
-        let tenant = tenant_with_pools(4, &["pool-0"]);
-        let (ctx, calls) = mock_kube(vec![
-            existing_budget(&tenant, "pool-0", true),
-            existing_budget(&tenant, "pool-1", true),
-        ]);
+        let tenant = tenant_with_pools(&[4]);
+        let (ctx, calls) = mock_kube(
+            vec![
+                existing_budget(&tenant, "pool-0", true),
+                existing_budget(&tenant, "pool-1", true),
+            ],
+            None,
+        );
 
         let requeue =
             reconcile_budgets_with_layouts(&ctx, &tenant, "default", false, layouts_never_read())
@@ -703,9 +1013,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unreadable_layout_keeps_existing_budgets_and_retries() {
-        let tenant = tenant_with_pools(4, &["pool-0"]);
-        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)]);
+    async fn unreadable_layout_blocks_evictions_through_existing_budgets() {
+        let tenant = tenant_with_pools(&[4, 4]);
+        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)], None);
 
         let requeue = reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async {
             Err("RustFS is not reachable".to_string())
@@ -715,16 +1025,18 @@ mod tests {
 
         assert_eq!(requeue, Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL));
         assert_eq!(
-            requests(&calls),
-            vec![(Method::GET, BUDGETS_PATH.to_string())]
+            written_min_available(&calls, Method::PATCH),
+            vec![("test-tenant-pool-0".to_string(), IntOrString::Int(4))]
         );
+        assert!(written_min_available(&calls, Method::POST).is_empty());
     }
 
     #[tokio::test]
-    async fn unhealthy_drive_keeps_the_pool_budget_and_retries() {
-        let tenant = tenant_with_pools(4, &["pool-0"]);
-        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)]);
-        let mut layouts = layouts_for(&ctx, &tenant, 2);
+    async fn offline_drive_that_consumes_the_allowance_blocks_evictions() {
+        // 4 drives with EC:2: write quorum 3, so one offline drive leaves no spare server.
+        let tenant = tenant_with_pools(&[4]);
+        let (ctx, calls) = mock_kube(vec![existing_budget(&tenant, "pool-0", true)], None);
+        let mut layouts = layouts_for(&ctx, &tenant, Some(2));
         layouts.info.servers[2].drives[0].state = "offline".to_string();
 
         let requeue =
@@ -734,8 +1046,63 @@ mod tests {
 
         assert_eq!(requeue, Some(POD_DISRUPTION_BUDGET_RETRY_INTERVAL));
         assert_eq!(
-            requests(&calls),
-            vec![(Method::GET, BUDGETS_PATH.to_string())]
+            written_min_available(&calls, Method::PATCH),
+            vec![("test-tenant-pool-0".to_string(), IntOrString::Int(4))]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_name_budget_without_tenant_owner_is_left_unchanged() {
+        let tenant = tenant_with_pools(&[4]);
+        let mut foreign = existing_budget(&tenant, "pool-0", false);
+        foreign.spec =
+            Some(new_pool_budget(&tenant, "default", &tenant.spec.pools[0], 3).spec).flatten();
+        let (ctx, calls) = mock_kube(vec![foreign], None);
+        let layouts = layouts_for(&ctx, &tenant, Some(2));
+
+        reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+            .await
+            .expect("reconcile");
+
+        let requests = requests(&calls);
+        assert_eq!(
+            requests[..2],
+            [
+                (Method::GET, BUDGETS_PATH.to_string()),
+                (Method::GET, budget_path("test-tenant-pool-0")),
+            ]
+        );
+        assert!(
+            requests[2..]
+                .iter()
+                .all(|(method, path)| *method == Method::POST && path.ends_with("/events")),
+            "only a warning event may follow: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_created_concurrently_by_someone_else_is_left_unchanged() {
+        let tenant = tenant_with_pools(&[4]);
+        let (ctx, calls) = mock_kube(Vec::new(), Some(existing_budget(&tenant, "pool-0", false)));
+        let layouts = layouts_for(&ctx, &tenant, Some(2));
+
+        reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+            .await
+            .expect("reconcile");
+
+        let requests = requests(&calls);
+        assert_eq!(
+            requests[..4],
+            [
+                (Method::GET, BUDGETS_PATH.to_string()),
+                (Method::GET, budget_path("test-tenant-pool-0")),
+                (Method::POST, BUDGETS_PATH.to_string()),
+                (Method::GET, budget_path("test-tenant-pool-0")),
+            ]
+        );
+        assert!(
+            requests.iter().all(|(method, _)| *method != Method::PATCH),
+            "a budget the Tenant does not own must not be patched: {requests:?}"
         );
     }
 }

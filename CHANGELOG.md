@@ -49,7 +49,10 @@ All notable changes to RustFS Operator are documented in this file. The format i
 - Seven built-in RustFS Grafana dashboards, published by default as sidecar-discoverable
   ConfigMaps with configurable labels and namespace.
 - Per-pool PodDisruptionBudgets with `minAvailable` derived from the erasure layout RustFS
-  reports, so node drains keep write quorum; opt out with `spec.disablePodDisruptionBudget`.
+  reports, so node drains keep `STANDARD` write quorum, including while drives are offline;
+  opt out with `spec.disablePodDisruptionBudget`. Enabled by default: before upgrading, set the
+  opt-out on Tenants whose budgets you manage yourself, or remove your own budgets that select
+  pool Pods, because Kubernetes rejects evictions of Pods selected by more than one budget.
 
 ### Fixed
 

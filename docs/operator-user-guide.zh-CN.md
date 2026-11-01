@@ -714,13 +714,26 @@ Operator 会自动管理以下环境变量：
 
 #### Pod disruption budget
 
-Operator 为每个 Pool 创建一个 PodDisruptionBudget，名称与该 Pool 的 StatefulSet 相同，选择该 Pool 的 Pod。`minAvailable` 等于 Pool 的服务器数减去在所有纠删集保持写仲裁的前提下可以同时不可用的服务器数，依据 RustFS admin API 报告的磁盘分布计算：
+Operator 为每个 Pool 创建一个 PodDisruptionBudget，名称与该 Pool 的 StatefulSet 相同，选择该 Pool 的 Pod。`minAvailable` 等于 Pool 的服务器数减去在所有纠删集对 `STANDARD` 存储类保持写仲裁的前提下可以同时不可用的服务器数，依据 RustFS admin API 报告的磁盘分布计算：
 
 - 一个有 `d` 块盘、标准校验盘数为 `p` 的纠删集，在线盘数不少于 `d - p` 时保持写仲裁；数据盘与校验盘数量相等时需要 `d - p + 1`；
 - 一台服务器持有该纠删集的 `k` 块盘时，它下线会带走 `k` 块盘，因此该纠删集可容忍 `floor(冗余盘数 / k)` 台服务器不可用；
-- 取 Pool 内所有纠删集中的最小值。RustFS 只报告一个标准校验盘数，因此 Operator 取该值与每个 Pool 按纠删集大小自动计算的校验盘数中的较小值。
+- 取 Pool 内所有纠删集中的最小值；
+- `p` 为 RustFS 报告的标准校验盘数。各 Pool 的校验盘数不同时 RustFS 不报告该值，此时与 RustFS 一样，每个纠删集按其大小使用自动校验盘数。
 
-无法在保持写仲裁的情况下失去一台服务器的 Pool（例如单服务器或双服务器 Pool）不会创建 PodDisruptionBudget。只有当所有 Pool 都完成滚动更新、全部就绪且没有进行退役，并且 RustFS 报告该 Pool 的所有磁盘在线时，才会创建或更新 PodDisruptionBudget；否则保留现有 PodDisruptionBudget 并稍后重试。节点 drain 在驱逐下一个 Pod 会低于 `minAvailable` 时停止。设置 `spec.disablePodDisruptionBudget: true` 会删除 Operator 创建的 PodDisruptionBudget；Operator 之外创建的 PodDisruptionBudget 不受影响。升级前请删除自行创建的、选择 Pool Pod 的 PodDisruptionBudget：Kubernetes 会拒绝驱逐被多个 PodDisruptionBudget 选中的 Pod，同名的 PodDisruptionBudget 会阻塞 reconcile。
+离线磁盘会占用可中断余量，因为 Pod 在部分磁盘离线时仍保持 Ready。离线磁盘耗尽余量时，`minAvailable` 等于服务器数，在磁盘恢复之前该 Pool 的任何 Pod 都不能被驱逐。存在离线磁盘时，Operator 每 60 秒重新读取磁盘分布。RustFS 无法报告磁盘分布时，现有 PodDisruptionBudget 同样设为服务器数。
+
+PodDisruptionBudget 只保护以当前校验盘数写入的 `STANDARD` 存储类对象。以 `REDUCED_REDUNDANCY`（默认 EC:1）写入的对象，或在配置变更前以更低标准校验盘数写入的对象，在 drain 使 Pool 处于 `minAvailable` 时可能无法读取。
+
+无法在保持写仲裁的情况下失去一台服务器的 Pool（例如单服务器或双服务器 Pool）不会创建 PodDisruptionBudget。只有当所有 Pool 都完成滚动更新、全部就绪且没有进行退役时，才会创建或更新 PodDisruptionBudget。节点 drain 在驱逐下一个 Pod 会低于 `minAvailable` 时停止。
+
+Operator 只修改和删除属于该 Tenant 的 PodDisruptionBudget。如果已存在同名且不属于该 Tenant 的 PodDisruptionBudget，Operator 不会修改它，并记录 `PodDisruptionBudgetConflict` 警告事件。设置 `spec.disablePodDisruptionBudget: true` 会删除 Operator 创建的 PodDisruptionBudget。
+
+从不支持 PodDisruptionBudget 的 Operator 版本升级：
+
+1. 升级 chart，使 CRD 包含 `disablePodDisruptionBudget`，ClusterRole 包含 `policy/poddisruptionbudgets` 权限。
+2. 如需继续自行管理 PodDisruptionBudget，请在新 Operator 镜像启动前为这些 Tenant 设置 `spec.disablePodDisruptionBudget: true`。
+3. 否则请删除自行创建的、选择 Pool Pod 的 PodDisruptionBudget。Kubernetes 会拒绝驱逐被多个 PodDisruptionBudget 选中的 Pod，两者同时存在时 drain 无法驱逐该 Pool 的任何 Pod。
 
 ### 7.5 TLS
 
