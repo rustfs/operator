@@ -113,3 +113,16 @@ Create the name of the COSI driver service account to use
 {{- default "default" .Values.cosiDriver.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Checksum of the Console JWT secret source, used to force a rollout when the
+secret changes. When console.existingSecret is set, checksum the referenced
+Secret name; otherwise checksum the chart-managed Console Secret template.
+*/}}
+{{- define "rustfs-operator.consoleSecretChecksum" -}}
+{{- if .Values.console.existingSecret -}}
+{{- .Values.console.existingSecret | sha256sum -}}
+{{- else -}}
+{{- include (print $.Template.BasePath "/console-secret.yaml") . | sha256sum -}}
+{{- end -}}
+{{- end }}
