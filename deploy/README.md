@@ -4,13 +4,23 @@ This directory contains separate charts for installing the RustFS Operator and d
 
 ## Quick Start
 
-Install the operator using Helm:
+Install the operator from the public [Helm repository](https://operator.rustfs.com).
+Before installing, prepare the `sts-tls` Secret described in the
+[chart installation guide](rustfs-operator/README.md#installing-the-chart).
 
 ```bash
-helm install rustfs-operator deploy/rustfs-operator/ \
+helm repo add rustfs-operator https://operator.rustfs.com
+helm repo update
+helm search repo rustfs-operator/rustfs-operator --versions
+helm install rustfs-operator rustfs-operator/rustfs-operator \
+  --version 0.0.8 \
   --namespace rustfs-system \
   --create-namespace
 ```
+
+The example selects published chart version `0.0.8`. Select another available
+version with `--version`. For GitOps deployments, see the
+[Argo CD Application example](rustfs-operator/README.md#argo-cd).
 
 ## What's Included
 
@@ -37,7 +47,7 @@ See the [Helm chart README](rustfs-operator/README.md) for detailed configuratio
 
 - Kubernetes cluster (v1.30+)
 - Helm 3.0+
-- The `rustfs/operator:latest` container image loaded or available in your registry
+- Access to the Operator image selected by the chart version or your Helm values
 
 ## Verify Installation
 

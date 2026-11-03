@@ -25,6 +25,13 @@ RustFS **S3 API** and **RustFS Console UI** inside a Tenant are exposed on **900
 
 ## Quick start
 
+**Helm and Argo CD**
+
+Published Operator charts are available from [https://operator.rustfs.com](https://operator.rustfs.com).
+See the [Helm installation guide](deploy/rustfs-operator/README.md#installing-the-chart)
+for repository setup, available versions, and installation commands, or use the
+[Argo CD Application example](deploy/rustfs-operator/README.md#argo-cd).
+
 **Local CLI**
 
 ```bash

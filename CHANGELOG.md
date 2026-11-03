@@ -72,6 +72,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Changed
 
+- Documented the public Operator Helm repository, versioned installation, and an
+  Argo CD Application using the published chart.
 - Updated the default RustFS server image from `rustfs/rustfs:1.0.0-beta.10` to
   `rustfs/rustfs:1.0.0`.
 - Documented that distinct-physical-disk erasure failures and a separate data-plane operator are
