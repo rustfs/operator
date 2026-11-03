@@ -9,16 +9,16 @@ Helm chart for deploying the RustFS Kubernetes operator.
 
 ## Installing the Chart
 
-To install the chart with the release name `rustfs-operator`:
+The public Helm repository is [https://operator.rustfs.com](https://operator.rustfs.com).
+Published chart versions and package URLs are listed in its
+[repository index](https://operator.rustfs.com/index.yaml).
+
+Add the repository and list available versions:
 
 ```bash
-helm install rustfs-operator deploy/rustfs-operator/
-```
-
-To install in a specific namespace:
-
-```bash
-helm install rustfs-operator deploy/rustfs-operator/ --namespace rustfs-system --create-namespace
+helm repo add rustfs-operator https://operator.rustfs.com
+helm repo update
+helm search repo rustfs-operator/rustfs-operator --versions
 ```
 
 Operator STS TLS is enabled while automatic certificate generation is disabled by default.
@@ -26,9 +26,66 @@ Before installing, pre-create `sts-tls` in the release namespace with `tls.crt`,
 `ca.crt`. For development environments only, opt in to Operator-generated certificates with
 `--set sts.tls.auto=true`.
 
+Install the published chart with an explicit version:
+
+```bash
+helm install rustfs-operator rustfs-operator/rustfs-operator \
+  --version 0.0.8 \
+  --namespace rustfs-system \
+  --create-namespace
+```
+
+The examples use published chart version `0.0.8`. Select another version from
+`helm search repo --versions` when installing or upgrading. Inspect that version's
+configuration with `helm show values rustfs-operator/rustfs-operator --version 0.0.8`.
+
 The chart publishes the seven bundled RustFS Grafana dashboards as ConfigMaps by
 default. It does not install Grafana or Prometheus. A Grafana dashboard sidecar
 must watch the ConfigMap namespace and match the configured discovery labels.
+
+### Argo CD
+
+Use the published chart as the Helm source for an Argo CD `Application`:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rustfs-operator
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://operator.rustfs.com
+    chart: rustfs-operator
+    targetRevision: "0.0.8"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rustfs-system
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+```
+
+Set `metadata.namespace`, `spec.project`, and `spec.destination` for your Argo CD
+installation. The AppProject must allow this repository, the destination, and
+the chart's cluster-scoped resources, including CRDs and ClusterRoles.
+`targetRevision` selects a published chart version. Server-side apply supports
+the chart's large CRDs. Prepare `sts-tls` in `rustfs-system` before syncing, as
+described above, and supply custom chart settings through `spec.source.helm.valuesObject`.
+See the [Argo CD Helm documentation](https://argo-cd.readthedocs.io/en/stable/user-guide/helm/)
+for additional configuration.
+
+### Install from a Local Checkout
+
+To install the chart from a checkout of this repository, run from the repository root:
+
+```bash
+helm install rustfs-operator deploy/rustfs-operator/ \
+  --namespace rustfs-system \
+  --create-namespace
+```
 
 ### OpenShift Installation
 
