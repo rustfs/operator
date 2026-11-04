@@ -335,7 +335,13 @@ fn default_parity_count(drives: usize) -> usize {
     }
 }
 
+/// Host key for drives of a single-node deployment, which RustFS reports by path only.
+const LOCAL_SERVER: &str = "local";
+
 fn endpoint_host(endpoint: &str) -> Option<&str> {
+    if endpoint.starts_with('/') {
+        return Some(LOCAL_SERVER);
+    }
     let rest = endpoint
         .split_once("://")
         .map_or(endpoint, |(_, rest)| rest);
@@ -633,7 +639,8 @@ mod tests {
             endpoint_host("https://t-p-0.t-hl.ns.svc:9000/data/rustfs0"),
             Some("t-p-0.t-hl.ns.svc:9000")
         );
-        assert_eq!(endpoint_host("/data/rustfs0"), None);
+        assert_eq!(endpoint_host("/data/rustfs0"), Some(LOCAL_SERVER));
+        assert_eq!(endpoint_host("http:///data/rustfs0"), None);
     }
 
     const BUDGETS_PATH: &str = "/apis/policy/v1/namespaces/default/poddisruptionbudgets";
@@ -876,6 +883,27 @@ mod tests {
             Some(tenant.pool_selector_labels(&tenant.spec.pools[0]))
         );
         assert!(object_owned_by_tenant(&budget.metadata, &tenant));
+    }
+
+    #[tokio::test]
+    async fn single_node_pool_with_path_endpoints_gets_no_budget() {
+        let tenant = tenant_with_pools(&[1]);
+        let (ctx, calls) = mock_kube(Vec::new(), None);
+        let mut layouts = layouts_for(&ctx, &tenant, None);
+        for drive in &mut layouts.info.servers[0].drives {
+            drive.endpoint = "/data/rustfs0".to_string();
+        }
+
+        let requeue =
+            reconcile_budgets_with_layouts(&ctx, &tenant, "default", true, async { Ok(layouts) })
+                .await
+                .expect("reconcile");
+
+        assert_eq!(requeue, None);
+        assert_eq!(
+            requests(&calls),
+            vec![(Method::GET, BUDGETS_PATH.to_string())]
+        );
     }
 
     #[tokio::test]
