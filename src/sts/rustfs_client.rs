@@ -76,6 +76,23 @@ impl RustfsAdminClient {
         .map(Self)
     }
 
+    pub fn new_with_base_url_tls_material(
+        base_url: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+        ca_pem: Option<&[u8]>,
+        client_cert_and_key: Option<(&[u8], &[u8])>,
+    ) -> Result<Self, RustfsClientError> {
+        rustfs_admin::RustfsAdminClient::new_with_base_url_tls_material(
+            base_url,
+            access_key,
+            secret_key,
+            ca_pem,
+            client_cert_and_key,
+        )
+        .map(Self)
+    }
+
     pub fn new_with_base_url_and_http_client(
         base_url: impl Into<String>,
         access_key: impl Into<String>,
@@ -121,15 +138,6 @@ impl RustfsAdminClient {
         if !tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled()) {
             return Err(RustfsClientError::TenantTlsRequired);
         }
-        if tenant
-            .status
-            .as_ref()
-            .and_then(|status| status.certificates.tls.as_ref())
-            .and_then(|tls| tls.client_ca_secret_ref.as_ref())
-            .is_some()
-        {
-            return Err(RustfsClientError::TenantTlsClientCertificateRequired);
-        }
 
         let namespace = tenant
             .namespace()
@@ -137,19 +145,77 @@ impl RustfsAdminClient {
         let service_fqdn =
             cluster_dns::service_fqdn(&tenant.headless_service_name(), &namespace, cluster_domain);
         let base_url = format!("https://{service_fqdn}:9000");
-        match Self::load_tenant_tls_ca(kube_client, tenant).await? {
-            Some(ca_pem) => Self::new_with_base_url_and_ca_pem(
-                base_url,
-                credentials.access_key,
-                credentials.secret_key,
-                &ca_pem,
-            ),
-            None => Ok(Self::new_with_base_url(
+        let ca_pem = Self::load_tenant_tls_ca(kube_client, tenant).await?;
+        let client_identity = Self::load_tenant_tls_client_identity(kube_client, tenant).await?;
+        match (ca_pem.as_deref(), client_identity.as_ref()) {
+            (None, None) => Ok(Self::new_with_base_url(
                 base_url,
                 credentials.access_key,
                 credentials.secret_key,
             )),
+            (ca_pem, client_identity) => Self::new_with_base_url_tls_material(
+                base_url,
+                credentials.access_key,
+                credentials.secret_key,
+                ca_pem,
+                client_identity
+                    .map(|(cert_pem, key_pem)| (cert_pem.as_slice(), key_pem.as_slice())),
+            ),
         }
+    }
+
+    pub async fn load_tenant_tls_client_identity(
+        kube_client: &Client,
+        tenant: &Tenant,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, RustfsClientError> {
+        if !tenant.spec.tls.as_ref().is_some_and(|tls| tls.is_enabled()) {
+            return Ok(None);
+        }
+        let tls_status = tenant
+            .status
+            .as_ref()
+            .and_then(|status| status.certificates.tls.as_ref())
+            .filter(|tls| tls.ready)
+            .ok_or(RustfsClientError::TenantTlsNotReady)?;
+        let mtls_required = tenant
+            .spec
+            .tls
+            .as_ref()
+            .is_some_and(|tls| tls.is_mtls_enabled())
+            || tls_status.client_ca_secret_ref.is_some();
+        if !mtls_required {
+            return Ok(None);
+        }
+        let Some(server_ref) = tls_status.server_secret_ref.as_ref() else {
+            return Err(RustfsClientError::TenantTlsClientCertificateRequired);
+        };
+        let namespace = tenant
+            .namespace()
+            .map_err(|_| RustfsClientError::MissingTenantNamespace)?;
+        let api: Api<corev1::Secret> = Api::namespaced(kube_client.clone(), &namespace);
+        let secret = api.get(&server_ref.name).await.map_err(|_| {
+            RustfsClientError::TenantTlsCaSecretLookupFailed {
+                secret: server_ref.name.clone(),
+            }
+        })?;
+        let data = secret.data.as_ref();
+        let cert_pem = data
+            .and_then(|map| map.get("tls.crt"))
+            .map(|bytes| bytes.0.clone())
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| RustfsClientError::MissingTenantTlsCaKey {
+                secret: server_ref.name.clone(),
+                key: "tls.crt".to_string(),
+            })?;
+        let key_pem = data
+            .and_then(|map| map.get("tls.key"))
+            .map(|bytes| bytes.0.clone())
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| RustfsClientError::MissingTenantTlsCaKey {
+                secret: server_ref.name.clone(),
+                key: "tls.key".to_string(),
+            })?;
+        Ok(Some((cert_pem, key_pem)))
     }
 
     pub async fn load_tenant_tls_ca(
@@ -241,5 +307,88 @@ impl RustfsAdminClient {
             session_token: credentials.session_token,
             expiration: credentials.expiration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::v1alpha1::status::{
+        Status,
+        certificate::{SecretStatusRef, Status as CertificateStatus, TlsCertificateStatus},
+    };
+    use crate::types::v1alpha1::tls::{TlsConfig, TlsMode};
+    use http::{Method, Request, Response, StatusCode};
+    use k8s_openapi::ByteString;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::client::Body;
+    use std::collections::BTreeMap;
+    use std::convert::Infallible;
+    use tower::service_fn;
+
+    #[tokio::test]
+    async fn load_tenant_tls_client_identity_reads_server_secret_when_enable_mtls_is_set() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.namespace = Some("default".to_string());
+        tenant.spec.tls = Some(TlsConfig {
+            mode: TlsMode::CertManager,
+            enable_mtls: true,
+            ..Default::default()
+        });
+        tenant.status = Some(Status {
+            certificates: CertificateStatus {
+                tls: Some(TlsCertificateStatus {
+                    mode: "CertManager".to_string(),
+                    ready: true,
+                    server_secret_ref: Some(SecretStatusRef {
+                        name: "mtls-server-tls".to_string(),
+                        key: None,
+                        resource_version: Some("1".to_string()),
+                    }),
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        });
+
+        let secret = corev1::Secret {
+            metadata: ObjectMeta {
+                name: Some("mtls-server-tls".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            data: Some(BTreeMap::from([
+                ("tls.crt".to_string(), ByteString(b"cert-pem".to_vec())),
+                ("tls.key".to_string(), ByteString(b"key-pem".to_vec())),
+            ])),
+            ..Default::default()
+        };
+
+        let service = service_fn(move |request: Request<Body>| {
+            let secret = secret.clone();
+            async move {
+                assert_eq!(request.method(), Method::GET);
+                assert_eq!(
+                    request.uri().path(),
+                    "/api/v1/namespaces/default/secrets/mtls-server-tls"
+                );
+                let response = Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from(
+                        serde_json::to_vec(&secret).expect("Secret should serialize"),
+                    ))
+                    .expect("response should build");
+                Ok::<_, Infallible>(response)
+            }
+        });
+        let client = Client::new(service, "default");
+
+        let identity = RustfsAdminClient::load_tenant_tls_client_identity(&client, &tenant)
+            .await
+            .expect("client identity should load")
+            .expect("client identity should be Some when enable_mtls=true");
+
+        assert_eq!(identity.0, b"cert-pem");
+        assert_eq!(identity.1, b"key-pem");
     }
 }

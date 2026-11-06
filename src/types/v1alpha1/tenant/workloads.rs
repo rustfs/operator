@@ -26,7 +26,9 @@ use crate::types::v1alpha1::security_context::{
     MAX_KUBERNETES_ID, PodSecurityContextOverride, effective_run_as_non_root,
     security_context_pair_delegates_to_platform,
 };
-use crate::types::v1alpha1::tls::{TLS_SERVER_VOLUME_NAME, TlsPlan, http_probe};
+use crate::types::v1alpha1::tls::{
+    TLS_SERVER_VOLUME_NAME, TlsPlan, http_probe, mtls_exec_probe, tcp_probe,
+};
 use k8s_openapi::DeepMerge;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
@@ -1698,9 +1700,21 @@ impl Tenant {
                 .image_pull_policy
                 .as_ref()
                 .map(ToString::to_string),
-            liveness_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
-            readiness_probe: Some(http_probe("/health/ready", tls_plan.probe_scheme)),
-            startup_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
+            liveness_probe: Some(if tls_plan.mtls_enabled {
+                tcp_probe()
+            } else {
+                http_probe("/health", tls_plan.probe_scheme)
+            }),
+            readiness_probe: Some(if tls_plan.mtls_enabled {
+                mtls_exec_probe(&tls_plan.mount_path, "/health/ready")
+            } else {
+                http_probe("/health/ready", tls_plan.probe_scheme)
+            }),
+            startup_probe: Some(if tls_plan.mtls_enabled {
+                tcp_probe()
+            } else {
+                http_probe("/health", tls_plan.probe_scheme)
+            }),
             termination_message_policy: Some("FallbackToLogsOnError".to_string()),
             security_context: Some(container_security_context),
             ..Default::default()
@@ -2026,6 +2040,17 @@ impl Tenant {
         // Check volume mounts (compare as JSON for deep equality)
         if serde_json::to_value(&existing_container.volume_mounts)?
             != serde_json::to_value(&desired_container.volume_mounts)?
+        {
+            return Ok(true);
+        }
+
+        // Check container probes (mTLS switches HTTP probes to TCP/exec probes)
+        if serde_json::to_value(&existing_container.liveness_probe)?
+            != serde_json::to_value(&desired_container.liveness_probe)?
+            || serde_json::to_value(&existing_container.readiness_probe)?
+                != serde_json::to_value(&desired_container.readiness_probe)?
+            || serde_json::to_value(&existing_container.startup_probe)?
+                != serde_json::to_value(&desired_container.startup_probe)?
         {
             return Ok(true);
         }
@@ -3836,6 +3861,71 @@ mod tests {
             .expect("Should compare StatefulSet");
 
         assert!(needs_update, "TLS hash change should roll the pod template");
+    }
+
+    #[test]
+    fn mtls_tls_plan_switches_probes_and_triggers_statefulset_update() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let base_plan = tls_plan("sha256:same");
+        let mut mtls_plan = base_plan.clone();
+        mtls_plan.mtls_enabled = true;
+
+        let base_sts = tenant
+            .new_statefulset_with_tls_plan(pool, &base_plan)
+            .expect("Should create StatefulSet with base TLS");
+        let mtls_sts = tenant
+            .new_statefulset_with_tls_plan(pool, &mtls_plan)
+            .expect("Should create StatefulSet with mTLS");
+
+        let container = &mtls_sts
+            .spec
+            .as_ref()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("Pod template should have spec")
+            .containers[0];
+        assert!(
+            container
+                .liveness_probe
+                .as_ref()
+                .and_then(|probe| probe.tcp_socket.as_ref())
+                .is_some()
+        );
+        assert!(
+            container
+                .startup_probe
+                .as_ref()
+                .and_then(|probe| probe.tcp_socket.as_ref())
+                .is_some()
+        );
+        let readiness_cmd = container
+            .readiness_probe
+            .as_ref()
+            .and_then(|probe| probe.exec.as_ref())
+            .and_then(|exec| exec.command.as_ref())
+            .expect("mTLS readiness probe should use exec");
+        assert!(readiness_cmd.iter().any(|arg| arg == "curl"));
+        assert!(
+            readiness_cmd
+                .iter()
+                .any(|arg| arg.ends_with("/client_cert.pem"))
+        );
+        assert!(
+            readiness_cmd
+                .iter()
+                .any(|arg| arg.ends_with("/client_key.pem"))
+        );
+
+        let needs_update = tenant
+            .statefulset_needs_update_with_tls_plan(&base_sts, pool, &mtls_plan)
+            .expect("Should compare StatefulSet");
+        assert!(
+            needs_update,
+            "enabling mTLS probes should trigger StatefulSet update"
+        );
     }
 
     // Test: Pod runs as non-root with proper security context

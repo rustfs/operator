@@ -26,6 +26,9 @@ spec:
     mountPath: /var/run/rustfs/tls
     rotationStrategy: Rollout
     enableInternodeHttps: true
+    # Set enableMtls: true to enable Pod-to-Pod mutual TLS. When usages is omitted,
+    # the operator requests both "server auth" and "client auth" automatically.
+    enableMtls: false
     requireSanMatch: true
     certManager:
       manageCertificate: true

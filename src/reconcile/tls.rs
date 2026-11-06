@@ -392,11 +392,12 @@ async fn reconcile_cert_manager_tls(
                 .await;
             }
 
-            let desired_certificate = build_cert_manager_certificate(
+            let desired_certificate = build_cert_manager_certificate_with_mtls(
                 &san_budget,
                 cert_manager,
                 &entry.hosts,
                 include_generated_dns_names(&entry),
+                entry.default && config.is_mtls_enabled(),
                 CertManagerCertificateNames {
                     secret: &secret_name,
                     certificate: &certificate_name,
@@ -626,6 +627,26 @@ async fn reconcile_cert_manager_tls(
         CaTrustSource::SystemCa => {}
     }
 
+    if config.is_mtls_enabled()
+        && ca_trust.client_ca_secret_ref.is_none()
+        && explicit_ca_bytes.is_none()
+        && !trust_system_ca
+    {
+        return tls_validation_blocked(
+            ctx,
+            tenant,
+            config,
+            TlsValidationFailure {
+                reason: Reason::CaBundleMissing,
+                message: format!(
+                    "TLS Secret '{}' is missing '{}' while spec.tls.enableMtls=true and no client CA or system CA trust is configured",
+                    default_certificate.secret_name, CA_CERT_KEY
+                ),
+            },
+        )
+        .await;
+    }
+
     let mut client_ca = None;
     let mut client_ca_secret = None;
     let mut client_ca_bytes: Option<Vec<u8>> = None;
@@ -725,13 +746,14 @@ async fn reconcile_cert_manager_tls(
         })
         .collect();
 
-    Ok(TlsPlan::rollout_certificates(
+    Ok(TlsPlan::rollout_certificates_with_mtls(
         config.mount_path.clone(),
         hash,
         server_certificates,
         explicit_ca,
         client_ca,
         config.enable_internode_https,
+        config.is_mtls_enabled(),
         trust_system_ca,
         ca_trust.trust_leaf_certificate_as_ca,
         Some(status),
@@ -1069,11 +1091,30 @@ struct CertManagerCertificateNames<'a> {
     certificate: &'a str,
 }
 
+#[cfg(test)]
 fn build_cert_manager_certificate(
     san_budget: &ValidatedTlsSanBudget<'_>,
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
     include_generated_dns_names: bool,
+    names: CertManagerCertificateNames<'_>,
+) -> DynamicObject {
+    build_cert_manager_certificate_with_mtls(
+        san_budget,
+        cert_manager,
+        hosts,
+        include_generated_dns_names,
+        false,
+        names,
+    )
+}
+
+fn build_cert_manager_certificate_with_mtls(
+    san_budget: &ValidatedTlsSanBudget<'_>,
+    cert_manager: &CertManagerTlsConfig,
+    hosts: &[String],
+    include_generated_dns_names: bool,
+    include_client_auth: bool,
     names: CertManagerCertificateNames<'_>,
 ) -> DynamicObject {
     let tenant = san_budget.tenant();
@@ -1101,7 +1142,7 @@ fn build_cert_manager_certificate(
     );
     spec.insert(
         "usages".to_string(),
-        json!(certificate_usages(cert_manager)),
+        json!(certificate_usages(cert_manager, include_client_auth)),
     );
     if let Some(duration) = cert_manager
         .duration
@@ -2160,9 +2201,16 @@ fn rustfs_certificate_domains(certificate: &ObservedTlsCertificate) -> Vec<Optio
     domains
 }
 
-fn certificate_usages(cert_manager: &CertManagerTlsConfig) -> Vec<String> {
+fn certificate_usages(
+    cert_manager: &CertManagerTlsConfig,
+    include_client_auth: bool,
+) -> Vec<String> {
     if cert_manager.usages.is_empty() {
-        vec!["server auth".to_string()]
+        if include_client_auth {
+            vec!["server auth".to_string(), "client auth".to_string()]
+        } else {
+            vec!["server auth".to_string()]
+        }
     } else {
         cert_manager.usages.clone()
     }
@@ -2803,6 +2851,9 @@ fn tls_hash(
             "false"
         },
     );
+    if config.enable_mtls {
+        hash_str(&mut hasher, "enableMtls", "true");
+    }
     hash_str(
         &mut hasher,
         "trustSystemCa",
@@ -3819,6 +3870,32 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             !dns_names
                 .iter()
                 .any(|name| name.ends_with(".svc.cluster.local"))
+        );
+    }
+
+    #[test]
+    fn managed_certificate_manifest_defaults_to_server_and_client_auth_when_mtls_enabled() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.namespace = Some("storage".to_string());
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
+
+        let certificate = build_cert_manager_certificate_with_mtls(
+            &san_budget,
+            &CertManagerTlsConfig::default(),
+            &[],
+            true,
+            true,
+            CertManagerCertificateNames {
+                secret: "tenant-a-tls",
+                certificate: "tenant-a-tls",
+            },
+        );
+
+        assert_eq!(
+            certificate.data.pointer("/spec/usages"),
+            Some(&serde_json::json!(["server auth", "client auth"]))
         );
     }
 

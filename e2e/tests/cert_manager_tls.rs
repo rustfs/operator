@@ -18,8 +18,9 @@ use operator::types::v1alpha1::{
     status::certificate::SecretStatusRef,
     tenant::Tenant,
     tls::{
-        CaTrustSource, DEFAULT_TLS_MOUNT_PATH, RUSTFS_CA_FILE, RUSTFS_TLS_CERT_FILE,
-        RUSTFS_TLS_KEY_FILE, SecretKeyReference, TlsPlan,
+        CaTrustSource, DEFAULT_TLS_MOUNT_PATH, RUSTFS_CA_FILE, RUSTFS_CLIENT_CA_FILE,
+        RUSTFS_CLIENT_CERT_FILE, RUSTFS_CLIENT_KEY_FILE, RUSTFS_TLS_CERT_FILE, RUSTFS_TLS_KEY_FILE,
+        SecretKeyReference, TlsPlan, TlsServerCertificateMount,
     },
 };
 use rustfs_operator_e2e::{
@@ -601,6 +602,87 @@ fn external_secret_tls_plan_projects_server_and_explicit_ca_into_single_tls_dire
             .iter()
             .any(|volume| volume.name == "rustfs-tls-ca"),
         "explicit CA SecretRef should be projected into the TLS directory instead of mounted as a separate subPath volume"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mtls_tls_plan_projects_client_identity_and_uses_tcp_and_exec_probes() -> Result<()> {
+    let config = E2eConfig::defaults();
+    let tenant = tls_e2e::managed_certificate_tenant(&config);
+    let pool = tenant
+        .spec
+        .pools
+        .first()
+        .expect("managed certificate fixture should have a pool");
+    let secret_name = tls_e2e::managed_secret_name(&config);
+    let tls_plan = TlsPlan::rollout_certificates_with_mtls(
+        DEFAULT_TLS_MOUNT_PATH.to_string(),
+        "sha256:e2e-mtls".to_string(),
+        vec![TlsServerCertificateMount {
+            secret_name: secret_name.clone(),
+            domains: vec![None],
+            ca_key: Some("ca.crt".to_string()),
+        }],
+        None,
+        None,
+        true,
+        true,
+        false,
+        false,
+        None,
+    );
+
+    let statefulset = tenant.new_statefulset_with_tls_plan(pool, &tls_plan)?;
+    let pod_spec = statefulset
+        .spec
+        .as_ref()
+        .context("StatefulSet should have spec")?
+        .template
+        .spec
+        .as_ref()
+        .context("StatefulSet pod template should have spec")?;
+    let tls_volume = pod_spec
+        .volumes
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|volume| volume.name == "rustfs-tls-server")
+        .context("TLS material should use the rustfs-tls-server volume")?;
+    let rustfs_container = pod_spec
+        .containers
+        .iter()
+        .find(|container| container.name == "rustfs")
+        .context("rustfs container should exist")?;
+
+    ensure!(
+        projected_secret_item(tls_volume, &secret_name, "tls.crt", RUSTFS_CLIENT_CERT_FILE,),
+        "mTLS projected volume should include client_cert.pem"
+    );
+    ensure!(
+        projected_secret_item(tls_volume, &secret_name, "tls.key", RUSTFS_CLIENT_KEY_FILE,),
+        "mTLS projected volume should include client_key.pem"
+    );
+    ensure!(
+        projected_secret_item(tls_volume, &secret_name, "ca.crt", RUSTFS_CLIENT_CA_FILE,),
+        "mTLS projected volume should include client_ca.crt"
+    );
+    ensure!(
+        rustfs_container
+            .liveness_probe
+            .as_ref()
+            .and_then(|probe| probe.tcp_socket.as_ref())
+            .is_some(),
+        "mTLS liveness probe should use tcpSocket"
+    );
+    ensure!(
+        rustfs_container
+            .readiness_probe
+            .as_ref()
+            .and_then(|probe| probe.exec.as_ref())
+            .is_some(),
+        "mTLS readiness probe should use exec"
     );
 
     Ok(())

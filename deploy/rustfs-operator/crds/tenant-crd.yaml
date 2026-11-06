@@ -3579,6 +3579,12 @@ spec:
                   enableInternodeHttps:
                     default: false
                     type: boolean
+                  enableMtls:
+                    default: false
+                    type: boolean
+                    x-kubernetes-validations:
+                    - message: enableMtls is immutable
+                      rule: self == oldSelf
                   mode:
                     default: disabled
                     enum:
@@ -3650,6 +3656,9 @@ spec:
             required:
             - pools
             type: object
+            x-kubernetes-validations:
+            - message: tls.enableMtls is immutable
+              rule: (has(self.tls) && has(self.tls.enableMtls) && self.tls.enableMtls) == (has(oldSelf.tls) && has(oldSelf.tls.enableMtls) && oldSelf.tls.enableMtls)
           status:
             nullable: true
             properties:
