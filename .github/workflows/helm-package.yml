@@ -29,6 +29,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # Official SemVer 2.0.0 pattern (ERE). A malformed release tag once published
+  # a chart version "0.07" that Artifact Hub ranked as latest and that installed
+  # a non-existent image tag.
+  SEMVER_RE: '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
+
 jobs:
   build-helm-package:
     runs-on: sm-standard-2
@@ -66,6 +72,15 @@ jobs:
             echo "Version is empty"
             exit 1
           fi
+
+          # Helm's own version parsing is lenient and accepted "0.07" as a
+          # chart version. Reject anything that is not strict semver before
+          # it reaches the published chart repository.
+          if ! grep -qE "$SEMVER_RE" <<< "$CHART_VERSION"; then
+            echo "::error::Chart version '$CHART_VERSION' is not valid semver (expected e.g. 1.2.3 or 1.2.3-rc.1). Fix the release tag and re-run."
+            exit 1
+          fi
+
           {
             echo "raw_tag=$RAW_TAG"
             echo "chart_version=$CHART_VERSION"
