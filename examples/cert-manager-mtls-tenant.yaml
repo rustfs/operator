@@ -1,0 +1,82 @@
+# Minimal RustFS Tenant example for cert-manager managed mTLS (Pod-to-Pod and client-to-Pod).
+#
+# Notes:
+# - RustFS serves both S3 API and internode RPC traffic on port 9000, so enabling
+#   enableMtls enforces client certificate verification for both peer pods and S3 clients.
+# - rustls requires the CA certificate in ca.crt / client_ca.crt to carry
+#   basicConstraints: CA:TRUE, so this example sets up a self-signed root Issuer,
+#   a CA Certificate (isCA: true), and a CA Issuer referenced by the Tenant.
+# - Create the credentials Secret referenced by spec.credsSecret with non-default
+#   accesskey / secretkey values before applying in a multi-node deployment.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: rustfs-selfsigned-root
+  namespace: rustfs-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: rustfs-root-ca
+  namespace: rustfs-system
+spec:
+  isCA: true
+  commonName: rustfs-root-ca
+  secretName: rustfs-root-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: rustfs-selfsigned-root
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: rustfs-ca-issuer
+  namespace: rustfs-system
+spec:
+  ca:
+    secretName: rustfs-root-ca-secret
+---
+apiVersion: rustfs.com/v1alpha1
+kind: Tenant
+metadata:
+  name: cert-manager-mtls
+  namespace: rustfs-system
+spec:
+  image: rustfs/rustfs:1.0.4
+  credsSecret:
+    name: rustfs-creds
+
+  tls:
+    mode: certManager
+    mountPath: /var/run/rustfs/tls
+    rotationStrategy: Rollout
+    enableInternodeHttps: true
+    enableMtls: true
+    requireSanMatch: true
+    certManager:
+      manageCertificate: true
+      certificateName: cert-manager-mtls-server
+      secretName: cert-manager-mtls-server-tls
+      issuerRef:
+        group: cert-manager.io
+        kind: Issuer
+        name: rustfs-ca-issuer
+      includeGeneratedDnsNames: true
+
+  pools:
+    - name: primary
+      servers: 4
+      persistence:
+        volumesPerServer: 1
+        volumeClaimTemplate:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi

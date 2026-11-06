@@ -98,6 +98,7 @@ pub struct OidcConfig {
     crates(serde_json = "k8s_openapi::serde_json")
 )]
 #[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("(has(self.tls) && has(self.tls.enableMtls) && self.tls.enableMtls) == (has(oldSelf.tls) && has(oldSelf.tls.enableMtls) && oldSelf.tls.enableMtls)").message("tls.enableMtls is immutable"))]
 pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<String>,

@@ -803,6 +803,7 @@ Important fields:
 | `mountPath` | TLS mount path. Defaults to `/var/run/rustfs/tls`. |
 | `rotationStrategy` | `Rollout` is supported. `HotReload` is accepted by the CRD but currently blocks reconciliation. |
 | `enableInternodeHttps` | Use HTTPS for RustFS peer communication. |
+| `enableMtls` | Enable mutual TLS (`RUSTFS_SERVER_MTLS_ENABLE=true`) on the shared RustFS listener (enforcing client certificate verification for both client-to-Pod and Pod-to-Pod connections on `:9000`) and project `client_cert.pem` / `client_key.pem` from the default certificate for Pod-to-Pod mTLS. Immutable after Tenant creation. |
 | `requireSanMatch` | Require generated DNS names to match certificate SANs. Defaults to `true`. |
 | `certManager` | Backward-compatible single certificate settings. `secretName` is required for `mode: certManager` when `certificates` is empty. |
 | `certificates` | Multiple server certificate entries rendered into the RustFS TLS directory for SNI. Exactly one entry must set `default: true`; non-default entries must set `hosts`. |
@@ -868,6 +869,13 @@ spec:
 The default certificate is projected to `rustfs_cert.pem` and `rustfs_key.pem` at `mountPath`, so RustFS can use it as the fallback certificate and for internode HTTPS. Each `hosts` value is projected as a RustFS SNI directory, for example `s3.example.com/rustfs_cert.pem` and `s3.example.com/rustfs_key.pem`.
 When `certificates` is set, omitted `includeGeneratedDnsNames` is treated as `true` only on the `default: true` certificate. Non-default entries include only `hosts` and `certManager.dnsNames` unless they explicitly set `includeGeneratedDnsNames: true`.
 When `enableInternodeHttps: true`, the default managed certificate must cover the RustFS peer DNS names used by the operator and `RUSTFS_VOLUMES`. Keep `includeGeneratedDnsNames` enabled, or list the required names explicitly in `hosts` or `certManager.dnsNames`. Clusters with a custom Kubernetes DNS domain should set the Helm chart `clusterDomain`; required names then use `.svc.<clusterDomain>`. External certificates must cover the headless Service FQDN (`<tenant>-hl.<namespace>.svc.<clusterDomain>`) and pod FQDNs; a wildcard such as `*.<tenant>-hl.<namespace>.svc.<clusterDomain>` covers the generated pod FQDNs.
+When `enableMtls: true` (or when `caTrust.clientCaSecretRef` is configured):
+- The operator sets `RUSTFS_SERVER_MTLS_ENABLE=true` on the RustFS container. Because RustFS serves both S3 API and internode RPC traffic on port `9000`, all TLS connections to `:9000` (both client-to-Pod and Pod-to-Pod) must present a client certificate trusted by `client_ca.crt` (or `ca.crt`).
+- The default certificate's `tls.crt` and `tls.key` are projected to both `rustfs_cert.pem`/`rustfs_key.pem` and `client_cert.pem`/`client_key.pem` in `mountPath`, and `ca.crt` is also projected to `client_ca.crt` when `clientCaSecretRef` is omitted.
+- When `manageCertificate: true` and `certManager.usages` is omitted, the operator requests `usages: ["server auth", "client auth"]` on the default `Certificate`.
+- Liveness and startup probes switch to `tcpSocket` on port `9000`, and the readiness probe uses `curl` with `--cert` and `--key` against `https://127.0.0.1:9000/health/ready`.
+- Because `rustls` requires client trust anchors to have `basicConstraints: CA:TRUE`, use a `cert-manager` CA `Issuer` (backed by a certificate with `isCA: true`) rather than a direct leaf `selfSigned` `Issuer`.
+
 When `certificates` is set, configure process-wide trust with top-level `caTrust` or the `caTrust` on the `default: true` certificate. The legacy `certManager.caTrust` field is only used by the single-certificate form, and `certManager.caTrust` on non-default entries is rejected.
 
 ### 7.6 Logging

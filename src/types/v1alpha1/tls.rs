@@ -26,6 +26,8 @@ pub const RUSTFS_TLS_CERT_FILE: &str = "rustfs_cert.pem";
 pub const RUSTFS_TLS_KEY_FILE: &str = "rustfs_key.pem";
 pub const RUSTFS_CA_FILE: &str = "ca.crt";
 pub const RUSTFS_CLIENT_CA_FILE: &str = "client_ca.crt";
+pub const RUSTFS_CLIENT_CERT_FILE: &str = "client_cert.pem";
+pub const RUSTFS_CLIENT_KEY_FILE: &str = "client_key.pem";
 
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -196,6 +198,10 @@ pub struct TlsConfig {
     #[serde(default)]
     pub enable_internode_https: bool,
 
+    #[serde(default)]
+    #[x_kube(validation = Rule::new("self == oldSelf").message("enableMtls is immutable"))]
+    pub enable_mtls: bool,
+
     #[serde(default = "default_require_san_match")]
     pub require_san_match: bool,
 
@@ -224,6 +230,7 @@ impl Default for TlsConfig {
             mount_path: default_tls_mount_path(),
             rotation_strategy: TlsRotationStrategy::default(),
             enable_internode_https: false,
+            enable_mtls: false,
             require_san_match: default_require_san_match(),
             cert_manager: None,
             certificates: Vec::new(),
@@ -235,6 +242,10 @@ impl Default for TlsConfig {
 impl TlsConfig {
     pub fn is_enabled(&self) -> bool {
         self.mode != TlsMode::Disabled
+    }
+
+    pub fn is_mtls_enabled(&self) -> bool {
+        self.enable_mtls || self.ca_trust().client_ca_secret_ref.is_some()
     }
 
     pub fn ca_trust(&self) -> CaTrustConfig {
@@ -309,10 +320,65 @@ mod tests {
         assert_eq!(config.mount_path, DEFAULT_TLS_MOUNT_PATH);
         assert_eq!(config.rotation_strategy, TlsRotationStrategy::Rollout);
         assert!(!config.enable_internode_https);
+        assert!(!config.enable_mtls);
+        assert!(!config.is_mtls_enabled());
         assert!(config.require_san_match);
         assert!(config.cert_manager.is_none());
         assert!(config.certificates.is_empty());
         assert!(config.ca_trust.is_none());
+    }
+
+    #[test]
+    fn tls_plan_mtls_projects_client_cert_key_and_client_ca() {
+        let plan = TlsPlan::rollout_certificates_with_mtls(
+            DEFAULT_TLS_MOUNT_PATH.to_string(),
+            "sha256:mtls".to_string(),
+            vec![TlsServerCertificateMount {
+                secret_name: "internal-tls".to_string(),
+                domains: vec![None],
+                ca_key: Some("ca.crt".to_string()),
+            }],
+            None,
+            None,
+            true,
+            true,
+            false,
+            false,
+            None,
+        );
+
+        assert!(plan.mtls_enabled);
+        assert!(plan.env.iter().any(|var| {
+            var.name == "RUSTFS_SERVER_MTLS_ENABLE" && var.value.as_deref() == Some("true")
+        }));
+        let volume = plan
+            .volumes
+            .iter()
+            .find(|volume| volume.name == "rustfs-tls-server")
+            .expect("TLS volume should exist");
+        let paths = volume
+            .projected
+            .as_ref()
+            .and_then(|projected| projected.sources.as_ref())
+            .expect("TLS volume should use projected sources")
+            .iter()
+            .flat_map(|source| {
+                source
+                    .secret
+                    .as_ref()
+                    .and_then(|secret| secret.items.as_ref())
+                    .into_iter()
+                    .flatten()
+            })
+            .map(|item| item.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"rustfs_cert.pem"));
+        assert!(paths.contains(&"rustfs_key.pem"));
+        assert!(paths.contains(&"client_cert.pem"));
+        assert!(paths.contains(&"client_key.pem"));
+        assert!(paths.contains(&"ca.crt"));
+        assert!(paths.contains(&"client_ca.crt"));
     }
 
     #[test]
@@ -430,6 +496,7 @@ pub struct TlsServerCertificateMount {
 #[derive(Clone, Debug, Default)]
 pub struct TlsPlan {
     pub enabled: bool,
+    pub mtls_enabled: bool,
     pub mount_path: String,
     pub internode_scheme: &'static str,
     pub probe_scheme: &'static str,
@@ -444,6 +511,7 @@ impl TlsPlan {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            mtls_enabled: false,
             mount_path: DEFAULT_TLS_MOUNT_PATH.to_string(),
             internode_scheme: "http",
             probe_scheme: "HTTP",
@@ -497,6 +565,35 @@ impl TlsPlan {
         trust_leaf_certificate_as_ca: bool,
         status: Option<crate::types::v1alpha1::status::certificate::TlsCertificateStatus>,
     ) -> Self {
+        let enable_mtls = client_ca.is_some();
+        Self::rollout_certificates_with_mtls(
+            mount_path,
+            hash,
+            server_certificates,
+            explicit_ca,
+            client_ca,
+            enable_internode_https,
+            enable_mtls,
+            trust_system_ca,
+            trust_leaf_certificate_as_ca,
+            status,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rollout_certificates_with_mtls(
+        mount_path: String,
+        hash: String,
+        server_certificates: Vec<TlsServerCertificateMount>,
+        explicit_ca: Option<SecretKeyReference>,
+        client_ca: Option<SecretKeyReference>,
+        enable_internode_https: bool,
+        enable_mtls: bool,
+        trust_system_ca: bool,
+        trust_leaf_certificate_as_ca: bool,
+        status: Option<crate::types::v1alpha1::status::certificate::TlsCertificateStatus>,
+    ) -> Self {
+        let mtls_enabled = enable_mtls || client_ca.is_some();
         let mut annotations = BTreeMap::new();
         annotations.insert(TLS_HASH_ANNOTATION.to_string(), hash);
 
@@ -519,7 +616,7 @@ impl TlsPlan {
                 ..Default::default()
             });
         }
-        if client_ca.is_some() {
+        if mtls_enabled {
             env.push(corev1::EnvVar {
                 name: "RUSTFS_SERVER_MTLS_ENABLE".to_string(),
                 value: Some("true".to_string()),
@@ -527,21 +624,24 @@ impl TlsPlan {
             });
         }
 
+        let project_default_client_ca =
+            mtls_enabled && client_ca.is_none() && explicit_ca.is_none();
         let mut sources = server_certificates
             .iter()
             .map(|certificate| {
                 secret_projection(
                     &certificate.secret_name,
-                    server_certificate_items(certificate),
+                    server_certificate_items(certificate, mtls_enabled, project_default_client_ca),
                 )
             })
             .collect::<Vec<_>>();
 
         if let Some(explicit_ca) = &explicit_ca {
-            sources.push(secret_projection(
-                &explicit_ca.name,
-                vec![key_to_path(&explicit_ca.key, RUSTFS_CA_FILE)],
-            ));
+            let mut items = vec![key_to_path(&explicit_ca.key, RUSTFS_CA_FILE)];
+            if mtls_enabled && client_ca.is_none() {
+                items.push(key_to_path(&explicit_ca.key, RUSTFS_CLIENT_CA_FILE));
+            }
+            sources.push(secret_projection(&explicit_ca.name, items));
         }
         if let Some(client_ca) = &client_ca {
             sources.push(secret_projection(
@@ -552,6 +652,7 @@ impl TlsPlan {
 
         Self {
             enabled: true,
+            mtls_enabled,
             mount_path: mount_path.clone(),
             internode_scheme: if enable_internode_https {
                 "https"
@@ -584,14 +685,25 @@ impl TlsPlan {
     }
 }
 
-fn server_certificate_items(certificate: &TlsServerCertificateMount) -> Vec<corev1::KeyToPath> {
+fn server_certificate_items(
+    certificate: &TlsServerCertificateMount,
+    mtls_enabled: bool,
+    project_default_client_ca: bool,
+) -> Vec<corev1::KeyToPath> {
     let mut items = Vec::new();
     for domain in &certificate.domains {
         items.push(key_to_path("tls.crt", &server_cert_path(domain.as_deref())));
         items.push(key_to_path("tls.key", &server_key_path(domain.as_deref())));
     }
+    if mtls_enabled && certificate.domains.iter().any(Option::is_none) {
+        items.push(key_to_path("tls.crt", RUSTFS_CLIENT_CERT_FILE));
+        items.push(key_to_path("tls.key", RUSTFS_CLIENT_KEY_FILE));
+    }
     if let Some(ca_key) = certificate.ca_key.as_deref() {
         items.push(key_to_path(ca_key, RUSTFS_CA_FILE));
+        if project_default_client_ca {
+            items.push(key_to_path(ca_key, RUSTFS_CLIENT_CA_FILE));
+        }
     }
     items
 }
@@ -657,6 +769,39 @@ pub fn http_probe(path: &str, scheme: &'static str) -> corev1::Probe {
             port: IntOrString::Int(9000),
             scheme: Some(scheme.to_string()),
             ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+pub fn tcp_probe() -> corev1::Probe {
+    corev1::Probe {
+        tcp_socket: Some(corev1::TCPSocketAction {
+            port: IntOrString::Int(9000),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+pub fn mtls_exec_probe(mount_path: &str, path: &str) -> corev1::Probe {
+    let mount_path = mount_path.trim_end_matches('/');
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    corev1::Probe {
+        exec: Some(corev1::ExecAction {
+            command: Some(vec![
+                "curl".to_string(),
+                "-skf".to_string(),
+                "--cert".to_string(),
+                format!("{mount_path}/{RUSTFS_CLIENT_CERT_FILE}"),
+                "--key".to_string(),
+                format!("{mount_path}/{RUSTFS_CLIENT_KEY_FILE}"),
+                format!("https://127.0.0.1:9000{path}"),
+            ]),
         }),
         ..Default::default()
     }
