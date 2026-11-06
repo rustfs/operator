@@ -201,6 +201,11 @@ impl StatusError {
                 ConditionType::SpecValid,
                 sanitize_message(message),
             ),
+            types::error::Error::InvalidReadinessProbe { message, .. } => Self::blocked(
+                Reason::InvalidReadinessProbe,
+                ConditionType::SpecValid,
+                sanitize_message(message),
+            ),
             types::error::Error::ImmutableFieldModified { field, .. } => Self::blocked(
                 Reason::ImmutableFieldModified,
                 ConditionType::SpecValid,
@@ -884,6 +889,29 @@ mod tests {
         assert_eq!(
             crate::types::v1alpha1::status::next_actions_for_reason(&condition.reason),
             vec!["fixAdditionalVolumeSpec"]
+        );
+    }
+
+    #[test]
+    fn status_builder_marks_invalid_readiness_probe_as_invalid_spec() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let err = types::error::Error::InvalidReadinessProbe {
+            name: tenant.name(),
+            message: "spec.readinessProbe.timeoutSeconds must be at least 1".to_string(),
+        };
+
+        let status_error = StatusError::from_types_error(&err);
+        let mut builder = StatusBuilder::from_tenant(&tenant);
+        builder.mark_error(&status_error);
+        let status = builder.build();
+
+        let condition = status.condition(ConditionType::SpecValid).unwrap();
+        assert_eq!(condition.status, "False");
+        assert_eq!(condition.reason, "InvalidReadinessProbe");
+        assert_eq!(status.current_state, "Blocked");
+        assert_eq!(
+            crate::types::v1alpha1::status::next_actions_for_reason(&condition.reason),
+            vec!["fixReadinessProbe"]
         );
     }
 
