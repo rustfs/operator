@@ -143,6 +143,52 @@ tenant:
 }
 
 #[test]
+fn readiness_timing_values_reach_generated_statefulsets() {
+    for (values, expected) in [
+        (
+            r#"
+tenant:
+  spec:
+    readinessProbe:
+      initialDelaySeconds: 7
+      timeoutSeconds: 9
+      periodSeconds: 17
+      failureThreshold: 4
+      successThreshold: 2
+"#,
+            (7, 9, 17, 4, 2),
+        ),
+        (
+            "tenant: {spec: {readinessProbe: {timeoutSeconds: 8}}}",
+            (0, 8, 10, 3, 1),
+        ),
+    ] {
+        let docs = documents(render(values, &[]));
+        let tenant = tenant(&docs);
+        let workload = tenant.new_statefulset(&tenant.spec.pools[0]).unwrap();
+        let pod = workload.spec.unwrap().template.spec.unwrap();
+        let container = pod
+            .containers
+            .iter()
+            .find(|container| container.name == "rustfs")
+            .unwrap();
+        let probe = container.readiness_probe.as_ref().unwrap();
+        assert_eq!(
+            (
+                probe.initial_delay_seconds.unwrap_or_default(),
+                probe.timeout_seconds.unwrap(),
+                probe.period_seconds.unwrap(),
+                probe.failure_threshold.unwrap(),
+                probe.success_threshold.unwrap(),
+            ),
+            expected,
+            "chart values must reach the generated Pod readiness probe: {values}"
+        );
+        assert_resource_boundary(&docs);
+    }
+}
+
+#[test]
 fn ingress_backends_match_operator_services_and_preserve_tls() {
     let docs = documents(render(
         "{}",

@@ -24,6 +24,8 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Added
 
+- Tenant `spec.readinessProbe` with optional initial delay, timeout, period, failure
+  threshold, and success threshold settings, preserved during reconciliation.
 - Optional `rustfs-tenant` Helm chart for a Tenant and separate API/Console Ingress
   or HTTPRoute resources, with backend TLS policies, native YAML/Kustomize examples,
   and networking lifecycle documentation. Existing CRDs and controller behavior are unchanged.
@@ -53,6 +55,14 @@ All notable changes to RustFS Operator are documented in this file. The format i
   opt out with `spec.disablePodDisruptionBudget`. Enabled by default: before upgrading, set the
   opt-out on Tenants whose budgets you manage yourself, or remove your own budgets that select
   pool Pods, because Kubernetes rejects evictions of Pods selected by more than one budget.
+
+### Changed
+
+- The default Tenant readiness probe timeout is five seconds, increased from the
+  previous effective one-second default. Upgrades update existing StatefulSet Pod
+  templates; Pod replacement follows their `RollingUpdate`, partition, or `OnDelete`
+  strategy. Apply the updated Tenant CRD explicitly before upgrading the Operator
+  or configuring readiness fields; Helm does not upgrade installed CRDs.
 
 ### Fixed
 

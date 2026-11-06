@@ -68,6 +68,23 @@ pub(crate) fn uses_unpartitioned_rolling_update(
     strategy_type == "RollingUpdate" && partition == 0
 }
 
+fn readiness_probes_equal(
+    existing: Option<&corev1::Probe>,
+    desired: Option<&corev1::Probe>,
+) -> bool {
+    let with_kubernetes_defaults = |probe: &corev1::Probe| {
+        let mut probe = probe.clone();
+        probe.initial_delay_seconds.get_or_insert(0);
+        probe.timeout_seconds.get_or_insert(1);
+        probe.period_seconds.get_or_insert(10);
+        probe.failure_threshold.get_or_insert(3);
+        probe.success_threshold.get_or_insert(1);
+        probe
+    };
+
+    existing.map(with_kubernetes_defaults) == desired.map(with_kubernetes_defaults)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageUnverifiableReason {
     CustomRepository,
@@ -1484,6 +1501,7 @@ impl Tenant {
     ) -> Result<v1::StatefulSet, types::error::Error> {
         self.validate_declared_workload_security_contexts()?;
         self.validate_additional_volumes()?;
+        self.validate_readiness_probe()?;
 
         let labels = self.pool_labels(pool);
         let selector_labels = self.pool_selector_labels(pool);
@@ -1665,6 +1683,13 @@ impl Tenant {
             ..
         } = security;
 
+        let mut readiness_probe = http_probe("/health/ready", tls_plan.probe_scheme);
+        self.spec
+            .readiness_probe
+            .as_ref()
+            .unwrap_or(&super::ReadinessProbeConfig::default())
+            .apply_to(&mut readiness_probe);
+
         let container = corev1::Container {
             name: "rustfs".to_owned(),
             image: Some(super::helper::get_rustfs_image_or_default(
@@ -1699,7 +1724,7 @@ impl Tenant {
                 .as_ref()
                 .map(ToString::to_string),
             liveness_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
-            readiness_probe: Some(http_probe("/health/ready", tls_plan.probe_scheme)),
+            readiness_probe: Some(readiness_probe),
             startup_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
             termination_message_policy: Some("FallbackToLogsOnError".to_string()),
             security_context: Some(container_security_context),
@@ -1984,6 +2009,13 @@ impl Tenant {
 
         let existing_container = &existing_pod_spec.containers[0];
         let desired_container = &desired_pod_spec.containers[0];
+
+        if !readiness_probes_equal(
+            existing_container.readiness_probe.as_ref(),
+            desired_container.readiness_probe.as_ref(),
+        ) {
+            return Ok(true);
+        }
 
         // Check image
         if existing_container.image != desired_container.image {
@@ -2308,9 +2340,9 @@ mod tests {
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
     use crate::types::v1alpha1::security_context::{MAX_KUBERNETES_ID, PodSecurityContextOverride};
     use crate::types::v1alpha1::tenant::{
-        OidcConfig, OidcExtraCaCertSecretRef, RpcSecretRef, Tenant,
+        OidcConfig, OidcExtraCaCertSecretRef, ReadinessProbeConfig, RpcSecretRef, Tenant,
     };
-    use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
+    use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan, http_probe};
     use k8s_openapi::api::apps::v1;
     use k8s_openapi::api::core::v1 as corev1;
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -5395,6 +5427,203 @@ mod tests {
             container.resources.as_ref().unwrap().requests,
             Some(requests),
             "Container should use pool-level resource requests"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_configuration_preserves_tls_and_other_probes() {
+        for tls in [TlsPlan::disabled(), tls_plan("sha256:readiness")] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            let baseline = tenant
+                .new_statefulset_with_tls_plan(&tenant.spec.pools[0], &tls)
+                .expect("default StatefulSet should render");
+            let baseline_container = &baseline.spec.unwrap().template.spec.unwrap().containers[0];
+
+            for (config, expected) in [
+                (None, [0, 5, 10, 3, 1]),
+                (Some(ReadinessProbeConfig::default()), [0, 5, 10, 3, 1]),
+                (
+                    Some(ReadinessProbeConfig {
+                        timeout_seconds: Some(8),
+                        ..Default::default()
+                    }),
+                    [0, 8, 10, 3, 1],
+                ),
+                (
+                    Some(ReadinessProbeConfig {
+                        initial_delay_seconds: Some(2),
+                        timeout_seconds: Some(8),
+                        period_seconds: Some(15),
+                        failure_threshold: Some(4),
+                        success_threshold: Some(2),
+                    }),
+                    [2, 8, 15, 4, 2],
+                ),
+            ] {
+                tenant.spec.readiness_probe = config;
+                let statefulset = tenant
+                    .new_statefulset_with_tls_plan(&tenant.spec.pools[0], &tls)
+                    .expect("configured StatefulSet should render");
+                let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+                let probe = container.readiness_probe.as_ref().unwrap();
+                let http_get = probe.http_get.as_ref().unwrap();
+                assert_eq!(http_get.path.as_deref(), Some("/health/ready"));
+                assert_eq!(
+                    http_get.port,
+                    k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(9000)
+                );
+                assert_eq!(http_get.scheme.as_deref(), Some(tls.probe_scheme));
+                assert_eq!(
+                    [
+                        probe.initial_delay_seconds,
+                        probe.timeout_seconds,
+                        probe.period_seconds,
+                        probe.failure_threshold,
+                        probe.success_threshold,
+                    ],
+                    expected.map(Some)
+                );
+                assert_eq!(
+                    probe.http_get,
+                    baseline_container
+                        .readiness_probe
+                        .as_ref()
+                        .unwrap()
+                        .http_get
+                );
+                assert_eq!(container.liveness_probe, baseline_container.liveness_probe);
+                assert_eq!(container.startup_probe, baseline_container.startup_probe);
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_probe_invalid_timing_prevents_statefulset_rendering() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+            timeout_seconds: Some(0),
+            ..Default::default()
+        });
+        let error = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect_err("invalid readiness timing must not reach the Pod template");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidReadinessProbe { name, message }
+                if name == "test-tenant" && message.contains("timeoutSeconds")
+        ));
+    }
+
+    #[test]
+    fn readiness_probe_timing_changes_and_removal_require_statefulset_updates() {
+        for (field, value) in [
+            ("initialDelaySeconds", 2),
+            ("timeoutSeconds", 8),
+            ("periodSeconds", 15),
+            ("failureThreshold", 4),
+            ("successThreshold", 2),
+        ] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            let existing = tenant
+                .new_statefulset(&tenant.spec.pools[0])
+                .expect("default StatefulSet should render");
+            tenant.spec.readiness_probe = Some(
+                serde_json::from_value(serde_json::json!({ field: value }))
+                    .expect("readiness configuration should deserialize"),
+            );
+            assert!(
+                tenant
+                    .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                    .unwrap(),
+                "changing {field} must update the StatefulSet"
+            );
+            let configured = tenant
+                .new_statefulset(&tenant.spec.pools[0])
+                .expect("configured StatefulSet should render");
+            assert!(
+                !tenant
+                    .statefulset_needs_update(&configured, &tenant.spec.pools[0])
+                    .unwrap()
+            );
+            tenant.spec.readiness_probe = None;
+            assert!(
+                tenant
+                    .statefulset_needs_update(&configured, &tenant.spec.pools[0])
+                    .unwrap(),
+                "removing {field} must restore the operator default"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_probe_comparison_uses_kubernetes_defaults_for_existing_objects() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let mut existing = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("StatefulSet should render");
+        let container = &mut existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0];
+        let mut probe = http_probe("/health/ready", "HTTP");
+        probe.timeout_seconds = Some(5);
+        container.readiness_probe = Some(probe);
+        assert!(
+            !tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "omitted Kubernetes defaults must not cause repeated updates"
+        );
+
+        existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .readiness_probe
+            .as_mut()
+            .unwrap()
+            .timeout_seconds = None;
+        assert!(
+            tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "the historical one-second timeout must receive the new default"
+        );
+        tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+            timeout_seconds: Some(1),
+            ..Default::default()
+        });
+        assert!(
+            !tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "an explicit one-second timeout must match the Kubernetes default"
+        );
+        existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .readiness_probe = None;
+        assert!(
+            tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "a missing readiness probe must be restored"
         );
     }
 

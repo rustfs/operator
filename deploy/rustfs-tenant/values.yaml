@@ -25,6 +25,14 @@ tenant:
   spec:
     credsSecret:
       name: rustfs-credentials
+    # Optional timing overrides; omitted fields use these Operator defaults.
+    # The Operator selects /health/ready on port 9000 and the Tenant TLS scheme.
+    # readinessProbe:
+    #   initialDelaySeconds: 0
+    #   timeoutSeconds: 5
+    #   periodSeconds: 10
+    #   failureThreshold: 3
+    #   successThreshold: 1
     pools:
       - name: pool-0
         servers: 1

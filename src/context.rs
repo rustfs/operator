@@ -696,6 +696,23 @@ impl Context {
         .await
     }
 
+    /// Applies only the RustFS readiness timing fields with a dedicated field manager.
+    pub(crate) async fn apply_readiness_fields(
+        &self,
+        name: &str,
+        namespace: &str,
+        patch: &serde_json::Value,
+    ) -> Result<k8s_openapi::api::apps::v1::StatefulSet, Error> {
+        let api = Api::namespaced(self.client.clone(), namespace);
+        api.patch(
+            name,
+            &PatchParams::apply("rustfs-operator-readiness").force(),
+            &Patch::Apply(patch),
+        )
+        .context(KubeSnafu)
+        .await
+    }
+
     /// Force-applies a narrow security patch without taking ownership of the full resource.
     pub(crate) async fn force_apply_security_fields<T, P>(
         &self,

@@ -86,6 +86,23 @@ Optional quick compile (not a separate `make` target):
 cargo check --all-targets
 ```
 
+The readiness field-management test uses a real Kubernetes API and is ignored
+by default. Run it against a disposable cluster with the current Tenant CRD:
+
+```bash
+kind create cluster --name rustfs-readiness --kubeconfig /tmp/rustfs-readiness.kubeconfig
+export KUBECONFIG=/tmp/rustfs-readiness.kubeconfig
+export RUSTFS_READINESS_TEST_CONTEXT=kind-rustfs-readiness
+kubectl --context "$RUSTFS_READINESS_TEST_CONTEXT" apply --server-side -f deploy/rustfs-operator/crds/tenant-crd.yaml
+cargo test --lib readiness_ssa_live_preserves_values_ownership_and_external_fields -- --ignored
+kind delete cluster --name rustfs-readiness
+```
+
+This test creates and deletes an isolated namespace and uses zero-replica
+StatefulSets; it does not require Operator or RustFS container images. It checks
+readiness timing ownership, manual configuration migration, and preservation of
+external rollout policies and unrelated field ownership.
+
 ### 🔒 Git hooks (optional)
 
 The repository does **not** ship a `make setup-hooks` target. To run checks automatically on `git commit`, add your own `.git/hooks/pre-commit` that invokes `make pre-commit` (or the individual commands above).

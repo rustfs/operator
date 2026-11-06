@@ -124,6 +124,12 @@ pub(super) async fn validate_tenant_prerequisites(
         return Err(e.into());
     }
 
+    if let Err(e) = tenant.validate_readiness_probe() {
+        let status_error = StatusError::from_types_error(&e);
+        patch_status_error(ctx, tenant, &status_error).await;
+        return Err(e.into());
+    }
+
     // Block known incompatible RustFS images before creating or rolling any StatefulSet.
     if let Err(e) = tenant.validate_workload_security_compatibility() {
         let status_error = StatusError::from_types_error(&e);
@@ -1160,7 +1166,9 @@ async fn reconcile_existing_pool_statefulset(
             tenant,
         )
         .await?;
-        if let Err(e) = ctx.apply(&desired, namespace).await {
+        if let Err(e) =
+            super::readiness::apply_statefulset(ctx, tenant, namespace, &existing_ss, desired).await
+        {
             let status_error = StatusError::statefulset_apply_failed(&ss_name);
             patch_status_error(ctx, tenant, &status_error).await;
             return Err(e.into());
@@ -1597,6 +1605,75 @@ mod tests {
             error,
             Error::Types {
                 source: crate::types::error::Error::InvalidPoolSpec { .. }
+            }
+        ));
+        assert_eq!(status_patches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_readiness_prerequisites_block_before_resource_requests() {
+        use http_body_util::BodyExt;
+
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.readiness_probe = Some(crate::types::v1alpha1::tenant::ReadinessProbeConfig {
+            timeout_seconds: Some(0),
+            ..Default::default()
+        });
+        let status_patches = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let tenant = tenant.clone();
+            let status_patches = Arc::clone(&status_patches);
+            move |request: Request<Body>| {
+                let tenant = tenant.clone();
+                let status_patches = Arc::clone(&status_patches);
+                async move {
+                    let path = request.uri().path().to_string();
+                    let is_status = path.ends_with("/tenants/test-tenant/status");
+                    assert!(
+                        is_status || path.contains("/events"),
+                        "invalid readiness configuration must stop resource requests: {path}"
+                    );
+                    if is_status {
+                        assert_eq!(request.method(), Method::PATCH);
+                    }
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    if is_status {
+                        assert_eq!(payload["status"]["currentState"], "Blocked");
+                        assert!(
+                            payload["status"]["conditions"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|condition| {
+                                    condition["type"] == "SpecValid"
+                                        && condition["status"] == "False"
+                                        && condition["reason"] == "InvalidReadinessProbe"
+                                        && condition["message"]
+                                            .as_str()
+                                            .unwrap()
+                                            .contains("spec.readinessProbe.timeoutSeconds")
+                                })
+                        );
+                        status_patches.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, Infallible>(kube_response(
+                            StatusCode::OK,
+                            serde_json::to_value(tenant).unwrap(),
+                        ))
+                    } else {
+                        Ok(kube_response(StatusCode::OK, payload))
+                    }
+                }
+            }
+        });
+        let ctx = Context::new(Client::new(service, "default"));
+        let error = validate_tenant_prerequisites(&ctx, &tenant)
+            .await
+            .expect_err("invalid readiness timing must stop reconciliation");
+        assert!(matches!(
+            error,
+            Error::Types {
+                source: crate::types::error::Error::InvalidReadinessProbe { .. }
             }
         ));
         assert_eq!(status_patches.load(Ordering::SeqCst), 1);

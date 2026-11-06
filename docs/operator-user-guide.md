@@ -641,6 +641,7 @@ Useful Tenant-level fields:
 | `createServiceAccountRbac` | Deprecated compatibility field; ignored. Manage any custom ServiceAccount RBAC explicitly. |
 | `priorityClassName` | Tenant-level priority class. |
 | `lifecycle` | Kubernetes container lifecycle hooks. |
+| `readinessProbe` | Optional readiness timing overrides for every RustFS Pool. |
 | `podManagementPolicy` | StatefulSet pod management policy. |
 | `podDeletionPolicyWhenNodeIsDown` | Node-down pod deletion behavior. |
 | `disablePodDisruptionBudget` | Set to `true` to stop creating per-pool PodDisruptionBudgets and delete the ones the operator created. |
@@ -767,6 +768,60 @@ Multi-pool Tenants cannot contain a single-node single-disk pool. The Operator r
 - `DeleteBothStatefulSetAndDeploymentPod`: Longhorn-compatible force delete for both StatefulSet and Deployment pods.
 
 Force deletion can have data consistency implications. Use it only when the storage backend and operational procedure are designed for that failure mode. Force deletion requires the Node object to be deleted or marked with an effective `node.kubernetes.io/out-of-service` taint that the target Pod does not tolerate, so volume detach fencing is explicit. Before using force policies, confirm the node is powered off or otherwise isolated; deleting the Node object is treated as that operational assertion.
+
+#### Readiness probe timing
+
+Set `spec.readinessProbe` to configure the readiness probe on every RustFS
+container in the Tenant. Each field is optional; omitted fields use the defaults
+below.
+
+| Field | Default | Minimum | Meaning |
+| --- | --- | --- | --- |
+| `initialDelaySeconds` | `0` | `0` | Delay before readiness checks begin. |
+| `timeoutSeconds` | `5` | `1` | Time Kubernetes allows for each probe response. |
+| `periodSeconds` | `10` | `1` | Interval between readiness checks. |
+| `failureThreshold` | `3` | `1` | Consecutive failures required to mark the container unready. |
+| `successThreshold` | `1` | `1` | Consecutive successes required to become ready after a failure. |
+
+```yaml
+spec:
+  readinessProbe:
+    initialDelaySeconds: 0
+    timeoutSeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+    successThreshold: 1
+```
+
+The Operator generates HTTP GET `/health/ready` on port `9000`, using HTTP or
+HTTPS according to the Tenant TLS configuration. The five timing fields apply
+only to readiness. Startup and liveness continue to use `/health`. Kubernetes
+stops routing Service traffic to a Pod when it becomes unready; a readiness
+failure alone does not restart its container.
+
+The five-second default gives distributed health checks more time to respond
+during a peer failure. It is the Kubernetes probe timeout, not an upper bound on
+the RustFS server's entire readiness handler. Choose timing values using measured
+probe durations during normal operation and node failures, alongside the required
+failure detection time. A successful readiness check reports the server's readiness
+decision; verify S3 reads and writes separately when testing availability.
+
+Apply the updated Tenant CRD before using these fields or upgrading the Operator,
+following [the upgrade instructions](#4-install-the-operator). Helm does not
+upgrade an installed CRD from a chart's `crds/` directory.
+
+For existing Tenants that omit `readinessProbe`, upgrading changes the generated
+readiness timeout from Kubernetes' previous effective default of `1` second to
+`5` seconds. This changes the StatefulSet Pod template. Pod replacement follows
+the StatefulSet update strategy: `RollingUpdate` updates eligible Pods;
+`rollingUpdate.partition` limits which ordinals are updated; `OnDelete` applies
+the new template when Pods are manually replaced. Plan the update according to
+the cluster's available quorum. Set `spec.readinessProbe.timeoutSeconds: 1`
+explicitly if the deployment requires the previous timeout.
+
+Keep the desired settings in the Tenant resource. Reconciliation restores them
+after a manual StatefulSet probe change. Removing an override restores that
+field's default and can also change the Pod template.
 
 #### Pod disruption budgets
 

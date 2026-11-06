@@ -34,6 +34,7 @@ mod phases;
 mod pod_disruption_budget;
 mod pool_lifecycle;
 mod provisioning;
+mod readiness;
 mod tls;
 
 const OUT_OF_SERVICE_TAINT_KEY: &str = "node.kubernetes.io/out-of-service";
@@ -971,6 +972,7 @@ pub fn error_policy(object: Arc<Tenant>, error: &Error, _ctx: Arc<Context>) -> A
             types::error::Error::ImmutableFieldModified { .. }
             | types::error::Error::InvalidTenantName { .. }
             | types::error::Error::InvalidAdditionalVolumeSpec { .. }
+            | types::error::Error::InvalidReadinessProbe { .. }
             | types::error::Error::KmsMigrationBlocked { .. }
             | types::error::Error::InvalidWorkloadSecurityProfile { .. }
             | types::error::Error::WorkloadSecurityIncompatible { .. }
@@ -1028,6 +1030,7 @@ fn reconcile_error_reason(error: &Error) -> &'static str {
             types::error::Error::InvalidAdditionalVolumeSpec { .. } => {
                 "InvalidAdditionalVolumeSpec"
             }
+            types::error::Error::InvalidReadinessProbe { .. } => "InvalidReadinessProbe",
             types::error::Error::ImmutableFieldModified { .. } => "ImmutableFieldModified",
             types::error::Error::PoolDeleteBlocked { .. } => "PoolDeleteBlocked",
             types::error::Error::KmsMigrationBlocked { .. } => "KmsMigrationBlocked",
