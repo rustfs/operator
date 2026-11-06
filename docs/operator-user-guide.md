@@ -812,12 +812,16 @@ upgrade an installed CRD from a chart's `crds/` directory.
 
 For existing Tenants that omit `readinessProbe`, upgrading changes the generated
 readiness timeout from Kubernetes' previous effective default of `1` second to
-`5` seconds. This changes the StatefulSet Pod template. Pod replacement follows
-the StatefulSet update strategy: `RollingUpdate` updates eligible Pods;
-`rollingUpdate.partition` limits which ordinals are updated; `OnDelete` applies
-the new template when Pods are manually replaced. Plan the update according to
-the cluster's available quorum. Set `spec.readinessProbe.timeoutSeconds: 1`
-explicitly if the deployment requires the previous timeout.
+`5` seconds. This changes the StatefulSet Pod template. When
+`spec.serviceAccountName` is omitted, the Operator enforces `RollingUpdate` with
+`rollingUpdate.partition: 0` as part of its default ServiceAccount token
+protection, so eligible Pods are replaced automatically. With an explicit custom
+ServiceAccount, the Operator preserves the existing StatefulSet update strategy:
+`RollingUpdate` updates eligible Pods, `rollingUpdate.partition` limits which
+ordinals are updated, and `OnDelete` applies the new template when Pods are
+manually replaced. Plan the update according to the cluster's available quorum.
+Set `spec.readinessProbe.timeoutSeconds: 1` explicitly if the deployment requires
+the previous timeout.
 
 Keep the desired settings in the Tenant resource. Reconciliation restores them
 after a manual StatefulSet probe change. Removing an override restores that

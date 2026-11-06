@@ -60,9 +60,11 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 - The default Tenant readiness probe timeout is five seconds, increased from the
   previous effective one-second default. Upgrades update existing StatefulSet Pod
-  templates; Pod replacement follows their `RollingUpdate`, partition, or `OnDelete`
-  strategy. Apply the updated Tenant CRD explicitly before upgrading the Operator
-  or configuring readiness fields; Helm does not upgrade installed CRDs.
+  templates. Tenants without `spec.serviceAccountName` use enforced `RollingUpdate`
+  with partition zero for default ServiceAccount token protection; Tenants with
+  a custom ServiceAccount retain their existing update strategy and partition.
+  Apply the updated Tenant CRD explicitly before upgrading the Operator or
+  configuring readiness fields; Helm does not upgrade installed CRDs.
 
 ### Fixed
 

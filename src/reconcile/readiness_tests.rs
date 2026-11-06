@@ -20,9 +20,10 @@ use k8s_openapi::api::core::v1::{Container, Namespace, Probe};
 use kube::api::{DeleteParams, Patch, PatchParams, PostParams, WatchEvent, WatchParams};
 use kube::config::KubeConfigOptions;
 use kube::{Api, Client, Config, client::Body};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tower::service_fn;
@@ -164,96 +165,201 @@ fn api_failure(code: u16) -> (StatusCode, Value) {
     )
 }
 
+fn field_manager_conflict(field: &str, manager: &str) -> Value {
+    json!({
+        "reason": "FieldManagerConflict",
+        "message": format!("conflict with \"{manager}\""),
+        "field": field,
+    })
+}
+
+fn conflict_response(causes: Vec<Value>) -> (StatusCode, Value) {
+    let (status, mut body) = api_failure(409);
+    body["details"] = json!({"causes": causes});
+    (status, body)
+}
+
+fn timing_conflict(field: &str) -> Value {
+    field_manager_conflict(
+        &format!(".spec.template.spec.containers[name=\"rustfs\"].readinessProbe.{field}"),
+        "external-readiness-manager",
+    )
+}
+
+fn expected_apply(existing: &StatefulSet, desired: &StatefulSet) -> Value {
+    let mut expected = desired.clone();
+    expected.metadata.uid = existing.metadata.uid.clone();
+    expected.metadata.resource_version = existing.metadata.resource_version.clone();
+    serde_json::to_value(expected).expect("desired StatefulSet should serialize")
+}
+
 #[tokio::test]
-async fn timing_apply_is_scoped_and_full_apply_releases_timing_ownership() {
-    let (tenant, mut existing, desired) = fixture();
-    existing
-        .spec
-        .as_mut()
-        .unwrap()
-        .template
-        .spec
-        .as_mut()
-        .unwrap()
-        .containers
-        .insert(
-            0,
-            Container {
-                name: "sidecar".to_string(),
-                image: Some("example.invalid/sidecar:1".to_string()),
-                ..Default::default()
-            },
-        );
-    let (ctx, requests) = mock_context(vec![
-        successful_response(desired.clone(), "42"),
-        successful_response(desired.clone(), "43"),
-    ]);
+async fn ordinary_apply_submits_the_complete_template_once_without_force() {
+    let (tenant, existing, mut desired) = fixture();
+    let container = rustfs_container_mut(&mut desired);
+    container.image = Some("example.invalid/rustfs:updated".to_string());
+    container
+        .env
+        .get_or_insert_with(Vec::new)
+        .push(k8s_openapi::api::core::v1::EnvVar {
+            name: "READINESS_TEST_ENV".to_string(),
+            value: Some("updated".to_string()),
+            ..Default::default()
+        });
+    let expected = expected_apply(&existing, &desired);
+    let (ctx, requests) = mock_context(vec![successful_response(desired.clone(), "42")]);
 
     let result = apply_statefulset(&ctx, &tenant, "default", &existing, desired)
         .await
-        .expect("both apply requests should succeed");
-    assert_eq!(result.metadata.resource_version.as_deref(), Some("43"));
+        .expect("ordinary apply should succeed");
+    assert_eq!(result.metadata.resource_version.as_deref(), Some("42"));
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    let narrow = &requests[0];
-    assert_eq!(narrow.method, Method::PATCH);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, Method::PATCH);
     assert_eq!(
-        narrow.path,
+        requests[0].path,
         "/apis/apps/v1/namespaces/default/statefulsets/test-tenant-pool-0"
     );
     assert!(
-        narrow
+        requests[0]
             .query
-            .contains("fieldManager=rustfs-operator-readiness")
+            .split('&')
+            .any(|parameter| parameter == "fieldManager=rustfs-operator")
     );
-    assert!(narrow.query.contains("force=true"));
-    assert_eq!(
-        narrow.body,
-        json!({
-            "apiVersion": "apps/v1",
-            "kind": "StatefulSet",
-            "metadata": {
-                "name": "test-tenant-pool-0",
-                "namespace": "default",
-                "uid": "statefulset-uid",
-                "resourceVersion": "41",
-            },
-            "spec": { "template": { "spec": { "containers": [{
-                "name": "rustfs",
-                "readinessProbe": {
-                    "initialDelaySeconds": 2,
-                    "timeoutSeconds": 8,
-                    "periodSeconds": 7,
-                    "failureThreshold": 4,
-                    "successThreshold": 2,
-                },
-            }] } } },
-        })
-    );
+    assert!(!requests[0].query.contains("force=true"));
+    assert_eq!(requests[0].body, expected);
+}
 
-    let ordinary = &requests[1];
-    assert_eq!(ordinary.method, Method::PATCH);
-    assert_eq!(ordinary.path, narrow.path);
-    assert!(ordinary.query.contains("fieldManager=rustfs-operator"));
-    assert!(!ordinary.query.contains("force=true"));
-    assert_eq!(ordinary.body["metadata"]["uid"], "statefulset-uid");
-    assert_eq!(ordinary.body["metadata"]["resourceVersion"], "42");
-    assert_eq!(
-        ordinary.body["spec"]["template"]["spec"]["containers"][0]["readinessProbe"],
-        json!({"httpGet": {"path": "/health/ready", "port": 9000, "scheme": "HTTP"}})
+#[tokio::test]
+async fn timing_conflicts_retry_the_identical_complete_template_with_force() {
+    let fields = [
+        "initialDelaySeconds",
+        "timeoutSeconds",
+        "periodSeconds",
+        "failureThreshold",
+        "successThreshold",
+    ];
+    let mut conflicts: Vec<Vec<Value>> = fields
+        .iter()
+        .map(|field| vec![timing_conflict(field)])
+        .collect();
+    conflicts.push(
+        fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                field_manager_conflict(
+                    &format!(
+                        ".spec.template.spec.containers[name=\"rustfs\"].readinessProbe.{field}"
+                    ),
+                    &format!("external-manager-{index}"),
+                )
+            })
+            .collect(),
     );
+    for causes in conflicts {
+        let (tenant, existing, mut desired) = fixture();
+        rustfs_container_mut(&mut desired).image =
+            Some("example.invalid/rustfs:updated".to_string());
+        let expected = expected_apply(&existing, &desired);
+        let (ctx, requests) = mock_context(vec![
+            conflict_response(causes),
+            successful_response(desired.clone(), "42"),
+        ]);
+        apply_statefulset(&ctx, &tenant, "default", &existing, desired)
+            .await
+            .expect("timing-only conflicts should permit one force retry");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert_eq!(request.method, Method::PATCH);
+            assert!(
+                request
+                    .query
+                    .split('&')
+                    .any(|parameter| parameter == "fieldManager=rustfs-operator")
+            );
+            assert_eq!(request.body, expected);
+            assert_eq!(request.body["metadata"]["uid"], "statefulset-uid");
+            assert_eq!(request.body["metadata"]["resourceVersion"], "41");
+        }
+        assert_eq!(requests[0].path, requests[1].path);
+        assert!(!requests[0].query.contains("force=true"));
+        assert!(requests[1].query.contains("force=true"));
+    }
+}
+
+#[tokio::test]
+async fn conflicts_outside_readiness_timing_never_force_or_partially_update() {
+    let unrelated_fields = [
+        ".spec.template.spec.containers[name=\"rustfs\"].image",
+        ".spec.template.spec.containers[name=\"rustfs\"].env[name=\"TEST\"].value",
+        ".spec.template.spec.containers[name=\"rustfs\"].readinessProbe.httpGet.path",
+        ".spec.template.spec.containers[name=\"sidecar\"].readinessProbe.timeoutSeconds",
+        ".spec.template.spec.containers[name=\"rustfs\"].livenessProbe.timeoutSeconds",
+        ".spec.template.spec.containers[name=\"rustfs\"].readinessProbe.timeoutSeconds.extra",
+        "spec.template.spec.containers[name=\"rustfs\"].readinessProbe.timeoutSeconds",
+    ];
+    for field in unrelated_fields {
+        let (tenant, existing, desired) = fixture();
+        let (ctx, requests) = mock_context(vec![conflict_response(vec![
+            timing_conflict("timeoutSeconds"),
+            field_manager_conflict(field, "external-owner"),
+        ])]);
+        apply_statefulset(&ctx, &tenant, "default", &existing, desired)
+            .await
+            .expect_err("a mixed conflict must preserve all existing fields");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "unexpected retry for {field}");
+        assert!(!requests[0].query.contains("force=true"));
+    }
+}
+
+#[tokio::test]
+async fn missing_or_invalid_conflict_details_never_enable_force() {
+    let valid_cause = timing_conflict("timeoutSeconds");
+    let mut responses = vec![api_failure(409), api_failure(500)];
+    for details in [
+        Value::Null,
+        json!({}),
+        json!({"causes": []}),
+        json!({"causes": null}),
+        json!({"causes": "invalid"}),
+        json!({"causes": [null]}),
+        json!({"causes": [{"reason": "FieldManagerConflict"}]}),
+        json!({"causes": [{"field": valid_cause["field"]}]}),
+        json!({"causes": [{"reason": "FieldValueInvalid", "field": valid_cause["field"]}]}),
+        json!({"causes": [{"reason": "FieldManagerConflict", "field": 42}]}),
+    ] {
+        let (status, mut body) = api_failure(409);
+        body["details"] = details;
+        responses.push((status, body));
+    }
+    let (status, mut wrong_code) = conflict_response(vec![valid_cause.clone()]);
+    wrong_code["code"] = json!(500);
+    responses.push((status, wrong_code));
+    let (status, mut wrong_reason) = conflict_response(vec![valid_cause.clone()]);
+    wrong_reason["reason"] = json!("Invalid");
+    responses.push((status, wrong_reason));
+    let (_, valid_body) = conflict_response(vec![valid_cause]);
+    responses.push((StatusCode::INTERNAL_SERVER_ERROR, valid_body));
+
+    for failure in responses {
+        let (tenant, existing, desired) = fixture();
+        let (ctx, requests) = mock_context(vec![failure]);
+        apply_statefulset(&ctx, &tenant, "default", &existing, desired)
+            .await
+            .expect_err("only complete structured timing conflicts may enable force");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].query.contains("force=true"));
+    }
 }
 
 #[tokio::test]
 async fn invalid_ownership_or_identity_prevents_all_apply_requests() {
-    for invalid in [
-        "owner",
-        "tenant_uid",
-        "uid",
-        "resource_version",
-        "desired_probe",
-    ] {
-        let (mut tenant, mut existing, mut desired) = fixture();
+    for invalid in ["owner", "tenant_uid", "uid", "resource_version"] {
+        let (mut tenant, mut existing, desired) = fixture();
         match invalid {
             "owner" => {
                 existing.metadata.owner_references.as_mut().unwrap()[0].uid =
@@ -262,13 +368,12 @@ async fn invalid_ownership_or_identity_prevents_all_apply_requests() {
             "tenant_uid" => tenant.metadata.uid = None,
             "uid" => existing.metadata.uid = None,
             "resource_version" => existing.metadata.resource_version = None,
-            "desired_probe" => rustfs_container_mut(&mut desired).readiness_probe = None,
             _ => unreachable!(),
         }
         let (ctx, requests) = mock_context(Vec::new());
         let error = apply_statefulset(&ctx, &tenant, "default", &existing, desired)
             .await
-            .expect_err("invalid resource identity or generated probe must stop the update");
+            .expect_err("invalid resource identity must stop the update");
         assert!(
             matches!(error, Error::Types { .. }),
             "unexpected error for {invalid}: {error}"
@@ -281,22 +386,23 @@ async fn invalid_ownership_or_identity_prevents_all_apply_requests() {
 }
 
 #[tokio::test]
-async fn apply_errors_are_propagated_without_retrying_or_continuing() {
-    for (failing_request, code) in [(0, 409), (0, 500), (1, 409), (1, 500)] {
+async fn force_retry_errors_are_propagated_without_further_requests() {
+    for code in [409, 500] {
         let (tenant, existing, desired) = fixture();
-        let mut responses = Vec::new();
-        if failing_request == 1 {
-            responses.push(successful_response(desired.clone(), "42"));
-        }
-        responses.push(api_failure(code));
-        let (ctx, requests) = mock_context(responses);
+        let (ctx, requests) = mock_context(vec![
+            conflict_response(vec![timing_conflict("timeoutSeconds")]),
+            api_failure(code),
+        ]);
         let error = apply_statefulset(&ctx, &tenant, "default", &existing, desired)
             .await
-            .expect_err("API failure must propagate to reconciliation");
+            .expect_err("retry errors must propagate to reconciliation");
         assert!(
             matches!(error, Error::Kube { source: kube::Error::Api(ref response) } if response.code == code)
         );
-        assert_eq!(requests.lock().unwrap().len(), failing_request + 1);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body, requests[1].body);
+        assert_eq!(requests[1].body["metadata"]["resourceVersion"], "41");
     }
 }
 
@@ -310,7 +416,12 @@ async fn missing_existing_probe_is_restored_with_handler_and_timing_in_one_apply
         .expect("ordinary apply should restore the complete probe");
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].query.contains("fieldManager=rustfs-operator"));
+    assert!(
+        requests[0]
+            .query
+            .split('&')
+            .any(|parameter| parameter == "fieldManager=rustfs-operator")
+    );
     assert!(!requests[0].query.contains("force=true"));
     assert_eq!(requests[0].body["metadata"]["uid"], "statefulset-uid");
     assert_eq!(requests[0].body["metadata"]["resourceVersion"], "41");
@@ -400,30 +511,20 @@ async fn live_apply_and_check_events(
     let expected_version = updated.metadata.resource_version.as_deref().unwrap();
     let before_strategy =
         serde_json::to_value(&existing.spec.as_ref().unwrap().update_strategy).unwrap();
-    let before_container = rustfs_container(existing);
-    let previous_timeout = readiness_probe(existing).timeout_seconds;
+    let before_template = serde_json::to_value(&existing.spec.as_ref().unwrap().template).unwrap();
+    let expected_template = serde_json::to_value(&updated.spec.as_ref().unwrap().template).unwrap();
     if expected_version != resource_version {
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut target_observed = false;
             while let Some(event) = events.try_next().await.expect("watch event should read") {
                 if let WatchEvent::Added(observed) | WatchEvent::Modified(observed) = event {
-                    let probe = readiness_probe(&observed);
-                    target_observed |= probe.timeout_seconds == Some(expected_timeout);
+                    let template =
+                        serde_json::to_value(&observed.spec.as_ref().unwrap().template).unwrap();
+                    target_observed |= template == expected_template;
                     assert!(
-                        probe.timeout_seconds == Some(expected_timeout)
-                            || (!target_observed && probe.timeout_seconds == previous_timeout),
-                        "stored revisions must move to the requested timeout without resetting it: {:?}",
-                        probe.timeout_seconds
-                    );
-                    let container = rustfs_container(&observed);
-                    assert_eq!(container.image, before_container.image);
-                    assert_eq!(
-                        serde_json::to_value(&container.liveness_probe).unwrap(),
-                        serde_json::to_value(&before_container.liveness_probe).unwrap()
-                    );
-                    assert_eq!(
-                        serde_json::to_value(&container.startup_probe).unwrap(),
-                        serde_json::to_value(&before_container.startup_probe).unwrap()
+                        template == expected_template
+                            || (!target_observed && template == before_template),
+                        "stored revisions must contain the complete old or requested template"
                     );
                     assert_eq!(
                         serde_json::to_value(&observed.spec.as_ref().unwrap().update_strategy)
@@ -438,15 +539,15 @@ async fn live_apply_and_check_events(
             panic!("watch ended before the final apply revision");
         })
         .await
-        .expect("both apply revisions should be observed");
+        .expect("the complete applied template should be observed");
     }
     assert_eq!(
         readiness_probe(&updated).timeout_seconds,
         Some(expected_timeout)
     );
-    let timing_fields = managed_container_fields(&updated, "rustfs-operator-readiness")
+    let timing_fields = managed_container_fields(&updated, "rustfs-operator")
         .and_then(|fields| fields.get("f:readinessProbe"))
-        .expect("dedicated manager should own readiness timing");
+        .expect("the Operator should own readiness timing");
     for field in [
         "f:initialDelaySeconds",
         "f:timeoutSeconds",
@@ -456,20 +557,39 @@ async fn live_apply_and_check_events(
     ] {
         assert!(
             timing_fields.get(field).is_some(),
-            "timing manager must own {field}"
+            "the Operator must own {field}"
         );
     }
-    assert!(timing_fields.get("f:httpGet").is_none());
-    let ordinary_probe_fields = managed_container_fields(&updated, "rustfs-operator")
-        .and_then(|fields| fields.get("f:readinessProbe"));
-    assert!(ordinary_probe_fields.is_none_or(|fields| fields.get("f:timeoutSeconds").is_none()));
+    assert!(timing_fields.get("f:httpGet").is_some());
+    let http = readiness_probe(&updated).http_get.as_ref().unwrap();
+    assert_eq!(http.host.as_deref(), Some("127.0.0.1"));
+    assert_eq!(
+        http.http_headers.as_ref().unwrap()[0].name,
+        "X-Probe-Source"
+    );
+    assert_eq!(
+        http.http_headers.as_ref().unwrap()[0].value,
+        "external-manager"
+    );
+    let mut observed = tenant
+        .new_statefulset(&tenant.spec.pools[0])
+        .expect("StatefulSet should render for comparison");
+    // Keep unrelated API defaults out of the readiness convergence check.
+    rustfs_container_mut(&mut observed).readiness_probe =
+        rustfs_container(&updated).readiness_probe.clone();
+    assert!(
+        !tenant
+            .statefulset_needs_update(&observed, &tenant.spec.pools[0])
+            .unwrap(),
+        "external probe headers and host must not cause repeated reconciliation writes"
+    );
     updated
 }
 
 async fn run_live_scenario(client: Client, namespace: &str) {
     let tenants: Api<Tenant> = Api::namespaced(client.clone(), namespace);
     let statefulsets: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-    let ctx = Context::new(client);
+    let ctx = Context::new(client.clone());
     let mut tenant =
         crate::tests::create_test_tenant(Some("external-workload-identity".to_string()), None);
     tenant.metadata.namespace = Some(namespace.to_string());
@@ -500,7 +620,13 @@ async fn run_live_scenario(client: Client, namespace: &str) {
         .expect("legacy StatefulSet should create through SSA");
     assert_eq!(readiness_probe(&existing).timeout_seconds, Some(1));
     let manual = json!({"spec": {"template": {"spec": {"containers": [{
-        "name": "rustfs", "readinessProbe": {"timeoutSeconds": 5},
+        "name": "rustfs", "readinessProbe": {
+            "timeoutSeconds": 5,
+            "httpGet": {
+                "host": "127.0.0.1",
+                "httpHeaders": [{"name": "X-Probe-Source", "value": "external-manager"}],
+            },
+        },
     }]}}}});
     existing = statefulsets
         .patch(
@@ -589,8 +715,12 @@ async fn run_live_scenario(client: Client, namespace: &str) {
         value: Some("updated".to_string()),
         ..Default::default()
     });
+    tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+        timeout_seconds: Some(8),
+        ..Default::default()
+    });
     let updated =
-        live_apply_and_check_events(&ctx, &tenant, namespace, &statefulsets, &existing, 5).await;
+        live_apply_and_check_events(&ctx, &tenant, namespace, &statefulsets, &existing, 8).await;
     assert!(
         rustfs_container(&updated)
             .env
@@ -613,7 +743,7 @@ async fn run_live_scenario(client: Client, namespace: &str) {
         .await
         .expect("external manager should own the image");
     tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
-        timeout_seconds: Some(8),
+        timeout_seconds: Some(9),
         ..Default::default()
     });
     let error = live_apply_with_status_retries(&ctx, &tenant, namespace, &statefulsets, &existing)
@@ -639,14 +769,181 @@ async fn run_live_scenario(client: Client, namespace: &str) {
             .get("f:image")
             .is_some()
     );
-    assert!(
-        managed_container_fields(&preserved, "rustfs-operator-readiness")
-            .unwrap()
-            .get("f:image")
-            .is_none()
+    assert_eq!(
+        serde_json::to_value(&preserved.spec).unwrap(),
+        serde_json::to_value(&existing.spec).unwrap(),
+        "an unrelated ownership conflict must leave the entire StatefulSet spec unchanged"
     );
     assert_eq!(readiness_probe(&preserved).timeout_seconds, Some(8));
     assert_eq!(preserved.spec.as_ref().unwrap().replicas, Some(0));
+
+    for replace_existing in [false, true] {
+        live_force_retry_preserves_concurrent_change(
+            client.clone(),
+            &tenant,
+            namespace,
+            replace_existing,
+        )
+        .await;
+    }
+}
+
+async fn live_force_retry_preserves_concurrent_change(
+    client: Client,
+    tenant: &Tenant,
+    namespace: &str,
+    replace_existing: bool,
+) {
+    let api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
+    let mut desired = live_desired(tenant);
+    let suffix = if replace_existing {
+        "replacement"
+    } else {
+        "update"
+    };
+    let name = format!("{}-{suffix}", desired.name_any());
+    desired.metadata.name = Some(name.clone());
+    api.patch(
+        &name,
+        &PatchParams::apply("rustfs-operator"),
+        &Patch::Apply(&desired),
+    )
+    .await
+    .expect("concurrency test StatefulSet should create");
+    let timing = json!({
+        "apiVersion": "apps/v1", "kind": "StatefulSet",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {"template": {"spec": {"containers": [{
+            "name": "rustfs", "readinessProbe": {"timeoutSeconds": 1}
+        }]}}}
+    });
+    api.patch(
+        &name,
+        &PatchParams::apply("external-readiness").force(),
+        &Patch::Apply(&timing),
+    )
+    .await
+    .expect("external timing ownership should create a real SSA conflict");
+    let existing = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let current = api
+                .get(&name)
+                .await
+                .expect("StatefulSet should remain readable");
+            if current
+                .status
+                .as_ref()
+                .and_then(|status| status.observed_generation)
+                == current.metadata.generation
+            {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("zero-replica StatefulSet status should converge before the race");
+
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let changed = Arc::new(Mutex::new(None::<StatefulSet>));
+    let mut replacement = desired.clone();
+    rustfs_container_mut(&mut replacement).image =
+        Some("example.invalid/concurrent-image:1".to_string());
+    rustfs_container_mut(&mut replacement)
+        .readiness_probe
+        .as_mut()
+        .unwrap()
+        .timeout_seconds = Some(1);
+    let service = service_fn({
+        let request_count = Arc::clone(&request_count);
+        let changed = Arc::clone(&changed);
+        let name = name.clone();
+        let api = api.clone();
+        move |request: Request<Body>| {
+            let request_count = Arc::clone(&request_count);
+            let changed = Arc::clone(&changed);
+            let name = name.clone();
+            let api = api.clone();
+            let client = client.clone();
+            let replacement = replacement.clone();
+            async move {
+                let index = request_count.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    index < 2,
+                    "only the ordinary apply and one force retry are allowed"
+                );
+                let force = request
+                    .uri()
+                    .query()
+                    .unwrap_or_default()
+                    .split('&')
+                    .any(|parameter| parameter == "force=true");
+                assert_eq!(force, index == 1);
+                let response = client.send(request).await?;
+                if index == 0 {
+                    assert_eq!(response.status(), StatusCode::CONFLICT);
+                    let updated = if replace_existing {
+                        api.delete(&name, &DeleteParams::default()).await?;
+                        tokio::time::timeout(Duration::from_secs(15), async {
+                            loop {
+                                match api.get(&name).await {
+                                    Err(kube::Error::Api(error)) if error.code == 404 => break,
+                                    Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                                    Err(error) => panic!("replacement wait failed: {error}"),
+                                }
+                            }
+                        })
+                        .await
+                        .expect("zero-replica StatefulSet should delete");
+                        api.create(&PostParams::default(), &replacement).await?
+                    } else {
+                        let patch = json!({
+                            "metadata": {"annotations": {"concurrent-update": "retained"}},
+                            "spec": {"template": {"spec": {"containers": [{
+                                "name": "rustfs", "image": "example.invalid/concurrent-image:1"
+                            }]}}}
+                        });
+                        api.patch(&name, &PatchParams::default(), &Patch::Strategic(&patch))
+                            .await?
+                    };
+                    *changed
+                        .lock()
+                        .expect("concurrent result should be available") = Some(updated);
+                }
+                Ok::<_, kube::Error>(response)
+            }
+        }
+    });
+    let ctx = Context::new(Client::new(service, namespace));
+    let error = apply_statefulset(&ctx, tenant, namespace, &existing, desired)
+        .await
+        .expect_err("force retry must reject a concurrent update or replacement");
+    assert!(
+        matches!(error, Error::Kube { source: kube::Error::Api(ref response) }
+            if matches!(response.code, 409 | 422)),
+        "expected a resource identity or version conflict, got {error}"
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 2);
+    let changed = changed
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the race should have run");
+    let preserved = api
+        .get(&name)
+        .await
+        .expect("concurrent resource should remain readable");
+    assert_eq!(
+        serde_json::to_value(&preserved.spec).unwrap(),
+        serde_json::to_value(&changed.spec).unwrap(),
+        "the rejected retry must preserve the entire concurrent spec"
+    );
+    assert_eq!(preserved.metadata.annotations, changed.metadata.annotations);
+    assert_eq!(preserved.metadata.uid, changed.metadata.uid);
+    assert_eq!(
+        preserved.metadata.uid != existing.metadata.uid,
+        replace_existing
+    );
 }
 
 #[tokio::test]

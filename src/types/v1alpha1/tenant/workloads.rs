@@ -72,17 +72,37 @@ fn readiness_probes_equal(
     existing: Option<&corev1::Probe>,
     desired: Option<&corev1::Probe>,
 ) -> bool {
-    let with_kubernetes_defaults = |probe: &corev1::Probe| {
-        let mut probe = probe.clone();
-        probe.initial_delay_seconds.get_or_insert(0);
-        probe.timeout_seconds.get_or_insert(1);
-        probe.period_seconds.get_or_insert(10);
-        probe.failure_threshold.get_or_insert(3);
-        probe.success_threshold.get_or_insert(1);
-        probe
+    let (existing, desired) = match (existing, desired) {
+        (Some(existing), Some(desired)) => (existing, desired),
+        (None, None) => return true,
+        _ => return false,
+    };
+    let (Some(existing_http), Some(desired_http)) =
+        (existing.http_get.as_ref(), desired.http_get.as_ref())
+    else {
+        return false;
+    };
+    let timing_values = |probe: &corev1::Probe| {
+        [
+            probe.initial_delay_seconds.unwrap_or(0),
+            probe.timeout_seconds.unwrap_or(1),
+            probe.period_seconds.unwrap_or(10),
+            probe.failure_threshold.unwrap_or(3),
+            probe.success_threshold.unwrap_or(1),
+        ]
     };
 
-    existing.map(with_kubernetes_defaults) == desired.map(with_kubernetes_defaults)
+    // External managers can add HTTP headers or a host without changing the
+    // endpoint and timing fields that the Operator owns.
+    timing_values(existing) == timing_values(desired)
+        && existing_http.path.as_deref().unwrap_or("/")
+            == desired_http.path.as_deref().unwrap_or("/")
+        && existing_http.port == desired_http.port
+        && existing_http.scheme.as_deref().unwrap_or("HTTP")
+            == desired_http.scheme.as_deref().unwrap_or("HTTP")
+        && existing.exec.is_some() == desired.exec.is_some()
+        && existing.grpc.is_some() == desired.grpc.is_some()
+        && existing.tcp_socket.is_some() == desired.tcp_socket.is_some()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2331,7 +2351,7 @@ mod tests {
     use super::{
         DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER,
         MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH, RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION,
-        quantities_semantically_equal, uses_unpartitioned_rolling_update,
+        quantities_semantically_equal, readiness_probes_equal, uses_unpartitioned_rolling_update,
         validate_declared_app_armor_profile, validate_declared_seccomp_profile,
     };
     use crate::types::v1alpha1::encryption::{
@@ -5625,6 +5645,97 @@ mod tests {
                 .unwrap(),
             "a missing readiness probe must be restored"
         );
+    }
+
+    #[test]
+    fn readiness_probe_comparison_preserves_unmanaged_http_fields() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let mut existing = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("StatefulSet should render");
+        let probe = existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .readiness_probe
+            .as_mut()
+            .unwrap();
+        let http_get = probe.http_get.as_mut().unwrap();
+        http_get.host = Some("127.0.0.1".to_string());
+        http_get.http_headers = Some(vec![corev1::HTTPHeader {
+            name: "X-Probe-Source".to_string(),
+            value: "external-manager".to_string(),
+        }]);
+        probe.timeout_seconds = Some(8);
+        assert!(
+            tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "external fields must not hide changes to managed timing"
+        );
+
+        tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+            timeout_seconds: Some(8),
+            ..Default::default()
+        });
+        assert!(
+            !tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "matching managed fields must converge with external HTTP fields present"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_comparison_tracks_managed_http_fields() {
+        let desired = http_probe("/health/ready", "HTTP");
+        let mut changed_port = desired.clone();
+        changed_port.http_get.as_mut().unwrap().port =
+            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(9001);
+        for existing in [
+            http_probe("/health", "HTTP"),
+            http_probe("/health/ready", "HTTPS"),
+            changed_port,
+        ] {
+            assert!(
+                !readiness_probes_equal(Some(&existing), Some(&desired)),
+                "managed endpoint changes must require an update"
+            );
+        }
+
+        let mut default_scheme = desired.clone();
+        default_scheme.http_get.as_mut().unwrap().scheme = None;
+        assert!(
+            readiness_probes_equal(Some(&default_scheme), Some(&desired)),
+            "an omitted scheme uses Kubernetes' HTTP default"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_comparison_detects_missing_or_replaced_http_handler() {
+        let desired = http_probe("/health/ready", "HTTP");
+        for existing in [
+            corev1::Probe::default(),
+            corev1::Probe {
+                exec: Some(corev1::ExecAction {
+                    command: Some(vec!["true".to_string()]),
+                }),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !readiness_probes_equal(Some(&existing), Some(&desired)),
+                "a missing or replaced HTTP handler must require an update"
+            );
+        }
+        assert!(!readiness_probes_equal(None, Some(&desired)));
+        assert!(!readiness_probes_equal(Some(&desired), None));
+        assert!(readiness_probes_equal(None, None));
     }
 
     // Test: StatefulSet diff detection - no changes needed

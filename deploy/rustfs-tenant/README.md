@@ -126,8 +126,12 @@ server-side readiness work has its own time budgets.
 Install the updated Tenant CRD explicitly before applying these values; Helm
 does not upgrade CRDs from the Operator chart's `crds/` directory. Upgrading the
 Operator also changes existing Tenants' default readiness timeout from one to
-five seconds, which updates their StatefulSet Pod templates. Pod replacement
-follows `RollingUpdate`, `rollingUpdate.partition`, or `OnDelete` as configured.
+five seconds, which updates their StatefulSet Pod templates. When
+`spec.serviceAccountName` is omitted, the Operator enforces `RollingUpdate` with
+`rollingUpdate.partition: 0` for default ServiceAccount token protection, and
+eligible Pods are replaced automatically. With an explicit custom ServiceAccount,
+the Operator preserves the existing `RollingUpdate`, `rollingUpdate.partition`,
+or `OnDelete` settings.
 See [readiness timing and upgrade guidance](../../docs/operator-user-guide.md#readiness-probe-timing)
 for validation rules, rollout behavior, and availability checks.
 
