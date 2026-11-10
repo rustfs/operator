@@ -812,6 +812,13 @@ spec:
 默认条目会被投影到 `mountPath` 根目录下的 `rustfs_cert.pem` 和 `rustfs_key.pem`，供 RustFS 作为 fallback 证书和节点间 HTTPS 证书使用。每个 `hosts` 值会被投影为 RustFS SNI 子目录，例如 `s3.example.com/rustfs_cert.pem` 和 `s3.example.com/rustfs_key.pem`。
 配置了 `certificates` 时，省略 `includeGeneratedDnsNames` 只有在 `default: true` 证书条目中才按 `true` 处理。非默认条目只包含 `hosts` 和 `certManager.dnsNames`，除非显式设置 `includeGeneratedDnsNames: true`。
 当 `enableInternodeHttps: true` 时，默认托管证书必须覆盖 operator 和 `RUSTFS_VOLUMES` 实际使用的 RustFS peer DNS 名称。应保持 `includeGeneratedDnsNames` 启用，或在 `hosts` / `certManager.dnsNames` 中显式列出必需名称。使用自定义 Kubernetes DNS 域的集群应设置 Helm chart 的 `clusterDomain`；必需名称会使用 `.svc.<clusterDomain>`。外部证书必须覆盖 headless Service FQDN（`<tenant>-hl.<namespace>.svc.<clusterDomain>`）和 pod FQDN；类似 `*.<tenant>-hl.<namespace>.svc.<clusterDomain>` 的 wildcard 可以覆盖生成的 pod FQDN。
+当配置了 `caTrust.clientCaSecretRef`（启用 mTLS）时：
+- Operator 会为 RustFS 容器设置 `RUSTFS_SERVER_MTLS_ENABLE=true`，并将 `RUSTFS_VOLUMES` 中的所有节点间地址切换为 `https://`。由于 RustFS 在 `9000` 端口同时承载 S3 API 与节点间 RPC 流量，所有连往 `:9000` 的 TLS 连接（包括客户端到 Pod 和 Pod 间连接）都必须提供受 `client_ca.crt` 信任的客户端证书。
+- 默认证书的 `tls.crt` 和 `tls.key` 会同时投影到 `mountPath` 下的 `rustfs_cert.pem`/`rustfs_key.pem` 以及 `client_cert.pem`/`client_key.pem`；`clientCaSecretRef` 会投影为 `client_ca.crt`，且 Operator 在调用管理接口与 STS 时也会使用该默认证书作为客户端身份。
+- 当 `manageCertificate: true` 且未指定 `certManager.usages` 时，默认 `Certificate` 会自动请求 `usages: ["server auth", "client auth"]`，并在标记 TLS Ready 前校验签发的默认证书具备客户端认证用途且由 `clientCaSecretRef` 信任。
+- 就绪探针默认使用带 `--cert` 和 `--key` 的 `curl` 访问 `https://127.0.0.1:9000/health/ready`，存活与启动探针使用 `9000` 端口的 `tcpSocket`。对于不含 `curl` 的 distroless 容器镜像，可在 Operator Deployment 或 `spec.env` 中设置 `TENANT_MTLS_READINESS_PROBE=tcp` 以回退到 `9000` 端口的 `tcpSocket`（注意：`tcpSocket` 在 `9000` 端口接受连接后即视为成功，不会等待 `/health/ready` 读仲裁就绪，因此 Pod 可能会在读仲裁建立前被标记为 Ready 或推进 StatefulSet 滚动更新；详见 [rustfs/rustfs#9256](https://github.com/rustfs/rustfs/issues/9256)）。
+- 由于 `rustls` 要求客户端信任根包含 `basicConstraints: CA:TRUE`，请使用基于 CA 证书（`isCA: true`）的 `cert-manager` CA `Issuer`，而不是直接使用签发叶子证书的 `selfSigned` `Issuer`。
+
 配置了 `certificates` 时，进程级 trust 应放在顶层 `caTrust` 或 `default: true` 证书条目的 `caTrust` 中。旧的 `certManager.caTrust` 只对单证书写法生效，非默认条目上的 `certManager.caTrust` 会被拒绝。
 
 ### 7.6 日志配置

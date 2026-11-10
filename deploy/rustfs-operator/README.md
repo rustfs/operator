@@ -233,7 +233,7 @@ Monitor `rustfs_operator_sts_tls_certificate_expiry_timestamp_seconds` and `rust
 
 STS only issues credentials for TLS-enabled Tenants. For Tenant upstream calls, the operator selects the Tenant HTTPS service endpoint and trusts the CA recorded in `status.certificates.tls.caSecretRef`.
 
-Operator STS does not present a client certificate when calling the Tenant. Tenants configured with `spec.tls.certManager.caTrust.clientCaSecretRef` continue to run with server-side mTLS enabled, but Operator STS rejects those Tenants with HTTP 400 and `TenantTlsClientCertificateUnsupported`.
+When calling an mTLS-enabled Tenant (`caTrust.clientCaSecretRef`), the operator presents the Tenant's default certificate (`status.certificates.tls.serverSecretRef`) as its client certificate identity. If a Tenant requires a client certificate but `serverSecretRef` is unavailable, Operator STS rejects the request with HTTP 400 and `TenantTlsClientCertificateUnsupported`.
 
 When `operator.serviceMonitor.enabled=true`, the chart creates scrape targets for both the operator observability endpoint and the Console API `/metrics` endpoint.
 

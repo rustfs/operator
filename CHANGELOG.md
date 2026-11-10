@@ -24,6 +24,10 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Added
 
+- Full mutual TLS (client-to-Pod and Pod-to-Pod) support when `caTrust.clientCaSecretRef` is
+  configured with cert-manager, including client certificate/key volume projections, automatic
+  `client auth` usage on managed default certificates, mTLS-aware container probes, and operator
+  admin/STS client certificate authentication.
 - Optional `rustfs-tenant` Helm chart for a Tenant and separate API/Console Ingress
   or HTTPRoute resources, with backend TLS policies, native YAML/Kustomize examples,
   and networking lifecycle documentation. Existing CRDs and controller behavior are unchanged.

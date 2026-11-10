@@ -520,7 +520,7 @@ pub(super) fn expected_pool_cmd_line(
         .spec
         .tls
         .as_ref()
-        .is_some_and(|tls| tls.enable_internode_https)
+        .is_some_and(|tls| tls.is_enabled() && tls.is_internode_https_enabled())
     {
         "https"
     } else {

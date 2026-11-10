@@ -26,7 +26,9 @@ use crate::types::v1alpha1::security_context::{
     MAX_KUBERNETES_ID, PodSecurityContextOverride, effective_run_as_non_root,
     security_context_pair_delegates_to_platform,
 };
-use crate::types::v1alpha1::tls::{TLS_SERVER_VOLUME_NAME, TlsPlan, http_probe};
+use crate::types::v1alpha1::tls::{
+    TLS_SERVER_VOLUME_NAME, TlsPlan, http_probe, mtls_readiness_probe, tcp_probe,
+};
 use k8s_openapi::DeepMerge;
 use k8s_openapi::api::apps::v1;
 use k8s_openapi::api::core::v1 as corev1;
@@ -1698,9 +1700,25 @@ impl Tenant {
                 .image_pull_policy
                 .as_ref()
                 .map(ToString::to_string),
-            liveness_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
-            readiness_probe: Some(http_probe("/health/ready", tls_plan.probe_scheme)),
-            startup_probe: Some(http_probe("/health", tls_plan.probe_scheme)),
+            liveness_probe: Some(if tls_plan.mtls_enabled {
+                tcp_probe()
+            } else {
+                http_probe("/health", tls_plan.probe_scheme)
+            }),
+            readiness_probe: Some(if tls_plan.mtls_enabled {
+                if super::helper::use_tcp_mtls_readiness_probe(&self.spec.env) {
+                    tcp_probe()
+                } else {
+                    mtls_readiness_probe(&tls_plan.mount_path)
+                }
+            } else {
+                http_probe("/health/ready", tls_plan.probe_scheme)
+            }),
+            startup_probe: Some(if tls_plan.mtls_enabled {
+                tcp_probe()
+            } else {
+                http_probe("/health", tls_plan.probe_scheme)
+            }),
             termination_message_policy: Some("FallbackToLogsOnError".to_string()),
             security_context: Some(container_security_context),
             ..Default::default()
@@ -2030,6 +2048,17 @@ impl Tenant {
             return Ok(true);
         }
 
+        // Check container probes (mTLS switches HTTP probes to TCP/exec probes)
+        if normalize_probe_for_comparison(existing_container.liveness_probe.as_ref())
+            != normalize_probe_for_comparison(desired_container.liveness_probe.as_ref())
+            || normalize_probe_for_comparison(existing_container.readiness_probe.as_ref())
+                != normalize_probe_for_comparison(desired_container.readiness_probe.as_ref())
+            || normalize_probe_for_comparison(existing_container.startup_probe.as_ref())
+                != normalize_probe_for_comparison(desired_container.startup_probe.as_ref())
+        {
+            return Ok(true);
+        }
+
         // If we reach here, no updates are needed
         Ok(false)
     }
@@ -2291,6 +2320,23 @@ impl Tenant {
 
         Ok(())
     }
+}
+
+fn normalize_probe_for_comparison(probe: Option<&corev1::Probe>) -> Option<corev1::Probe> {
+    let mut normalized = probe?.clone();
+    normalized.timeout_seconds = Some(normalized.timeout_seconds.unwrap_or(1));
+    normalized.period_seconds = Some(normalized.period_seconds.unwrap_or(10));
+    normalized.success_threshold = Some(normalized.success_threshold.unwrap_or(1));
+    normalized.failure_threshold = Some(normalized.failure_threshold.unwrap_or(3));
+    if normalized.initial_delay_seconds == Some(0) {
+        normalized.initial_delay_seconds = None;
+    }
+    if let Some(http_get) = normalized.http_get.as_mut()
+        && http_get.scheme.is_none()
+    {
+        http_get.scheme = Some("HTTP".to_string());
+    }
+    Some(normalized)
 }
 
 #[cfg(test)]
@@ -3836,6 +3882,199 @@ mod tests {
             .expect("Should compare StatefulSet");
 
         assert!(needs_update, "TLS hash change should roll the pod template");
+    }
+
+    #[test]
+    fn mtls_tls_plan_switches_probes_and_triggers_statefulset_update() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let base_plan = tls_plan("sha256:same");
+        let mut mtls_plan = base_plan.clone();
+        mtls_plan.mtls_enabled = true;
+
+        let base_sts = tenant
+            .new_statefulset_with_tls_plan(pool, &base_plan)
+            .expect("Should create StatefulSet with base TLS");
+        let mtls_sts = tenant
+            .new_statefulset_with_tls_plan(pool, &mtls_plan)
+            .expect("Should create StatefulSet with mTLS");
+
+        let container = &mtls_sts
+            .spec
+            .as_ref()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("Pod template should have spec")
+            .containers[0];
+        assert!(
+            container
+                .liveness_probe
+                .as_ref()
+                .and_then(|probe| probe.tcp_socket.as_ref())
+                .is_some()
+        );
+        assert!(
+            container
+                .startup_probe
+                .as_ref()
+                .and_then(|probe| probe.tcp_socket.as_ref())
+                .is_some()
+        );
+        let readiness_probe = container
+            .readiness_probe
+            .as_ref()
+            .expect("mTLS readiness probe should be set");
+        assert!(readiness_probe.tcp_socket.is_none());
+        let command = readiness_probe
+            .exec
+            .as_ref()
+            .and_then(|exec| exec.command.as_ref())
+            .expect("mTLS readiness probe should use exec");
+        assert!(command.iter().any(|arg| arg == "curl"));
+        assert!(
+            command
+                .windows(2)
+                .any(|w| w == ["--cert", "/var/run/rustfs/tls/client_cert.pem"])
+        );
+        assert!(
+            command
+                .windows(2)
+                .any(|w| w == ["--key", "/var/run/rustfs/tls/client_key.pem"])
+        );
+        assert!(
+            command
+                .iter()
+                .any(|arg| arg == "https://127.0.0.1:9000/health/ready")
+        );
+
+        let needs_update = tenant
+            .statefulset_needs_update_with_tls_plan(&base_sts, pool, &mtls_plan)
+            .expect("Should compare StatefulSet");
+        assert!(
+            needs_update,
+            "enabling mTLS probes should trigger StatefulSet update"
+        );
+
+        let mut tcp_override_tenant = tenant.clone();
+        tcp_override_tenant.spec.env.push(corev1::EnvVar {
+            name: crate::types::v1alpha1::tenant::helper::TENANT_MTLS_READINESS_PROBE_ENV
+                .to_string(),
+            value: Some("tcp".to_string()),
+            ..Default::default()
+        });
+        let tcp_override_sts = tcp_override_tenant
+            .new_statefulset_with_tls_plan(pool, &mtls_plan)
+            .expect("Should create StatefulSet with TCP mTLS readiness override");
+        let tcp_override_container = &tcp_override_sts
+            .spec
+            .as_ref()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("Pod template should have spec")
+            .containers[0];
+        assert!(
+            tcp_override_container
+                .readiness_probe
+                .as_ref()
+                .and_then(|probe| probe.tcp_socket.as_ref())
+                .is_some(),
+            "TENANT_MTLS_READINESS_PROBE=tcp should switch readinessProbe to tcpSocket"
+        );
+        assert!(
+            tcp_override_container
+                .readiness_probe
+                .as_ref()
+                .and_then(|probe| probe.exec.as_ref())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mtls_plan_uses_https_peer_urls_even_when_enable_internode_https_is_false() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.pools[0].servers = 4;
+        let pool = &tenant.spec.pools[0];
+        let plan = TlsPlan::rollout_certificates(
+            "/var/run/rustfs/tls".to_string(),
+            "sha256:mtls-peers".to_string(),
+            vec![crate::types::v1alpha1::tls::TlsServerCertificateMount {
+                secret_name: "server-tls".to_string(),
+                domains: vec![None],
+                ca_key: Some("ca.crt".to_string()),
+            }],
+            None,
+            Some(SecretKeyReference {
+                name: "client-ca".to_string(),
+                key: "ca.crt".to_string(),
+            }),
+            false,
+            false,
+            false,
+            None,
+        );
+
+        let sts = tenant
+            .new_statefulset_with_tls_plan(pool, &plan)
+            .expect("Should create StatefulSet with mTLS");
+        let container = &sts
+            .spec
+            .as_ref()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("Pod template should have spec")
+            .containers[0];
+        let volumes = env_value(container, "RUSTFS_VOLUMES").expect("RUSTFS_VOLUMES should exist");
+        assert!(
+            volumes.starts_with("https://"),
+            "expected https:// peer URLs for distributed mTLS tenant, got {volumes}"
+        );
+    }
+
+    #[test]
+    fn api_defaulted_probes_do_not_trigger_statefulset_update() {
+        let tenant = crate::tests::create_test_tenant(None, None);
+        let pool = &tenant.spec.pools[0];
+        let mut statefulset = tenant
+            .new_statefulset(pool)
+            .expect("Should create StatefulSet with TLS disabled");
+
+        let container = &mut statefulset
+            .spec
+            .as_mut()
+            .expect("StatefulSet should have spec")
+            .template
+            .spec
+            .as_mut()
+            .expect("Pod template should have spec")
+            .containers[0];
+        for probe in [
+            container.liveness_probe.as_mut(),
+            container.readiness_probe.as_mut(),
+            container.startup_probe.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            probe.timeout_seconds = Some(1);
+            probe.period_seconds = Some(10);
+            probe.success_threshold = Some(1);
+            probe.failure_threshold = Some(3);
+            probe.initial_delay_seconds = Some(0);
+        }
+
+        let needs_update = tenant
+            .statefulset_needs_update(&statefulset, pool)
+            .expect("Should compare StatefulSet");
+        assert!(
+            !needs_update,
+            "API-server defaulted probes should not trigger a StatefulSet update"
+        );
     }
 
     // Test: Pod runs as non-root with proper security context
