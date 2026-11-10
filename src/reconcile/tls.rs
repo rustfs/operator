@@ -248,6 +248,16 @@ pub(super) async fn reconcile_tls(
         return Ok(TlsPlan::disabled());
     };
     if !config.is_enabled() {
+        if config.is_mtls_enabled() {
+            return tls_blocked(
+                ctx,
+                tenant,
+                config,
+                Reason::CertificateInvalid,
+                "spec.tls.mode must not be disabled when mTLS is enabled".to_string(),
+            )
+            .await;
+        }
         return Ok(TlsPlan::disabled());
     }
 
@@ -392,11 +402,12 @@ async fn reconcile_cert_manager_tls(
                 .await;
             }
 
-            let desired_certificate = build_cert_manager_certificate(
+            let desired_certificate = build_cert_manager_certificate_with_mtls(
                 &san_budget,
                 cert_manager,
                 &entry.hosts,
                 include_generated_dns_names(&entry),
+                entry.default && config.is_mtls_enabled(),
                 CertManagerCertificateNames {
                     secret: &secret_name,
                     certificate: &certificate_name,
@@ -566,7 +577,7 @@ async fn reconcile_cert_manager_tls(
         CaTrustSource::CertificateSecretCa => match certificate_ca_material(
             default_certificate.ca_bytes.as_deref(),
             &default_certificate.secret_name,
-            config.enable_internode_https,
+            config.is_internode_https_enabled(),
             trust_system_ca,
             &mut runtime_budget,
         ) {
@@ -643,31 +654,39 @@ async fn reconcile_cert_manager_tls(
             ),
         )
         .await?;
-        client_ca_bytes = Some(
-            require_secret_key(
-                ctx,
-                tenant,
-                config,
-                &ca_secret,
-                &client_ca_secret_ref.name,
-                &client_ca_secret_ref.key,
-                Reason::CaBundleMissing,
-            )
-            .await?,
-        );
-        if let Some(bytes) = client_ca_bytes.as_deref()
-            && let Err(failure) = runtime_budget.charge_secret_material(bytes.len())
-        {
+        let bytes = require_secret_key(
+            ctx,
+            tenant,
+            config,
+            &ca_secret,
+            &client_ca_secret_ref.name,
+            &client_ca_secret_ref.key,
+            Reason::CaBundleMissing,
+        )
+        .await?;
+        if let Err(failure) = runtime_budget.charge_secret_material(bytes.len()) {
             return tls_validation_blocked(ctx, tenant, config, failure).await;
         }
         if let Err(failure) = validate_ca_bundle_bytes(
             &client_ca_secret_ref.name,
             &client_ca_secret_ref.key,
-            client_ca_bytes.as_deref().unwrap_or_default(),
+            bytes.as_slice(),
             &mut runtime_budget,
         ) {
             return tls_validation_blocked(ctx, tenant, config, failure).await;
         }
+        if let Err(failure) = validate_default_certificate_client_auth(
+            &default_certificate.secret_name,
+            &default_certificate.cert_bytes,
+            &client_ca_secret_ref.name,
+            &client_ca_secret_ref.key,
+            bytes.as_slice(),
+            !config.require_san_match,
+            &mut runtime_budget,
+        ) {
+            return tls_validation_blocked(ctx, tenant, config, failure).await;
+        }
+        client_ca_bytes = Some(bytes);
         client_ca = Some(client_ca_secret_ref);
         client_ca_secret = Some(ca_secret);
     }
@@ -731,7 +750,7 @@ async fn reconcile_cert_manager_tls(
         server_certificates,
         explicit_ca,
         client_ca,
-        config.enable_internode_https,
+        config.is_internode_https_enabled(),
         trust_system_ca,
         ca_trust.trust_leaf_certificate_as_ca,
         Some(status),
@@ -802,7 +821,7 @@ fn certificate_entries(
         config.certificates.iter().map(certificate_entry).collect()
     };
 
-    validate_certificate_entries(entries)
+    validate_certificate_entries(entries, config.is_mtls_enabled())
 }
 
 fn certificate_entry(config: &TlsCertificateConfig) -> TlsCertificateEntry {
@@ -817,6 +836,7 @@ fn certificate_entry(config: &TlsCertificateConfig) -> TlsCertificateEntry {
 
 fn validate_certificate_entries(
     entries: Vec<TlsCertificateEntry>,
+    mtls_enabled: bool,
 ) -> Result<Vec<TlsCertificateEntry>, TlsValidationFailure> {
     if entries.is_empty() {
         return Err(TlsValidationFailure {
@@ -841,6 +861,22 @@ fn validate_certificate_entries(
         }
         if entry.default {
             default_count += 1;
+            if mtls_enabled
+                && !entry.cert_manager.usages.is_empty()
+                && !entry
+                    .cert_manager
+                    .usages
+                    .iter()
+                    .any(|usage| usage.eq_ignore_ascii_case("client auth"))
+            {
+                return Err(TlsValidationFailure {
+                    reason: Reason::CertificateInvalid,
+                    message: format!(
+                        "spec.tls certificate '{}' must include 'client auth' in certManager.usages when mTLS is enabled",
+                        entry.name
+                    ),
+                });
+            }
         } else if entry.hosts.is_empty() {
             return Err(TlsValidationFailure {
                 reason: Reason::CertificateInvalid,
@@ -1069,11 +1105,30 @@ struct CertManagerCertificateNames<'a> {
     certificate: &'a str,
 }
 
+#[cfg(test)]
 fn build_cert_manager_certificate(
     san_budget: &ValidatedTlsSanBudget<'_>,
     cert_manager: &CertManagerTlsConfig,
     hosts: &[String],
     include_generated_dns_names: bool,
+    names: CertManagerCertificateNames<'_>,
+) -> DynamicObject {
+    build_cert_manager_certificate_with_mtls(
+        san_budget,
+        cert_manager,
+        hosts,
+        include_generated_dns_names,
+        false,
+        names,
+    )
+}
+
+fn build_cert_manager_certificate_with_mtls(
+    san_budget: &ValidatedTlsSanBudget<'_>,
+    cert_manager: &CertManagerTlsConfig,
+    hosts: &[String],
+    include_generated_dns_names: bool,
+    include_client_auth: bool,
     names: CertManagerCertificateNames<'_>,
 ) -> DynamicObject {
     let tenant = san_budget.tenant();
@@ -1101,7 +1156,7 @@ fn build_cert_manager_certificate(
     );
     spec.insert(
         "usages".to_string(),
-        json!(certificate_usages(cert_manager)),
+        json!(certificate_usages(cert_manager, include_client_auth)),
     );
     if let Some(duration) = cert_manager
         .duration
@@ -1453,7 +1508,7 @@ mod san_budget {
             }
 
             let mut status = custom;
-            if config.enable_internode_https && entry.default {
+            if config.is_internode_https_enabled() && entry.default {
                 status.merge(required)?;
             } else if include_generated {
                 status.merge(generated)?;
@@ -1474,7 +1529,7 @@ mod san_budget {
             }
 
             if entry.cert_manager.manage_certificate
-                && config.enable_internode_https
+                && config.is_internode_https_enabled()
                 && entry.default
                 && !include_generated
             {
@@ -1979,7 +2034,8 @@ fn validate_managed_certificate_san_config(
     config: &TlsConfig,
     entry: &TlsCertificateEntry,
 ) -> Result<(), TlsValidationFailure> {
-    if !config.enable_internode_https || !entry.default || include_generated_dns_names(entry) {
+    if !config.is_internode_https_enabled() || !entry.default || include_generated_dns_names(entry)
+    {
         return Ok(());
     }
 
@@ -2024,7 +2080,7 @@ fn san_validation_dns_names(
             .filter(|name| !name.is_empty())
             .cloned(),
     );
-    if entry.default && config.enable_internode_https {
+    if entry.default && config.is_internode_https_enabled() {
         names.extend(required_tls_dns_names(san_budget));
     } else if include_generated_dns_names(entry) {
         names.extend(generated_dns_names(san_budget));
@@ -2160,9 +2216,16 @@ fn rustfs_certificate_domains(certificate: &ObservedTlsCertificate) -> Vec<Optio
     domains
 }
 
-fn certificate_usages(cert_manager: &CertManagerTlsConfig) -> Vec<String> {
+fn certificate_usages(
+    cert_manager: &CertManagerTlsConfig,
+    include_client_auth: bool,
+) -> Vec<String> {
     if cert_manager.usages.is_empty() {
-        vec!["server auth".to_string()]
+        if include_client_auth {
+            vec!["server auth".to_string(), "client auth".to_string()]
+        } else {
+            vec!["server auth".to_string()]
+        }
     } else {
         cert_manager.usages.clone()
     }
@@ -2561,6 +2624,90 @@ fn invalid_ca_bundle(secret_name: &str, key: &str) -> TlsValidationFailure {
     }
 }
 
+fn validate_default_certificate_client_auth(
+    secret_name: &str,
+    cert_bytes: &[u8],
+    client_ca_secret_name: &str,
+    client_ca_key: &str,
+    client_ca_bytes: &[u8],
+    charge_der_budget: bool,
+    runtime_budget: &mut TlsCertificateRuntimeBudget,
+) -> Result<(), TlsValidationFailure> {
+    let mut cert_cursor = Cursor::new(cert_bytes);
+    let mut certificates = Vec::new();
+    for cert in rustls_pemfile::certs(&mut cert_cursor) {
+        let cert = cert.map_err(|_| TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: format!(
+                "TLS certificate in Secret '{}' key '{}' must contain a valid PEM certificate",
+                secret_name, TLS_CERT_KEY
+            ),
+        })?;
+        if charge_der_budget {
+            runtime_budget.charge_der(cert.as_ref().len())?;
+        }
+        certificates.push(cert);
+    }
+    let Some(leaf_der) = certificates.first() else {
+        return Err(TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: format!(
+                "TLS certificate in Secret '{}' key '{}' must contain at least one valid PEM certificate",
+                secret_name, TLS_CERT_KEY
+            ),
+        });
+    };
+    let end_entity =
+        webpki::EndEntityCert::try_from(leaf_der).map_err(|_| TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: format!(
+                "TLS certificate in Secret '{}' key '{}' must be a valid X.509 end-entity certificate",
+                secret_name, TLS_CERT_KEY
+            ),
+        })?;
+
+    let mut ca_cursor = Cursor::new(client_ca_bytes);
+    let mut ca_certificates = Vec::new();
+    for cert in rustls_pemfile::certs(&mut ca_cursor) {
+        let cert = cert.map_err(|_| invalid_ca_bundle(client_ca_secret_name, client_ca_key))?;
+        ca_certificates.push(cert);
+    }
+    if ca_certificates.is_empty() {
+        return Err(invalid_ca_bundle(client_ca_secret_name, client_ca_key));
+    }
+    let trust_anchors = ca_certificates
+        .iter()
+        .map(webpki::anchor_from_trusted_cert)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| TlsValidationFailure {
+            reason: Reason::CaBundleInvalid,
+            message: format!(
+                "CA bundle in Secret '{}' key '{}' contains an invalid trust anchor: {}",
+                client_ca_secret_name, client_ca_key, error
+            ),
+        })?;
+
+    end_entity
+        .verify_for_usage(
+            webpki::ALL_VERIFICATION_ALGS,
+            &trust_anchors,
+            &certificates[1..],
+            rustls::pki_types::UnixTime::now(),
+            webpki::KeyUsage::client_auth(),
+            None,
+            None,
+        )
+        .map_err(|error| TlsValidationFailure {
+            reason: Reason::CertificateInvalid,
+            message: format!(
+                "TLS certificate in Secret '{}' key '{}' cannot authenticate as an mTLS client against CA bundle in Secret '{}' key '{}': {}",
+                secret_name, TLS_CERT_KEY, client_ca_secret_name, client_ca_key, error
+            ),
+        })?;
+
+    Ok(())
+}
+
 async fn tls_validation_blocked<T>(
     ctx: &Context,
     tenant: &Tenant,
@@ -2797,7 +2944,7 @@ fn tls_hash(
     hash_str(
         &mut hasher,
         "enableInternodeHttps",
-        if config.enable_internode_https {
+        if config.is_internode_https_enabled() {
             "true"
         } else {
             "false"
@@ -3823,6 +3970,32 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
     }
 
     #[test]
+    fn managed_certificate_manifest_defaults_to_server_and_client_auth_when_mtls_enabled() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.metadata.name = Some("tenant-a".to_string());
+        tenant.metadata.namespace = Some("storage".to_string());
+        let san_budget =
+            validated_test_san_budget(&tenant, "storage", cluster_dns::DEFAULT_CLUSTER_DOMAIN);
+
+        let certificate = build_cert_manager_certificate_with_mtls(
+            &san_budget,
+            &CertManagerTlsConfig::default(),
+            &[],
+            true,
+            true,
+            CertManagerCertificateNames {
+                secret: "tenant-a-tls",
+                certificate: "tenant-a-tls",
+            },
+        );
+
+        assert_eq!(
+            certificate.data.pointer("/spec/usages"),
+            Some(&serde_json::json!(["server auth", "client auth"]))
+        );
+    }
+
+    #[test]
     fn managed_certificate_manifest_includes_sni_hosts() {
         let mut tenant = crate::tests::create_test_tenant(None, None);
         tenant.metadata.name = Some("tenant-a".to_string());
@@ -4654,5 +4827,176 @@ S2+cuFyHX+xgTPNxiG9zUDrgtXds/63ePISjIADAUvsmI97k96E6jdcgB9MmWdJj
             data: Some(data),
             ..Default::default()
         }
+    }
+
+    fn generate_test_ca_and_leaf(
+        common_name: &str,
+        dns_names: Vec<String>,
+        include_client_auth_eku: bool,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType,
+            ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+        };
+
+        let ca_key = KeyPair::generate().expect("CA key should generate");
+        let mut ca_params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, common_name);
+        ca_params.distinguished_name = dn;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let ca_cert = ca_params
+            .self_signed(&ca_key)
+            .expect("CA cert should generate");
+
+        let leaf_key = KeyPair::generate().expect("leaf key should generate");
+        let mut leaf_params =
+            CertificateParams::new(dns_names).expect("leaf params should construct");
+        leaf_params.is_ca = IsCa::NoCa;
+        leaf_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        leaf_params.extended_key_usages = if include_client_auth_eku {
+            vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ]
+        } else {
+            vec![ExtendedKeyUsagePurpose::ServerAuth]
+        };
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .expect("leaf cert should sign");
+
+        (
+            ca_cert.pem().into_bytes(),
+            leaf_cert.pem().into_bytes(),
+            leaf_key.serialize_pem().into_bytes(),
+        )
+    }
+
+    #[test]
+    fn certificate_entries_rejects_default_cert_missing_client_auth_usage_when_mtls_enabled() {
+        let config = TlsConfig {
+            mode: TlsMode::CertManager,
+            ca_trust: Some(CaTrustConfig {
+                client_ca_secret_ref: Some(secret_ref("client-ca", "ca.crt")),
+                ..Default::default()
+            }),
+            cert_manager: Some(CertManagerTlsConfig {
+                secret_name: Some("server-tls".to_string()),
+                usages: vec!["server auth".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let failure = certificate_entries(&config)
+            .expect_err("explicit server-auth-only usages must fail when mTLS is enabled");
+        assert_eq!(failure.reason, Reason::CertificateInvalid);
+        assert!(failure.message.contains("client auth"));
+    }
+
+    #[test]
+    fn validate_default_certificate_client_auth_checks_eku_and_issuer_chain() {
+        let (ca_pem, valid_leaf_pem, _) =
+            generate_test_ca_and_leaf("rustfs-ca-a", vec!["localhost".to_string()], true);
+        let (_, server_only_leaf_pem, _) =
+            generate_test_ca_and_leaf("rustfs-ca-a", vec!["localhost".to_string()], false);
+        let (other_ca_pem, _, _) =
+            generate_test_ca_and_leaf("rustfs-ca-b", vec!["localhost".to_string()], true);
+
+        let mut budget = TlsCertificateRuntimeBudget::default();
+        validate_default_certificate_client_auth(
+            "server-tls",
+            &valid_leaf_pem,
+            "server-tls",
+            CA_CERT_KEY,
+            &ca_pem,
+            true,
+            &mut budget,
+        )
+        .expect("certificate with clientAuth EKU and matching CA should pass");
+
+        let eku_failure = validate_default_certificate_client_auth(
+            "server-tls",
+            &server_only_leaf_pem,
+            "server-tls",
+            CA_CERT_KEY,
+            &ca_pem,
+            true,
+            &mut budget,
+        )
+        .expect_err("serverAuth-only certificate should fail client auth verification");
+        assert_eq!(eku_failure.reason, Reason::CertificateInvalid);
+
+        let untrusted_failure = validate_default_certificate_client_auth(
+            "server-tls",
+            &valid_leaf_pem,
+            "client-ca",
+            CA_CERT_KEY,
+            &other_ca_pem,
+            true,
+            &mut budget,
+        )
+        .expect_err("untrusted client CA should fail client auth verification");
+        assert_eq!(untrusted_failure.reason, Reason::CertificateInvalid);
+    }
+
+    #[tokio::test]
+    async fn reconcile_tls_blocks_disabled_mode_when_mtls_is_enabled() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.tls = Some(TlsConfig {
+            mode: TlsMode::Disabled,
+            ca_trust: Some(CaTrustConfig {
+                client_ca_secret_ref: Some(secret_ref("client-ca", "ca.crt")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let service = service_fn({
+            let request_count = Arc::clone(&request_count);
+            let tenant = tenant.clone();
+            move |request: Request<Body>| {
+                let request_number = request_count.fetch_add(1, Ordering::SeqCst);
+                let tenant = tenant.clone();
+                async move {
+                    let response = match request_number {
+                        0 => {
+                            assert_eq!(request.method(), Method::PATCH);
+                            kube_response(
+                                StatusCode::OK,
+                                serde_json::to_value(tenant).expect("Tenant should serialize"),
+                            )
+                        }
+                        1 => {
+                            assert_eq!(request.method(), Method::POST);
+                            kube_response(StatusCode::OK, serde_json::json!({}))
+                        }
+                        _ => panic!("unexpected Kubernetes request: {request:?}"),
+                    };
+                    Ok::<_, Infallible>(response)
+                }
+            }
+        });
+        let ctx = Context::new(Client::new(service, "default"));
+
+        let error = reconcile_tls(&ctx, &tenant, "default")
+            .await
+            .expect_err("disabled mode with clientCaSecretRef must block reconcile");
+        assert!(matches!(
+            error,
+            Error::TlsBlocked { reason, message }
+                if reason == Reason::CertificateInvalid.as_str()
+                    && message.contains("spec.tls.mode must not be disabled")
+        ));
     }
 }

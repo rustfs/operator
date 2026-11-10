@@ -32,3 +32,37 @@ pub(crate) fn get_rustfs_image_or_default(explicit: Option<&String>) -> String {
 pub(crate) fn get_rustfs_mount_path() -> Option<String> {
     Some("/data".to_owned())
 }
+
+/// Environment variable that overrides the mTLS readiness probe mode (`tcp` / `tcpSocket` vs default `exec` with `curl`).
+/// Can be set on the operator process or in `tenant.spec.env` for distroless images without `curl`.
+/// Caveat: `tcpSocket` succeeds as soon as port 9000 accepts TCP connections, before `/health/ready`
+/// confirms storage read quorum (tracked in https://github.com/rustfs/rustfs/issues/9256).
+pub const TENANT_MTLS_READINESS_PROBE_ENV: &str = "TENANT_MTLS_READINESS_PROBE";
+pub const RUSTFS_MTLS_READINESS_PROBE_ENV: &str = "RUSTFS_MTLS_READINESS_PROBE";
+
+pub(crate) fn is_tcp_mtls_readiness_probe_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.eq_ignore_ascii_case("tcp") || trimmed.eq_ignore_ascii_case("tcpsocket")
+}
+
+pub(crate) fn use_tcp_mtls_readiness_probe(
+    explicit_env: &[k8s_openapi::api::core::v1::EnvVar],
+) -> bool {
+    if let Some(value) = explicit_env
+        .iter()
+        .rev()
+        .find(|env| {
+            env.name == TENANT_MTLS_READINESS_PROBE_ENV
+                || env.name == RUSTFS_MTLS_READINESS_PROBE_ENV
+        })
+        .and_then(|env| env.value.as_deref())
+    {
+        return is_tcp_mtls_readiness_probe_value(value);
+    }
+
+    std::env::var(TENANT_MTLS_READINESS_PROBE_ENV)
+        .ok()
+        .or_else(|| std::env::var(RUSTFS_MTLS_READINESS_PROBE_ENV).ok())
+        .as_deref()
+        .is_some_and(is_tcp_mtls_readiness_probe_value)
+}

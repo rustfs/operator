@@ -14,7 +14,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use reqwest::{Certificate, Client as HttpClient, Response, StatusCode};
+use reqwest::{Certificate, Client as HttpClient, Identity, Response, StatusCode};
 
 /// admin_ops: tenant admin operations (user/policy APIs).
 #[path = "admin_ops.rs"]
@@ -576,13 +576,36 @@ impl RustfsAdminClient {
         secret_key: impl Into<String>,
         ca_pem: &[u8],
     ) -> Result<Self, RustfsClientError> {
-        let certs = Certificate::from_pem_bundle(ca_pem)
-            .map_err(|_| RustfsClientError::InvalidTenantTlsCa)?;
+        Self::new_with_base_url_tls_material(base_url, access_key, secret_key, Some(ca_pem), None)
+    }
+
+    pub fn new_with_base_url_tls_material(
+        base_url: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+        ca_pem: Option<&[u8]>,
+        client_cert_and_key: Option<(&[u8], &[u8])>,
+    ) -> Result<Self, RustfsClientError> {
         let mut builder = HttpClient::builder()
             .connect_timeout(ADMIN_HTTP_CONNECT_TIMEOUT)
             .timeout(ADMIN_HTTP_REQUEST_TIMEOUT);
-        for cert in certs {
-            builder = builder.add_root_certificate(cert);
+        if let Some(ca_pem) = ca_pem {
+            let certs = Certificate::from_pem_bundle(ca_pem)
+                .map_err(|_| RustfsClientError::InvalidTenantTlsCa)?;
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+        if let Some((cert_pem, key_pem)) = client_cert_and_key {
+            let mut combined = Vec::with_capacity(cert_pem.len() + 1 + key_pem.len());
+            combined.extend_from_slice(cert_pem);
+            if !combined.ends_with(b"\n") {
+                combined.push(b'\n');
+            }
+            combined.extend_from_slice(key_pem);
+            let identity = Identity::from_pem(&combined)
+                .map_err(|_| RustfsClientError::TlsClientBuildFailed)?;
+            builder = builder.identity(identity);
         }
         let http_client = builder
             .build()
