@@ -17,7 +17,9 @@ use crate::types;
 use crate::types::v1alpha1::encryption::LocalKmsMasterKeySecretRef;
 use crate::types::v1alpha1::tenant::{OidcExtraCaCertSecretRef, RpcSecretRef, Tenant};
 use k8s_openapi::NamespaceResourceScope;
+use k8s_openapi::api::apps::v1::StatefulSet;
 use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Status, StatusCause};
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams, PostParams};
 use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::{Resource, ResourceExt, api::Api};
@@ -29,6 +31,22 @@ use std::fmt::Debug;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use tracing::info;
+
+#[derive(Debug, Snafu)]
+#[snafu(display("Kubernetes StatefulSet apply error: {}", source))]
+pub(crate) struct StatefulSetApplyError {
+    pub(crate) source: Box<kube::Error>,
+    pub(crate) causes: Vec<StatusCause>,
+}
+
+impl From<kube::Error> for StatefulSetApplyError {
+    fn from(source: kube::Error) -> Self {
+        Self {
+            source: Box::new(source),
+            causes: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -694,6 +712,54 @@ impl Context {
         )
         .context(KubeSnafu)
         .await
+    }
+
+    /// Preserves structured SSA conflict causes omitted by kube's ErrorResponse.
+    pub(crate) async fn apply_statefulset(
+        &self,
+        resource: &StatefulSet,
+        namespace: &str,
+        params: &PatchParams,
+    ) -> Result<StatefulSet, StatefulSetApplyError> {
+        let api: Api<StatefulSet> = Api::namespaced(self.client.clone(), namespace);
+        let request = kube::core::Request::new(api.resource_url())
+            .patch(&resource.name_any(), params, &Patch::Apply(resource))
+            .map_err(kube::Error::BuildRequest)?;
+        let response = self
+            .client
+            .send(request.map(kube::client::Body::from))
+            .await?;
+        let response_status = response.status();
+        let body = response.into_body().collect_bytes().await?;
+        if response_status.is_success() {
+            return serde_json::from_slice(&body)
+                .map_err(kube::Error::SerdeError)
+                .map_err(Into::into);
+        }
+
+        let error_response = serde_json::from_slice::<kube::core::ErrorResponse>(&body)
+            .unwrap_or_else(|_| kube::core::ErrorResponse {
+                status: response_status.to_string(),
+                message: String::from_utf8_lossy(&body).into_owned(),
+                reason: "Failed to parse error data".to_string(),
+                code: response_status.as_u16(),
+            });
+        let causes = if response_status == http::StatusCode::CONFLICT
+            && error_response.code == 409
+            && error_response.reason == "Conflict"
+        {
+            serde_json::from_slice::<Status>(&body)
+                .ok()
+                .and_then(|status| status.details)
+                .and_then(|details| details.causes)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Err(StatefulSetApplyError {
+            source: Box::new(kube::Error::Api(error_response)),
+            causes,
+        })
     }
 
     /// Force-applies a narrow security patch without taking ownership of the full resource.

@@ -3158,6 +3158,41 @@ spec:
               priorityClassName:
                 nullable: true
                 type: string
+              readinessProbe:
+                description: Readiness timing for every RustFS Pod. Omitted fields use operator defaults.
+                nullable: true
+                properties:
+                  failureThreshold:
+                    description: Consecutive failures required to report NotReady. Defaults to 3.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  initialDelaySeconds:
+                    description: Seconds before readiness checks begin. Defaults to 0.
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  periodSeconds:
+                    description: Interval between readiness checks, in seconds. Defaults to 10.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  successThreshold:
+                    description: Consecutive successes required to report Ready. Defaults to 1.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  timeoutSeconds:
+                    description: Timeout for each readiness check, in seconds. Defaults to 5.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               rpcSecret:
                 description: |-
                   Optional Secret key selector for RustFS internode RPC authentication.

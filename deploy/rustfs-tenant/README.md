@@ -79,6 +79,7 @@ has no `appVersion`: it does not select a RustFS image through chart metadata.
 | `tenant.metadata.name` | Tenant name; defaults to release name; DNS-1035, max 55 characters |
 | `tenant.metadata.labels`, `annotations` | Native metadata maps for the Tenant |
 | `tenant.spec` | Native Tenant spec, rendered without `tpl` evaluation or environment injection |
+| `tenant.spec.readinessProbe` | Optional readiness timing fields; the Operator supplies defaults and the health endpoint |
 | `ingress.api`, `ingress.console` | Independent Ingress settings; disabled by default |
 | `ingress.*.hosts` | Explicit DNS hostnames; no catch-all rule |
 | `ingress.*.ingressClassName`, `tls` | Native Ingress fields; TLS uses existing Secrets |
@@ -100,6 +101,41 @@ Keep the complete desired lists in your values file. Clearing a default map uses
 `null`, e.g. `tenant.spec.credsSecret: null` when using another supported credential
 source. The installed Tenant CRD remains the authority for validating native spec
 fields; chart schema validation covers the chart-owned settings.
+
+### Readiness timing
+
+Configure readiness through the native Tenant spec in your values file:
+
+```yaml
+tenant:
+  spec:
+    readinessProbe:
+      initialDelaySeconds: 0
+      timeoutSeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+      successThreshold: 1
+```
+
+These are the Operator defaults. Each field is optional, so a values file can
+override only `timeoutSeconds`, for example. The Operator selects the readiness
+handler from Tenant TLS: HTTP/HTTPS uses `/health/ready` on port `9000`, while
+mTLS uses the authenticated exec probe or configured TCP probe. The five-second
+timeout is the time Kubernetes allows for a probe response; the mTLS exec
+command retains its separate two-second curl timeout, and server-side readiness
+work has its own time budgets.
+
+Install the updated Tenant CRD explicitly before applying these values; Helm
+does not upgrade CRDs from the Operator chart's `crds/` directory. Upgrading the
+Operator also changes existing Tenants' default readiness timeout from one to
+five seconds, which updates their StatefulSet Pod templates. When
+`spec.serviceAccountName` is omitted, the Operator enforces `RollingUpdate` with
+`rollingUpdate.partition: 0` for default ServiceAccount token protection, and
+eligible Pods are replaced automatically. With an explicit custom ServiceAccount,
+the Operator preserves the existing `RollingUpdate`, `rollingUpdate.partition`,
+or `OnDelete` settings.
+See [readiness timing and upgrade guidance](../../docs/operator-user-guide.md#readiness-probe-timing)
+for validation rules, rollout behavior, and availability checks.
 
 ## Upgrade and remove
 

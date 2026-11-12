@@ -83,6 +83,65 @@ pub struct OidcConfig {
     pub extra_ca_cert_secret_ref: Option<OidcExtraCaCertSecretRef>,
 }
 
+/// Timing overrides for the RustFS readiness probe.
+///
+/// The operator selects the probe handler according to the Tenant TLS configuration.
+#[derive(Deserialize, Serialize, Clone, Debug, KubeSchema, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessProbeConfig {
+    /// Seconds before readiness checks begin. Defaults to 0.
+    #[schemars(range(min = 0))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_delay_seconds: Option<i32>,
+
+    /// Timeout for each readiness check, in seconds. Defaults to 5.
+    #[schemars(range(min = 1))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<i32>,
+
+    /// Interval between readiness checks, in seconds. Defaults to 10.
+    #[schemars(range(min = 1))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_seconds: Option<i32>,
+
+    /// Consecutive failures required to report NotReady. Defaults to 3.
+    #[schemars(range(min = 1))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_threshold: Option<i32>,
+
+    /// Consecutive successes required to report Ready. Defaults to 1.
+    #[schemars(range(min = 1))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_threshold: Option<i32>,
+}
+
+impl ReadinessProbeConfig {
+    fn validate(&self) -> Result<(), String> {
+        for (field, value, minimum) in [
+            ("initialDelaySeconds", self.initial_delay_seconds, 0),
+            ("timeoutSeconds", self.timeout_seconds, 1),
+            ("periodSeconds", self.period_seconds, 1),
+            ("failureThreshold", self.failure_threshold, 1),
+            ("successThreshold", self.success_threshold, 1),
+        ] {
+            if value.is_some_and(|value| value < minimum) {
+                return Err(format!(
+                    "spec.readinessProbe.{field} must be at least {minimum}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_to(&self, probe: &mut corev1::Probe) {
+        probe.initial_delay_seconds = Some(self.initial_delay_seconds.unwrap_or(0));
+        probe.timeout_seconds = Some(self.timeout_seconds.unwrap_or(5));
+        probe.period_seconds = Some(self.period_seconds.unwrap_or(10));
+        probe.failure_threshold = Some(self.failure_threshold.unwrap_or(3));
+        probe.success_threshold = Some(self.success_threshold.unwrap_or(1));
+    }
+}
+
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, KubeSchema, Default)]
 #[kube(
     group = "rustfs.com",
@@ -194,6 +253,10 @@ pub struct TenantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oidc: Option<OidcConfig>,
 
+    /// Readiness timing for every RustFS Pod. Omitted fields use operator defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_probe: Option<ReadinessProbeConfig>,
+
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub request_auto_cert: Option<bool>,
     //
@@ -202,9 +265,6 @@ pub struct TenantSpec {
     //
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub liveness: Option<corev1::Probe>,
-    //
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub readiness: Option<corev1::Probe>,
     //
     // #[serde(default, skip_serializing_if = "Option::is_none")]
     // pub startup: Option<corev1::Probe>,
@@ -402,6 +462,18 @@ impl Tenant {
                 message,
             }
         })
+    }
+
+    pub(crate) fn validate_readiness_probe(&self) -> Result<(), types::error::Error> {
+        if let Some(config) = &self.spec.readiness_probe {
+            config
+                .validate()
+                .map_err(|message| types::error::Error::InvalidReadinessProbe {
+                    name: self.name(),
+                    message,
+                })?;
+        }
+        Ok(())
     }
 
     /// a new owner reference for tenant
@@ -616,11 +688,84 @@ pub fn validate_dns1035_label(name: &str) -> Result<(), types::error::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OidcConfig, OidcExtraCaCertSecretRef, TenantSpec};
+    use super::{OidcConfig, OidcExtraCaCertSecretRef, ReadinessProbeConfig, Tenant, TenantSpec};
     use crate::types::v1alpha1::status::pool::PoolState;
     use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec, StatefulSetStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::CustomResourceExt;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn readiness_probe_preserves_omitted_fields_and_camel_case_names() {
+        let legacy: TenantSpec = serde_json::from_value(serde_json::json!({ "pools": [] }))
+            .expect("existing Tenant specs should deserialize");
+        assert!(legacy.readiness_probe.is_none());
+
+        let config = serde_json::json!({ "timeoutSeconds": 8 });
+        let spec: TenantSpec = serde_json::from_value(serde_json::json!({
+            "pools": [],
+            "readinessProbe": config,
+        }))
+        .expect("readiness timing should deserialize");
+        assert_eq!(
+            spec.readiness_probe,
+            Some(ReadinessProbeConfig {
+                timeout_seconds: Some(8),
+                ..Default::default()
+            })
+        );
+        let value = serde_json::to_value(spec).expect("Tenant spec should serialize");
+        assert_eq!(value["readinessProbe"], config);
+    }
+
+    #[test]
+    fn readiness_probe_validation_accepts_boundaries_and_rejects_invalid_values() {
+        for (field, minimum) in [
+            ("initialDelaySeconds", 0),
+            ("timeoutSeconds", 1),
+            ("periodSeconds", 1),
+            ("failureThreshold", 1),
+            ("successThreshold", 1),
+        ] {
+            for value in [minimum, i32::MAX] {
+                let config: ReadinessProbeConfig =
+                    serde_json::from_value(serde_json::json!({ field: value }))
+                        .expect("readiness timing should deserialize");
+                assert!(config.validate().is_ok(), "{field} should accept {value}");
+            }
+            let config: ReadinessProbeConfig =
+                serde_json::from_value(serde_json::json!({ field: minimum - 1 }))
+                    .expect("invalid timing should reach runtime validation");
+            let error = config.validate().expect_err("invalid timing must fail");
+            assert!(error.contains(&format!("spec.readinessProbe.{field}")));
+        }
+        assert!(ReadinessProbeConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn readiness_probe_crd_exposes_only_optional_timing_fields_with_bounds() {
+        let crd = serde_json::to_value(Tenant::crd()).expect("Tenant CRD should serialize");
+        let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["readinessProbe"];
+        assert_eq!(
+            schema["properties"].as_object().map(|fields| fields.len()),
+            Some(5)
+        );
+        assert!(schema.get("required").is_none());
+        for (field, minimum) in [
+            ("initialDelaySeconds", 0),
+            ("timeoutSeconds", 1),
+            ("periodSeconds", 1),
+            ("failureThreshold", 1),
+            ("successThreshold", 1),
+        ] {
+            assert_eq!(
+                schema["properties"][field]["minimum"].as_f64(),
+                Some(f64::from(minimum))
+            );
+            assert_eq!(schema["properties"][field]["format"], "int32");
+        }
+    }
 
     #[test]
     fn oidc_extra_ca_secret_ref_defaults_to_ca_crt() {
