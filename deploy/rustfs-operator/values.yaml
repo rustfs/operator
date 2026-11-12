@@ -222,6 +222,12 @@ console:
   # Generate with: openssl rand -base64 32
   jwtSecret: ""
 
+  # Name of a pre-existing Secret in the operator namespace that contains the key
+  # "jwt-secret" used to encrypt in-process Console session data. When set, the chart
+  # does not create its own Console Secret and the Console Deployment references this
+  # Secret directly. Mutually exclusive with console.jwtSecret.
+  existingSecret: ""
+
   image:
     # Console uses the same image as operator
     repository: docker.io/rustfs/operator

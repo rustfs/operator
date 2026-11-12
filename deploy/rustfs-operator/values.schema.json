@@ -68,6 +68,12 @@
     "console": {
       "type": "object",
       "properties": {
+        "existingSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$",
+          "description": "Name of a pre-existing Secret in the operator namespace containing the key jwt-secret; when set the chart does not create its own Console Secret."
+        },
         "loginAdmission": {
           "$ref": "#/definitions/admission"
         }
