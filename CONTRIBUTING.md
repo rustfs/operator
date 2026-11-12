@@ -86,6 +86,35 @@ Optional quick compile (not a separate `make` target):
 cargo check --all-targets
 ```
 
+The readiness field-management and rollout tests use a real Kubernetes API and
+are ignored by default. Run them against a disposable cluster with the current
+Tenant CRD:
+
+```bash
+kind create cluster --name rustfs-readiness --kubeconfig /tmp/rustfs-readiness.kubeconfig
+export KUBECONFIG=/tmp/rustfs-readiness.kubeconfig
+export RUSTFS_READINESS_TEST_CONTEXT=kind-rustfs-readiness
+kubectl --context "$RUSTFS_READINESS_TEST_CONTEXT" apply --server-side -f deploy/rustfs-operator/crds/tenant-crd.yaml
+cargo test --lib readiness_ssa_live_preserves_values_ownership_and_external_fields -- --ignored
+docker pull python:3.12-slim
+kind load docker-image python:3.12-slim --name rustfs-readiness
+cargo test --lib readiness_rollout_live_updates_complete_templates -- --ignored
+kind delete cluster --name rustfs-readiness
+```
+
+Both tests create and delete isolated namespaces. The field-management test uses
+zero-replica StatefulSets and checks
+readiness timing ownership, manual configuration migration, and preservation of
+external rollout policies and unrelated field ownership.
+
+The rollout test uses two Python HTTP server Pods with `imagePullPolicy: Never`,
+so `python:3.12-slim` must be available on every node. It submits readiness timing
+and server configuration changes through the production update helper, observes
+all stored StatefulSet templates and Pod events, and waits for both updated Pods
+to become Ready without manual Pod deletion. It exercises `Parallel` and
+`OrderedReady` policies with an external manager sharing the readiness timeout.
+Neither test requires Operator or RustFS container images.
+
 ### 🔒 Git hooks (optional)
 
 The repository does **not** ship a `make setup-hooks` target. To run checks automatically on `git commit`, add your own `.git/hooks/pre-commit` that invokes `make pre-commit` (or the individual commands above).

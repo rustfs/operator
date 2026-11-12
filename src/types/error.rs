@@ -46,6 +46,9 @@ pub enum Error {
     ))]
     InvalidAdditionalVolumeSpec { name: String, message: String },
 
+    #[snafu(display("invalid readiness probe for tenant '{}': {}", name, message))]
+    InvalidReadinessProbe { name: String, message: String },
+
     #[snafu(display("KMS migration is blocked for tenant '{}': {}", name, message))]
     KmsMigrationBlocked { name: String, message: String },
 

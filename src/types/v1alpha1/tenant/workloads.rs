@@ -70,6 +70,44 @@ pub(crate) fn uses_unpartitioned_rolling_update(
     strategy_type == "RollingUpdate" && partition == 0
 }
 
+fn readiness_probes_equal(
+    existing: Option<&corev1::Probe>,
+    desired: Option<&corev1::Probe>,
+) -> bool {
+    let (existing, desired) = match (existing, desired) {
+        (Some(existing), Some(desired)) => (existing, desired),
+        (None, None) => return true,
+        _ => return false,
+    };
+    let http_equal = match (existing.http_get.as_ref(), desired.http_get.as_ref()) {
+        (Some(existing), Some(desired)) => {
+            existing.path.as_deref().unwrap_or("/") == desired.path.as_deref().unwrap_or("/")
+                && existing.port == desired.port
+                && existing.scheme.as_deref().unwrap_or("HTTP")
+                    == desired.scheme.as_deref().unwrap_or("HTTP")
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    let timing_values = |probe: &corev1::Probe| {
+        [
+            probe.initial_delay_seconds.unwrap_or(0),
+            probe.timeout_seconds.unwrap_or(1),
+            probe.period_seconds.unwrap_or(10),
+            probe.failure_threshold.unwrap_or(3),
+            probe.success_threshold.unwrap_or(1),
+        ]
+    };
+
+    // External managers can add HTTP headers or a host without changing the
+    // endpoint and timing fields that the Operator owns.
+    timing_values(existing) == timing_values(desired)
+        && http_equal
+        && existing.exec == desired.exec
+        && existing.grpc == desired.grpc
+        && existing.tcp_socket == desired.tcp_socket
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImageUnverifiableReason {
     CustomRepository,
@@ -1486,6 +1524,7 @@ impl Tenant {
     ) -> Result<v1::StatefulSet, types::error::Error> {
         self.validate_declared_workload_security_contexts()?;
         self.validate_additional_volumes()?;
+        self.validate_readiness_probe()?;
 
         let labels = self.pool_labels(pool);
         let selector_labels = self.pool_selector_labels(pool);
@@ -1667,6 +1706,21 @@ impl Tenant {
             ..
         } = security;
 
+        let mut readiness_probe = if tls_plan.mtls_enabled {
+            if super::helper::use_tcp_mtls_readiness_probe(&self.spec.env) {
+                tcp_probe()
+            } else {
+                mtls_readiness_probe(&tls_plan.mount_path)
+            }
+        } else {
+            http_probe("/health/ready", tls_plan.probe_scheme)
+        };
+        self.spec
+            .readiness_probe
+            .as_ref()
+            .unwrap_or(&super::ReadinessProbeConfig::default())
+            .apply_to(&mut readiness_probe);
+
         let container = corev1::Container {
             name: "rustfs".to_owned(),
             image: Some(super::helper::get_rustfs_image_or_default(
@@ -1705,15 +1759,7 @@ impl Tenant {
             } else {
                 http_probe("/health", tls_plan.probe_scheme)
             }),
-            readiness_probe: Some(if tls_plan.mtls_enabled {
-                if super::helper::use_tcp_mtls_readiness_probe(&self.spec.env) {
-                    tcp_probe()
-                } else {
-                    mtls_readiness_probe(&tls_plan.mount_path)
-                }
-            } else {
-                http_probe("/health/ready", tls_plan.probe_scheme)
-            }),
+            readiness_probe: Some(readiness_probe),
             startup_probe: Some(if tls_plan.mtls_enabled {
                 tcp_probe()
             } else {
@@ -2003,6 +2049,13 @@ impl Tenant {
         let existing_container = &existing_pod_spec.containers[0];
         let desired_container = &desired_pod_spec.containers[0];
 
+        if !readiness_probes_equal(
+            existing_container.readiness_probe.as_ref(),
+            desired_container.readiness_probe.as_ref(),
+        ) {
+            return Ok(true);
+        }
+
         // Check image
         if existing_container.image != desired_container.image {
             return Ok(true);
@@ -2051,8 +2104,6 @@ impl Tenant {
         // Check container probes (mTLS switches HTTP probes to TCP/exec probes)
         if normalize_probe_for_comparison(existing_container.liveness_probe.as_ref())
             != normalize_probe_for_comparison(desired_container.liveness_probe.as_ref())
-            || normalize_probe_for_comparison(existing_container.readiness_probe.as_ref())
-                != normalize_probe_for_comparison(desired_container.readiness_probe.as_ref())
             || normalize_probe_for_comparison(existing_container.startup_probe.as_ref())
                 != normalize_probe_for_comparison(desired_container.startup_probe.as_ref())
         {
@@ -2345,7 +2396,7 @@ mod tests {
     use super::{
         DEFAULT_FS_GROUP, DEFAULT_RUN_AS_GROUP, DEFAULT_RUN_AS_USER,
         MAX_APP_ARMOR_LOCALHOST_PROFILE_LENGTH, RUNTIME_DEFAULT_IMAGE_ACK_ANNOTATION,
-        quantities_semantically_equal, uses_unpartitioned_rolling_update,
+        quantities_semantically_equal, readiness_probes_equal, uses_unpartitioned_rolling_update,
         validate_declared_app_armor_profile, validate_declared_seccomp_profile,
     };
     use crate::types::v1alpha1::encryption::{
@@ -2354,9 +2405,9 @@ mod tests {
     use crate::types::v1alpha1::logging::{LoggingConfig, LoggingMode};
     use crate::types::v1alpha1::security_context::{MAX_KUBERNETES_ID, PodSecurityContextOverride};
     use crate::types::v1alpha1::tenant::{
-        OidcConfig, OidcExtraCaCertSecretRef, RpcSecretRef, Tenant,
+        OidcConfig, OidcExtraCaCertSecretRef, ReadinessProbeConfig, RpcSecretRef, Tenant,
     };
-    use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan};
+    use crate::types::v1alpha1::tls::{SecretKeyReference, TlsPlan, http_probe};
     use k8s_openapi::api::apps::v1;
     use k8s_openapi::api::core::v1 as corev1;
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -4061,12 +4112,24 @@ mod tests {
         .into_iter()
         .flatten()
         {
-            probe.timeout_seconds = Some(1);
-            probe.period_seconds = Some(10);
-            probe.success_threshold = Some(1);
-            probe.failure_threshold = Some(3);
-            probe.initial_delay_seconds = Some(0);
+            probe.timeout_seconds.get_or_insert(1);
+            probe.period_seconds.get_or_insert(10);
+            probe.success_threshold.get_or_insert(1);
+            probe.failure_threshold.get_or_insert(3);
+            probe.initial_delay_seconds.get_or_insert(0);
         }
+        assert_eq!(
+            container.readiness_probe.as_ref().unwrap().timeout_seconds,
+            Some(5)
+        );
+        assert_eq!(
+            container.liveness_probe.as_ref().unwrap().timeout_seconds,
+            Some(1)
+        );
+        assert_eq!(
+            container.startup_probe.as_ref().unwrap().timeout_seconds,
+            Some(1)
+        );
 
         let needs_update = tenant
             .statefulset_needs_update(&statefulset, pool)
@@ -5635,6 +5698,385 @@ mod tests {
             Some(requests),
             "Container should use pool-level resource requests"
         );
+    }
+
+    #[test]
+    fn readiness_probe_configuration_preserves_tls_and_other_probes() {
+        for tls in [TlsPlan::disabled(), tls_plan("sha256:readiness")] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            let baseline = tenant
+                .new_statefulset_with_tls_plan(&tenant.spec.pools[0], &tls)
+                .expect("default StatefulSet should render");
+            let baseline_container = &baseline.spec.unwrap().template.spec.unwrap().containers[0];
+
+            for (config, expected) in [
+                (None, [0, 5, 10, 3, 1]),
+                (Some(ReadinessProbeConfig::default()), [0, 5, 10, 3, 1]),
+                (
+                    Some(ReadinessProbeConfig {
+                        timeout_seconds: Some(8),
+                        ..Default::default()
+                    }),
+                    [0, 8, 10, 3, 1],
+                ),
+                (
+                    Some(ReadinessProbeConfig {
+                        initial_delay_seconds: Some(2),
+                        timeout_seconds: Some(8),
+                        period_seconds: Some(15),
+                        failure_threshold: Some(4),
+                        success_threshold: Some(2),
+                    }),
+                    [2, 8, 15, 4, 2],
+                ),
+            ] {
+                tenant.spec.readiness_probe = config;
+                let statefulset = tenant
+                    .new_statefulset_with_tls_plan(&tenant.spec.pools[0], &tls)
+                    .expect("configured StatefulSet should render");
+                let container = &statefulset.spec.unwrap().template.spec.unwrap().containers[0];
+                let probe = container.readiness_probe.as_ref().unwrap();
+                let http_get = probe.http_get.as_ref().unwrap();
+                assert_eq!(http_get.path.as_deref(), Some("/health/ready"));
+                assert_eq!(
+                    http_get.port,
+                    k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(9000)
+                );
+                assert_eq!(http_get.scheme.as_deref(), Some(tls.probe_scheme));
+                assert_eq!(
+                    [
+                        probe.initial_delay_seconds,
+                        probe.timeout_seconds,
+                        probe.period_seconds,
+                        probe.failure_threshold,
+                        probe.success_threshold,
+                    ],
+                    expected.map(Some)
+                );
+                assert_eq!(
+                    probe.http_get,
+                    baseline_container
+                        .readiness_probe
+                        .as_ref()
+                        .unwrap()
+                        .http_get
+                );
+                assert_eq!(container.liveness_probe, baseline_container.liveness_probe);
+                assert_eq!(container.startup_probe, baseline_container.startup_probe);
+            }
+        }
+    }
+
+    #[test]
+    fn readiness_timing_preserves_mtls_handlers_and_converges() {
+        for mode in ["exec", "tcp"] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            tenant.spec.env.push(corev1::EnvVar {
+                name: "TENANT_MTLS_READINESS_PROBE".to_string(),
+                value: Some(mode.to_string()),
+                ..Default::default()
+            });
+            let mut tls = tls_plan("sha256:readiness-mtls");
+            tls.mtls_enabled = true;
+            let pool = tenant.spec.pools[0].clone();
+            let baseline = tenant.new_statefulset_with_tls_plan(&pool, &tls).unwrap();
+            let baseline_container = &baseline
+                .spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .containers[0];
+            let baseline_probe = baseline_container.readiness_probe.as_ref().unwrap();
+            assert_eq!(baseline_probe.exec.is_some(), mode == "exec");
+            assert_eq!(baseline_probe.tcp_socket.is_some(), mode == "tcp");
+            assert!(
+                !tenant
+                    .statefulset_needs_update_with_tls_plan(&baseline, &pool, &tls)
+                    .unwrap()
+            );
+
+            tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+                initial_delay_seconds: Some(2),
+                timeout_seconds: Some(8),
+                period_seconds: Some(15),
+                failure_threshold: Some(4),
+                success_threshold: Some(2),
+            });
+            assert!(
+                tenant
+                    .statefulset_needs_update_with_tls_plan(&baseline, &pool, &tls)
+                    .unwrap()
+            );
+            let configured = tenant.new_statefulset_with_tls_plan(&pool, &tls).unwrap();
+            let container = &configured
+                .spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .containers[0];
+            let probe = container.readiness_probe.as_ref().unwrap();
+            assert_eq!(probe.exec, baseline_probe.exec);
+            assert_eq!(probe.tcp_socket, baseline_probe.tcp_socket);
+            assert_eq!(container.liveness_probe, baseline_container.liveness_probe);
+            assert_eq!(container.startup_probe, baseline_container.startup_probe);
+            assert_eq!(
+                [
+                    probe.initial_delay_seconds,
+                    probe.timeout_seconds,
+                    probe.period_seconds,
+                    probe.failure_threshold,
+                    probe.success_threshold,
+                ],
+                [2, 8, 15, 4, 2].map(Some)
+            );
+            assert!(
+                !tenant
+                    .statefulset_needs_update_with_tls_plan(&configured, &pool, &tls)
+                    .unwrap()
+            );
+
+            let mut changed_handler = probe.clone();
+            if let Some(exec) = changed_handler.exec.as_mut() {
+                exec.command = Some(vec!["true".to_string()]);
+            }
+            if let Some(tcp) = changed_handler.tcp_socket.as_mut() {
+                tcp.port = k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(9001);
+            }
+            assert!(!readiness_probes_equal(Some(&changed_handler), Some(probe)));
+            tenant.spec.readiness_probe = None;
+            assert!(
+                tenant
+                    .statefulset_needs_update_with_tls_plan(&configured, &pool, &tls)
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_probe_invalid_timing_prevents_statefulset_rendering() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+            timeout_seconds: Some(0),
+            ..Default::default()
+        });
+        let error = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect_err("invalid readiness timing must not reach the Pod template");
+        assert!(matches!(
+            error,
+            crate::types::error::Error::InvalidReadinessProbe { name, message }
+                if name == "test-tenant" && message.contains("timeoutSeconds")
+        ));
+    }
+
+    #[test]
+    fn readiness_probe_timing_changes_and_removal_require_statefulset_updates() {
+        for (field, value) in [
+            ("initialDelaySeconds", 2),
+            ("timeoutSeconds", 8),
+            ("periodSeconds", 15),
+            ("failureThreshold", 4),
+            ("successThreshold", 2),
+        ] {
+            let mut tenant = crate::tests::create_test_tenant(None, None);
+            let existing = tenant
+                .new_statefulset(&tenant.spec.pools[0])
+                .expect("default StatefulSet should render");
+            tenant.spec.readiness_probe = Some(
+                serde_json::from_value(serde_json::json!({ field: value }))
+                    .expect("readiness configuration should deserialize"),
+            );
+            assert!(
+                tenant
+                    .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                    .unwrap(),
+                "changing {field} must update the StatefulSet"
+            );
+            let configured = tenant
+                .new_statefulset(&tenant.spec.pools[0])
+                .expect("configured StatefulSet should render");
+            assert!(
+                !tenant
+                    .statefulset_needs_update(&configured, &tenant.spec.pools[0])
+                    .unwrap()
+            );
+            tenant.spec.readiness_probe = None;
+            assert!(
+                tenant
+                    .statefulset_needs_update(&configured, &tenant.spec.pools[0])
+                    .unwrap(),
+                "removing {field} must restore the operator default"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_probe_comparison_uses_kubernetes_defaults_for_existing_objects() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let mut existing = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("StatefulSet should render");
+        let container = &mut existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0];
+        let mut probe = http_probe("/health/ready", "HTTP");
+        probe.timeout_seconds = Some(5);
+        container.readiness_probe = Some(probe);
+        assert!(
+            !tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "omitted Kubernetes defaults must not cause repeated updates"
+        );
+
+        existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .readiness_probe
+            .as_mut()
+            .unwrap()
+            .timeout_seconds = None;
+        assert!(
+            tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "the historical one-second timeout must receive the new default"
+        );
+        tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+            timeout_seconds: Some(1),
+            ..Default::default()
+        });
+        assert!(
+            !tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "an explicit one-second timeout must match the Kubernetes default"
+        );
+        existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .readiness_probe = None;
+        assert!(
+            tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "a missing readiness probe must be restored"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_comparison_preserves_unmanaged_http_fields() {
+        let mut tenant = crate::tests::create_test_tenant(None, None);
+        let mut existing = tenant
+            .new_statefulset(&tenant.spec.pools[0])
+            .expect("StatefulSet should render");
+        let probe = existing
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .spec
+            .as_mut()
+            .unwrap()
+            .containers[0]
+            .readiness_probe
+            .as_mut()
+            .unwrap();
+        let http_get = probe.http_get.as_mut().unwrap();
+        http_get.host = Some("127.0.0.1".to_string());
+        http_get.http_headers = Some(vec![corev1::HTTPHeader {
+            name: "X-Probe-Source".to_string(),
+            value: "external-manager".to_string(),
+        }]);
+        probe.timeout_seconds = Some(8);
+        assert!(
+            tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "external fields must not hide changes to managed timing"
+        );
+
+        tenant.spec.readiness_probe = Some(ReadinessProbeConfig {
+            timeout_seconds: Some(8),
+            ..Default::default()
+        });
+        assert!(
+            !tenant
+                .statefulset_needs_update(&existing, &tenant.spec.pools[0])
+                .unwrap(),
+            "matching managed fields must converge with external HTTP fields present"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_comparison_tracks_managed_http_fields() {
+        let desired = http_probe("/health/ready", "HTTP");
+        let mut changed_port = desired.clone();
+        changed_port.http_get.as_mut().unwrap().port =
+            k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(9001);
+        for existing in [
+            http_probe("/health", "HTTP"),
+            http_probe("/health/ready", "HTTPS"),
+            changed_port,
+        ] {
+            assert!(
+                !readiness_probes_equal(Some(&existing), Some(&desired)),
+                "managed endpoint changes must require an update"
+            );
+        }
+
+        let mut default_scheme = desired.clone();
+        default_scheme.http_get.as_mut().unwrap().scheme = None;
+        assert!(
+            readiness_probes_equal(Some(&default_scheme), Some(&desired)),
+            "an omitted scheme uses Kubernetes' HTTP default"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_comparison_detects_missing_or_replaced_http_handler() {
+        let desired = http_probe("/health/ready", "HTTP");
+        for existing in [
+            corev1::Probe::default(),
+            corev1::Probe {
+                exec: Some(corev1::ExecAction {
+                    command: Some(vec!["true".to_string()]),
+                }),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                !readiness_probes_equal(Some(&existing), Some(&desired)),
+                "a missing or replaced HTTP handler must require an update"
+            );
+        }
+        assert!(!readiness_probes_equal(None, Some(&desired)));
+        assert!(!readiness_probes_equal(Some(&desired), None));
+        assert!(readiness_probes_equal(None, None));
     }
 
     // Test: StatefulSet diff detection - no changes needed
