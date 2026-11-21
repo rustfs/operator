@@ -23,7 +23,6 @@ on:
       version:
         description: "Release version to publish, e.g. 1.0.0 or v1.0.0"
         required: true
-        default: "0.0.4"
         type: string
 
 permissions:
@@ -45,21 +44,15 @@ jobs:
       chart_version: ${{ steps.version.outputs.chart_version }}
 
     steps:
-      - name: Checkout helm chart repo
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
       - name: Normalize release version
         id: version
+        env:
+          RELEASE_TAG: ${{ inputs.version || github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            RAW="${{ github.event.inputs.version }}"
-          else
-            RAW="${{ github.event.workflow_run.head_branch }}"
-          fi
-
-          RAW_TAG="${RAW#refs/tags/}"
+          RAW_TAG="${RELEASE_TAG#refs/tags/}"
+          git check-ref-format "refs/tags/$RAW_TAG"
           CHART_VERSION="${RAW_TAG#v}"
 
           if [ -z "$CHART_VERSION" ]; then
@@ -71,25 +64,26 @@ jobs:
             echo "chart_version=$CHART_VERSION"
           } >> "$GITHUB_OUTPUT"
 
-
-      - name: Replace chart version and app version
-        run: |
-          set -eux
-          sed -i -E 's/^version:.*/version: "${{ steps.version.outputs.chart_version }}"/' deploy/rustfs-operator/Chart.yaml
+      - name: Check out the release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || format('refs/tags/{0}', steps.version.outputs.raw_tag) }}
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Package Helm Chart
+        env:
+          CHART_VERSION: ${{ steps.version.outputs.chart_version }}
         run: |
           set -eux
           helm package ./deploy/rustfs-operator \
             --destination helm-packages/ \
-            --version "${{ steps.version.outputs.chart_version }}" \
-            --app-version "${{ steps.version.outputs.chart_version }}"
+            --version "$CHART_VERSION" \
+            --app-version "$CHART_VERSION"
           helm package ./deploy/rustfs-tenant \
             --destination helm-packages/ \
-            --version "${{ steps.version.outputs.chart_version }}"
+            --version "$CHART_VERSION"
 
       - name: Upload helm package as artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -123,10 +117,12 @@ jobs:
         run: helm repo index . --url https://operator.rustfs.com
 
       - name: Push helm package and index file
+        env:
+          CHART_VERSION: ${{ needs.build-helm-package.outputs.chart_version }}
         run: |
           set -eux
           git config --global user.name "${{ secrets.USERNAME }}"
           git config --global user.email "${{ secrets.EMAIL_ADDRESS }}"
           git add .
-          git commit -m "Update rustfs operator helm package with ${{ needs.build-helm-package.outputs.chart_version }}." || echo "No changes to commit"
+          git commit -m "Update rustfs operator helm package with $CHART_VERSION." || echo "No changes to commit"
           git push origin main

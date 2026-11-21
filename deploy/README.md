@@ -13,12 +13,12 @@ helm repo add rustfs-operator https://operator.rustfs.com
 helm repo update
 helm search repo rustfs-operator/rustfs-operator --versions
 helm install rustfs-operator rustfs-operator/rustfs-operator \
-  --version 0.0.8 \
+  --version 0.0.9 \
   --namespace rustfs-system \
   --create-namespace
 ```
 
-The example selects published chart version `0.0.8`. Select another available
+The example pins chart version `0.0.9`. Select another available
 version with `--version`. For GitOps deployments, see the
 [Argo CD Application example](rustfs-operator/README.md#argo-cd).
 

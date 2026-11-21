@@ -153,9 +153,10 @@ grep -Fq '.Values.console.image.tag | default .Values.operator.image.tag | defau
   echo "release metadata check failed: Console image does not default to Chart.appVersion" >&2
   exit 1
 }
-grep -Fq -- '--app-version "${{ steps.version.outputs.chart_version }}"' .github/workflows/helm-package.yml || {
+if ! grep -Fq 'CHART_VERSION: ${{ steps.version.outputs.chart_version }}' .github/workflows/helm-package.yml ||
+  ! grep -Fq -- '--app-version "$CHART_VERSION"' .github/workflows/helm-package.yml; then
   echo "release metadata check failed: Helm packaging does not set appVersion from the release tag" >&2
   exit 1
-}
+fi
 
 echo "release metadata is consistent: operator=$cargo_version rust=$toolchain_version"

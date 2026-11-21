@@ -22,14 +22,39 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ## [Unreleased]
 
+## [0.0.9]
+
 ### Added
 
-- Tenant `spec.readinessProbe` with optional initial delay, timeout, period, failure
-  threshold, and success threshold settings, preserved during reconciliation.
-- Full mutual TLS (client-to-Pod and Pod-to-Pod) support when `caTrust.clientCaSecretRef` is
-  configured with cert-manager, including client certificate/key volume projections, automatic
-  `client auth` usage on managed default certificates, mTLS-aware container probes, and operator
-  admin/STS client certificate authentication.
+- Tenant `spec.tiers` registers S3, RustFS, and MinIO remote tiers and rotates credentials when their Secret changes. Bucket lifecycle rules can move current and noncurrent object versions to a tier once it is ready.
+- Buckets support declarative default encryption for new objects with SSE-S3 or SSE-KMS. The Operator validates the key configuration and reports conflicts when an externally modified setting would be overwritten.
+- Tenant `spec.tls.caTrust.clientCaSecretRef` enables mutual TLS for client and peer connections with cert-manager. Operator admin and STS requests use a client certificate.
+- Tenant `spec.readinessProbe` configures the initial delay, timeout, period, and success and failure thresholds for each Pool.
+- The Operator manages a PodDisruptionBudget for each eligible Pool, using drive placement and online drive counts to preserve the write quorum for the `STANDARD` storage class during node drains.
+- The [Helm installation guide](deploy/rustfs-operator/README.md#installing-the-chart) includes versioned installation commands and an Argo CD Application for the public chart repository.
+
+### Fixed
+
+- Tenant provisioning checks existing buckets with `HeadBucket` before attempting creation. Busy buckets can reach `Ready` even when repeated creation requests would time out. COSI retains its ownership check for same-name buckets.
+- The PodDisruptionBudget calculation treats path-only drive endpoints on a single-node deployment as belonging to one server.
+- Helm defaults to `docker.io/rustfs/operator` for the Operator, Console, and COSI driver. CI checks source and packaged image versions against the release tag. Both Helm charts are packaged from the Docker release commit, or from the requested tag for manual publication.
+
+### Upgrading from 0.0.8
+
+1. Apply the CRDs from the 0.0.9 Operator chart before upgrading the controller. Helm leaves installed CRDs in place. See the [upgrade commands](deploy/rustfs-operator/README.md#upgrading).
+2. If you manage PodDisruptionBudgets yourself, set `spec.disablePodDisruptionBudget: true` on those Tenants before the new Operator starts. If the Operator will manage the budgets, remove existing budgets that select the same Pool Pods. Kubernetes rejects evictions when two budgets select one Pod.
+3. Plan for a StatefulSet rollout. The default readiness timeout increases from one to five seconds. Tenants using the default ServiceAccount roll eligible Pods with `RollingUpdate` and partition zero. A custom ServiceAccount preserves the existing strategy and partition. Set `spec.readinessProbe.timeoutSeconds: 1` to retain the previous timeout.
+
+## [0.0.8] - 2026-10-03
+
+### Changed
+
+- Docker builds in CI and image publication use the smaller `dind-sm-standard-2` runners.
+
+## [0.0.7] - 2026-09-09
+
+### Added
+
 - Optional `rustfs-tenant` Helm chart for a Tenant and separate API/Console Ingress
   or HTTPRoute resources, with backend TLS policies, native YAML/Kustomize examples,
   and networking lifecycle documentation. Existing CRDs and controller behavior are unchanged.
@@ -43,41 +68,14 @@ All notable changes to RustFS Operator are documented in this file. The format i
 - Tenant `spec.hostUsers` and OpenShift `hostUsers: false` defaults for `restricted-v3`.
 - Tenant bucket canned anonymous access and ConfigMap-sourced bucket policies.
 - Declarative Tenant bucket lifecycle rules with drift-aware ownership and explicit removal.
-- Bucket lifecycle `transition` and `noncurrentVersionTransition` actions that move objects to a
-  remote tier registered in RustFS.
-- Tenant `spec.tiers` for declarative S3, RustFS, and MinIO remote tiers with Secret-sourced
-  credentials, rotation on Secret updates, and conflict reporting for immutable tier settings.
 - Declarative Tenant bucket versioning and Object Lock default retention with drift-aware ownership.
-- Declarative default bucket encryption (`SSE-S3` or `SSE-KMS`) with drift-aware ownership,
-  explicit removal, and validation of the Tenant SSE-S3 master key or KMS default key.
 - Helm chart `cosiDriver.enabled` to deploy the RustFS COSI (`rustfs.objectstorage.k8s.io`)
   driver alongside the upstream provisioner sidecar, with dedicated ServiceAccount/RBAC.
 - Seven built-in RustFS Grafana dashboards, published by default as sidecar-discoverable
   ConfigMaps with configurable labels and namespace.
-- Per-pool PodDisruptionBudgets with `minAvailable` derived from the erasure layout RustFS
-  reports, so node drains keep `STANDARD` write quorum, including while drives are offline;
-  opt out with `spec.disablePodDisruptionBudget`. Enabled by default: before upgrading, set the
-  opt-out on Tenants whose budgets you manage yourself, or remove your own budgets that select
-  pool Pods, because Kubernetes rejects evictions of Pods selected by more than one budget.
-
-### Changed
-
-- The default Tenant readiness probe timeout is five seconds, increased from the
-  previous effective one-second default. Upgrades update existing StatefulSet Pod
-  templates. Tenants without `spec.serviceAccountName` use enforced `RollingUpdate`
-  with partition zero for default ServiceAccount token protection; Tenants with
-  a custom ServiceAccount retain their existing update strategy and partition.
-  Apply the updated Tenant CRD explicitly before upgrading the Operator or
-  configuring readiness fields; Helm does not upgrade installed CRDs.
 
 ### Fixed
 
-- Check an existing Tenant bucket with HeadBucket before CreateBucket, so a bucket under
-  continuous writes no longer stays Pending on RustFS lock-timeout 503 responses.
-- Update source release metadata to `0.0.8` so source Helm installs select the
-  `0.0.8` Operator and Console images, and verify release tags and chart images in CI.
-- Use `docker.io/rustfs/operator` as the default Helm image repository for the Operator,
-  Console, and COSI driver, while preserving repository overrides through Helm values.
 - Reject multi-pool Tenants containing a single-node single-disk pool before applying pool workloads, matching RustFS startup constraints.
 - Reject additional volume mounts that overlap operator-managed data, logging, TLS, or OIDC paths.
 
@@ -88,8 +86,6 @@ All notable changes to RustFS Operator are documented in this file. The format i
 
 ### Changed
 
-- Documented the public Operator Helm repository, versioned installation, and an
-  Argo CD Application using the published chart.
 - Updated the default RustFS server image from `rustfs/rustfs:1.0.0-beta.10` to
   `rustfs/rustfs:1.0.0`.
 - Documented that distinct-physical-disk erasure failures and a separate data-plane operator are
@@ -191,5 +187,8 @@ is unaffected.
 - Pin Operator and RustFS images independently, then verify Tenant readiness and S3 read/write data
   before and after any rollback.
 
-[Unreleased]: https://github.com/rustfs/operator/compare/0.0.6...HEAD
+[Unreleased]: https://github.com/rustfs/operator/compare/0.0.9...HEAD
+[0.0.9]: https://github.com/rustfs/operator/compare/0.0.8...0.0.9
+[0.0.8]: https://github.com/rustfs/operator/compare/0.0.7...0.0.8
+[0.0.7]: https://github.com/rustfs/operator/compare/0.0.6...0.0.7
 [0.0.6]: https://github.com/rustfs/operator/compare/0.0.5...0.0.6

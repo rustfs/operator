@@ -848,9 +848,9 @@ The Operator only changes and deletes budgets that the Tenant owns. If a PodDisr
 
 Upgrading an Operator release without PodDisruptionBudget support:
 
-1. Upgrade the chart, so the CRD gains `disablePodDisruptionBudget` and the ClusterRole gains `policy/poddisruptionbudgets` permissions.
-2. To keep managing budgets yourself, set `spec.disablePodDisruptionBudget: true` on those Tenants before the new Operator image starts.
-3. Otherwise remove your own PodDisruptionBudgets that select pool Pods. Kubernetes rejects the eviction of a Pod that more than one budget selects, so a drain cannot evict any Pod of the pool while both exist.
+1. Apply the [CRDs from the target release](../deploy/rustfs-operator/README.md#upgrading) so the API server accepts `spec.disablePodDisruptionBudget`.
+2. To keep managing budgets yourself, set `spec.disablePodDisruptionBudget: true` on those Tenants. To use Operator-managed budgets, remove your own PodDisruptionBudgets that select the same pool Pods. Kubernetes rejects evictions when more than one budget selects a Pod.
+3. Upgrade the chart to grant the ClusterRole its `policy/poddisruptionbudgets` permissions and start the new Operator.
 
 ### 7.5 TLS
 

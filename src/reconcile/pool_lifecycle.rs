@@ -695,15 +695,11 @@ fn should_start_decommission(
         ));
     }
 
-    if matches!(existing_state, Some(PoolLifecycleState::Decommissioning))
+    let same_request = matches!(existing_state, Some(PoolLifecycleState::Decommissioning))
         && existing
             .and_then(|status| status.request_id.as_deref())
-            .is_some_and(|request_id| request_id == request.request_id)
-    {
-        return Ok(false);
-    }
-
-    Ok(true)
+            .is_some_and(|request_id| request_id == request.request_id);
+    Ok(!same_request)
 }
 
 fn decommission_started_after_request(

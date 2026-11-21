@@ -30,14 +30,14 @@ Install the published chart with an explicit version:
 
 ```bash
 helm install rustfs-operator rustfs-operator/rustfs-operator \
-  --version 0.0.8 \
+  --version 0.0.9 \
   --namespace rustfs-system \
   --create-namespace
 ```
 
-The examples use published chart version `0.0.8`. Select another version from
+The examples pin chart version `0.0.9`. Select another version from
 `helm search repo --versions` when installing or upgrading. Inspect that version's
-configuration with `helm show values rustfs-operator/rustfs-operator --version 0.0.8`.
+configuration with `helm show values rustfs-operator/rustfs-operator --version 0.0.9`.
 
 The chart publishes the seven bundled RustFS Grafana dashboards as ConfigMaps by
 default. It does not install Grafana or Prometheus. A Grafana dashboard sidecar
@@ -58,7 +58,7 @@ spec:
   source:
     repoURL: https://operator.rustfs.com
     chart: rustfs-operator
-    targetRevision: "0.0.8"
+    targetRevision: "0.0.9"
   destination:
     server: https://kubernetes.default.svc
     namespace: rustfs-system
@@ -571,7 +571,9 @@ kubectl apply -f examples/simple-tenant.yaml
 
 ## Upgrading
 
-To upgrade the operator:
+From a checkout of the target release, apply the CRDs before upgrading the Operator.
+Helm leaves installed CRDs in place. The dedicated field manager takes ownership
+of the chart-managed CRD fields, including CRDs originally created by Helm.
 
 ```bash
 kubectl apply --server-side --force-conflicts \
@@ -580,14 +582,23 @@ kubectl apply --server-side --force-conflicts \
 kubectl apply --server-side --force-conflicts \
   --field-manager=rustfs-operator-crd-upgrade \
   -f deploy/rustfs-operator/crds/policybinding-crd.yaml
+```
+
+When upgrading from 0.0.8, set `spec.disablePodDisruptionBudget: true` on any
+Tenant whose Pool budgets you manage yourself. If the Operator will manage
+the budgets, remove any existing budgets that select the same Pool Pods.
+Complete this step before starting the new Operator.
+
+Then upgrade the chart using your installation's values:
+
+```bash
 helm upgrade rustfs-operator deploy/rustfs-operator/ \
   --namespace rustfs-system
 ```
 
-Helm does not upgrade existing CRDs from a chart's `crds/` directory. Apply the
-cluster-scoped CRDs first so the API server accepts fields introduced by the
-new Operator version. The dedicated field manager deliberately takes ownership
-of the chart-managed CRD fields, including CRDs originally created by Helm.
+The default readiness timeout increases from one to five seconds in 0.0.9.
+See the [release notes](../../CHANGELOG.md#upgrading-from-008) for StatefulSet
+rollout behavior.
 
 When adopting OpenShift mode on an existing installation, apply the CRDs first,
 then upgrade the chart with `openshift.enabled=true`, and wait for the Operator
